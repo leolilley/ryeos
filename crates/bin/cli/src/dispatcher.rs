@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use ryeos_runtime::{
@@ -15,6 +16,7 @@ use crate::lifecycle_commands;
     name = "ryeos",
     about = "CLI for Rye OS",
     version,
+    disable_help_flag = true,
     disable_help_subcommand = true,
     trailing_var_arg = true
 )]
@@ -52,6 +54,16 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
+    if should_show_tty_screen(&cli.rest, std::io::stdout().is_terminal()) {
+        return crate::tty::run(
+            &app_root,
+            cli.project.as_deref(),
+            tty_screen_for(&cli.rest),
+            cli.debug,
+        )
+        .await;
+    }
+
     // Load the verified node-config snapshot once per invocation; help,
     // offline dispatch, and daemon resolution all reuse it instead of
     // re-reading and re-verifying node config from disk. Local commands
@@ -66,8 +78,15 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // `ryeos help` → top-level help
+    // Non-TTY `ryeos help` keeps the plain top-level help path. TTY stdout
+    // is intercepted above and rendered through the compact TTY help screen.
     if cli.rest == ["help"] {
+        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
+        return Ok(());
+    }
+
+    // `ryeos help --all` / `ryeos commands` → exhaustive command reference.
+    if cli.rest == ["help", "--all"] || cli.rest == ["commands"] {
         crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
         return Ok(());
     }
@@ -226,6 +245,19 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     print_result(result);
     Ok(())
+}
+
+fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
+    stdout_is_tty
+        && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
+}
+
+fn tty_screen_for(rest: &[String]) -> crate::tty::TtyScreen {
+    if rest == ["help"] || rest == ["--help"] || rest == ["-h"] {
+        crate::tty::TtyScreen::Help
+    } else {
+        crate::tty::TtyScreen::Home
+    }
 }
 
 /// Parse a stream descriptor from an `/execute` response into `(path, braid)`.

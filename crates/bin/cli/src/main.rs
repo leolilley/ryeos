@@ -14,6 +14,7 @@ mod project_resolve;
 #[cfg(test)]
 mod test_env;
 mod transport;
+mod tty;
 
 fn init_tracing(debug: bool) {
     if debug {

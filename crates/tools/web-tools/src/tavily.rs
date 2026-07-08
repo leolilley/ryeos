@@ -12,17 +12,24 @@ use anyhow::{anyhow, Context};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_NUM_RESULTS: usize = 10;
-const MAX_RESULTS: usize = 20;
+const DEFAULT_NUM_RESULTS: usize = 8;
+const MAX_RESULTS: usize = 10;
 const TAVILY_TIMEOUT_SECS: u64 = 12;
 const TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
+// Per-result snippet cap. Without this a single search can dump full scraped
+// page content into the model context; several agentic searches then exhaust the
+// chat token budget before the model can synthesize an answer.
+const SNIPPET_MAX_CHARS: usize = 400;
 
 #[derive(Debug, Deserialize)]
 struct SearchParams {
     query: String,
     #[serde(default)]
     num_results: Option<usize>,
+    // Accepted for backward-compat but IGNORED — this tool always uses "basic"
+    // depth (see search_tavily). "advanced" returns noisy full-page content.
     #[serde(default)]
+    #[allow(dead_code)]
     search_depth: Option<String>,
 }
 
@@ -70,11 +77,7 @@ pub fn execute_json(raw: &str) -> anyhow::Result<SearchEnvelope> {
         .num_results
         .unwrap_or(DEFAULT_NUM_RESULTS)
         .clamp(1, MAX_RESULTS);
-    let search_depth = match params.search_depth.as_deref() {
-        Some("advanced") => "advanced",
-        _ => "basic",
-    };
-    let results = search_tavily(query, num_results, search_depth)?;
+    let results = search_tavily(query, num_results)?;
     Ok(SearchEnvelope {
         success: true,
         provider: "tavily".to_string(),
@@ -96,11 +99,7 @@ fn tavily_api_key() -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("TAVILY_API_KEY is not set"))
 }
 
-fn search_tavily(
-    query: &str,
-    num_results: usize,
-    search_depth: &str,
-) -> anyhow::Result<Vec<SearchResult>> {
+fn search_tavily(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
     let api_key = tavily_api_key()?;
     let client = Client::builder()
         .timeout(Duration::from_secs(TAVILY_TIMEOUT_SECS))
@@ -108,10 +107,14 @@ fn search_tavily(
         .build()
         .context("build HTTP client")?;
 
+    // Always "basic": clean, relevant snippets. "advanced" returns full scraped
+    // page content (~15-20k chars/call) that is both noisy (nav/footers) and large
+    // enough that a few agentic searches blow the chat token budget before the
+    // model answers.
     let body = serde_json::json!({
         "query": query,
         "max_results": num_results,
-        "search_depth": search_depth,
+        "search_depth": "basic",
         "topic": "general",
     });
 
@@ -134,9 +137,21 @@ fn search_tavily(
         .map(|r| SearchResult {
             title: r.title,
             url: r.url,
-            snippet: r.content,
+            snippet: truncate_snippet(&r.content),
         })
         .collect())
+}
+
+/// Bound a single result snippet (char-safe) so one search can't flood the model
+/// context with full page content.
+fn truncate_snippet(s: &str) -> String {
+    if s.chars().count() <= SNIPPET_MAX_CHARS {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(SNIPPET_MAX_CHARS).collect();
+    out.truncate(out.trim_end().len());
+    out.push('…');
+    out
 }
 
 fn format_results(results: &[SearchResult]) -> String {
@@ -189,6 +204,15 @@ mod tests {
         assert_eq!(results[0].title, "TVB Drama");
         assert_eq!(results[0].url, "https://example.com/a");
         assert_eq!(results[0].snippet, "A snippet.");
+    }
+
+    #[test]
+    fn truncate_snippet_bounds_long_content() {
+        let long = "word ".repeat(500); // 2500 chars
+        let t = truncate_snippet(&long);
+        assert!(t.chars().count() <= SNIPPET_MAX_CHARS + 1, "len={}", t.chars().count());
+        assert!(t.ends_with('…'));
+        assert_eq!(truncate_snippet("short snippet"), "short snippet");
     }
 
     #[test]
