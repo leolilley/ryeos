@@ -80,32 +80,63 @@ pub fn draw_input_tile(
         }
     }
 
-    // Buffer + block cursor on the first interior row, one cell of padding.
+    // Buffer + block cursor, visually wrapped inside the prompt box. The
+    // buffer remains semantically single-line; wrapping is renderer-only.
     let inner_x = x + 2;
     let row_y = y + 1;
     let avail = w.saturating_sub(4);
     if avail == 0 {
         return;
     }
-    let visible = truncate(&input.text, avail);
-    surface.draw_text(inner_x, row_y, &visible, Style::new().fg(FG).bg(BG));
+    let hint = input.completion.first();
+    let interior_rows = bottom_y.saturating_sub(row_y);
+    let reserve_hint = usize::from(hint.is_some() && interior_rows > 1);
+    let wrapped = wrap_input_text(&input.text, input.cursor, avail);
+    let max_buffer_rows = interior_rows.saturating_sub(reserve_hint).max(1);
+    let buffer_rows = if hint.is_some() {
+        wrapped.lines.len().min(max_buffer_rows).max(1)
+    } else {
+        max_buffer_rows
+    };
+    let line_start = wrapped
+        .cursor_line
+        .saturating_add(1)
+        .saturating_sub(buffer_rows)
+        .min(wrapped.lines.len().saturating_sub(buffer_rows));
+    for (row, line) in wrapped
+        .lines
+        .iter()
+        .skip(line_start)
+        .take(buffer_rows)
+        .enumerate()
+    {
+        let draw_y = row_y + row;
+        if draw_y >= bottom_y {
+            break;
+        }
+        surface.draw_text(inner_x, draw_y, line, Style::new().fg(FG).bg(BG));
+    }
 
-    let cursor_byte = input_cursor_byte(&input.text, input.cursor);
-    let cursor_col = display_width(&input.text[..cursor_byte]).min(avail.saturating_sub(1));
-    let cursor_char = input.text[cursor_byte..].chars().next().unwrap_or(' ');
-    // A true block cursor: invert the cell (the char shows through when
-    // there is one; an empty buffer shows a solid block).
-    surface.draw_char(
-        inner_x + cursor_col,
-        row_y,
-        cursor_char,
-        Style::new().fg(BG).bg(FG),
-    );
+    if wrapped.cursor_line >= line_start && wrapped.cursor_line < line_start + buffer_rows {
+        let cursor_y = row_y + (wrapped.cursor_line - line_start);
+        let cursor_char = input.text[wrapped.cursor_byte..]
+            .chars()
+            .next()
+            .unwrap_or(' ');
+        // A true block cursor: invert the cell (the char shows through when
+        // there is one; an empty buffer shows a solid block).
+        surface.draw_char(
+            inner_x + wrapped.cursor_col.min(avail.saturating_sub(1)),
+            cursor_y,
+            cursor_char,
+            Style::new().fg(BG).bg(FG),
+        );
+    }
 
     // Contextual completion hint: only while in command mode, and only if
-    // there is room for a line between the buffer and the bottom border.
-    let hint_y = row_y + 1;
-    if let Some(hint) = input.completion.first() {
+    // there is room for it after the wrapped buffer rows.
+    if let Some(hint) = hint {
+        let hint_y = row_y + buffer_rows;
         if hint_y < bottom_y {
             draw_hint(surface, inner_x, hint_y, hint, avail);
         }
@@ -189,6 +220,50 @@ fn shorten_home(path: &str) -> String {
             format!("~{}", &path[home.len()..])
         }
         _ => path.to_string(),
+    }
+}
+
+struct WrappedInput {
+    lines: Vec<String>,
+    cursor_line: usize,
+    cursor_col: usize,
+    cursor_byte: usize,
+}
+
+fn wrap_input_text(text: &str, cursor: usize, width: usize) -> WrappedInput {
+    let width = width.max(1);
+    let cursor_byte = input_cursor_byte(text, cursor);
+    let mut lines = vec![String::new()];
+    let mut line_width = 0usize;
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut saw_cursor = false;
+
+    for (byte, ch) in text.char_indices() {
+        if !saw_cursor && byte >= cursor_byte {
+            cursor_line = lines.len().saturating_sub(1);
+            cursor_col = line_width.min(width.saturating_sub(1));
+            saw_cursor = true;
+        }
+        let ch_width = display_width(&ch.to_string()).max(1);
+        if line_width > 0 && line_width + ch_width > width {
+            lines.push(String::new());
+            line_width = 0;
+        }
+        lines.last_mut().expect("input has a line").push(ch);
+        line_width += ch_width;
+    }
+
+    if !saw_cursor {
+        cursor_line = lines.len().saturating_sub(1);
+        cursor_col = line_width.min(width.saturating_sub(1));
+    }
+
+    WrappedInput {
+        lines,
+        cursor_line,
+        cursor_col,
+        cursor_byte,
     }
 }
 

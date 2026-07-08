@@ -522,8 +522,12 @@ fn focused_selectable(
 fn selectable_of(view: &super::view_model::RyeOsViewVm) -> (usize, bool) {
     use super::view_model::RyeOsViewVm;
     match view {
-        RyeOsViewVm::Rows { rows, .. } => (rows.len(), false),
-        RyeOsViewVm::Table { rows, .. } => (rows.len(), false),
+        RyeOsViewVm::Rows {
+            rows, total_rows, ..
+        } => ((*total_rows).max(rows.len()), false),
+        RyeOsViewVm::Table {
+            rows, total_rows, ..
+        } => ((*total_rows).max(rows.len()), false),
         RyeOsViewVm::Timeline { entries, .. } => (entries.len(), true),
         // The point walks a flat top-down list: an expanded section's rows,
         // or a collapsed section's single header (so it stays re-expandable)

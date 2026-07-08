@@ -327,6 +327,10 @@ pub enum RyeOsViewVm {
     Rows {
         title: String,
         columns: Vec<String>,
+        /// Total selectable rows in the source collection. `rows` may be a
+        /// render window around the cursor for large lists.
+        #[serde(default)]
+        total_rows: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provenance: Option<String>,
         #[serde(default)]
@@ -399,6 +403,10 @@ pub enum RyeOsViewVm {
     Table {
         title: String,
         columns: Vec<String>,
+        /// Total selectable rows in the source collection. `rows` may be a
+        /// render window around the cursor for large lists.
+        #[serde(default)]
+        total_rows: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provenance: Option<String>,
         #[serde(default)]
@@ -1257,10 +1265,16 @@ fn bound_view_vm_keyed(
         ("rows", Some(response)) => {
             let activate_affordance = activate_affordance(binding);
             let expand_fields = super::content::expand_fields(binding);
-            let rows = super::content::project_records(binding, response)
-                .into_iter()
+            let records = super::content::source_collection(binding, response);
+            let total_rows = records.len();
+            let (start, end) = row_render_window(total_rows, cursor);
+            let selected_index = clamped_row_cursor(total_rows, cursor);
+            let rows = records[start..end]
+                .iter()
                 .enumerate()
-                .map(|(index, record)| {
+                .map(|(offset, raw)| {
+                    let index = start + offset;
+                    let record = super::content::project_record_for_binding(binding, raw);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
                     let detail = expanded
@@ -1280,7 +1294,7 @@ fn bound_view_vm_keyed(
                             }
                         }),
                         tone: tone_from_name(record.tone.as_deref()),
-                        selected: cursor == Some(index),
+                        selected: selected_index == Some(index),
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
@@ -1291,6 +1305,7 @@ fn bound_view_vm_keyed(
             RyeOsViewVm::Rows {
                 title,
                 columns: Vec::new(),
+                total_rows,
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
@@ -1400,10 +1415,16 @@ fn bound_view_vm_keyed(
             let columns = super::content::table_columns(binding);
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
-            let rows = super::content::project_table(binding, response, &columns)
-                .into_iter()
+            let records = super::content::source_collection(binding, response);
+            let total_rows = records.len();
+            let (start, end) = row_render_window(total_rows, cursor);
+            let selected_index = clamped_row_cursor(total_rows, cursor);
+            let rows = records[start..end]
+                .iter()
                 .enumerate()
-                .map(|(index, record)| {
+                .map(|(offset, raw)| {
+                    let index = start + offset;
+                    let record = super::content::project_table_record(binding, raw, &columns);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
                     let detail = expanded
@@ -1429,7 +1450,7 @@ fn bound_view_vm_keyed(
                                 record: record.raw.clone(),
                             }
                         }),
-                        selected: cursor == Some(index),
+                        selected: selected_index == Some(index),
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
@@ -1441,6 +1462,7 @@ fn bound_view_vm_keyed(
             RyeOsViewVm::Table {
                 title,
                 columns: column_labels,
+                total_rows,
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
@@ -1467,6 +1489,7 @@ fn bound_view_vm_keyed(
             RyeOsViewVm::Rows {
                 title,
                 columns: Vec::new(),
+                total_rows: rows.len(),
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 rows,
@@ -1503,6 +1526,22 @@ fn activate_affordance(binding: &super::content::ViewBinding) -> Option<String> 
                     .is_ok()
                 })
         })
+}
+
+fn row_render_window(total: usize, cursor: Option<usize>) -> (usize, usize) {
+    const ROW_WINDOW: usize = 96;
+    if total <= ROW_WINDOW {
+        return (0, total);
+    }
+    let cursor = clamped_row_cursor(total, cursor).unwrap_or(0);
+    let start = cursor
+        .saturating_sub(ROW_WINDOW / 2)
+        .min(total.saturating_sub(ROW_WINDOW));
+    (start, start + ROW_WINDOW)
+}
+
+fn clamped_row_cursor(total: usize, cursor: Option<usize>) -> Option<usize> {
+    (total > 0).then(|| cursor.unwrap_or(0).min(total - 1))
 }
 
 fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
@@ -2592,10 +2631,7 @@ fn focused_selected_row(core: &RyeOsCore) -> Option<RyeOsRowVm> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
-        RyeOsViewVm::Rows { rows, .. } => {
-            let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-            rows.into_iter().nth(cursor)
-        }
+        RyeOsViewVm::Rows { rows, .. } => rows.into_iter().find(|row| row.selected),
         RyeOsViewVm::Sections { sections, .. } => sections
             .into_iter()
             .flat_map(|section| section.rows)
@@ -2611,10 +2647,7 @@ fn focused_selected_table_row(core: &RyeOsCore) -> Option<RyeOsTableRowVm> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
-        RyeOsViewVm::Table { rows, .. } => {
-            let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-            rows.into_iter().nth(cursor)
-        }
+        RyeOsViewVm::Table { rows, .. } => rows.into_iter().find(|row| row.selected),
         _ => None,
     }
 }

@@ -607,6 +607,22 @@ pub fn source_collection<'a>(binding: &ViewBinding, response: &'a Value) -> &'a 
         .unwrap_or(&[])
 }
 
+pub fn project_record_for_binding(binding: &ViewBinding, record: &Value) -> ProjectedRecord {
+    let event_kinds = binding.projections.get("event_kinds");
+    let default_projection = binding
+        .projections
+        .get("default")
+        .cloned()
+        .unwrap_or_else(|| binding.projections.clone());
+    let projection = event_kinds
+        .and_then(|kinds| {
+            let kind = record.get("event_type").and_then(Value::as_str)?;
+            kinds.get(kind)
+        })
+        .unwrap_or(&default_projection);
+    project_record(record, projection)
+}
+
 /// One projected table row: a cell per column (in column order), the per-cell
 /// tones (parallel to `cells`; `None` where the column declares no tone or
 /// the record misses its field), the row tone, and the raw record kept for
@@ -631,22 +647,30 @@ pub fn project_table(
 ) -> Vec<ProjectedTableRow> {
     source_collection(binding, response)
         .iter()
-        .map(|record| ProjectedTableRow {
-            cells: columns
-                .iter()
-                .map(|col| field_text(record, &col.field).unwrap_or_default())
-                .collect(),
-            cell_tones: columns
-                .iter()
-                .map(|col| {
-                    let tone = col.tone.as_ref()?;
-                    project_tone(record, &serde_json::json!({ "tone": tone }))
-                })
-                .collect(),
-            tone: project_tone(record, &binding.projections),
-            raw: record.clone(),
-        })
+        .map(|record| project_table_record(binding, record, columns))
         .collect()
+}
+
+pub fn project_table_record(
+    binding: &ViewBinding,
+    record: &Value,
+    columns: &[TableColumn],
+) -> ProjectedTableRow {
+    ProjectedTableRow {
+        cells: columns
+            .iter()
+            .map(|col| field_text(record, &col.field).unwrap_or_default())
+            .collect(),
+        cell_tones: columns
+            .iter()
+            .map(|col| {
+                let tone = col.tone.as_ref()?;
+                project_tone(record, &serde_json::json!({ "tone": tone }))
+            })
+            .collect(),
+        tone: project_tone(record, &binding.projections),
+        raw: record.clone(),
+    }
 }
 
 /// Project a rows/timeline source response: pull the collection, apply
@@ -654,24 +678,9 @@ pub fn project_table(
 /// the record's `event_type`, falling back to `default`, falling back to
 /// raw — degradation is the v0, not an error path.
 pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<ProjectedRecord> {
-    let event_kinds = binding.projections.get("event_kinds");
-    let default_projection = binding
-        .projections
-        .get("default")
-        .cloned()
-        .unwrap_or_else(|| binding.projections.clone());
-
     source_collection(binding, response)
         .iter()
-        .map(|record| {
-            let projection = event_kinds
-                .and_then(|kinds| {
-                    let kind = record.get("event_type").and_then(Value::as_str)?;
-                    kinds.get(kind)
-                })
-                .unwrap_or(&default_projection);
-            project_record(record, projection)
-        })
+        .map(|record| project_record_for_binding(binding, record))
         .collect()
 }
 

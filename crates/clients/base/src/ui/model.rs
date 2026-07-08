@@ -611,19 +611,25 @@ impl RyeOsCore {
             self.emit(RyeOsEffectKind::FetchDimension),
             self.emit(RyeOsEffectKind::FetchProjects),
         ];
+        let visible_docks = self.visible_dock_views();
+        let mut visible_input_views: std::collections::BTreeSet<String> = bound_tiles
+            .iter()
+            .map(|(_, view_ref)| view_ref.clone())
+            .collect();
+        visible_input_views.extend(visible_docks.iter().map(|(_, view_ref)| view_ref.clone()));
         for (tile_id, view_ref) in bound_tiles {
             effects.extend(self.emit_fetch_source(tile_id, &view_ref));
         }
-        for (key, view_ref) in self.visible_dock_views() {
+        for (key, view_ref) in visible_docks {
             effects.extend(self.emit_fetch_source_keyed(key, &view_ref));
         }
         // @-mention sources: fetch the refs each input declares, keyed so the
         // reader (key_context / CompleteInput) reads them back. A generic
         // FetchSource, so clients need no bespoke handling.
-        let mention_fetches: Vec<(String, String)> = self
-            .views
+        let mention_fetches: Vec<(String, String)> = visible_input_views
             .iter()
-            .filter_map(|(view_ref, binding)| {
+            .filter_map(|view_ref| {
+                let binding = self.views.get(view_ref)?;
                 let input = binding.input.as_ref()?;
                 let mentions = input.mentions.as_ref()?;
                 Some((
@@ -642,10 +648,10 @@ impl RyeOsCore {
         // `completion` sources (the line-start `/` grammar): fetched through the
         // same generic keyed FetchSource as mentions, read back by the
         // slash-completion projectors. No bespoke commands effect.
-        let completion_fetches: Vec<(String, String)> = self
-            .views
+        let completion_fetches: Vec<(String, String)> = visible_input_views
             .iter()
-            .filter_map(|(view_ref, binding)| {
+            .filter_map(|view_ref| {
+                let binding = self.views.get(view_ref)?;
                 let input = binding.input.as_ref()?;
                 let completion = input.completion.as_ref()?;
                 Some((
@@ -1273,12 +1279,18 @@ impl RyeOsCore {
         let Some(binding) = self.views.get(&tile.view.view_ref) else {
             return;
         };
-        let new_rows = projected_row_signatures(binding, new);
+        let cursor = match &tile.local {
+            ViewLocalState::GenericList { cursor, .. } => *cursor,
+            ViewLocalState::None => return,
+        };
+        let total = super::content::source_collection(binding, new).len();
+        let (start, end) = row_signature_window(total, cursor);
+        let new_rows = projected_row_signatures(binding, new, start, end);
         if new_rows.is_empty() {
             return;
         }
         let old_rows = old
-            .map(|value| projected_row_signatures(binding, value))
+            .map(|value| projected_row_signatures(binding, value, start, end))
             .unwrap_or_default();
         let now_ms = self.runtime.now_ms;
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
@@ -1426,12 +1438,19 @@ pub(crate) fn row_key(record: &serde_json::Value, index: usize) -> String {
 fn projected_row_signatures(
     binding: &super::content::ViewBinding,
     response: &serde_json::Value,
+    start: usize,
+    end: usize,
 ) -> std::collections::BTreeMap<String, String> {
+    let records = super::content::source_collection(binding, response);
+    let start = start.min(records.len());
+    let end = end.min(records.len()).max(start);
     match binding.widget.as_str() {
-        "rows" => super::content::project_records(binding, response)
-            .into_iter()
+        "rows" => records[start..end]
+            .iter()
             .enumerate()
-            .map(|(index, record)| {
+            .map(|(offset, raw)| {
+                let index = start + offset;
+                let record = super::content::project_record_for_binding(binding, raw);
                 let signature = serde_json::json!({
                     "primary": record.primary,
                     "meta": record.meta,
@@ -1443,10 +1462,12 @@ fn projected_row_signatures(
             .collect(),
         "table" => {
             let columns = super::content::table_columns(binding);
-            super::content::project_table(binding, response, &columns)
-                .into_iter()
+            records[start..end]
+                .iter()
                 .enumerate()
-                .map(|(index, record)| {
+                .map(|(offset, raw)| {
+                    let index = start + offset;
+                    let record = super::content::project_table_record(binding, raw, &columns);
                     let signature = serde_json::json!({
                         "cells": record.cells,
                         "cell_tones": record.cell_tones,
@@ -1459,6 +1480,18 @@ fn projected_row_signatures(
         }
         _ => std::collections::BTreeMap::new(),
     }
+}
+
+fn row_signature_window(total: usize, cursor: usize) -> (usize, usize) {
+    const ROW_WINDOW: usize = 96;
+    if total <= ROW_WINDOW {
+        return (0, total);
+    }
+    let cursor = cursor.min(total.saturating_sub(1));
+    let start = cursor
+        .saturating_sub(ROW_WINDOW / 2)
+        .min(total.saturating_sub(ROW_WINDOW));
+    (start, start + ROW_WINDOW)
 }
 
 fn parse_source_tile_key(source_key: &str) -> Option<crate::ids::TileId> {
