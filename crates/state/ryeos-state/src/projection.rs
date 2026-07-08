@@ -61,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at);
 -- Events: durable thread events
 CREATE TABLE IF NOT EXISTS events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_hash TEXT NOT NULL,
     chain_root_id TEXT NOT NULL,
     chain_seq INTEGER NOT NULL,
     thread_id TEXT NOT NULL,
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE(chain_root_id, chain_seq)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_hash ON events(event_hash);
 CREATE INDEX IF NOT EXISTS idx_events_chain_root ON events(chain_root_id);
 CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -483,6 +485,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                         name: "event_id",
                         col_type: "INTEGER",
                         pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "event_hash",
+                        col_type: "TEXT",
+                        pk: false,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
@@ -1197,6 +1205,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "threads",
                 columns: &["updated_at"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_events_event_hash",
+                table: "events",
+                columns: &["event_hash"],
+                unique: true,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_events_chain_root",
@@ -2916,6 +2930,31 @@ pub fn project_thread_snapshot(
     Ok(())
 }
 
+/// Project a newly-created child thread and its initial durable events as one
+/// read-model update.
+///
+/// This is used by relation-bearing child creation, where exposing the child
+/// without the event that defines its relation would be misleading even though
+/// the CAS/head transition is already atomic.
+pub fn project_thread_snapshot_with_events(
+    db: &ProjectionDb,
+    snapshot: &crate::ThreadSnapshot,
+    chain_root_id: &str,
+    events: &[crate::ThreadEvent],
+) -> anyhow::Result<()> {
+    db.immediate_transaction("thread snapshot with events projection", || {
+        project_thread_snapshot(db, snapshot, chain_root_id)?;
+        for event in events {
+            if event.durability.is_projection_indexed() {
+                project_event(db, event).with_context(|| {
+                    format!("projection failed for event chain_seq={}", event.chain_seq)
+                })?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Project all thread snapshots from a chain state into the projection database.
 ///
 /// Also updates the projection metadata to track the indexed chain state hash.
@@ -2964,15 +3003,17 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
 
     let payload =
         serde_json::to_vec(&event.payload).context("failed to serialize event payload")?;
+    let event_hash = lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes());
 
     db.connection()
         .execute(
             "INSERT OR IGNORE INTO events (
-            chain_root_id, chain_seq, thread_id, thread_seq,
+            event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
             event_type, durability, ts, prev_chain_event_hash,
             prev_thread_event_hash, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
+                &event_hash,
                 &event.chain_root_id,
                 event.chain_seq,
                 &event.thread_id,

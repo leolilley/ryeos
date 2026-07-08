@@ -146,7 +146,10 @@ fn format_results(results: &[SearchResult]) -> String {
         lines.push(format!("   {}", result.url));
         if !result.snippet.is_empty() {
             let snippet = if result.snippet.chars().count() > 220 {
-                format!("{}...", result.snippet.chars().take(220).collect::<String>())
+                format!(
+                    "{}...",
+                    result.snippet.chars().take(220).collect::<String>()
+                )
             } else {
                 result.snippet.clone()
             };

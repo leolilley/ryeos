@@ -10,7 +10,7 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTableRowVm, RyeOs
 use super::super::primitives::fill_line;
 use super::super::text::{letterspace, truncate};
 use super::super::theme::{
-    ACCENT, mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style,
+    mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT,
 };
 
 /// Cells sit two columns in, past the tone-glyph gutter.
@@ -153,7 +153,11 @@ fn draw_row(
         tone_style(row.tone)
     };
     let glyph = if row.expandable {
-        if row.expanded { "▾" } else { "▸" }
+        if row.expanded {
+            "▾"
+        } else {
+            "▸"
+        }
     } else {
         tone_glyph(row.tone)
     };

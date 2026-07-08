@@ -1004,10 +1004,10 @@ mod tests {
             }),
         );
         core.data.threads = Some(RyeOsThreadsDto { threads: vec![] }); // refresh not landed
-        // Slots = [New, SyntheticChain(T-new)]. The guarantee: you can move
-        // AWAY from the unfetched current chain before the refresh lands —
-        // forward from the synthetic current reaches "new conversation".
-        // (Returning to it relies on the refresh, which lands quickly.)
+                                                                       // Slots = [New, SyntheticChain(T-new)]. The guarantee: you can move
+                                                                       // AWAY from the unfetched current chain before the refresh lands —
+                                                                       // forward from the synthetic current reaches "new conversation".
+                                                                       // (Returning to it relies on the refresh, which lands quickly.)
         assert_eq!(
             core.seat.fold().input_route().chain_root.as_deref(),
             Some("T-new"),
@@ -1094,12 +1094,11 @@ mod tests {
             event: RyeOsUiEvent::SubmitInput,
         });
         assert!(effects.is_empty());
-        assert!(
-            core.ui
-                .notices
-                .last()
-                .is_some_and(|notice| notice.message.contains("no target"))
-        );
+        assert!(core
+            .ui
+            .notices
+            .last()
+            .is_some_and(|notice| notice.message.contains("no target")));
     }
 
     #[test]
@@ -1127,11 +1126,9 @@ mod tests {
             },
         });
 
-        assert!(
-            followups
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 200 }))
-        );
+        assert!(followups
+            .iter()
+            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 200 })));
         assert!(focused_input_text(&core).is_empty());
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread.as_deref(), Some("T-9"));
@@ -1344,12 +1341,11 @@ mod tests {
             event: RyeOsUiEvent::SubmitInput,
         });
         assert!(effects.is_empty());
-        assert!(
-            core.ui
-                .notices
-                .last()
-                .is_some_and(|notice| notice.message.contains("read-only"))
-        );
+        assert!(core
+            .ui
+            .notices
+            .last()
+            .is_some_and(|notice| notice.message.contains("read-only")));
     }
 
     #[test]

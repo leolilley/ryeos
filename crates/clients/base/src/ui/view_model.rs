@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::content::ViewBinding;
 use super::event::RyeOsAction;
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
-use super::scene_model::{RyeOsSceneModel, build_scene_model};
+use super::scene_model::{build_scene_model, RyeOsSceneModel};
 use super::seat::InvokeTemplate;
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
@@ -2811,12 +2811,10 @@ mod tests {
             .expect("backdrop scene on empty center");
         // The scene resolves from the view body — objects incl. text labels.
         assert!(!backdrop.objects.is_empty());
-        assert!(
-            backdrop
-                .objects
-                .iter()
-                .any(|o| o.label.as_deref() == Some("RYE OS"))
-        );
+        assert!(backdrop
+            .objects
+            .iter()
+            .any(|o| o.label.as_deref() == Some("RYE OS")));
     }
 
     #[test]
@@ -3093,7 +3091,7 @@ mod tests {
 
     #[test]
     fn actual_threads_list_binding_projects_a_table() {
-        use crate::ui::content::{ViewBinding, project_table, table_columns};
+        use crate::ui::content::{project_table, table_columns, ViewBinding};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos/.ai/views/ryeos/threads/list.yaml"
         ))
@@ -3109,9 +3107,7 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            [
-                "thread", "kind", "item", "status", "source", "follow", "created"
-            ]
+            ["thread", "kind", "item", "status", "source", "follow", "created"]
         );
         let rows = project_table(
             &binding,
@@ -3186,7 +3182,7 @@ mod tests {
 
     #[test]
     fn actual_thread_detail_binding_projects_inspect_sections() {
-        use crate::ui::content::{ViewBinding, project_section};
+        use crate::ui::content::{project_section, ViewBinding};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos/.ai/views/ryeos/threads/detail.yaml"
         ))
@@ -3258,7 +3254,7 @@ mod tests {
 
     #[test]
     fn actual_items_space_binding_projects_renamed_and_nested_fields() {
-        use crate::ui::content::{ViewBinding, project_table, project_tone, table_columns};
+        use crate::ui::content::{project_table, project_tone, table_columns, ViewBinding};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos/.ai/views/ryeos/items/space.yaml"
         ))

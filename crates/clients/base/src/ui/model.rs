@@ -10,7 +10,7 @@ use super::scene_model::RyeOsSceneModel;
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
 use crate::atlas::AtlasUiStateVm;
 use crate::surface::{
-    SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec, builtin_default,
+    builtin_default, SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec,
 };
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;

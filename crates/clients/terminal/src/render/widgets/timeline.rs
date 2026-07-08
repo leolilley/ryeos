@@ -10,7 +10,7 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, 
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
-use super::super::theme::{PANEL, style_fg, style_muted, tone_glyph, tone_style};
+use super::super::theme::{style_fg, style_muted, tone_glyph, tone_style, PANEL};
 
 /// One rendered line plus the index of the entry it belongs to (None for
 /// structural blanks and the empty-state line — they never take the point).
