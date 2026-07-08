@@ -1,8 +1,10 @@
-# ryeos:signed:2026-07-06T12:24:56Z:0029fd3002135f42ea8f73a0ed32800f0c71653eb2ff6a847a834b25a6f8b9ab:UOPk1wAUY3lWZbVD/LIg4wUbVGLsd0kVLOadEAh8tWZpff8u0VIRcP4FaYVNYDFqyzAWRy3J5RCqOIwIikUMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-08T01:26:03Z:f1b49b313f54d00292c8c514b03f590e0fe6e98acd8b3ba18ed4edeb0ce5e2f6:Ze3Adbc3i0z7MWbBC66qIK1MMYs7PuNCRFvGmOCynLzWfQQ5XtqOjLPc+uADQ00tCy88U0sv5g14gDbIG0elCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: node-threads-history
 version: "1.0.0"
-description: Node-wide thread history across project contexts
+description: >-
+  Node-wide thread history across project contexts. The input acts as the
+  active/status/kind/source filter instead of a separate active-only view.
 
 widget: table
 source:
@@ -84,6 +86,7 @@ input:
   id: filter
   feeds:
     fields:
+      - { param: active, label: active }
       - { param: status, label: status }
       - { param: kind, label: kind }
       - { param: requested_by, label: source }

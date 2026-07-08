@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T03:16:41Z:3669774d8c0f87f3aae4e1b9ee3e91208d7863b2e1901dea340615be27fe5871:Wex/mbCkwA7JGCSicPd0fjRLI/nZRylQsb5towatYn4ZW7wzsJ194pWVFbq667Pr4j3NQBD/+YPPzzwVc1LTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T04:10:28Z:71534ed8df2446ac944a420b57e8d7a4665ae5590fc06ea5c3aaa0c34800c6cd:Ne8xKDXpdD8BI8iCy7L9AOa1TJTdy0Iis7XmlWzz7iI90samX4hvyXgWy4ekjfgDdcxSlk1Wn8BkpOxhNdG8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-base
 version: "1.0.0"
@@ -25,35 +25,18 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/backdrop/prism
-  - view:ryeos/backdrop/prism-shards
-  - view:ryeos/backdrop/splash
-  - view:ryeos/input
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
-  - view:ryeos/thread/transcript
-  - view:ryeos/threads/detail
+  - view:ryeos/node/threads/history
+  - view:ryeos/projects/list
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
+  - view:ryeos/items/space
   - view:ryeos/node/events
   - view:ryeos/node/remotes
   - view:ryeos/node/bundles
   - view:ryeos/node/gc
-  - view:ryeos/projects/list
-  - view:ryeos/node/activity
-  - view:ryeos/item/inspector
-  - view:ryeos/chain/timeline
-  - view:ryeos/remotes/list
-  - view:ryeos/schedules/list
   - view:ryeos/commands/grammar
-  - view:ryeos/bundles/list
-  - view:ryeos/node/status
-  - view:ryeos/items/space
-  - view:ryeos/item/explain
-  - view:ryeos/files/list
-  - view:ryeos/gc/status
 
 overlays:
   views:

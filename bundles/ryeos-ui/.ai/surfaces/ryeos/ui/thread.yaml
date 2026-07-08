@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T02:51:18Z:d4198ddd83a69e44be8634a16d7e3d21d3d2a644803827bbb95304a9b99d6a39:oYWIuygOzPVeV4xBXx3L+DF6H3SQsZcOyZP4fRtsK3h9IS8dVNR641mkEr1iItaXQXFbOS19nHnVimQV+615Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T04:10:29Z:011e543f65514b67ec193f9730dc9cbcccb9ff7619db8dbcd9185fcbd8842f8f:x9vjWZgRUT91+w1L8LL8b270nWmXBnq3xgleY0miQPVtWx6nh34FRJHKbRGiVaC8kmnydjvF9TTALqOCKdXDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-thread
 version: "1.0.0"
@@ -26,20 +26,13 @@ style:
   border: thin
 
 library:
-  - view:ryeos/thread/transcript
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
   - view:ryeos/node/events
-  - view:ryeos/chain/timeline
-  - view:ryeos/input
   - view:ryeos/projects/list
-  - view:ryeos/item/inspector
-  - view:ryeos/threads/detail
-  - view:ryeos/node/status
 
 input:
   route:

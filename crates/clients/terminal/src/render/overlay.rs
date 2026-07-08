@@ -39,7 +39,7 @@ fn draw_palette_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
             y + 3 + row,
             w.saturating_sub(2),
             item,
-            start + row == overlay.selected,
+            start + row == overlay.selected && item.enabled,
         );
     }
     draw_hint(surface, x, y + h - 2, &overlay.hint, w);
@@ -81,9 +81,15 @@ fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     let start = scroll_start(overlay.selected, rows, overlay.items.len());
     for (row, item) in overlay.items.iter().skip(start).take(rows).enumerate() {
         let ry = y + 4 + row;
-        let selected = start + row == overlay.selected;
+        let selected = start + row == overlay.selected && item.enabled;
         let bg = if selected { ACCENT } else { PANEL };
-        let fg = if selected { BG } else { FG };
+        let fg = if selected {
+            BG
+        } else if item.enabled {
+            FG
+        } else {
+            MUTED
+        };
         for col in 0..w.saturating_sub(2) {
             surface.draw_char(x + 1 + col, ry, ' ', Style::new().fg(fg).bg(bg));
         }

@@ -817,9 +817,11 @@ mod tests {
             },
         });
 
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology)));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology))
+        );
     }
 
     #[test]
@@ -868,11 +870,13 @@ mod tests {
         let scene = crate::ui::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas surface should build scene atlas");
         assert_eq!(atlas.root_label, ".ai");
-        assert!(atlas
-            .nodes
-            .iter()
-            .flat_map(|node| &node.stack)
-            .any(|item| item.canonical_ref == "tool:demo/run"));
+        assert!(
+            atlas
+                .nodes
+                .iter()
+                .flat_map(|node| &node.stack)
+                .any(|item| item.canonical_ref == "tool:demo/run")
+        );
     }
 
     #[test]

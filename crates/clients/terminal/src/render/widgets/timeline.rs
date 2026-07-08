@@ -10,7 +10,7 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, 
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
-use super::super::theme::{style_fg, style_muted, tone_glyph, tone_style, PANEL};
+use super::super::theme::{PANEL, style_fg, style_muted, tone_glyph, tone_style};
 
 /// One rendered line plus the index of the entry it belongs to (None for
 /// structural blanks and the empty-state line — they never take the point).
@@ -65,15 +65,30 @@ pub fn draw_timeline(
     if width == 0 || height == 0 {
         return;
     }
+    let entry_window = height.saturating_mul(4).max(64);
+    let selected_entry = selected.and_then(|sel| (sel < entries.len()).then_some(sel));
+    let entry_start = match selected_entry {
+        Some(sel) => sel.saturating_sub(entry_window / 2),
+        None => entries.len().saturating_sub(entry_window),
+    };
+    let entry_end = match selected_entry {
+        Some(sel) => sel
+            .saturating_add(entry_window / 2)
+            .saturating_add(1)
+            .min(entries.len()),
+        None => entries.len(),
+    };
+
     let mut lines = Vec::new();
     push_timeline_lines(
         &mut lines,
-        entries,
+        &entries[entry_start..entry_end],
         entry_indents,
         width,
         entry_expandable,
         entry_expanded,
         entry_details,
+        entry_start,
     );
 
     let visible = lines.len().min(height);
@@ -130,6 +145,7 @@ fn push_timeline_lines(
     entry_expandable: &[bool],
     entry_expanded: &[bool],
     entry_details: &[Vec<RyeOsRowDetailVm>],
+    entry_offset: usize,
 ) {
     if entries.is_empty() {
         lines.push(FeedLine::plain(
@@ -140,11 +156,12 @@ fn push_timeline_lines(
         return;
     }
     for (index, entry) in entries.iter().enumerate() {
+        let entry_index = entry_offset + index;
         // Call-tree indent: a graph node's tool calls and its directive fork
         // nest one level under the node. Prefix every line this entry emits with
         // two spaces per level, so the braid reads as a call tree. Panic-safe: a
         // missing/short indent vector degrades to depth 0 (flat).
-        let depth = entry_indents.get(index).copied().unwrap_or(0) as usize;
+        let depth = entry_indents.get(entry_index).copied().unwrap_or(0) as usize;
         let indent_cols = (depth * 2).min(width.saturating_sub(1));
         let entry_width = width.saturating_sub(indent_cols).max(1);
         let first_line = lines.len();
@@ -152,7 +169,7 @@ fn push_timeline_lines(
             RyeOsTimelineEntryVm::Block { text, tone } => {
                 // The braid stores the raw cognition prose; the lens typesets
                 // it (block-level markdown). Inline spans are a later pass.
-                push_markdown_block(lines, text, *tone, entry_width, index);
+                push_markdown_block(lines, text, *tone, entry_width, entry_index);
                 // Padding between blocks — not part of the entry's point.
                 lines.push(FeedLine::plain(String::new(), style_fg(), None));
             }
@@ -165,7 +182,7 @@ fn push_timeline_lines(
                 lines.push(FeedLine::plain(
                     join_with_right_meta(tone_glyph(*tone), primary, meta.as_deref(), entry_width),
                     tone_style(*tone),
-                    Some(index),
+                    Some(entry_index),
                 ));
             }
             RyeOsTimelineEntryVm::Pair {
@@ -189,7 +206,7 @@ fn push_timeline_lines(
                 lines.push(FeedLine::plain(
                     join_with_right_meta(glyph, summary, meta.as_deref(), entry_width),
                     style,
-                    Some(index),
+                    Some(entry_index),
                 ));
             }
             RyeOsTimelineEntryVm::Separator { label } => {
@@ -200,7 +217,7 @@ fn push_timeline_lines(
                 lines.push(FeedLine::plain(
                     format!("{}{}{}", "─".repeat(left), label, "─".repeat(right)),
                     style_muted(),
-                    Some(index),
+                    Some(entry_index),
                 ));
             }
         }
@@ -213,10 +230,10 @@ fn push_timeline_lines(
                 line.indent = indent_cols;
             }
         }
-        if entry_expandable.get(index).copied().unwrap_or(false)
-            && entry_expanded.get(index).copied().unwrap_or(false)
+        if entry_expandable.get(entry_index).copied().unwrap_or(false)
+            && entry_expanded.get(entry_index).copied().unwrap_or(false)
         {
-            for detail in entry_details.get(index).into_iter().flatten() {
+            for detail in entry_details.get(entry_index).into_iter().flatten() {
                 let label = if detail.field.is_empty() {
                     "detail".to_string()
                 } else {
@@ -233,7 +250,7 @@ fn push_timeline_lines(
                     lines.push(FeedLine::plain(
                         format!("{prefix}{wrapped}"),
                         style_muted(),
-                        Some(index),
+                        Some(entry_index),
                     ));
                     if let Some(line) = lines.last_mut() {
                         line.indent = detail_indent;

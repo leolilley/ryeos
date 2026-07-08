@@ -50,6 +50,17 @@ fn string_list_filter(params: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+fn active_filter(params: &Value) -> bool {
+    match params.get("active") {
+        Some(Value::Bool(active)) => *active,
+        Some(Value::String(value)) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "active" | "live" | "running"
+        ),
+        _ => false,
+    }
+}
+
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
@@ -80,12 +91,9 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         kind: string_filter(&params, "kind"),
         requested_by: string_filter(&params, "requested_by"),
         facet: string_filter(&params, "facet_key").zip(string_filter(&params, "facet_value")),
-        // `active: true` narrows to the agent's live (non-terminal) threads —
-        // the activity view's landing filter.
-        active_only: params
-            .get("active")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        // `active` narrows to live (non-terminal) threads. The filter accepts
+        // bools for authored views and text for the TUI live-filter input.
+        active_only: active_filter(&params),
     };
 
     let exclude_item_prefixes = string_list_filter(&params, "exclude_item_prefixes");
@@ -462,7 +470,7 @@ mod tests {
         assert_eq!(compact_limits(&serde_json::json!({})), "{}");
     }
 
-    use ryeos_app::thread_lifecycle::{follow_display_state, follow_role, FollowFact};
+    use ryeos_app::thread_lifecycle::{FollowFact, follow_display_state, follow_role};
 
     #[test]
     fn follow_rows_none_is_empty() {

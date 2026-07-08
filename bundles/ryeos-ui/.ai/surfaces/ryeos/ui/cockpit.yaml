@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T02:51:18Z:059704c28bf4676b30d1557ad1b92a5fc7267050cc004b4fae46702b83db0907:KJwCDKdUp+k3DsGLsqboh+O2PxULHLJ3YsKKSbfnnVsm27OD3GLiVD1bkjofaN6mOVs+bXf9TEoWz8j8QYBwCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T04:10:29Z:986c7beb66fd40c06256414f303895b926ed0f1ea31056df7a151d9daf530ecd:cNjQiyuZbohuFTUkKf9ELydhArJobeVMhv7cBr3JbQjc5vgQAmaJbLO3T0zUfnc0bBYa0+exzHY5mY15v0fIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-cockpit
 version: "1.0.0"
@@ -20,7 +20,7 @@ tiling:
 # so the cockpit keeps the execution table visible while the selected thread
 # becomes the conversational/detail surface.
 tiles:
-  - "view:ryeos/run/activity"
+  - "view:ryeos/threads/history"
   - "view:ryeos/thread/transcript"
 
 slots:
@@ -33,34 +33,19 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
-  - view:ryeos/thread/transcript
-  - view:ryeos/threads/detail
+  - view:ryeos/node/threads/history
+  - view:ryeos/projects/list
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
+  - view:ryeos/items/space
   - view:ryeos/node/events
   - view:ryeos/node/remotes
   - view:ryeos/node/bundles
   - view:ryeos/node/gc
-  - view:ryeos/projects/list
-  - view:ryeos/chain/timeline
-  - view:ryeos/files/list
-  - view:ryeos/items/space
-  - view:ryeos/item/inspector
-  - view:ryeos/item/explain
-  - view:ryeos/node/activity
-  - view:ryeos/ui/status
   - view:ryeos/graph/topology
-  - view:ryeos/remotes/list
-  - view:ryeos/schedules/list
   - view:ryeos/commands/grammar
-  - view:ryeos/bundles/list
-  - view:ryeos/node/status
-  - view:ryeos/gc/status
-  - view:ryeos/backdrop/prism
 
 input:
   route:

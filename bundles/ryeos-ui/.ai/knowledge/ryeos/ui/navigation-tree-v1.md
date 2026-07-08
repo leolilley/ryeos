@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-06T12:24:55Z:5b5fbd537a937fcdde687630ec127657fd144abc600226766ffabac7e6a51011:btvS69XWsPRfTaG9JXKXDcPhwyOeHu59TowEXoNlNs6pQjL+uZJabJNVXWAIXs/iwPQOQJ6A7A83M9gQADObCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-08T01:26:03Z:e6e3919eb4f4eabc74b977f8c3cd9aabd8950f0fa8050dd84b92c65894729605:UGvAFtz2Wa8oF66POSQkPSGkhcFWJD+FeFEe9g/TBmqN51aUbPFTzbt0f6ZEY3L4EMH0UiCnKpIj8ZTRx563Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -243,8 +243,6 @@ refs in this slice are:
 ```text
 view:ryeos/projects/list
 
-view:ryeos/threads/live
-view:ryeos/threads/live-all
 view:ryeos/threads/history
 view:ryeos/threads/detail
 
@@ -255,7 +253,6 @@ view:ryeos/project/items
 view:ryeos/project/schedules
 
 view:ryeos/node/status
-view:ryeos/node/threads/live
 view:ryeos/node/threads/history
 view:ryeos/node/events
 view:ryeos/node/remotes
@@ -274,23 +271,21 @@ view:ryeos/thread/graph
 view:ryeos/project/context
 ```
 
-Labels may be friendlier than refs. For example, `view:ryeos/threads/live`
-can render as "Activity" inside the cockpit, because the cockpit scope already
-implies "current project".
+Labels may be friendlier than refs. For example,
+`view:ryeos/threads/history` can render as "Project / Threads" in the
+launcher, because the view itself owns the project scope and the input owns the
+active/status/kind/source filters.
 
 ## Current Ref Migration
 
-The current tree contains useful pieces with names that predate the project
-scope split. Prefer aliases first, then move surfaces to the new refs.
+The current tree has been cut to the scoped thread tables. Active-only activity
+views are not separate launcher entries; they are filters on the thread table.
 
 ```text
 Current ref                         Target ref
 ----------------------------------  ----------------------------------
-view:ryeos/run/activity             view:ryeos/threads/live
-view:ryeos/run/all-activity         view:ryeos/threads/live-all
 view:ryeos/chain/timeline           view:ryeos/thread/transcript
 view:ryeos/threads/list             view:ryeos/threads/history
-view:ryeos/threads/live-all         view:ryeos/node/threads/live
 view:ryeos/threads/history          view:ryeos/node/threads/history
 view:ryeos/files/list               view:ryeos/project/files
 view:ryeos/items/space              view:ryeos/project/items
@@ -298,27 +293,38 @@ view:ryeos/schedules/list           view:ryeos/project/schedules
 view:ryeos/remotes/list             view:ryeos/node/remotes
 view:ryeos/bundles/list             view:ryeos/node/bundles
 view:ryeos/gc/status                view:ryeos/node/gc
-view:ryeos/node/activity            view:ryeos/node/events
 ```
 
-`view:ryeos/threads/live` is project-scoped by default:
+`view:ryeos/threads/history` is project-scoped by default:
 
 ```yaml
 source:
   ref: service:ui/ryeos-ui/threads/list
   params:
-    active: true
     project: current
     project_path: ""
 ```
 
-`view:ryeos/threads/live-all` and `view:ryeos/node/threads/live` are node-scoped:
+`view:ryeos/node/threads/history` is node-scoped:
 
 ```yaml
 source:
   ref: service:ui/ryeos-ui/threads/list
   params:
-    active: true
+    sort: watch
+```
+
+Both thread tables expose the same filter input:
+
+```yaml
+input:
+  id: filter
+  feeds:
+    fields:
+      - { param: active, label: active }
+      - { param: status, label: status }
+      - { param: kind, label: kind }
+      - { param: requested_by, label: source }
 ```
 
 ## Thread Lenses
@@ -352,7 +358,7 @@ operator's ability to inspect the full event stream.
 ```text
 surface:ryeos/ui/cockpit
 `-- project driving surface
-    |-- left: view:ryeos/threads/live
+    |-- left: view:ryeos/threads/history
     |-- right: selected thread lens, currently view:ryeos/thread/transcript
     |-- bottom: view:ryeos/input
     `-- top: node/project status
@@ -379,12 +385,12 @@ surface:ryeos/ui/project
 `-- active project explorer
     |-- left: view:ryeos/project/files
     |-- center: view:ryeos/project/items
-    |-- related: view:ryeos/threads/live
+    |-- related: view:ryeos/threads/history
     `-- right: inspector
 
 surface:ryeos/ui/node
 `-- node-wide overview
-    |-- all live threads: view:ryeos/node/threads/live
+    |-- threads: view:ryeos/node/threads/history
     |-- projects: view:ryeos/projects/list
     |-- events: view:ryeos/node/events
     `-- maintenance lenses

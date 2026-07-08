@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T03:16:41Z:10de297c353e83944f1ffb12f69cbd41e2ac1aea838b655905179d31fc85fa37:bB3zWcex87EczEcHuhpfQMyXVpu5cO3ciguMLOf7H0gU9htywRIAYuahy2ijFPxiWM4636yEXlFrYrvuimKQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T04:10:29Z:9693f198e32f01db4b6e521fee82410d2b06da1761fe16bc63a7f252d37aa338:bls5svqwZPzqlS9g4YNXcZPbJq+8/IGd0IC4Kx5liWFrqam/TwgJTKm/qetjFQVkhaJ4ya9L4b2k3/aq8eu/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-lens
 version: "1.0.0"
@@ -36,37 +36,19 @@ backdrop: view:ryeos/backdrop/prism-shards
 
 # The full lens set — swap the single center lens to reach any of these.
 library:
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
-  - view:ryeos/thread/transcript
-  - view:ryeos/threads/detail
+  - view:ryeos/node/threads/history
+  - view:ryeos/projects/list
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
+  - view:ryeos/items/space
   - view:ryeos/node/events
   - view:ryeos/node/remotes
   - view:ryeos/node/bundles
   - view:ryeos/node/gc
-  - view:ryeos/projects/list
-  - view:ryeos/node/activity
-  - view:ryeos/chain/timeline
-  - view:ryeos/ui/status
-  - view:ryeos/input
-  - view:ryeos/item/inspector
-  - view:ryeos/items/space
-  - view:ryeos/item/explain
-  - view:ryeos/files/list
   - view:ryeos/graph/topology
-  - view:ryeos/remotes/list
-  - view:ryeos/schedules/list
   - view:ryeos/commands/grammar
-  - view:ryeos/bundles/list
-  - view:ryeos/node/status
-  - view:ryeos/gc/status
-  - view:ryeos/backdrop/prism
-  - view:ryeos/backdrop/prism-shards
-  - view:ryeos/backdrop/splash
 
 overlays:
   views:

@@ -10,7 +10,7 @@ use super::scene_model::RyeOsSceneModel;
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
 use crate::atlas::AtlasUiStateVm;
 use crate::surface::{
-    builtin_default, SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec,
+    SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec, builtin_default,
 };
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;
@@ -388,6 +388,11 @@ pub struct RyeOsDataState {
     /// system: open JSON, projected through view bindings).
     #[serde(default)]
     pub sources: HashMap<String, serde_json::Value>,
+    /// Transient projected timeline cache, keyed by the same source key as
+    /// `sources`. Rebuilt only when source data lands so scroll keys do not
+    /// re-project long transcripts on every frame.
+    #[serde(default, skip)]
+    pub(crate) timeline_sources: HashMap<String, RyeOsTimelineSourceCache>,
     /// The newest fetch effect id issued for each source key. A response only
     /// lands if it is that newest request (freshness guard): when a single-lens
     /// tile is reused for a new selection its source keys are stable, so an
@@ -401,6 +406,13 @@ pub struct RyeOsDataState {
     /// the braid snapshot is. Cleared once a fresh snapshot supersedes it.
     #[serde(default)]
     pub live_delta: Option<RyeOsLiveDelta>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RyeOsTimelineSourceCache {
+    pub entries: Vec<super::timeline::RyeOsTimelineEntryVm>,
+    pub indents: Vec<u8>,
+    pub sources: Vec<Option<super::timeline::TimelineEntrySource>>,
 }
 
 // The live cognition buffer type + its accumulation logic live with the rest
@@ -979,6 +991,41 @@ impl RyeOsCore {
         self.notice(message, tone);
     }
 
+    pub(crate) fn rebuild_timeline_source_cache(&mut self, source_key: &str) {
+        self.data.timeline_sources.remove(source_key);
+        let Some(tile_id) = parse_source_tile_key(source_key) else {
+            return;
+        };
+        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+            return;
+        };
+        let Some(binding) = self.views.get(&tile.view.view_ref) else {
+            return;
+        };
+        if binding.widget != "timeline" {
+            return;
+        }
+        let Some(response) = self.data.sources.get(source_key) else {
+            return;
+        };
+        let (mut entries, mut indents, mut sources) = super::timeline::timeline_entries_indented(
+            super::content::project_records(binding, response),
+        );
+        if let Some(summary) = super::view_model::timeline_summary_entry(response) {
+            entries.insert(0, summary);
+            indents.insert(0, 0);
+            sources.insert(0, None);
+        }
+        self.data.timeline_sources.insert(
+            source_key.to_string(),
+            RyeOsTimelineSourceCache {
+                entries,
+                indents,
+                sources,
+            },
+        );
+    }
+
     pub fn envelope(&self, effects: Vec<RyeOsEffect>) -> RyeOsEnvelope {
         RyeOsEnvelope {
             schema_version: "ryeos.ui.envelope.v1".to_string(),
@@ -1326,15 +1373,29 @@ impl RyeOsCore {
                     .map(|(index, record)| (row_key(&record.raw, index), record.raw))
             }
             "timeline" => {
-                let (mut entries, mut indents, mut sources) =
-                    super::timeline::timeline_entries_indented(super::content::project_records(
-                        binding, response,
-                    ));
-                if let Some(summary) = super::view_model::timeline_summary_entry(response) {
-                    entries.insert(0, summary);
-                    indents.insert(0, 0);
-                    sources.insert(0, None);
-                }
+                let (mut entries, mut indents, mut sources) = self
+                    .data
+                    .timeline_sources
+                    .get(&tile_id.0.to_string())
+                    .map(|cache| {
+                        (
+                            cache.entries.clone(),
+                            cache.indents.clone(),
+                            cache.sources.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        let (mut entries, mut indents, mut sources) =
+                            super::timeline::timeline_entries_indented(
+                                super::content::project_records(binding, response),
+                            );
+                        if let Some(summary) = super::view_model::timeline_summary_entry(response) {
+                            entries.insert(0, summary);
+                            indents.insert(0, 0);
+                            sources.insert(0, None);
+                        }
+                        (entries, indents, sources)
+                    });
                 // `append_live_delta` can add non-expandable transient entries.
                 super::timeline::append_live_delta(self, &mut entries);
                 indents.resize(entries.len(), 0);

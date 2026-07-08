@@ -1,15 +1,19 @@
-# ryeos:signed:2026-07-07T02:51:18Z:19a2cb8298b725c97af0ba3788a3417d6d430f1605ceeb31710642a0c65163c1:RGhdy6l11Dopwzj6PTIJVIQ/lrkVlk+uC1B5uYbRYLVaI5pzl1nLNv08L52K8/vpm+kR6FBn2QQzcm6fVtsVDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-08T01:26:03Z:1d959d69d25c6f8641cae59231eb8aa4d248c70a87e6360be90df49f4d39c0b2:cyqD3gJNIUyBhcH0Kg3seFPnJw5GaWG9I17CqSDvJcSwozmPoHAJxlxnhEtraY7ldwRKZTQN+gzYSTScc4i7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
-name: thread-history
+name: project-threads
 version: "1.0.0"
 description: >-
-  Thread history across the RyeOS UI thread source. This is the settled and
-  watchable record view; live execution belongs in the activity lenses.
+  Active-project thread history. This is the broad project execution table:
+  running, failed, cancelled, and completed threads are all present, with the
+  input acting as the active/status/kind/source filter instead of separate
+  active-only views.
 
 widget: table
 source:
   ref: service:ui/ryeos-ui/threads/list
   params:
+    project: current
+    project_path: ""
     limit: 200
     sort: watch
   collection: threads
@@ -95,6 +99,7 @@ input:
   id: filter
   feeds:
     fields:
+      - { param: active, label: active }
       - { param: status, label: status }
       - { param: kind, label: kind }
       - { param: requested_by, label: source }

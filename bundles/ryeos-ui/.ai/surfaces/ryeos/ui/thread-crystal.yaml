@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T02:51:18Z:28bb1340997473cf02f7bb136afb6c3622aa9abd1ec52c3a61cd6b32d7a40bc8:pJNRfhpZKKY3tdLskkWZ8LQVMYZCz/S42iX0Kb3hZ5Fsi9UNDaDlnDHOT4oOYkembxTMDwN1GJZRj1WEsNGGDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T04:10:29Z:0f9ec2df231e287b239821e24f614b1121b5ddd9d735b826e17e458e168f78b1:ERJ5bh/gc5ZtbCcrUhnlI3fS73UENBoEzyns9HFay9+x+C2sU4nTq3uG9vi8YzKYPAWGtlilh7ZF0K1IETVoAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
@@ -23,14 +23,9 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/thread/transcript
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
   - view:ryeos/node/events
-  - view:ryeos/input
-  - view:ryeos/node/status
-  - view:ryeos/backdrop/prism
 
 input:
   route:

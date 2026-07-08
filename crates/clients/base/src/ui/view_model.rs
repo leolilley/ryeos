@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use super::content::ViewBinding;
 use super::event::RyeOsAction;
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
-use super::scene_model::{build_scene_model, RyeOsSceneModel};
+use super::scene_model::{RyeOsSceneModel, build_scene_model};
 use super::seat::InvokeTemplate;
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
@@ -1296,18 +1297,28 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let (mut full, mut full_indents, mut full_sources) =
-                timeline_entries_indented(super::content::project_records(binding, response));
-            // Deep-watch header: a chain execution summary line at the top of the
-            // braid, from the source's `summary` (chain_replay). Absent for any
-            // timeline whose source carries no `summary`, so it never intrudes.
-            // Header + live tail sit at the root (depth 0); keep `full_indents`
-            // parallel to `full` across both mutations.
-            if let Some(summary) = timeline_summary_entry(response) {
-                full.insert(0, summary);
-                full_indents.insert(0, 0);
-                full_sources.insert(0, None);
-            }
+            let (mut full, mut full_indents, mut full_sources) = core
+                .data
+                .timeline_sources
+                .get(source_key)
+                .map(|cache| {
+                    (
+                        cache.entries.clone(),
+                        cache.indents.clone(),
+                        cache.sources.clone(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    let (mut entries, mut indents, mut sources) = timeline_entries_indented(
+                        super::content::project_records(binding, response),
+                    );
+                    if let Some(summary) = timeline_summary_entry(response) {
+                        entries.insert(0, summary);
+                        indents.insert(0, 0);
+                        sources.insert(0, None);
+                    }
+                    (entries, indents, sources)
+                });
             append_live_delta(core, &mut full);
             full_indents.resize(full.len(), 0);
             full_sources.resize(full.len(), None);
@@ -1972,31 +1983,50 @@ pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem
         let view = ViewSpec {
             view_ref: view_ref.clone(),
         };
+        let (label, hint) = launchable_view_text(&view_ref, binding);
         items.push(RyeOsOverlayActionItem {
-            // Prefer the view item's authored name; fall back to the ref
-            // (sans `view:` prefix) so unnamed views still identify.
-            label: binding
-                .name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    view_ref
-                        .strip_prefix("view:")
-                        .unwrap_or(view_ref.as_str())
-                        .to_string()
-                }),
-            hint: binding
-                .description
-                .clone()
-                .unwrap_or_else(|| binding.widget.clone()),
+            label,
+            hint,
             action: RyeOsAction::OpenView { view: view.clone() },
             secondary_action: Some(RyeOsAction::OpenNewView { view }),
             enabled: true,
         });
     }
     items
+}
+
+fn launchable_view_text(view_ref: &str, binding: &ViewBinding) -> (String, String) {
+    let clean_ref = view_ref.strip_prefix("view:").unwrap_or(view_ref);
+    let (category, title) = match view_ref {
+        "view:ryeos/threads/history" => ("Project", "Threads"),
+        "view:ryeos/node/threads/history" => ("Node", "Threads"),
+        "view:ryeos/projects/list" => ("Node", "Projects"),
+        "view:ryeos/project/files" => ("Project", "Files"),
+        "view:ryeos/project/items" => ("Project", "Items"),
+        "view:ryeos/project/schedules" => ("Project", "Schedules"),
+        "view:ryeos/items/space" => ("Project", "Item space"),
+        "view:ryeos/node/events" => ("Node", "Events"),
+        "view:ryeos/node/remotes" => ("Node", "Remotes"),
+        "view:ryeos/node/bundles" => ("Node", "Bundles"),
+        "view:ryeos/node/gc" => ("Node", "Garbage collection"),
+        "view:ryeos/commands/grammar" => ("Node", "Command grammar"),
+        "view:ryeos/graph/topology" => ("Node", "Topology"),
+        "view:ryeos/atlas" => ("System", "Atlas"),
+        _ => (
+            "View",
+            binding
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(clean_ref),
+        ),
+    };
+    let hint = binding
+        .description
+        .clone()
+        .unwrap_or_else(|| binding.widget.clone());
+    (format!("{category}/{title}"), hint)
 }
 
 fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
@@ -2205,27 +2235,15 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
         ),
         view(
             "Work",
-            "Project activity",
-            "Live activity for the active project",
-            "view:ryeos/run/activity",
+            "Project threads",
+            "Active-project threads with active/status/kind/source filters",
+            "view:ryeos/threads/history",
         ),
         view(
             "Work",
-            "All-project activity",
-            "Live activity across registered projects",
-            "view:ryeos/run/all-activity",
-        ),
-        view(
-            "Threads",
-            "Transcript",
-            "Full transcript for the routed thread",
-            "view:ryeos/thread/transcript",
-        ),
-        view(
-            "Threads",
-            "Thread detail",
-            "Detail lens for a selected thread",
-            "view:ryeos/threads/detail",
+            "Node threads",
+            "Node-wide threads with active/status/kind/source filters",
+            "view:ryeos/node/threads/history",
         ),
     ]
 }
@@ -2755,10 +2773,12 @@ mod tests {
             .expect("backdrop scene on empty center");
         // The scene resolves from the view body — objects incl. text labels.
         assert!(!backdrop.objects.is_empty());
-        assert!(backdrop
-            .objects
-            .iter()
-            .any(|o| o.label.as_deref() == Some("RYE OS")));
+        assert!(
+            backdrop
+                .objects
+                .iter()
+                .any(|o| o.label.as_deref() == Some("RYE OS"))
+        );
     }
 
     #[test]
@@ -2782,6 +2802,7 @@ mod tests {
             effective_surface: Some(json!({
                 "name": "ryeos-base",
                 "tiles": tiles,
+                "library": tiles,
                 "views": views,
             })),
             ..Default::default()
@@ -2815,22 +2836,22 @@ mod tests {
     }
 
     #[test]
-    fn view_overlay_label_prefers_authored_name_else_stripped_ref() {
+    fn view_overlay_label_uses_launcher_scope_and_ref_fallback() {
         let core = session_with_views(
             json!({
                 "view:ryeos/atlas": { "widget": "atlas", "name": "Atlas", "description": "the namespace atlas" },
                 "view:ryeos/x/raw": { "widget": "rows" },
             }),
-            json!([]),
+            json!(["view:ryeos/atlas", "view:ryeos/x/raw"]),
         );
         let items = view_overlay_items(&core);
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(
-            labels.contains(&"Atlas"),
-            "named view uses its name: {labels:?}"
+            labels.contains(&"System/Atlas"),
+            "known view uses launcher scope: {labels:?}"
         );
         assert!(
-            labels.contains(&"ryeos/x/raw"),
+            labels.contains(&"View/ryeos/x/raw"),
             "unnamed view falls back to stripped ref: {labels:?}"
         );
     }
@@ -3034,7 +3055,7 @@ mod tests {
 
     #[test]
     fn actual_threads_list_binding_projects_a_table() {
-        use crate::ui::content::{project_table, table_columns, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_table, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos/.ai/views/ryeos/threads/list.yaml"
         ))
@@ -3050,7 +3071,9 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "status", "source", "follow", "created"]
+            [
+                "thread", "kind", "item", "status", "source", "follow", "created"
+            ]
         );
         let rows = project_table(
             &binding,
@@ -3125,7 +3148,7 @@ mod tests {
 
     #[test]
     fn actual_thread_detail_binding_projects_inspect_sections() {
-        use crate::ui::content::{project_section, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_section};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos/.ai/views/ryeos/threads/detail.yaml"
         ))
@@ -3197,7 +3220,7 @@ mod tests {
 
     #[test]
     fn actual_items_space_binding_projects_renamed_and_nested_fields() {
-        use crate::ui::content::{project_table, project_tone, table_columns, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_table, project_tone, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos/.ai/views/ryeos/items/space.yaml"
         ))

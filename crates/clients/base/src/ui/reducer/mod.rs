@@ -27,7 +27,7 @@ mod tiles;
 use super::effect::{RyeOsEffect, RyeOsEffectKind};
 use super::event::{RyeOsAction, RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent};
 use super::model::RyeOsCore;
-use super::view_model::{action_for_focused_row, RyeOsMotionEventVm, RyeOsTone};
+use super::view_model::{RyeOsMotionEventVm, RyeOsTone, action_for_focused_row};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
 use crate::workspace::ViewSpec;
 
@@ -380,9 +380,17 @@ impl RyeOsCore {
             RyeOsUiEvent::SubmitInput => self.submit_focused_input(false),
             RyeOsUiEvent::SubmitInputInterrupt => self.submit_focused_input(true),
             RyeOsUiEvent::MoveOverlaySelection { delta } => {
-                let len = super::view_model::active_overlay_items(self).len();
+                let items = super::view_model::active_overlay_items(self);
+                let len = items.len();
                 if len > 0 {
-                    self.ui.overlay.selected = wrap_index(self.ui.overlay.selected, delta, len);
+                    let mut next = self.ui.overlay.selected.min(len.saturating_sub(1));
+                    for _ in 0..len {
+                        next = wrap_index(next, delta, len);
+                        if items.get(next).is_some_and(|item| item.enabled) {
+                            break;
+                        }
+                    }
+                    self.ui.overlay.selected = next;
                     self.bump_generation();
                 }
                 Vec::new()
@@ -857,15 +865,21 @@ mod tests {
         // Dimension + Projects + Topology. Completion/commands is fetched only
         // for inputs that declare it (this fixture's input does not).
         assert_eq!(effects.len(), 3);
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension)));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects)));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology)));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology))
+        );
     }
 
     #[test]
@@ -1239,11 +1253,12 @@ mod tests {
         });
 
         assert!(duplicate.is_empty());
-        assert!(core
-            .ui
-            .notices
-            .iter()
-            .any(|notice| notice.message == "Run tool:demo/run is already pending."));
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message == "Run tool:demo/run is already pending.")
+        );
     }
 
     #[test]
@@ -1329,11 +1344,12 @@ mod tests {
         });
 
         assert!(duplicate.is_empty());
-        assert!(core
-            .ui
-            .notices
-            .iter()
-            .any(|notice| notice.message == "Cancel T-run is already pending."));
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message == "Cancel T-run is already pending.")
+        );
     }
 
     #[test]
@@ -1625,11 +1641,12 @@ mod tests {
             core.seat.fold().input_route().thread.is_none(),
             "read-only does not retarget the route"
         );
-        assert!(core
-            .ui
-            .notices
-            .iter()
-            .any(|n| n.message.contains("read-only")));
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|n| n.message.contains("read-only"))
+        );
     }
 
     #[test]

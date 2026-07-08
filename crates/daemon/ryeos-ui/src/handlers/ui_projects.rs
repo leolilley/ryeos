@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::{parse_request, HandlerError};
+use ryeos_app::handler_error::{HandlerError, parse_request};
 use ryeos_app::principal::{
-    HostedPrincipalResolver, LockedPrincipalStore, PrincipalStore, LOCAL_PRINCIPAL_ID,
+    HostedPrincipalResolver, LOCAL_PRINCIPAL_ID, LockedPrincipalStore, PrincipalStore,
 };
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -153,9 +153,31 @@ pub async fn handle_projects_list(
     let current_project = project_path.as_deref().or_else(|| caller.project_root());
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
+    let mut rows = projects.projects;
+    if let Some(current) = current_project {
+        if !rows
+            .iter()
+            .any(|project| same_existing_dir(current, &project.root))
+        {
+            let root = PathBuf::from(current);
+            rows.insert(
+                0,
+                ProjectEntry {
+                    local_id: "current".to_string(),
+                    name: inferred_project_name(&root),
+                    root: current.to_string(),
+                    added_at: String::new(),
+                    tags: Vec::new(),
+                },
+            );
+        }
+    }
     Ok(json!({
         "version": projects.version,
-        "projects": projects.projects.into_iter().map(|project| project_view(project, current_project)).collect::<Vec<_>>()
+        "projects": rows.into_iter().map(|project| {
+            let registered = project.local_id != "current";
+            project_view(project, current_project, registered)
+        }).collect::<Vec<_>>()
     }))
 }
 
@@ -182,7 +204,9 @@ pub async fn handle_projects_add(
         }
         let entry = existing.clone();
         store.write_projects(&projects)?;
-        return Ok(json!({ "project": project_view(entry, Some(&root_text)), "created": false }));
+        return Ok(
+            json!({ "project": project_view(entry, Some(&root_text), true), "created": false }),
+        );
     }
 
     let entry = ProjectEntry {
@@ -199,7 +223,7 @@ pub async fn handle_projects_add(
     projects.projects.sort_by(|a, b| a.name.cmp(&b.name));
     store.write_projects(&projects)?;
 
-    Ok(json!({ "project": project_view(entry, Some(&root_text)), "created": true }))
+    Ok(json!({ "project": project_view(entry, Some(&root_text), true), "created": true }))
 }
 
 pub async fn handle_projects_forget(
@@ -259,7 +283,7 @@ pub async fn handle_projects_resolve(
         .into_iter()
         .find(|p| p.local_id == req.local_id)
         .ok_or(HandlerError::NotFound)?;
-    Ok(json!({ "project": project_view(project, None) }))
+    Ok(json!({ "project": project_view(project, None, true) }))
 }
 
 pub async fn handle_projects_open(
@@ -267,21 +291,39 @@ pub async fn handle_projects_open(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    if require_seat_caller(&ctx, &state)?.read_only() {
+    let caller = require_seat_caller(&ctx, &state)?;
+    if caller.read_only() {
         return Err(HandlerError::Forbidden("session is read-only".into()).into());
     }
     let req: OpenProjectRequest = parse_request(params)?;
+    let current_project = caller.project_root().map(str::to_string);
     let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
-    let project = projects
-        .projects
-        .into_iter()
-        .find(|p| p.local_id == req.local_id)
-        .ok_or(HandlerError::NotFound)?;
+    let project = if req.local_id == "current" {
+        let root = current_project.ok_or(HandlerError::NotFound)?;
+        let path = PathBuf::from(&root);
+        ProjectEntry {
+            local_id: "current".to_string(),
+            name: inferred_project_name(&path),
+            root,
+            added_at: String::new(),
+            tags: Vec::new(),
+        }
+    } else {
+        projects
+            .projects
+            .into_iter()
+            .find(|p| p.local_id == req.local_id)
+            .ok_or(HandlerError::NotFound)?
+    };
 
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
-    let recent = store.touch_recent_project(&project.local_id)?;
+    let recent = if project.local_id == "current" {
+        RecentFile::default()
+    } else {
+        store.touch_recent_project(&project.local_id)?
+    };
 
     let session = if let Some(session_id) = session_id_from_context(&ctx) {
         let updated_session = get_ui_state(&state)
@@ -303,7 +345,11 @@ pub async fn handle_projects_open(
     };
 
     Ok(json!({
-        "project": project_view(ProjectEntry { root: root.clone(), ..project }, Some(&root)),
+        "project": project_view(
+            ProjectEntry { root: root.clone(), ..project.clone() },
+            Some(&root),
+            project.local_id != "current"
+        ),
         "session": session,
         "recent": recent.recent_projects,
     }))
@@ -541,7 +587,7 @@ fn inferred_project_name(root: &Path) -> String {
         .to_string()
 }
 
-fn project_view(project: ProjectEntry, current_project: Option<&str>) -> Value {
+fn project_view(project: ProjectEntry, current_project: Option<&str>, registered: bool) -> Value {
     let exists = Path::new(&project.root).is_dir();
     let current = current_project.is_some_and(|current| same_existing_dir(current, &project.root));
     json!({
@@ -552,6 +598,7 @@ fn project_view(project: ProjectEntry, current_project: Option<&str>) -> Value {
         "tags": project.tags,
         "exists": exists,
         "current": current,
+        "registered": registered,
     })
 }
 
@@ -730,9 +777,10 @@ mod tests {
     #[test]
     fn unsupported_versions_are_rejected() {
         let err = ensure_version("projects.yaml", 2, 1).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unsupported projects.yaml version 2"));
+        assert!(
+            err.to_string()
+                .contains("unsupported projects.yaml version 2")
+        );
     }
 
     #[test]
@@ -752,6 +800,7 @@ mod tests {
                 tags: vec![],
             },
             None,
+            true,
         );
         assert_eq!(value["exists"], false);
         assert_eq!(value["root"], "/definitely/missing/ryeos/project");
