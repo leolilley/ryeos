@@ -1,0 +1,28 @@
+version: "0.1.0"
+category: "ryeos/central-auth"
+name: "list-principals"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.ryeos.central-auth.list-principals"]
+description: "Read-only roster of the realm's accounts: id, display_name, roles, disabled. Never returns passphrases or secrets. For operator tooling that needs the full user list (e.g. per-user assistant assignment)."
+
+config:
+  command: "python3"
+  args:
+    - "{tool_dir}/../../../bin/central_auth.py"
+    - "list-principals"
+  input_data: "{params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    project_path:
+      type: string
+      description: "Project root used for .ai/state/central-auth storage."
+    runtime_state_dir:
+      type: string
+      description: "Optional absolute central-auth runtime state dir override."
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. tv-tracker."
+  required: [realm_id]
