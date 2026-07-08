@@ -213,10 +213,6 @@ fn run_publish_once(
         name: None,
         skip_unsignable: false,
         allow_namespace_mismatch: false,
-        // Core alone carries `knowledge/` items whose kind is defined by
-        // standard; publishing core as its own registry is a deliberately
-        // partial publish, so the uncovered-dir check is opted out here.
-        allow_uncovered_item_dirs: true,
         emit_trust_doc: false,
     };
     ryeos_core_tools::actions::publish::run_publish(&opts)

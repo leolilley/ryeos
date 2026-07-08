@@ -1464,14 +1464,14 @@ mod tests {
             "view:ryeos/okrefresh-list": { "widget": "text",
                 "refresh": { "on_hint": ["thread", "activity"] } }
         }});
-        let b = views_from_surface(Some(&surface));
-        let b = b.get("view:ryeos/okrefresh").expect("present");
+        let bindings = views_from_surface(Some(&surface));
+        let b = bindings.get("view:ryeos/okrefresh").expect("present");
         assert!(
             b.degraded.is_none(),
             "known refresh keys parse cleanly: {:?}",
             b.degraded
         );
-        let b = b.get("view:ryeos/okrefresh-list").expect("present");
+        let b = bindings.get("view:ryeos/okrefresh-list").expect("present");
         assert!(
             b.degraded.is_none(),
             "list-form on_hint parses cleanly: {:?}",

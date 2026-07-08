@@ -376,15 +376,8 @@ cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 
 echo "[populate-bundles] publishing core bundle…"
-# Core ships `knowledge/` documentation items whose kind is defined by standard,
-# which is not yet signed at this point. This first pass is a deliberately
-# partial publish: `--allow-uncovered-kind-dirs` acknowledges the uncovered
-# `knowledge/` directory so the publish does not hard-fail. The republish below
-# (with the standard registry root) signs those items and runs WITHOUT the flag,
-# so any genuinely uncovered directory there is caught loudly.
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
-  --allow-uncovered-kind-dirs \
   --owner "$OWNER" >/dev/null
 
 # central-auth ships in the source tree and is discovered/parsed at init, so its
@@ -402,16 +395,6 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STD" \
     --registry-root "$CORE" \
-    --owner "$OWNER" >/dev/null
-
-  echo "[populate-bundles] republishing core bundle with standard extension kinds…"
-  # Core owns foundational runtime items but also ships documentation items whose
-  # `knowledge` kind is provided by standard. Once standard has been signed, run
-  # core through the authoring path again with both roots so those extension-kind
-  # items are signed by the publisher key instead of being silently skipped.
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 

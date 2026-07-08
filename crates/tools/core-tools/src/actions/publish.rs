@@ -66,12 +66,6 @@ pub struct PublishOptions {
     /// such a mismatch is fatal, because the daemon hard-fails runtime-cap
     /// minting for it — a published-but-unusable manifest. Default `false`.
     pub allow_namespace_mismatch: bool,
-    /// If `true`, do not fail when a populated `.ai/<dir>` is covered by no
-    /// registered kind. Set this ONLY for a deliberately partial intermediate
-    /// publish (e.g. signing core before the bundle defining its `knowledge`
-    /// kind is available), which a later republish then completes. Default
-    /// `false`: an uncovered item directory hard-fails the publish.
-    pub allow_uncovered_item_dirs: bool,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
     /// operators to pin via `ryeos trust pin`. Default `true`.
@@ -162,7 +156,6 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         &opts.registry_roots,
         &opts.signing_key,
         opts.base_trust_store.as_ref(),
-        opts.allow_uncovered_item_dirs,
     )
     .context("sign-items phase failed")?;
     let mut partial = false;

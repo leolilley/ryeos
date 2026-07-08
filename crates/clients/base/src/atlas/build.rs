@@ -533,16 +533,16 @@ mod tests {
     fn stacks_items_with_same_namespace() {
         let atlas = build_namespace_atlas(AtlasInput {
             items: vec![
-                item("directive:rye/core/create_tool", "directive"),
-                item("tool:rye/core/create_tool", "tool"),
-                item("knowledge:rye/core/create_tool", "knowledge"),
+                item("directive:ryeos/core/create_tool", "directive"),
+                item("tool:ryeos/core/create_tool", "tool"),
+                item("knowledge:ryeos/core/create_tool", "knowledge"),
             ],
             ..AtlasInput::default()
         });
         let node = atlas
             .nodes
             .iter()
-            .find(|node| node.namespace_key == "rye/core/create_tool")
+            .find(|node| node.namespace_key == "ryeos/core/create_tool")
             .expect("stack node");
         assert_eq!(node.stack.len(), 3);
         assert_eq!(node.stack[0].kind, AtlasItemKind::Knowledge);
@@ -554,8 +554,8 @@ mod tests {
     fn layout_is_independent_of_input_order() {
         let mut input_a = AtlasInput {
             items: vec![
-                item("directive:rye/core/create_tool", "directive"),
-                item("knowledge:rye/core/signing", "knowledge"),
+                item("directive:ryeos/core/create_tool", "directive"),
+                item("knowledge:ryeos/core/signing", "knowledge"),
             ],
             ..AtlasInput::default()
         };
@@ -603,10 +603,10 @@ mod tests {
     fn namespace_projection_prefers_canonical_tail_over_label() {
         let atlas = build_namespace_atlas(AtlasInput {
             items: vec![AtlasItemInput {
-                canonical_ref: "directive:rye/core/create_tool".to_string(),
+                canonical_ref: "directive:ryeos/core/create_tool".to_string(),
                 kind: "directive".to_string(),
                 label: "Create Tool".to_string(),
-                namespace: Some("rye/core".to_string()),
+                namespace: Some("ryeos/core".to_string()),
                 scope: "project".to_string(),
                 ..AtlasItemInput::default()
             }],
@@ -615,34 +615,34 @@ mod tests {
         assert!(atlas
             .nodes
             .iter()
-            .any(|node| node.namespace_key == "rye/core/create_tool"));
+            .any(|node| node.namespace_key == "ryeos/core/create_tool"));
         assert!(!atlas
             .nodes
             .iter()
-            .any(|node| node.namespace_key == "rye/core/Create Tool"));
+            .any(|node| node.namespace_key == "ryeos/core/Create Tool"));
     }
 
     #[test]
     fn context_refs_highlight_matching_stack() {
         let atlas = build_namespace_atlas(AtlasInput {
-            selected_ref: Some("directive:rye/core/create_tool".to_string()),
-            context_refs: vec!["knowledge:rye/core/signing".to_string()],
+            selected_ref: Some("directive:ryeos/core/create_tool".to_string()),
+            context_refs: vec!["knowledge:ryeos/core/signing".to_string()],
             items: vec![
-                item("directive:rye/core/create_tool", "directive"),
-                item("knowledge:rye/core/signing", "knowledge"),
-                item("knowledge:rye/other/unrelated", "knowledge"),
+                item("directive:ryeos/core/create_tool", "directive"),
+                item("knowledge:ryeos/core/signing", "knowledge"),
+                item("knowledge:ryeos/other/unrelated", "knowledge"),
             ],
             ..AtlasInput::default()
         });
         let signing = atlas
             .nodes
             .iter()
-            .find(|node| node.namespace_key == "rye/core/signing")
+            .find(|node| node.namespace_key == "ryeos/core/signing")
             .expect("context node");
         let unrelated = atlas
             .nodes
             .iter()
-            .find(|node| node.namespace_key == "rye/other/unrelated")
+            .find(|node| node.namespace_key == "ryeos/other/unrelated")
             .expect("unrelated node");
         assert!(signing.state.highlighted);
         assert!(!signing.state.dimmed);

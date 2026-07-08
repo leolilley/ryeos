@@ -662,8 +662,10 @@ mod tests {
     fn ctrl_s_toggles_backdrop_break() {
         assert!(matches!(
             ryeos_key_command(ctrl('s'), context(false, true)),
-            RyeOsKeyCommand::Action {
-                action: RyeOsAction::ToggleBackdropBreak
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::Activate {
+                    action: RyeOsAction::ToggleBackdropBreak
+                }
             }
         ));
     }

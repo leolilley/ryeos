@@ -3057,7 +3057,7 @@ mod tests {
     #[test]
     fn actual_chain_timeline_binding_projects_replay_shapes() {
         let binding: super::super::content::ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/ryeos/.ai/views/ryeos/chain/timeline.yaml"
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml"
         ))
         .unwrap();
         let records = super::super::content::project_records(
@@ -3093,7 +3093,7 @@ mod tests {
     fn actual_threads_list_binding_projects_a_table() {
         use crate::ui::content::{project_table, table_columns, ViewBinding};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/ryeos/.ai/views/ryeos/threads/list.yaml"
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml"
         ))
         .unwrap();
         assert_eq!(binding.widget, "table");
@@ -3184,7 +3184,7 @@ mod tests {
     fn actual_thread_detail_binding_projects_inspect_sections() {
         use crate::ui::content::{project_section, ViewBinding};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/ryeos/.ai/views/ryeos/threads/detail.yaml"
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml"
         ))
         .unwrap();
         assert_eq!(binding.widget, "sections");
@@ -3256,7 +3256,7 @@ mod tests {
     fn actual_items_space_binding_projects_renamed_and_nested_fields() {
         use crate::ui::content::{project_table, project_tone, table_columns, ViewBinding};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/ryeos/.ai/views/ryeos/items/space.yaml"
+            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/items/space.yaml"
         ))
         .unwrap();
         assert_eq!(binding.widget, "table");

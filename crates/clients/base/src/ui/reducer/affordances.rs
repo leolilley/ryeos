@@ -452,7 +452,7 @@ mod tests {
         // affordance drills a row into its braid.
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let binding: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../../bundles/ryeos/.ai/views/ryeos/threads/list.yaml"
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml"
         ))
         .unwrap();
         core.views
@@ -518,7 +518,7 @@ mod tests {
         // (`service:ui/ryeos-ui/thread/cancel`, `service:threads/cancel`) must be
         // gone from every affordance in the view.
         let binding: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../../bundles/ryeos/.ai/views/ryeos/threads/list.yaml"
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml"
         ))
         .unwrap();
 

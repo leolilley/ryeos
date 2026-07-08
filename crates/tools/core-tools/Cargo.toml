@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-core-tools"
-version = "0.5.27"
+version = "0.5.28"
 edition = "2021"
 
 [lib]

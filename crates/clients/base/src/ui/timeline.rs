@@ -2127,7 +2127,7 @@ mod tests {
     fn chain_replay_projection_coalesces_into_block_separator_pair() {
         use super::super::content::{project_records, ViewBinding};
 
-        // Mirrors bundles/ryeos/.ai/views/ryeos/chain/timeline.yaml.
+        // Mirrors bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml.
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
             "source": { "ref": "service:events/chain_replay", "collection": "events" },
