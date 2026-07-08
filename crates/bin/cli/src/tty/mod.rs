@@ -604,8 +604,13 @@ struct TtyHomeFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TtyConfigFile {
+    #[serde(default = "default_tty_config_version")]
     version: u32,
     bare_action: TtyBareAction,
+}
+
+fn default_tty_config_version() -> u32 {
+    TTY_CONFIG_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
