@@ -52,7 +52,7 @@
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Color, Style, TextSurface};
 use ryeos_client_base::ui::scene_model::{
-    RyeOsSceneModel, RyeOsSceneObjectKind, RyeOsSceneObjectVm,
+    RyeOsSceneModel, RyeOsSceneObjectKind, RyeOsSceneObjectVm, SceneCutoutAmountVm,
 };
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
@@ -458,6 +458,9 @@ fn draw_fill(
             if !local_clip_allows(object, lx, ly) {
                 continue;
             }
+            if local_cutout_blocks(object, scene, lx, ly, light_az, spin) {
+                continue;
+            }
 
             let (sd, shade) = match object.shape.as_deref() {
                 Some("sphere") => sphere_sample(object.scale[0], lx, ly, light_az),
@@ -524,6 +527,35 @@ fn reveal_multiplier(object: &RyeOsSceneObjectVm, scene: &RyeOsSceneModel, pace:
     let sharpness = reveal.sharpness.max(0.1);
     let floor = reveal.floor.clamp(0.0, 1.0);
     (floor + (1.0 - floor) * closed.powf(sharpness)) * scene.break_amount.clamp(0.0, 1.0)
+}
+
+fn local_cutout_blocks(
+    object: &RyeOsSceneObjectVm,
+    scene: &RyeOsSceneModel,
+    lx: f32,
+    ly: f32,
+    light_az: f32,
+    spin: f32,
+) -> bool {
+    object.cutouts.iter().any(|cutout| {
+        let amount = match cutout.amount {
+            SceneCutoutAmountVm::Static => 1.0,
+            SceneCutoutAmountVm::Break => scene.break_amount.clamp(0.0, 1.0),
+        };
+        if amount <= 0.03 {
+            return false;
+        }
+        let x = lx - cutout.position[0];
+        let y = ly - cutout.position[1];
+        let sx = cutout.scale[0] * amount;
+        let sy = cutout.scale[1] * amount;
+        let sz = cutout.scale[2] * amount;
+        let (sd, _) = match cutout.shape.as_deref() {
+            Some("sphere") => sphere_sample(sx, x, y, light_az),
+            _ => prism_sample(sx, sy, sz, x, y, light_az, spin),
+        };
+        sd <= 0.0
+    })
 }
 
 /// Prism SDF + shading: a hexagonal crystal column (radius `r`, body
