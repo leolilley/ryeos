@@ -1010,11 +1010,54 @@ fn surface_uses_backdrop_underlay(core: &RyeOsCore) -> bool {
 
 fn dock_plane_vm(core: &RyeOsCore) -> RyeOsDockPlaneVm {
     RyeOsDockPlaneVm {
-        top: dock_tile_vm(core, RyeOsDockEdge::Top, core.ui.docks.top.as_ref()),
+        top: notice_dock_tile_vm(core)
+            .or_else(|| dock_tile_vm(core, RyeOsDockEdge::Top, core.ui.docks.top.as_ref())),
         bottom: dock_tile_vm(core, RyeOsDockEdge::Bottom, core.ui.docks.bottom.as_ref()),
         left: dock_tile_vm(core, RyeOsDockEdge::Left, core.ui.docks.left.as_ref()),
         right: dock_tile_vm(core, RyeOsDockEdge::Right, core.ui.docks.right.as_ref()),
     }
+}
+
+fn notice_dock_tile_vm(core: &RyeOsCore) -> Option<RyeOsDockTileVm> {
+    if core.ui.notices.is_empty() {
+        return None;
+    }
+    let rows: Vec<RyeOsRowVm> = core
+        .ui
+        .notices
+        .iter()
+        .rev()
+        .take(4)
+        .map(|notice| RyeOsRowVm {
+            id: notice.id.clone(),
+            primary: notice.message.clone(),
+            secondary: None,
+            meta: None,
+            kind: None,
+            action: None,
+            tone: notice.tone,
+            selected: false,
+            expandable: false,
+            expanded: false,
+            detail: Vec::new(),
+            changed_at_ms: None,
+        })
+        .collect();
+    let size = (rows.len() as u16).saturating_add(2).clamp(3, 6);
+    Some(RyeOsDockTileVm {
+        edge: RyeOsDockEdge::Top,
+        title: "status".to_string(),
+        size,
+        view: RyeOsViewVm::Rows {
+            title: "status".to_string(),
+            columns: Vec::new(),
+            total_rows: core.ui.notices.len(),
+            provenance: None,
+            affordance_hints: Vec::new(),
+            rows,
+        },
+        input: None,
+    })
 }
 
 fn dock_tile_vm(
@@ -2815,6 +2858,36 @@ mod tests {
             .objects
             .iter()
             .any(|o| o.label.as_deref() == Some("RYE OS")));
+    }
+
+    #[test]
+    fn notices_project_as_transient_top_dock_view() {
+        let mut core = RyeOsCore::default();
+        core.notice(
+            "Queued behind active thread · 2 staged inputs.",
+            RyeOsTone::Accent,
+        );
+
+        let vm = build_view_model(&core);
+        let dock = vm
+            .workspace
+            .docks
+            .top
+            .expect("notices should claim the top dock");
+        assert_eq!(dock.edge, RyeOsDockEdge::Top);
+        assert_eq!(dock.title, "status");
+        assert_eq!(dock.size, 3);
+        match dock.view {
+            RyeOsViewVm::Rows { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    rows[0].primary,
+                    "Queued behind active thread · 2 staged inputs."
+                );
+                assert!(!rows[0].selected);
+            }
+            other => panic!("expected rows notice dock, got {other:?}"),
+        }
     }
 
     #[test]

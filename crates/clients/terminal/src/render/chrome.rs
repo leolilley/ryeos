@@ -11,7 +11,7 @@ use ryeos_client_base::ui::view_model::{
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
-use super::theme::{border_for, mix_toward, style_muted, tone_style, ACCENT, BG, FG, MUTED, WARN};
+use super::theme::{ACCENT, BG, FG, MUTED, WARN, border_for, mix_toward, style_muted, tone_style};
 
 pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     // Breadcrumb: when a drill is open, prefix the return trail (root-first)

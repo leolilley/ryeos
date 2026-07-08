@@ -7,6 +7,8 @@ use super::model::RyeOsCore;
 use super::parse_tile_id;
 use super::view_model::RyeOsTone;
 
+const INPUT_QUEUE_NOTICE_PREFIX: &str = "Queued behind active thread";
+
 impl RyeOsCore {
     pub(crate) fn apply_effect_result(&mut self, result: RyeOsEffectResult) -> Vec<RyeOsEffect> {
         let Some(expected) = self.pending_effects.remove(&result.id) else {
@@ -135,23 +137,22 @@ impl RyeOsCore {
             // delivered as a new cognition_in on the SAME thread — no
             // new thread, so no ratchet and no "launched" copy. Clear
             // the buffer and keep the route where it is; the live tail
-            // shows the folded turn. A notice present here means a
-            // degradation (interrupt → steer); surface it as a warning.
+            // shows the folded turn.
             self.clear_focused_input();
-            let degraded = outcome.notice.is_some();
-            self.notice(
-                outcome
-                    .notice
-                    .unwrap_or_else(|| match outcome.thread_id.as_deref() {
-                        Some(id) => format!("Input delivered to {id}."),
-                        None => "Input delivered.".to_string(),
-                    }),
-                if degraded {
-                    RyeOsTone::Warn
-                } else {
-                    RyeOsTone::Good
-                },
+            let notice = submitted_delivery_notice(
+                outcome.thread_id.as_deref(),
+                outcome.notice,
+                outcome.pending,
             );
+            if notice.queued {
+                self.notice_replacing_prefix(
+                    INPUT_QUEUE_NOTICE_PREFIX,
+                    notice.message,
+                    notice.tone,
+                );
+            } else {
+                self.notice(notice.message, notice.tone);
+            }
             let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
             effects.extend(self.effects_for_hint("thread"));
             return effects;
@@ -453,6 +454,57 @@ impl RyeOsCore {
             ),
         }
     }
+}
+
+struct SubmittedDeliveryNotice {
+    message: String,
+    tone: RyeOsTone,
+    queued: bool,
+}
+
+fn submitted_delivery_notice(
+    thread_id: Option<&str>,
+    daemon_notice: Option<String>,
+    pending: Option<u64>,
+) -> SubmittedDeliveryNotice {
+    if let Some(pending) = pending.filter(|pending| *pending > 0) {
+        return SubmittedDeliveryNotice {
+            message: format_staged_input_notice(pending),
+            tone: RyeOsTone::Accent,
+            queued: true,
+        };
+    }
+
+    if let Some(notice) = daemon_notice {
+        let queued = notice.starts_with("Input queued");
+        return SubmittedDeliveryNotice {
+            message: if queued {
+                notice.replace("Input queued", INPUT_QUEUE_NOTICE_PREFIX)
+            } else {
+                notice
+            },
+            tone: if queued {
+                RyeOsTone::Accent
+            } else {
+                RyeOsTone::Warn
+            },
+            queued,
+        };
+    }
+
+    SubmittedDeliveryNotice {
+        message: match thread_id {
+            Some(id) => format!("Input delivered to {id}."),
+            None => "Input delivered.".to_string(),
+        },
+        tone: RyeOsTone::Good,
+        queued: false,
+    }
+}
+
+fn format_staged_input_notice(pending: u64) -> String {
+    let label = if pending == 1 { "input" } else { "inputs" };
+    format!("{INPUT_QUEUE_NOTICE_PREFIX} · {pending} staged {label}.")
 }
 
 /// Fallback notice when a refused delivery carries no reason from the daemon.
@@ -1733,5 +1785,45 @@ mod tests {
                     && n.tone == RyeOsTone::Warn),
             "a degraded submitted delivery surfaces its notice as a warning"
         );
+    }
+
+    #[test]
+    fn submitted_pending_delivery_coalesces_queue_notice() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "first steer",
+            serde_json::json!({
+                "thread_id": "T-live",
+                "delivery": "submitted",
+                "notice": "Input queued (1 staged).",
+                "pending": 1
+            }),
+            |_| {},
+        );
+        launch_and_deliver(
+            &mut core,
+            "second steer",
+            serde_json::json!({
+                "thread_id": "T-live",
+                "delivery": "submitted",
+                "notice": "Input queued (2 staged).",
+                "pending": 2
+            }),
+            |_| {},
+        );
+
+        let queue_notices: Vec<_> = core
+            .ui
+            .notices
+            .iter()
+            .filter(|notice| notice.message.starts_with(INPUT_QUEUE_NOTICE_PREFIX))
+            .collect();
+        assert_eq!(queue_notices.len(), 1);
+        assert_eq!(
+            queue_notices[0].message,
+            "Queued behind active thread · 2 staged inputs."
+        );
+        assert_eq!(queue_notices[0].tone, RyeOsTone::Accent);
     }
 }

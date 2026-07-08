@@ -981,6 +981,18 @@ impl RyeOsCore {
         self.bump_generation();
     }
 
+    pub fn notice_replacing_prefix(
+        &mut self,
+        prefix: &str,
+        message: impl Into<String>,
+        tone: RyeOsTone,
+    ) {
+        self.ui
+            .notices
+            .retain(|notice| !notice.message.starts_with(prefix));
+        self.notice(message, tone);
+    }
+
     /// Like `notice`, but skips when the most recent notice carries the same
     /// message — for repeatable actions (e.g. Tab on an untargetable route)
     /// that must surface the reason once without spamming it on every press.

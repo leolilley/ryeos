@@ -1,7 +1,6 @@
 import { el, textEl } from "/ui/assets/ryeos_components_primitives.js";
 
 let overlayWasOpen = false;
-const dismissedNoticeKeys = new Set();
 
 export function overlayDialog(state, shell) {
   const opening = Boolean(state.open && !overlayWasOpen);
@@ -73,26 +72,4 @@ export function overlayDialog(state, shell) {
     if (event.target === overlay) shell.closeOverlay?.();
   });
   return overlay;
-}
-
-export function notices(items) {
-  const wrap = el("div", "ryeos-notices");
-  for (const item of items) {
-    const key = noticeKey(item);
-    if (dismissedNoticeKeys.has(key)) continue;
-    const notice = el("button", `ryeos-notice ${item.tone || "neutral"}`);
-    notice.type = "button";
-    notice.title = "Dismiss notice";
-    notice.textContent = item.message || "";
-    notice.addEventListener("click", () => {
-      dismissedNoticeKeys.add(key);
-      notice.remove();
-    });
-    wrap.append(notice);
-  }
-  return wrap;
-}
-
-function noticeKey(item) {
-  return `${item.id || "notice"}:${item.tone || "neutral"}:${item.message || ""}`;
 }
