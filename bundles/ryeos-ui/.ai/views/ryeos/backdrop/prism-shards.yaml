@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-08T04:44:56Z:c28a87c6ea50eaad5780326b604c7d69cf67def43e1ec772ffe3d148a002205e:r7Tcce/tJSb4KYDg9BAHLeQba3dt4AO/Q7k33ak/ce7203a3ZkirZ6ce4GhL/OCHEwRP0fA8l9FmTy18Mm3GCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-08T04:53:48Z:bbe6cb1338b8310ab230398a662f7086f19c7cd520abc4400e39769715fa9ce1:cWhE363BebQ85ZQcZz3bfypeKvzOl1b0pIYOCO2IKAKTEiT3Rlwi9+cUfxfWGy+nWlfxerw2o/IUf3hf02vSAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: backdrop-prism-shards
 version: "1.0.0"
@@ -14,8 +14,8 @@ body:
   screen_offset: [0.02, -0.08]
   objects:
     - { kind: fill, shape: prism, id: prism/inner, position: [0.0, 0.0], scale: [0.9, 1.15, 0.85], color: "#fabd2f", tone: warn, opacity: 0.98, reveal: { period: 4, phase: 0, floor: 1.0, sharpness: 1.0 }, spin: -0.72, fit: false }
-    - { kind: fill, shape: prism, id: prism/half-left, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -3.0, x_max: 0.04 }, cutouts: [{ shape: prism, position: [0.0, -0.4], scale: [0.95, 1.2, 0.9], amount: break_spin }], break: { away: [-2.2, 0.0], period: 132, phase: 0 }, color: "#d65d0e", tone: accent, opacity: 0.94, spin: 0.48 }
-    - { kind: fill, shape: prism, id: prism/half-right, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -0.04, x_max: 3.0 }, cutouts: [{ shape: prism, position: [0.0, -0.4], scale: [0.95, 1.2, 0.9], amount: break_spin }], break: { away: [2.2, 0.0], period: 132, phase: 0 }, color: "#fe8019", tone: accent, opacity: 0.94, spin: 0.68 }
+    - { kind: fill, shape: prism, id: prism/half-left, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -3.0, x_max: 0.04 }, cutouts: [{ shape: prism, position: [0.0, -0.4], scale: [1.18, 1.42, 1.0], amount: break_spin }], break: { away: [-2.2, 0.0], period: 132, phase: 0 }, color: "#d65d0e", tone: accent, opacity: 0.94, spin: 0.48 }
+    - { kind: fill, shape: prism, id: prism/half-right, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -0.04, x_max: 3.0 }, cutouts: [{ shape: prism, position: [0.0, -0.4], scale: [1.18, 1.42, 1.0], amount: break_spin }], break: { away: [2.2, 0.0], period: 132, phase: 0 }, color: "#fe8019", tone: accent, opacity: 0.94, spin: 0.68 }
 
     - { kind: particle, position: [-11.0, 4.0], scale: 0.4, color: "#a89984", tone: neutral, opacity: 0.7, glyph: diamond, orbit: 0.5, fit: false }
     - { kind: particle, position: [10.0, 3.4], scale: 0.5, color: "#d5c4a1", tone: neutral, opacity: 0.7, glyph: diamond, orbit: -0.6, fit: false }

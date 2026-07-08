@@ -542,8 +542,9 @@ fn local_cutout_blocks(
             SceneCutoutAmountVm::Static => 1.0,
             SceneCutoutAmountVm::Break => scene.break_amount.clamp(0.0, 1.0),
             SceneCutoutAmountVm::BreakSpin => {
-                let facing = (0.5 + 0.5 * spin.cos()).powf(1.6);
-                scene.break_amount.clamp(0.0, 1.0) * facing
+                let facing = 0.5 + 0.5 * spin.cos();
+                let gate = ((facing - 0.22) / 0.38).clamp(0.0, 1.0);
+                scene.break_amount.clamp(0.0, 1.0) * gate
             }
         };
         if amount <= 0.03 {
