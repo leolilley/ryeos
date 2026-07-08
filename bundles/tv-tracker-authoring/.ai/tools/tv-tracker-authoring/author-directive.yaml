@@ -2,11 +2,15 @@ version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "author-directive"
 executor_id: "@subprocess"
-description: "Re-author the signed base chat directive apps/tv-tracker/ai_chat_base via the daemon runtime.author_item callback, to manage which context docs its context.system references (add/remove/reorder). Generic over content; the daemon signs (this wrapper never holds a key). Authority is scoped to exactly this one directive."
+description: "Re-author a signed tv-tracker chat directive via the daemon runtime.author_item callback — either the shared base (apps/tv-tracker/ai_chat_base) or an operator agent (apps/tv-tracker/agents/<slug>). Generic over content; the daemon signs (this wrapper never holds a key). Authority is bounded to the base directive + the agents/* subtree — nothing else."
 
-# Requests authoring authority for EXACTLY the base chat directive. The daemon
-# mints only ryeos.author.directive.apps/tv-tracker/ai_chat_base into this tool's
-# callback token, so it can never author any other directive or item.
+# Requests authoring authority for the base directive AND the agents/* subtree.
+# The agents/* wildcard MUST match the manifest declaration verbatim
+# (wildcard-vs-wildcard is identity-only). The daemon mints
+# ryeos.author.directive.apps/tv-tracker/ai_chat_base and
+# ryeos.author.directive.apps/tv-tracker/agents/* into this tool's callback token;
+# a concrete agent ref is glob-matched against the latter. The backend is the real
+# ref allow-list — never pass a browser-supplied ref straight through.
 requires:
   capabilities:
     manifest:
@@ -14,6 +18,8 @@ requires:
         item_authoring:
           - kind: directive
             namespace: apps/tv-tracker/ai_chat_base
+          - kind: directive
+            namespace: apps/tv-tracker/agents/*
 
 config:
   command: "bin:core/ryeos-core-tools"
@@ -28,7 +34,9 @@ config_schema:
   properties:
     item_ref:
       type: string
-      enum: ["directive:apps/tv-tracker/ai_chat_base"]   # early failure; daemon authority is the real boundary
+      # early failure only; daemon authority (ai_chat_base + agents/* wildcard) is
+      # the real boundary. The base directive or a kebab-case agent slug.
+      pattern: "^directive:apps/tv-tracker/(ai_chat_base|agents/[a-z0-9][a-z0-9-]*)$"
     content:
       type: string
       description: "Full unsigned directive markdown (frontmatter + body). The backend rewrites frontmatter via a YAML parser, mutating only context.system. Must not contain a signature line or ryeos:authored: marker."

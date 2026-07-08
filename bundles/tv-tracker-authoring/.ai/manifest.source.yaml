@@ -14,8 +14,13 @@ uses_kinds: []
 #     whole subtree (the daemon glob-matches the concrete author target against
 #     it). Deliberately NOT apps/tv-tracker/* — that would expose every knowledge
 #     doc under the app, not just the prompt context set.
-#   - directive apps/tv-tracker/ai_chat_base — re-author the base chat directive
-#     to manage which docs its context.system references (add/remove/reorder).
+#   - directive apps/tv-tracker/ai_chat_base — re-author the shared base directive
+#     (the floor every agent inherits) to manage its context.system set.
+#   - directive apps/tv-tracker/agents/*  — the operator agent library. Each agent
+#     is a directive authored here (extends the base, sets its own model + docs).
+#     A single wildcard grant authorizes the whole subtree; the daemon glob-matches
+#     the concrete author target. Dispatch of these is separately gated by the
+#     backend's execute.directive.apps/tv-tracker/agents/* delegation.
 runtime_authority:
   item_authoring:
     - kind: knowledge
@@ -28,3 +33,5 @@ runtime_authority:
       namespace: apps/tv-tracker/context/*
     - kind: directive
       namespace: apps/tv-tracker/ai_chat_base
+    - kind: directive
+      namespace: apps/tv-tracker/agents/*
