@@ -57,7 +57,7 @@ use ryeos_client_base::ui::scene_model::{
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
 use super::super::text::display_width;
-use super::super::theme::{mix_toward, ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN};
+use super::super::theme::{ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN, mix_toward};
 
 // Glyph palette for later reaches (all single-cell-width, monospace-safe):
 //   deeper dots:   ˙ . · : ∙ • ●           — the default ramp below
@@ -458,6 +458,9 @@ fn draw_fill(
             if !local_clip_allows(object, lx, ly) {
                 continue;
             }
+            if local_cutout_blocks(object, lx, ly, light_az, spin) {
+                continue;
+            }
 
             let (sd, shade) = match object.shape.as_deref() {
                 Some("sphere") => sphere_sample(object.scale[0], lx, ly, light_az),
@@ -524,6 +527,32 @@ fn reveal_multiplier(object: &RyeOsSceneObjectVm, scene: &RyeOsSceneModel, pace:
     let sharpness = reveal.sharpness.max(0.1);
     let floor = reveal.floor.clamp(0.0, 1.0);
     (floor + (1.0 - floor) * closed.powf(sharpness)) * scene.break_amount.clamp(0.0, 1.0)
+}
+
+fn local_cutout_blocks(
+    object: &RyeOsSceneObjectVm,
+    lx: f32,
+    ly: f32,
+    light_az: f32,
+    spin: f32,
+) -> bool {
+    object.cutouts.iter().any(|cutout| {
+        let x = lx - cutout.position[0];
+        let y = ly - cutout.position[1];
+        let (sd, _) = match cutout.shape.as_deref() {
+            Some("sphere") => sphere_sample(cutout.scale[0], x, y, light_az),
+            _ => prism_sample(
+                cutout.scale[0],
+                cutout.scale[1],
+                cutout.scale[2],
+                x,
+                y,
+                light_az,
+                spin,
+            ),
+        };
+        sd <= 0.0
+    })
 }
 
 /// Prism SDF + shading: a hexagonal crystal column (radius `r`, body
