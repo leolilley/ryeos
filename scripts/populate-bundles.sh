@@ -182,6 +182,7 @@ WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
+TVTA="$ROOT/bundles/tv-tracker-authoring"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
 INIT_SEED="$SOURCE_ROOT_AI/node/init"
 PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
@@ -417,6 +418,15 @@ fi
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
   echo "[populate-bundles] publishing web bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
+    --registry-root "$CORE" \
+    --owner "$OWNER" >/dev/null
+fi
+
+if [[ "$BUNDLE_SET" == "central-host" ]]; then
+  # tv-tracker-authoring — source-only bundle (tool kind from core); ships the
+  # operator context-doc author/read wrappers. No compiled binary of its own.
+  echo "[populate-bundles] publishing tv-tracker-authoring bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$TVTA" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
