@@ -1560,8 +1560,10 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
 // `super::timeline`; re-exported crate-wide so the timeline arm above and the
 // tests below call them unqualified (via `use super::*`).
 #[cfg(test)]
+pub(crate) use super::timeline::append_live_delta;
+#[cfg(test)]
 pub(crate) use super::timeline::timeline_entries;
-pub(crate) use super::timeline::{append_live_delta, timeline_entries_indented};
+pub(crate) use super::timeline::timeline_entries_indented;
 
 pub(crate) fn tone_from_name(name: Option<&str>) -> RyeOsTone {
     match name {
