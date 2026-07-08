@@ -88,10 +88,7 @@ async fn ryeos_dimension_exposes_session_user_principal() {
             .expect("ryeos-ui dimension should load");
 
     assert_eq!(dimension["session"]["user_principal_id"], principal);
-    assert_eq!(
-        dimension["session"]["surface_ref"],
-        "surface:ryeos/ui/base"
-    );
+    assert_eq!(dimension["session"]["surface_ref"], "surface:ryeos/ui/base");
 }
 
 #[tokio::test]

@@ -90,6 +90,8 @@ pub mod threads_receipts;
 pub mod threads_set_facet;
 pub mod threads_tail;
 pub mod tool_env_check;
+pub mod trace_branch;
+pub mod trace_inspect;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -140,6 +142,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,
+    trace_branch::DESCRIPTOR,
+    trace_inspect::DESCRIPTOR,
     commands_submit::DESCRIPTOR,
     commands_get::DESCRIPTOR,
     commands_wait::DESCRIPTOR,

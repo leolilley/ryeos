@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(compact_limits(&serde_json::json!({})), "{}");
     }
 
-    use ryeos_app::thread_lifecycle::{FollowFact, follow_display_state, follow_role};
+    use ryeos_app::thread_lifecycle::{follow_display_state, follow_role, FollowFact};
 
     #[test]
     fn follow_rows_none_is_empty() {

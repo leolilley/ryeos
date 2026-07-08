@@ -54,6 +54,7 @@ impl ThreadRow {
 #[derive(Debug, Clone)]
 pub struct EventRow {
     pub event_id: i64,
+    pub event_hash: String,
     pub chain_root_id: String,
     pub chain_seq: i64,
     pub thread_id: String,
@@ -70,6 +71,7 @@ impl EventRow {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             event_id: row.get("event_id")?,
+            event_hash: row.get("event_hash")?,
             chain_root_id: row.get("chain_root_id")?,
             chain_seq: row.get("chain_seq")?,
             thread_id: row.get("thread_id")?,
@@ -608,7 +610,7 @@ pub fn replay_events(
     limit: usize,
 ) -> anyhow::Result<Vec<EventRow>> {
     let mut sql = String::from(
-        "SELECT event_id, chain_root_id, chain_seq, thread_id, thread_seq, \
+        "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
                 event_type, durability, ts, prev_chain_event_hash, \
                 prev_thread_event_hash, payload \
          FROM events WHERE chain_root_id = ?",
@@ -896,7 +898,7 @@ pub fn latest_thread_events(
     let mut stmt = db
         .connection()
         .prepare(
-            "SELECT event_id, chain_root_id, chain_seq, thread_id, thread_seq, \
+            "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
                 event_type, durability, ts, prev_chain_event_hash, \
                 prev_thread_event_hash, payload \
          FROM events WHERE thread_id = ? ORDER BY chain_seq DESC LIMIT ?",
@@ -922,7 +924,7 @@ pub fn latest_node_events(
     exclude_types: &[String],
 ) -> anyhow::Result<Vec<EventRow>> {
     let mut sql = String::from(
-        "SELECT event_id, chain_root_id, chain_seq, thread_id, thread_seq, \
+        "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
             event_type, durability, ts, prev_chain_event_hash, \
             prev_thread_event_hash, payload \
          FROM events",
@@ -1600,23 +1602,24 @@ mod tests {
         let db = test_db();
         let conn = db.connection();
         conn.execute(
-            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
-             VALUES ('chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
-            [],
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
+            ["a".repeat(64)],
         ).unwrap();
         conn.execute(
-            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
-             VALUES ('chain-A', 2, 'T-1', 1, 'step', 'durable', '2026-01-01T00:01:00Z', X'01')",
-            [],
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 2, 'T-1', 1, 'step', 'durable', '2026-01-01T00:01:00Z', X'01')",
+            ["b".repeat(64)],
         ).unwrap();
         conn.execute(
-            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
-             VALUES ('chain-A', 3, 'T-2', 0, 'start', 'durable', '2026-01-01T00:02:00Z', X'02')",
-            [],
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 3, 'T-2', 0, 'start', 'durable', '2026-01-01T00:02:00Z', X'02')",
+            ["c".repeat(64)],
         ).unwrap();
 
         let all = replay_events(&db, "chain-A", None, None, 10).unwrap();
         assert_eq!(all.len(), 3);
+        assert_eq!(all[0].event_hash, "a".repeat(64));
 
         let filtered = replay_events(&db, "chain-A", Some("T-1"), None, 10).unwrap();
         assert_eq!(filtered.len(), 2);
@@ -1634,9 +1637,9 @@ mod tests {
         assert_eq!(chain_head_thread(&db, "chain-A").unwrap(), None);
 
         conn.execute(
-            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
-             VALUES ('chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
-            [],
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
+            ["d".repeat(64)],
         ).unwrap();
         assert_eq!(
             chain_head_thread(&db, "chain-A").unwrap(),
@@ -1646,9 +1649,9 @@ mod tests {
         // Chain advances to a successor: the head follows the latest event,
         // independent of insertion timestamps.
         conn.execute(
-            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
-             VALUES ('chain-A', 2, 'T-2', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'01')",
-            [],
+            "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES (?, 'chain-A', 2, 'T-2', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'01')",
+            ["e".repeat(64)],
         ).unwrap();
         assert_eq!(
             chain_head_thread(&db, "chain-A").unwrap(),
@@ -1664,10 +1667,11 @@ mod tests {
         let db = test_db();
         let conn = db.connection();
         for seq in 1..=4 {
+            let event_hash = format!("{seq:064x}");
             conn.execute(
-                "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
-                 VALUES ('chain-A', ?, 'T-1', ?, 'step', 'durable', '2026-01-01T00:00:00Z', X'00')",
-                (seq, seq),
+                "INSERT INTO events (event_hash, chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+                 VALUES (?, 'chain-A', ?, 'T-1', ?, 'step', 'durable', '2026-01-01T00:00:00Z', X'00')",
+                (&event_hash, seq, seq),
             )
             .unwrap();
         }

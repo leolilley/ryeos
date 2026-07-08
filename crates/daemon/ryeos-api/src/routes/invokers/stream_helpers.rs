@@ -91,6 +91,7 @@ mod tests {
     fn record(storage_class: &str, chain_seq: i64) -> PersistedEventRecord {
         PersistedEventRecord {
             event_id: chain_seq,
+            event_hash: None,
             chain_root_id: "T-root".into(),
             chain_seq,
             thread_id: "T-root".into(),

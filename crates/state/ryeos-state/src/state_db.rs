@@ -14,7 +14,7 @@ use crate::bundle_events::{
     self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord,
 };
 use crate::bundle_projection::BundleProjectionDb;
-use crate::chain::{self, AppendResult, CreateResult, SnapshotUpdate};
+use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
 use crate::head_cache::HeadCache;
 use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::objects::ThreadEvent;
@@ -212,6 +212,45 @@ impl StateDb {
                 )
             })?;
         }
+
+        Ok(result)
+    }
+
+    /// Add a new thread and its initial durable events in one chain-head update.
+    ///
+    /// This is used for relation-bearing child creation where a thread must not
+    /// become durable without the events that define what kind of child it is.
+    pub fn add_thread_with_events(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<AddThreadWithEventsResult> {
+        if events.iter().any(|event| !event.durability.is_cas_stored()) {
+            anyhow::bail!("StateDb::add_thread_with_events cannot persist ephemeral events");
+        }
+
+        let result = {
+            let mut cache = self.head_cache.lock().expect("head_cache lock");
+            chain::add_thread_to_chain_with_events(
+                &self.cas_root,
+                &self.refs_root,
+                chain_root_id,
+                snapshot.clone(),
+                events,
+                signer,
+                &mut cache,
+            )?
+        };
+
+        projection::project_thread_snapshot_with_events(
+            &self.projection,
+            &snapshot,
+            chain_root_id,
+            &result.events,
+        )
+        .context("projection failed after CAS write for add_thread_with_events")?;
 
         Ok(result)
     }

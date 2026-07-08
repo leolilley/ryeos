@@ -27,7 +27,7 @@ mod tiles;
 use super::effect::{RyeOsEffect, RyeOsEffectKind};
 use super::event::{RyeOsAction, RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent};
 use super::model::RyeOsCore;
-use super::view_model::{RyeOsMotionEventVm, RyeOsTone, action_for_focused_row};
+use super::view_model::{action_for_focused_row, RyeOsMotionEventVm, RyeOsTone};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
 use crate::workspace::ViewSpec;
 
@@ -865,21 +865,15 @@ mod tests {
         // Dimension + Projects + Topology. Completion/commands is fetched only
         // for inputs that declare it (this fixture's input does not).
         assert_eq!(effects.len(), 3);
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects))
-        );
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology))
-        );
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects)));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology)));
     }
 
     #[test]
@@ -1253,12 +1247,11 @@ mod tests {
         });
 
         assert!(duplicate.is_empty());
-        assert!(
-            core.ui
-                .notices
-                .iter()
-                .any(|notice| notice.message == "Run tool:demo/run is already pending.")
-        );
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Run tool:demo/run is already pending."));
     }
 
     #[test]
@@ -1344,12 +1337,11 @@ mod tests {
         });
 
         assert!(duplicate.is_empty());
-        assert!(
-            core.ui
-                .notices
-                .iter()
-                .any(|notice| notice.message == "Cancel T-run is already pending.")
-        );
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|notice| notice.message == "Cancel T-run is already pending."));
     }
 
     #[test]
@@ -1641,12 +1633,11 @@ mod tests {
             core.seat.fold().input_route().thread.is_none(),
             "read-only does not retarget the route"
         );
-        assert!(
-            core.ui
-                .notices
-                .iter()
-                .any(|n| n.message.contains("read-only"))
-        );
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|n| n.message.contains("read-only")));
     }
 
     #[test]

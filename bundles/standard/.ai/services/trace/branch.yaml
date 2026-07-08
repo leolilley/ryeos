@@ -1,0 +1,20 @@
+# ryeos:signed:2026-07-08T03:36:10Z:7b522252834a84802ce8f3a36f7bf403b9beca8dbd09908dba47b43c3f4d51e1:jJHd/60l9BKTUg+WuGnTPln8I4GfnoqlLIyY1jU6+cCIXTjHsBtqwZgDO2wywEQBGE00odWv4itjhFoeWnrpCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+category: "trace"
+name: "branch"
+kind: service
+version: "1.0.0"
+endpoint: trace.branch
+availability: daemon_only
+required_caps: ["ryeos.execute.service.trace/branch"]
+schema:
+  parent_event_ref: object
+  state_anchor_ref: object
+  child_thread_id: string?
+  purpose: string?
+  kind: string?
+  item_ref: string?
+  executor_ref: string?
+  launch_mode: string?
+  restore_contract: object?
+  metadata: object?
+description: "Create a signed trace branch relation from a durable parent event and state-anchor milestone. For idempotent retries, callers must provide a stable child_thread_id; duplicate explicit child IDs return conflict without appending another branch."

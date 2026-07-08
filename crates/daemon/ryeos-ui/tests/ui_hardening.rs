@@ -59,10 +59,7 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     )
     .await
     .expect("items list should succeed");
-    assert_eq!(
-        items["items"][0]["canonical_ref"],
-        "surface:ryeos/ui/base"
-    );
+    assert_eq!(items["items"][0]["canonical_ref"], "surface:ryeos/ui/base");
 
     let effective = (ryeos_api::handlers::items_effective::DESCRIPTOR.handler)(
         json!({
@@ -97,10 +94,7 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     .await
     .expect("item inspect should succeed");
     assert_eq!(inspection["schema_version"], "ryeos.ui.item.inspect.v1");
-    assert_eq!(
-        inspection["item"]["canonical_ref"],
-        "surface:ryeos/ui/base"
-    );
+    assert_eq!(inspection["item"]["canonical_ref"], "surface:ryeos/ui/base");
     assert!(inspection["raw"]["content"]
         .as_str()
         .unwrap()

@@ -2668,6 +2668,7 @@ mod tests {
                 supports_operator_followup: true,
             },
             follow: None,
+            project: None,
             pending: 0,
             facets: std::collections::BTreeMap::new(),
             current_node: None,

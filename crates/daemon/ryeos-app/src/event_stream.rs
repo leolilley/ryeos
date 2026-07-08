@@ -274,6 +274,7 @@ mod tests {
     fn sample_event(thread_id: &str, seq: i64, event_type: &str) -> PersistedEventRecord {
         PersistedEventRecord {
             event_id: seq,
+            event_hash: None,
             chain_root_id: thread_id.to_owned(),
             chain_seq: seq,
             thread_id: thread_id.to_owned(),
