@@ -858,7 +858,8 @@ impl TtyStreamPresenter {
                     .get("thread_id")
                     .and_then(Value::as_str)
                     .map(String::from);
-                self.push_event("stream_started", self.thread_id.as_deref().unwrap_or(""));
+                let thread_id = self.thread_id.clone().unwrap_or_default();
+                self.push_event("stream_started", &thread_id);
                 self.render()?;
                 Ok(StreamOutcome::Continue)
             }
