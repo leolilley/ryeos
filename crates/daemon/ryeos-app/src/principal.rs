@@ -59,8 +59,8 @@ impl PrincipalPaths {
         self.state("ryeos-ui/recent.yaml")
     }
 
-    pub fn ryeos_shell_home(&self) -> PathBuf {
-        self.state("ryeos-shell/home.yaml")
+    pub fn ryeos_tty_home(&self) -> PathBuf {
+        self.state("ryeos-tty/home.yaml")
     }
 }
 
@@ -306,8 +306,8 @@ mod tests {
             PathBuf::from("/tmp/user/.ai/state/ryeos-ui/recent.yaml")
         );
         assert_eq!(
-            paths.ryeos_shell_home(),
-            PathBuf::from("/tmp/user/.ai/state/ryeos-shell/home.yaml")
+            paths.ryeos_tty_home(),
+            PathBuf::from("/tmp/user/.ai/state/ryeos-tty/home.yaml")
         );
     }
 
