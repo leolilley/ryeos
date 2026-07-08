@@ -1465,7 +1465,7 @@ fn bound_view_vm_keyed(
             }
         }
         ("key_value" | "text", Some(response)) => {
-            let rows = super::content::project_detail(binding, response)
+            let rows: Vec<RyeOsRowVm> = super::content::project_detail(binding, response)
                 .into_iter()
                 .map(|(key, value)| RyeOsRowVm {
                     id: format!("{view_ref}#{key}"),
