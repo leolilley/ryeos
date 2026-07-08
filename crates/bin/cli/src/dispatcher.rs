@@ -54,11 +54,11 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    if should_show_shell_screen(&cli.rest, std::io::stdout().is_terminal()) {
-        return crate::shell_home::run(
+    if should_show_tty_screen(&cli.rest, std::io::stdout().is_terminal()) {
+        return crate::tty::run(
             &app_root,
             cli.project.as_deref(),
-            shell_screen_for(&cli.rest),
+            tty_screen_for(&cli.rest),
             cli.debug,
         )
         .await;
@@ -74,6 +74,13 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     // 4. No command = help
     if cli.rest.is_empty() {
+        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
+        return Ok(());
+    }
+
+    // Non-TTY `ryeos help` keeps the plain top-level help path. TTY stdout
+    // is intercepted above and rendered through the compact TTY help screen.
+    if cli.rest == ["help"] {
         crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
         return Ok(());
     }
@@ -240,16 +247,16 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-fn should_show_shell_screen(rest: &[String], stdout_is_tty: bool) -> bool {
+fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
     stdout_is_tty
         && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
 }
 
-fn shell_screen_for(rest: &[String]) -> crate::shell_home::ShellScreen {
+fn tty_screen_for(rest: &[String]) -> crate::tty::TtyScreen {
     if rest == ["help"] || rest == ["--help"] || rest == ["-h"] {
-        crate::shell_home::ShellScreen::Help
+        crate::tty::TtyScreen::Help
     } else {
-        crate::shell_home::ShellScreen::Home
+        crate::tty::TtyScreen::Home
     }
 }
 

@@ -1,6 +1,6 @@
-//! Interactive no-command CLI home screen.
+//! Rye OS CLI TTY presentation.
 //!
-//! This is a normal stdout renderer, not a TUI. Cached data is only a
+//! This is a normal stdout renderer, not the full TUI. Cached data is only a
 //! presentation projection and is never used for dispatch or authorization.
 
 use std::io::{self, Write};
@@ -14,24 +14,36 @@ use serde::{Deserialize, Serialize};
 use crate::error::{CliError, CliTransportError};
 use crate::transport::signing::Signer;
 
-const SHELL_HOME_VERSION: u32 = 1;
+const TTY_HOME_VERSION: u32 = 1;
+const TTY_CONFIG_VERSION: u32 = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ShellScreen {
+pub enum TtyScreen {
     Home,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TtyEntryKind {
+    Bare,
+    ExplicitScreen,
 }
 
 pub async fn run(
     app_root: &Path,
     explicit_project: Option<&Path>,
-    screen: ShellScreen,
+    screen: TtyScreen,
     debug: bool,
 ) -> std::result::Result<(), CliError> {
     let app_root_key = normalize_path_for_key(app_root);
     let app_root_path = PathBuf::from(&app_root_key);
+    let entry_kind = match screen {
+        TtyScreen::Home => TtyEntryKind::Bare,
+        TtyScreen::Help => TtyEntryKind::ExplicitScreen,
+    };
+    let screen = configured_screen(&app_root_path, screen, entry_kind, debug);
     let project = resolve_project_for_display(explicit_project);
     let signer = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
@@ -47,15 +59,15 @@ pub async fn run(
             root: app_root_path.clone(),
         };
         if let Ok(store) = PrincipalStore::resolve_with(&resolver, operator) {
-            let path = store.paths().ryeos_shell_home();
-            match load_optional_shell_home(&path) {
+            let path = store.paths().ryeos_tty_home();
+            match load_optional_tty_home(&path) {
                 Ok(Some(cached))
                     if cache_matches(&cached, &app_root_key, operator, &project.key, screen) =>
                 {
                     rendered_lines = render(&cached, RenderMode::Cached, rendered_lines)?;
                 }
                 Ok(_) => {}
-                Err(err) => debug_warn(debug, format!("ignore shell home cache: {err:#}")),
+                Err(err) => debug_warn(debug, format!("ignore tty home cache: {err:#}")),
             }
         }
     }
@@ -95,12 +107,12 @@ pub async fn run(
         };
         match PrincipalStore::locked_with(&resolver, operator).await {
             Ok(locked) => {
-                let path = locked.paths().ryeos_shell_home();
+                let path = locked.paths().ryeos_tty_home();
                 if let Err(err) = locked.write_yaml(&path, &live) {
-                    debug_warn(debug, format!("write shell home cache: {err:#}"));
+                    debug_warn(debug, format!("write tty home cache: {err:#}"));
                 }
             }
-            Err(err) => debug_warn(debug, format!("lock shell home cache: {err:#}")),
+            Err(err) => debug_warn(debug, format!("lock tty home cache: {err:#}")),
         }
     }
 
@@ -244,7 +256,57 @@ fn remote_daemon_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn load_optional_shell_home(path: &Path) -> AnyhowResult<Option<ShellHomeFile>> {
+fn load_optional_tty_home(path: &Path) -> AnyhowResult<Option<TtyHomeFile>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_yaml::from_str(&raw)
+            .map(Some)
+            .with_context(|| format!("parse {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn configured_screen(
+    app_root: &Path,
+    default: TtyScreen,
+    entry_kind: TtyEntryKind,
+    debug: bool,
+) -> TtyScreen {
+    if entry_kind != TtyEntryKind::Bare {
+        return default;
+    }
+
+    let resolver = AppRootPrincipalResolver {
+        root: app_root.to_path_buf(),
+    };
+    let store = match PrincipalStore::resolve_with(
+        &resolver,
+        ryeos_app::principal::LOCAL_PRINCIPAL_ID,
+    ) {
+        Ok(store) => store,
+        Err(err) => {
+            debug_warn(debug, format!("resolve tty config path: {err:#}"));
+            return default;
+        }
+    };
+    match load_optional_tty_config(&store.paths().ryeos_tty_config()) {
+        Ok(Some(config)) if config.version == TTY_CONFIG_VERSION => config.bare_action.screen(),
+        Ok(Some(config)) => {
+            debug_warn(
+                debug,
+                format!("ignore tty config version {}", config.version),
+            );
+            default
+        }
+        Ok(None) => default,
+        Err(err) => {
+            debug_warn(debug, format!("ignore tty config: {err:#}"));
+            default
+        }
+    }
+}
+
+fn load_optional_tty_config(path: &Path) -> AnyhowResult<Option<TtyConfigFile>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_yaml::from_str(&raw)
             .map(Some)
@@ -255,13 +317,13 @@ fn load_optional_shell_home(path: &Path) -> AnyhowResult<Option<ShellHomeFile>> 
 }
 
 fn cache_matches(
-    cached: &ShellHomeFile,
+    cached: &TtyHomeFile,
     app_root: &str,
     operator_principal_id: &str,
     project_root: &Option<String>,
-    screen: ShellScreen,
+    screen: TtyScreen,
 ) -> bool {
-    cached.version == SHELL_HOME_VERSION
+    cached.version == TTY_HOME_VERSION
         && cached.screen == screen
         && cached.app_root == app_root
         && cached.operator_principal_id == operator_principal_id
@@ -272,26 +334,26 @@ fn loading_projection(
     app_root: &str,
     operator_principal_id: Option<&str>,
     project: &ProjectDisplay,
-    screen: ShellScreen,
-) -> ShellHomeFile {
-    ShellHomeFile {
-        version: SHELL_HOME_VERSION,
+    screen: TtyScreen,
+) -> TtyHomeFile {
+    TtyHomeFile {
+        version: TTY_HOME_VERSION,
         screen,
         generated_at: lillux::time::iso8601_now(),
         app_root: app_root.to_string(),
         operator_principal_id: operator_principal_id.unwrap_or("missing").to_string(),
         project_root: project.key.clone(),
-        source: ShellHomeSource {
+        source: TtyHomeSource {
             node: SourceStatus::loading(),
             node_config: SourceStatus::loading(),
         },
-        sections: ShellHomeSections {
-            node: ShellNodeSummary {
+        sections: TtyHomeSections {
+            node: TtyNodeSummary {
                 status: "loading".to_string(),
                 detail: Some("reading local Rye OS state".to_string()),
             },
-            project: Some(ShellProjectSummary::from_project(project)),
-            commands: ShellCommandSummary {
+            project: Some(TtyProjectSummary::from_project(project)),
+            commands: TtyCommandSummary {
                 count: None,
                 detail: Some(loading_command_detail(screen).to_string()),
             },
@@ -305,12 +367,12 @@ async fn build_live_projection(
     app_root_key: &str,
     project: &ProjectDisplay,
     signer: &OperatorState,
-    screen: ShellScreen,
+    screen: TtyScreen,
     remote_url: Option<&str>,
-) -> ShellHomeFile {
+) -> TtyHomeFile {
     let (node, node_status) = match remote_url {
         Some(remote_url) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "remote override".to_string(),
                 detail: Some(format!("RYEOSD_URL={remote_url}")),
             },
@@ -347,8 +409,8 @@ async fn build_live_projection(
         });
     }
 
-    ShellHomeFile {
-        version: SHELL_HOME_VERSION,
+    TtyHomeFile {
+        version: TTY_HOME_VERSION,
         screen,
         generated_at: lillux::time::iso8601_now(),
         app_root: app_root_key.to_string(),
@@ -357,14 +419,14 @@ async fn build_live_projection(
             .clone()
             .unwrap_or_else(|| "missing".to_string()),
         project_root: project.key.clone(),
-        source: ShellHomeSource {
+        source: TtyHomeSource {
             node: node_status,
             node_config: node_config_status,
         },
-        sections: ShellHomeSections {
+        sections: TtyHomeSections {
             node,
-            project: Some(ShellProjectSummary::from_project(project)),
-            commands: ShellCommandSummary {
+            project: Some(TtyProjectSummary::from_project(project)),
+            commands: TtyCommandSummary {
                 count: command_count,
                 detail: command_count
                     .is_none()
@@ -375,12 +437,12 @@ async fn build_live_projection(
     }
 }
 
-async fn lifecycle_summary(app_root: &Path) -> (ShellNodeSummary, SourceStatus) {
+async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
     let env = match LocalLifecycleEnv::load(Some(app_root.to_path_buf())) {
         Ok(env) => env,
         Err(err) => {
             return (
-                ShellNodeSummary {
+                TtyNodeSummary {
                     status: "config error".to_string(),
                     detail: Some(err.to_string()),
                 },
@@ -391,14 +453,14 @@ async fn lifecycle_summary(app_root: &Path) -> (ShellNodeSummary, SourceStatus) 
     let controller = LifecycleController::from_env(env);
     match controller.status().await {
         Ok(LifecycleStatus::NotInitialized { diagnostics }) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "not initialized".to_string(),
                 detail: Some(diagnostics.message),
             },
             SourceStatus::missing("not initialized"),
         ),
         Ok(LifecycleStatus::Stopped { app_root }) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "stopped".to_string(),
                 detail: Some(format!("app root: {}", app_root.display())),
             },
@@ -413,7 +475,7 @@ async fn lifecycle_summary(app_root: &Path) -> (ShellNodeSummary, SourceStatus) 
                 detail.push(format!("http://{bind}"));
             }
             (
-                ShellNodeSummary {
+                TtyNodeSummary {
                     status: "running".to_string(),
                     detail: (!detail.is_empty()).then(|| detail.join(" · ")),
                 },
@@ -421,28 +483,28 @@ async fn lifecycle_summary(app_root: &Path) -> (ShellNodeSummary, SourceStatus) 
             )
         }
         Ok(LifecycleStatus::Stale { diagnostics, .. }) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "stale".to_string(),
                 detail: Some(diagnostics.message),
             },
             SourceStatus::error("stale daemon metadata"),
         ),
         Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "busy".to_string(),
                 detail: Some(diagnostics.message),
             },
             SourceStatus::error("daemon is running but not answering"),
         ),
         Ok(LifecycleStatus::Starting { pid, started_at, .. }) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "starting".to_string(),
                 detail: Some(format!("pid {pid} · since {started_at}")),
             },
             SourceStatus::loading(),
         ),
         Err(err) => (
-            ShellNodeSummary {
+            TtyNodeSummary {
                 status: "status error".to_string(),
                 detail: Some(err.to_string()),
             },
@@ -451,15 +513,15 @@ async fn lifecycle_summary(app_root: &Path) -> (ShellNodeSummary, SourceStatus) 
     }
 }
 
-fn screen_actions(screen: ShellScreen, has_tui_command: bool) -> Vec<ShellAction> {
+fn screen_actions(screen: TtyScreen, has_tui_command: bool) -> Vec<TtyAction> {
     let mut actions = match screen {
-        ShellScreen::Home => home_actions(),
-        ShellScreen::Help => help_actions(),
+        TtyScreen::Home => home_actions(),
+        TtyScreen::Help => help_actions(),
     };
     if has_tui_command {
         actions.insert(
             0,
-            ShellAction {
+            TtyAction {
                 label: "tui".to_string(),
                 command: "tui".to_string(),
                 description: "open terminal workspace".to_string(),
@@ -469,19 +531,19 @@ fn screen_actions(screen: ShellScreen, has_tui_command: bool) -> Vec<ShellAction
     actions
 }
 
-fn home_actions() -> Vec<ShellAction> {
+fn home_actions() -> Vec<TtyAction> {
     vec![
-        ShellAction {
+        TtyAction {
             label: "help".to_string(),
             command: "help".to_string(),
-            description: "open the compact shell help screen".to_string(),
+            description: "open the compact TTY help screen".to_string(),
         },
-        ShellAction {
+        TtyAction {
             label: "status".to_string(),
             command: "node status".to_string(),
             description: "show local node lifecycle status".to_string(),
         },
-        ShellAction {
+        TtyAction {
             label: "doctor".to_string(),
             command: "node doctor".to_string(),
             description: "diagnose local node startup and config".to_string(),
@@ -489,29 +551,29 @@ fn home_actions() -> Vec<ShellAction> {
     ]
 }
 
-fn help_actions() -> Vec<ShellAction> {
+fn help_actions() -> Vec<TtyAction> {
     vec![
-        ShellAction {
+        TtyAction {
             label: "open".to_string(),
             command: "help <command>".to_string(),
             description: "show focused help for one command".to_string(),
         },
-        ShellAction {
+        TtyAction {
             label: "list".to_string(),
             command: "commands".to_string(),
             description: "print the full verified command list".to_string(),
         },
-        ShellAction {
+        TtyAction {
             label: "all".to_string(),
             command: "help --all".to_string(),
             description: "print the exhaustive CLI reference".to_string(),
         },
-        ShellAction {
+        TtyAction {
             label: "status".to_string(),
             command: "node status".to_string(),
             description: "show local node lifecycle status".to_string(),
         },
-        ShellAction {
+        TtyAction {
             label: "doctor".to_string(),
             command: "node doctor".to_string(),
             description: "diagnose local node startup and config".to_string(),
@@ -519,29 +581,55 @@ fn help_actions() -> Vec<ShellAction> {
     ]
 }
 
-fn loading_command_detail(screen: ShellScreen) -> &'static str {
+fn loading_command_detail(screen: TtyScreen) -> &'static str {
     match screen {
-        ShellScreen::Home => "loading verified command snapshot",
-        ShellScreen::Help => "loading shell help and verified command snapshot",
+        TtyScreen::Home => "loading verified command snapshot",
+        TtyScreen::Help => "loading TTY help and verified command snapshot",
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellHomeFile {
+struct TtyHomeFile {
     version: u32,
-    screen: ShellScreen,
+    screen: TtyScreen,
     generated_at: String,
     app_root: String,
     operator_principal_id: String,
     project_root: Option<String>,
-    source: ShellHomeSource,
-    sections: ShellHomeSections,
+    source: TtyHomeSource,
+    sections: TtyHomeSections,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellHomeSource {
+struct TtyConfigFile {
+    #[serde(default = "default_tty_config_version")]
+    version: u32,
+    bare_action: TtyBareAction,
+}
+
+fn default_tty_config_version() -> u32 {
+    TTY_CONFIG_VERSION
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum TtyBareAction {
+    Screen { screen: TtyScreen },
+}
+
+impl TtyBareAction {
+    fn screen(&self) -> TtyScreen {
+        match self {
+            Self::Screen { screen } => *screen,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TtyHomeSource {
     node: SourceStatus,
     node_config: SourceStatus,
 }
@@ -612,16 +700,16 @@ impl SourceState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellHomeSections {
-    node: ShellNodeSummary,
-    project: Option<ShellProjectSummary>,
-    commands: ShellCommandSummary,
-    actions: Vec<ShellAction>,
+struct TtyHomeSections {
+    node: TtyNodeSummary,
+    project: Option<TtyProjectSummary>,
+    commands: TtyCommandSummary,
+    actions: Vec<TtyAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellNodeSummary {
+struct TtyNodeSummary {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
@@ -629,7 +717,7 @@ struct ShellNodeSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellProjectSummary {
+struct TtyProjectSummary {
     label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<String>,
@@ -637,7 +725,7 @@ struct ShellProjectSummary {
     detail: Option<String>,
 }
 
-impl ShellProjectSummary {
+impl TtyProjectSummary {
     fn from_project(project: &ProjectDisplay) -> Self {
         Self {
             label: project.label.clone(),
@@ -649,7 +737,7 @@ impl ShellProjectSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellCommandSummary {
+struct TtyCommandSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -658,7 +746,7 @@ struct ShellCommandSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ShellAction {
+struct TtyAction {
     label: String,
     command: String,
     description: String,
@@ -669,7 +757,7 @@ enum RenderMode {
     Live,
 }
 
-fn render(home: &ShellHomeFile, mode: RenderMode, previous_lines: usize) -> io::Result<usize> {
+fn render(home: &TtyHomeFile, mode: RenderMode, previous_lines: usize) -> io::Result<usize> {
     let width = terminal_width();
     let lines = render_lines(home, mode)
         .into_iter()
@@ -679,19 +767,19 @@ fn render(home: &ShellHomeFile, mode: RenderMode, previous_lines: usize) -> io::
     Ok(lines.len())
 }
 
-fn render_lines(home: &ShellHomeFile, mode: RenderMode) -> Vec<String> {
+fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
     let source = match mode {
         RenderMode::Cached => "cached",
         RenderMode::Live => "live",
     };
     let mut lines = Vec::new();
     lines.push(match home.screen {
-        ShellScreen::Home => "RYE OS".to_string(),
-        ShellScreen::Help => "RYE OS HELP".to_string(),
+        TtyScreen::Home => "RYE OS".to_string(),
+        TtyScreen::Help => "RYE OS HELP".to_string(),
     });
     lines.push(match home.screen {
-        ShellScreen::Home => "portable verified execution".to_string(),
-        ShellScreen::Help => "compact shell help".to_string(),
+        TtyScreen::Home => "portable verified execution".to_string(),
+        TtyScreen::Help => "compact TTY help".to_string(),
     });
     lines.push(String::new());
     lines.push(format!(
@@ -799,6 +887,6 @@ fn detail_suffix(detail: Option<&str>) -> String {
 
 fn debug_warn(debug: bool, message: String) {
     if debug {
-        eprintln!("ryeos shell home: {message}");
+        eprintln!("ryeos tty: {message}");
     }
 }
