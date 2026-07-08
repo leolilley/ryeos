@@ -207,6 +207,21 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
+            RyeOsUiEvent::FocusDock { edge } => {
+                let Some(slot) = self.ui.docks.slot(edge).filter(|slot| slot.visible) else {
+                    return Vec::new();
+                };
+                let super::model::RyeOsDockContent::View { view_ref } = &slot.content;
+                let view_ref = view_ref.clone();
+                self.ui.focus_target = Some(super::model::RyeOsFocusTarget::Dock { edge });
+                let key = super::model::dock_source_key(edge);
+                self.ui
+                    .dock_local
+                    .entry(key.clone())
+                    .or_insert_with(initial_list_local_state);
+                self.bump_generation();
+                self.emit_fetch_source_keyed(key, &view_ref)
+            }
             RyeOsUiEvent::FocusDirection { direction } => {
                 if self.workspace.focus_in_direction(direction) {
                     self.ui.focus_target = Some(super::model::RyeOsFocusTarget::WorkspaceTile {
@@ -565,7 +580,7 @@ impl RyeOsCore {
                     .unwrap_or_default()
             }
             RyeOsAction::ResizeFocused { direction } => {
-                if self.workspace.resize_master(direction) {
+                if self.resize_focused_dock(direction) || self.workspace.resize_master(direction) {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -836,6 +851,44 @@ fn current_project_path(core: &RyeOsCore) -> Option<String> {
 
 fn file_root_requires_project(root: &str) -> bool {
     matches!(root, "project" | "project_ai")
+}
+
+impl RyeOsCore {
+    fn resize_focused_dock(&mut self, direction: crate::workspace::FocusDirection) -> bool {
+        let super::model::RyeOsFocusTarget::Dock { edge } = self.focus_target() else {
+            return false;
+        };
+        let Some(slot) = self.ui.docks.slot_mut(edge).filter(|slot| slot.visible) else {
+            return false;
+        };
+        let delta: i16 = match (edge, direction) {
+            (super::model::RyeOsDockEdge::Top, crate::workspace::FocusDirection::Down)
+            | (super::model::RyeOsDockEdge::Bottom, crate::workspace::FocusDirection::Up)
+            | (super::model::RyeOsDockEdge::Left, crate::workspace::FocusDirection::Right)
+            | (super::model::RyeOsDockEdge::Right, crate::workspace::FocusDirection::Left) => 1,
+            (super::model::RyeOsDockEdge::Top, crate::workspace::FocusDirection::Up)
+            | (super::model::RyeOsDockEdge::Bottom, crate::workspace::FocusDirection::Down)
+            | (super::model::RyeOsDockEdge::Left, crate::workspace::FocusDirection::Left)
+            | (super::model::RyeOsDockEdge::Right, crate::workspace::FocusDirection::Right) => -1,
+            _ => return false,
+        };
+        let next = (slot.size as i16 + delta).clamp(3, 18) as u16;
+        if next == slot.size {
+            return false;
+        }
+        slot.size = next;
+        true
+    }
+}
+
+fn initial_list_local_state() -> crate::workspace::ViewLocalState {
+    crate::workspace::ViewLocalState::GenericList {
+        cursor: 0,
+        scroll: 0,
+        collapsed: std::collections::BTreeSet::new(),
+        expanded_rows: std::collections::BTreeSet::new(),
+        changed_rows: std::collections::BTreeMap::new(),
+    }
 }
 
 /// A route is the view's own ref — every view is addressable by ref

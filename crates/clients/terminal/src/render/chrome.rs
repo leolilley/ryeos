@@ -191,13 +191,14 @@ fn draw_dock_tile(
         return;
     }
     if let Some(border) = border {
+        let border_fg = if dock.focused { ACCENT } else { MUTED };
         surface.draw_box(
             x,
             y,
             x + w - 1,
             y + h - 1,
             border,
-            Style::new().fg(MUTED).bg(BG),
+            Style::new().fg(border_fg).bg(BG),
         );
     }
     surface.draw_text(
@@ -353,6 +354,7 @@ mod tests {
             edge,
             title: "t".into(),
             size,
+            focused: false,
             view: RyeOsViewVm::Placeholder {
                 title: "t".into(),
                 message: "m".into(),

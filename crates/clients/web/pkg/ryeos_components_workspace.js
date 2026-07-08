@@ -81,8 +81,12 @@ function workspacePlane(vm, ambient, dispatchUi, motion) {
 function dockTile(dockVm, dispatchUi) {
   if (!dockVm) return null;
   const edge = dockVm.edge || "bottom";
-  const tile = el("aside", `ryeos-dock-tile ${edge}`);
+  const tile = el("aside", `ryeos-dock-tile ${edge}${dockVm.focused ? " focused" : ""}`);
   tile.__dockSize = dockVm.size;
+  tile.addEventListener("mousedown", (event) => {
+    if (event.target.closest("button,input,select,textarea,a")) return;
+    dispatchUi({ type: "focus_dock", edge });
+  });
   const chrome = el("header", "ryeos-dock-chrome");
   chrome.append(textEl("strong", dockVm.title || edge), textEl("small", edge));
   tile.append(chrome, dockView(dockVm, dispatchUi));

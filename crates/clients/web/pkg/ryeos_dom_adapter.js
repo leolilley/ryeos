@@ -1,4 +1,4 @@
-import { overlayDialog, notices } from "/ui/assets/ryeos_components_chrome.js";
+import { overlayDialog } from "/ui/assets/ryeos_components_chrome.js";
 import { opticFrame, statusLine, ryeosHome, topStatusLine } from "/ui/assets/ryeos_components_home.js";
 import { ryeosWorkspace, tileIdsForNode } from "/ui/assets/ryeos_components_workspace.js";
 import { applyWorkspaceMotion, captureWorkspaceMotion } from "/ui/assets/ryeos_motion.js";
@@ -23,7 +23,6 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   const home = ryeosHome(vm, scene, chromeShell);
   const layers = [
     opticFrame(vm.presentation?.frame),
-    notices(vm.notices || []),
     topStatusLine(vm, chromeShell),
     ryeosWorkspace(vm.workspace, vm.session?.ambient, presentation.motion, dispatchUi),
     statusLine(vm, chromeShell),

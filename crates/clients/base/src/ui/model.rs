@@ -311,6 +311,8 @@ pub struct RyeOsUiState {
     #[serde(default)]
     pub input_buffers: BTreeMap<String, RyeOsInputState>,
     #[serde(default)]
+    pub dock_local: BTreeMap<String, ViewLocalState>,
+    #[serde(default)]
     pub docks: RyeOsDockState,
     /// Ambient/backdrop atlas state — the empty-center `namespace_atlas`
     /// background. Surface-level, not a tile. Per-tile Atlas tiles keep
@@ -345,6 +347,7 @@ impl Default for RyeOsUiState {
             overlay: RyeOsOverlayState::default(),
             focus_target: None,
             input_buffers: BTreeMap::new(),
+            dock_local: BTreeMap::new(),
             docks: RyeOsDockState::default(),
             atlas: AtlasUiStateVm::default(),
             tile_atlas: BTreeMap::new(),
@@ -979,6 +982,18 @@ impl RyeOsCore {
             self.ui.notices.drain(0..excess);
         }
         self.bump_generation();
+    }
+
+    pub fn notice_replacing_prefix(
+        &mut self,
+        prefix: &str,
+        message: impl Into<String>,
+        tone: RyeOsTone,
+    ) {
+        self.ui
+            .notices
+            .retain(|notice| !notice.message.starts_with(prefix));
+        self.notice(message, tone);
     }
 
     /// Like `notice`, but skips when the most recent notice carries the same

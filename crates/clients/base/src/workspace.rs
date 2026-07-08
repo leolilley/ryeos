@@ -40,7 +40,7 @@ pub enum FocusDirection {
 // View-local state
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum ViewLocalState {
     GenericList {
         cursor: usize,

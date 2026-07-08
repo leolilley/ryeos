@@ -108,19 +108,6 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
         widgets::scene::draw_scene(&mut surface, center, backdrop);
     }
 
-    for (index, notice) in vm.notices.iter().rev().take(2).enumerate() {
-        let text = format!(" {} ", notice.message);
-        let y = top_h + index;
-        if y < height.saturating_sub(bottom_h) {
-            surface.draw_text(
-                2,
-                y,
-                &truncate(&text, width.saturating_sub(4)),
-                tone_style(notice.tone),
-            );
-        }
-    }
-
     if let Some(active_overlay) = vm.overlays.first() {
         primitives::dim_surface(&mut surface);
         overlay::draw_overlay(&mut surface, active_overlay);

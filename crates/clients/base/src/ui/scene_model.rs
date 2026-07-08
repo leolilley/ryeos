@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::atlas::{
-    AtlasFileInput, AtlasFileSpaceInput, AtlasInput, AtlasItemInput, AtlasProjectionVm,
-    AtlasUiStateVm, NamespaceAtlasVm, build_file_space_atlas, build_namespace_atlas,
+    build_file_space_atlas, build_namespace_atlas, AtlasFileInput, AtlasFileSpaceInput, AtlasInput,
+    AtlasItemInput, AtlasProjectionVm, AtlasUiStateVm, NamespaceAtlasVm,
 };
 
 use super::event::RyeOsAction;
@@ -1073,18 +1073,14 @@ mod tests {
             .atlas
             .expect("atlas");
         // The scene reflects the per-tile items, not the shared dataset.
-        assert!(
-            atlas
-                .nodes
-                .iter()
-                .any(|n| n.namespace_key == "tile/scoped/y")
-        );
-        assert!(
-            !atlas
-                .nodes
-                .iter()
-                .any(|n| n.namespace_key == "shared/global/x")
-        );
+        assert!(atlas
+            .nodes
+            .iter()
+            .any(|n| n.namespace_key == "tile/scoped/y"));
+        assert!(!atlas
+            .nodes
+            .iter()
+            .any(|n| n.namespace_key == "shared/global/x"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T04:10:29Z:0f9ec2df231e287b239821e24f614b1121b5ddd9d735b826e17e458e168f78b1:ERJ5bh/gc5ZtbCcrUhnlI3fS73UENBoEzyns9HFay9+x+C2sU4nTq3uG9vi8YzKYPAWGtlilh7ZF0K1IETVoAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-08T06:03:18Z:836bd395753ddb82cf1d34057a6c08c17dd15572b6a8c9ca20cf8ab2051738ab:nwpuKHKziu72/yykcR9jHrDpaDBASZD4lupGME/M3u4mzctGI9Ohsvw9vEmTeUQ5Rkgxd6y6A9XJu0eKC+dWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
@@ -15,7 +15,7 @@ tiles:
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: false, size: 3 }
+  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
 
 style:
   border: hidden

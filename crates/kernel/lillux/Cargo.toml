@@ -1,6 +1,6 @@
 [package]
 name = "lillux"
-version = "0.5.29"
+version = "0.5.30"
 edition = "2021"
 description = "Lillux microkernel — Execute, Memory, Identity, Time"
 license = "MIT"

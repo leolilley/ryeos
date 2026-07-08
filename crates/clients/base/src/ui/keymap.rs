@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::event::{RyeOsAction, RyeOsStackMoveDirection, RyeOsUiEvent};
+use super::model::RyeOsDockEdge;
 use crate::workspace::FocusDirection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +155,13 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 && !context.input_focused =>
         {
             ui(RyeOsUiEvent::FocusInput)
+        }
+        RyeOsKey::Char(c)
+            if event.modifiers.none() && c.eq_ignore_ascii_case(&'s') && !context.input_focused =>
+        {
+            ui(RyeOsUiEvent::FocusDock {
+                edge: RyeOsDockEdge::Top,
+            })
         }
         RyeOsKey::Char(c)
             if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
@@ -447,19 +455,38 @@ impl super::model::RyeOsCore {
     }
 
     fn move_focused_row(&mut self, delta: i32) -> (bool, Vec<super::RyeOsEffect>) {
-        use super::{RyeOsEvent, RyeOsUiEvent};
         let vm = self.envelope(Vec::new()).view_model;
-        let focused = vm.workspace.focused_tile;
-        let Some(root) = vm.workspace.root.as_ref() else {
-            return (false, Vec::new());
+        let target = match self.focus_target() {
+            super::model::RyeOsFocusTarget::Dock { edge } => {
+                let Some(dock) = dock_vm_for_edge(&vm.workspace.docks, edge) else {
+                    return (false, Vec::new());
+                };
+                FocusedRowsTarget {
+                    source_key: super::model::dock_source_key(edge),
+                    count_and_feed: selectable_of(&dock.view),
+                }
+            }
+            super::model::RyeOsFocusTarget::WorkspaceTile { .. } => {
+                let focused = vm.workspace.focused_tile;
+                let Some(root) = vm.workspace.root.as_ref() else {
+                    return (false, Vec::new());
+                };
+                let Some(count_and_feed) = focused_selectable(root, &focused) else {
+                    return (false, Vec::new());
+                };
+                FocusedRowsTarget {
+                    source_key: focused,
+                    count_and_feed,
+                }
+            }
         };
-        let Some((count, is_feed)) = focused_selectable(root, &focused) else {
-            return (false, Vec::new());
-        };
+        let (count, is_feed) = target.count_and_feed;
         if count == 0 {
             return (false, Vec::new());
         }
-        let current = self.stored_cursor().min(count.saturating_sub(1));
+        let current = self
+            .stored_cursor_for(&target.source_key)
+            .min(count.saturating_sub(1));
         // The feed cursor is distance-from-bottom (0 = newest), so arrow-up
         // walks back into history — the opposite sense from a top-down row
         // list.
@@ -475,28 +502,95 @@ impl super::model::RyeOsCore {
         if next == current {
             return (false, Vec::new());
         }
-        let effects = self.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::SetTileCursor {
-                tile_id: focused,
-                index: next,
-            },
-        });
-        (true, effects)
+        self.set_cursor_for(&target.source_key, next);
+        (true, Vec::new())
     }
 
-    /// The focused tile's stored list cursor (row index, or feed distance-
-    /// from-bottom). Both renderers store it the same way; the meaning is
-    /// per-widget.
-    fn stored_cursor(&self) -> usize {
-        match self
-            .workspace
-            .tiles
-            .get(&self.workspace.focused_tile)
-            .map(|tile| &tile.local)
-        {
+    /// The focused view-instance's stored list cursor (row index, or feed
+    /// distance-from-bottom). Both renderers store it the same way; the meaning
+    /// is per-widget.
+    fn stored_cursor_for(&self, source_key: &str) -> usize {
+        match view_local_for_source(self, source_key) {
             Some(crate::workspace::ViewLocalState::GenericList { cursor, .. }) => *cursor,
             _ => 0,
         }
+    }
+
+    fn set_cursor_for(&mut self, source_key: &str, index: usize) {
+        let Some(local) = view_local_for_source_mut(self, source_key) else {
+            return;
+        };
+        let crate::workspace::ViewLocalState::GenericList { cursor, .. } = local else {
+            return;
+        };
+        if *cursor != index {
+            *cursor = index;
+            self.bump_generation();
+        }
+    }
+}
+
+struct FocusedRowsTarget {
+    source_key: String,
+    count_and_feed: (usize, bool),
+}
+
+fn view_local_for_source<'a>(
+    core: &'a super::model::RyeOsCore,
+    source_key: &str,
+) -> Option<&'a crate::workspace::ViewLocalState> {
+    if let Some(dock) = source_key.strip_prefix("dock:") {
+        let key = format!("dock:{dock}");
+        return core.ui.dock_local.get(&key);
+    }
+    let tile_id = source_key
+        .parse::<u64>()
+        .ok()
+        .map(crate::ids::TileId::new)?;
+    core.workspace.tiles.get(&tile_id).map(|tile| &tile.local)
+}
+
+fn view_local_for_source_mut<'a>(
+    core: &'a mut super::model::RyeOsCore,
+    source_key: &str,
+) -> Option<&'a mut crate::workspace::ViewLocalState> {
+    if source_key.starts_with("dock:") {
+        return Some(
+            core.ui
+                .dock_local
+                .entry(source_key.to_string())
+                .or_insert_with(initial_list_local_state),
+        );
+    }
+    let tile_id = source_key
+        .parse::<u64>()
+        .ok()
+        .map(crate::ids::TileId::new)?;
+    core.workspace
+        .tiles
+        .get_mut(&tile_id)
+        .map(|tile| &mut tile.local)
+}
+
+fn initial_list_local_state() -> crate::workspace::ViewLocalState {
+    crate::workspace::ViewLocalState::GenericList {
+        cursor: 0,
+        scroll: 0,
+        collapsed: std::collections::BTreeSet::new(),
+        expanded_rows: std::collections::BTreeSet::new(),
+        changed_rows: std::collections::BTreeMap::new(),
+    }
+}
+
+fn dock_vm_for_edge<'a>(
+    docks: &'a super::view_model::RyeOsDockPlaneVm,
+    edge: RyeOsDockEdge,
+) -> Option<&'a super::view_model::RyeOsDockTileVm> {
+    match edge {
+        RyeOsDockEdge::Top => docks.top.as_ref(),
+        RyeOsDockEdge::Bottom => docks.bottom.as_ref(),
+        RyeOsDockEdge::Left => docks.left.as_ref(),
+        RyeOsDockEdge::Right => docks.right.as_ref(),
     }
 }
 

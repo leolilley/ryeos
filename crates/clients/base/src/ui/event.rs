@@ -186,6 +186,9 @@ pub enum RyeOsUiEvent {
     FocusChanged {
         target: Option<String>,
     },
+    FocusDock {
+        edge: RyeOsDockEdge,
+    },
     FocusDirection {
         direction: FocusDirection,
     },
