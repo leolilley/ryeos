@@ -101,11 +101,6 @@ pub struct RyeOsSceneObjectVm {
     /// generic SDF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<SceneClipVm>,
-    /// Local-space SDF holes for a fill shape. Cutouts let content carve
-    /// voids out of generic filled solids without introducing renderer
-    /// cases for a particular scene.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cutouts: Vec<SceneCutoutVm>,
     /// Looping offset motion: the object eases from its authored
     /// position to `away` and back, giving scene content a generic
     /// break-apart/rejoin animation.
@@ -133,16 +128,6 @@ pub struct SceneClipVm {
     pub y_min: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y_max: Option<f32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SceneCutoutVm {
-    #[serde(default)]
-    pub shape: Option<String>,
-    #[serde(default)]
-    pub position: [f32; 3],
-    #[serde(default)]
-    pub scale: [f32; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -653,7 +638,6 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> RyeOsSceneM
             .and_then(serde_json::Value::as_f64)
             .map(|speed| speed as f32);
         object.clip = read_clip(obj.get("clip"));
-        object.cutouts = read_cutouts(obj.get("cutouts"));
         object.break_motion = read_break_motion(obj.get("break"));
         object.reveal = read_reveal(obj.get("reveal"));
         object.fit = obj
@@ -726,24 +710,6 @@ fn read_clip(v: Option<&serde_json::Value>) -> Option<SceneClipVm> {
         y_min: get("y_min"),
         y_max: get("y_max"),
     })
-}
-
-fn read_cutouts(v: Option<&serde_json::Value>) -> Vec<SceneCutoutVm> {
-    v.and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| SceneCutoutVm {
-                    shape: item
-                        .get("shape")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
-                    position: read_position(item.get("position")),
-                    scale: read_scale(item.get("scale")),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn read_break_motion(v: Option<&serde_json::Value>) -> Option<SceneBreakMotionVm> {
@@ -832,7 +798,6 @@ fn scene_object(
         spin: None,
         clip: None,
         break_motion: None,
-        cutouts: Vec::new(),
         reveal: None,
         fit: true,
     }

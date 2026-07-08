@@ -439,7 +439,7 @@ fn draw_fill(
     let soft = 1.0 / (scale * cell_aspect * zoom).max(0.001);
     let ramp = ramp_for(object);
     let noise_amp = 0.10 + 0.12 * energy;
-    let opacity = object.opacity.clamp(0.1, 1.0) * reveal_multiplier(object, scene, pace);
+    let opacity = object.opacity.clamp(0.0, 1.0) * reveal_multiplier(object, scene, pace);
     let (position, _depth) = orbited_position(object, scene, pace);
 
     for row in 0..h {
@@ -456,9 +456,6 @@ fn draw_fill(
             let lx = x - position[0];
             let ly = y - position[1];
             if !local_clip_allows(object, lx, ly) {
-                continue;
-            }
-            if local_cutout_blocks(object, lx, ly, light_az, spin) {
                 continue;
             }
 
@@ -527,32 +524,6 @@ fn reveal_multiplier(object: &RyeOsSceneObjectVm, scene: &RyeOsSceneModel, pace:
     let sharpness = reveal.sharpness.max(0.1);
     let floor = reveal.floor.clamp(0.0, 1.0);
     (floor + (1.0 - floor) * closed.powf(sharpness)) * scene.break_amount.clamp(0.0, 1.0)
-}
-
-fn local_cutout_blocks(
-    object: &RyeOsSceneObjectVm,
-    lx: f32,
-    ly: f32,
-    light_az: f32,
-    spin: f32,
-) -> bool {
-    object.cutouts.iter().any(|cutout| {
-        let x = lx - cutout.position[0];
-        let y = ly - cutout.position[1];
-        let (sd, _) = match cutout.shape.as_deref() {
-            Some("sphere") => sphere_sample(cutout.scale[0], x, y, light_az),
-            _ => prism_sample(
-                cutout.scale[0],
-                cutout.scale[1],
-                cutout.scale[2],
-                x,
-                y,
-                light_az,
-                spin,
-            ),
-        };
-        sd <= 0.0
-    })
 }
 
 /// Prism SDF + shading: a hexagonal crystal column (radius `r`, body
