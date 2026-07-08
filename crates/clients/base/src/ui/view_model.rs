@@ -1312,47 +1312,43 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let (mut full, mut full_indents, mut full_sources) = core
-                .data
-                .timeline_sources
-                .get(source_key)
-                .map(|cache| {
-                    (
-                        cache.entries.clone(),
-                        cache.indents.clone(),
-                        cache.sources.clone(),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    let (mut entries, mut indents, mut sources) = timeline_entries_indented(
-                        super::content::project_records(binding, response),
-                    );
-                    if let Some(summary) = timeline_summary_entry(response) {
-                        entries.insert(0, summary);
-                        indents.insert(0, 0);
-                        sources.insert(0, None);
-                    }
-                    (entries, indents, sources)
-                });
-            append_live_delta(core, &mut full);
-            full_indents.resize(full.len(), 0);
-            full_sources.resize(full.len(), None);
+            use std::borrow::Cow;
+
+            let cached = core.data.timeline_sources.get(source_key);
+            let (full, full_indents, full_sources) = if let Some(cache) = cached {
+                (
+                    Cow::Borrowed(cache.entries.as_slice()),
+                    Cow::Borrowed(cache.indents.as_slice()),
+                    Cow::Borrowed(cache.sources.as_slice()),
+                )
+            } else {
+                let (mut entries, mut indents, mut sources) =
+                    timeline_entries_indented(super::content::project_records(binding, response));
+                if let Some(summary) = timeline_summary_entry(response) {
+                    entries.insert(0, summary);
+                    indents.insert(0, 0);
+                    sources.insert(0, None);
+                }
+                (
+                    Cow::Owned(entries),
+                    Cow::Owned(indents),
+                    Cow::Owned(sources),
+                )
+            };
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
-            let folded = super::timeline::fold_timeline(
-                full,
-                full_indents,
-                full_sources,
+            let windowed = super::timeline::fold_timeline_window(
+                full.as_ref(),
+                full_indents.as_ref(),
+                full_sources.as_ref(),
+                super::timeline::live_delta_entry(core),
                 collapsed.unwrap_or(&empty),
+                cursor.unwrap_or(0),
+                TIMELINE_RENDER_WINDOW,
             );
-            // The feed reads the tile cursor as distance-from-bottom: 0 keeps
-            // the point on the newest entry (so it follows the live tail),
-            // larger values walk back into history. Empty feed → no point.
-            let selected = folded.entries.len().checked_sub(1).map(|last| {
-                let distance = cursor.unwrap_or(0).min(last);
-                last - distance
-            });
+            let folded = windowed.folded;
+            let selected = windowed.selected;
             // The foldable section under the point — what a fold key toggles.
             let fold_section = selected.and_then(|i| {
                 let section = folded.sections.get(i).copied()?;
@@ -1539,6 +1535,8 @@ fn row_render_window(total: usize, cursor: Option<usize>) -> (usize, usize) {
         .min(total.saturating_sub(ROW_WINDOW));
     (start, start + ROW_WINDOW)
 }
+
+const TIMELINE_RENDER_WINDOW: usize = 192;
 
 fn clamped_row_cursor(total: usize, cursor: Option<usize>) -> Option<usize> {
     (total > 0).then(|| cursor.unwrap_or(0).min(total - 1))

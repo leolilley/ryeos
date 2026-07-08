@@ -25,7 +25,7 @@ use super::dto::CognitionOutPayload;
 use super::effect::RyeOsEffect;
 use super::event::RyeOsAction;
 use super::model::RyeOsCore;
-use super::view_model::{tone_from_name, RyeOsTone};
+use super::view_model::{RyeOsTone, tone_from_name};
 
 /// Detail source for one rendered timeline entry. Kept parallel to
 /// `RyeOsTimelineEntryVm`/indents so the view-model layer can apply a
@@ -114,6 +114,12 @@ pub(crate) struct FoldedTimeline {
     pub collapsible: std::collections::BTreeSet<usize>,
 }
 
+pub(crate) struct FoldedTimelineWindow {
+    pub folded: FoldedTimeline,
+    /// Selected entry index inside `folded.entries`.
+    pub selected: Option<usize>,
+}
+
 /// Apply the operator's folds to a coalesced timeline. A section is foldable
 /// only if it is headed by a `Separator` (section 0 without one can't collapse
 /// to nothing). Collapsed sections keep their header, marked `▸`, body hidden.
@@ -167,6 +173,115 @@ pub(crate) fn fold_timeline(
         sources,
         collapsible,
     }
+}
+
+/// Fold a render window around the selected visible entry, cloning only the
+/// entries the renderer can plausibly draw. This keeps transcript render cost
+/// bounded while preserving the cursor's distance-from-bottom semantics.
+pub(crate) fn fold_timeline_window(
+    full: &[RyeOsTimelineEntryVm],
+    full_indents: &[u8],
+    full_sources: &[Option<TimelineEntrySource>],
+    tail_entry: Option<RyeOsTimelineEntryVm>,
+    collapsed: &std::collections::BTreeSet<usize>,
+    cursor_from_bottom: usize,
+    window: usize,
+) -> FoldedTimelineWindow {
+    let mut section_of = timeline_sections(full);
+    if tail_entry.is_some() {
+        section_of.push(section_of.last().copied().unwrap_or(0));
+    }
+    let total = section_of.len();
+    let is_header: Vec<bool> = (0..total)
+        .map(|i| i == 0 || section_of[i] != section_of[i - 1])
+        .collect();
+    let mut collapsible = std::collections::BTreeSet::new();
+    for i in 0..total {
+        if is_header[i]
+            && timeline_window_entry(full, tail_entry.as_ref(), i)
+                .is_some_and(|entry| matches!(entry, RyeOsTimelineEntryVm::Separator { .. }))
+        {
+            collapsible.insert(section_of[i]);
+        }
+    }
+
+    let visible_full_indices: Vec<usize> = (0..total)
+        .filter(|i| {
+            let sec = section_of[*i];
+            !(collapsed.contains(&sec) && collapsible.contains(&sec) && !is_header[*i])
+        })
+        .collect();
+    let Some(last_visible) = visible_full_indices.len().checked_sub(1) else {
+        return FoldedTimelineWindow {
+            folded: FoldedTimeline {
+                entries: Vec::new(),
+                sections: Vec::new(),
+                indents: Vec::new(),
+                sources: Vec::new(),
+                collapsible,
+            },
+            selected: None,
+        };
+    };
+    let selected_visible = last_visible.saturating_sub(cursor_from_bottom.min(last_visible));
+    let window = window.max(1).min(visible_full_indices.len());
+    let start_visible = selected_visible
+        .saturating_sub(window / 2)
+        .min(visible_full_indices.len().saturating_sub(window));
+    let end_visible = start_visible + window;
+
+    let mut entries = Vec::with_capacity(window);
+    let mut sections = Vec::with_capacity(window);
+    let mut indents = Vec::with_capacity(window);
+    let mut sources = Vec::with_capacity(window);
+    for i in visible_full_indices[start_visible..end_visible]
+        .iter()
+        .copied()
+    {
+        let sec = section_of[i];
+        let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
+        let Some(source_entry) = timeline_window_entry(full, tail_entry.as_ref(), i) else {
+            continue;
+        };
+        let entry = if folded {
+            match source_entry {
+                RyeOsTimelineEntryVm::Separator { label } => RyeOsTimelineEntryVm::Separator {
+                    label: format!("{label} ▸"),
+                },
+                other => other.clone(),
+            }
+        } else {
+            source_entry.clone()
+        };
+        entries.push(entry);
+        sections.push(sec);
+        indents.push(full_indents.get(i).copied().unwrap_or(0));
+        sources.push(if i < full.len() {
+            full_sources.get(i).cloned().unwrap_or(None)
+        } else {
+            None
+        });
+    }
+
+    FoldedTimelineWindow {
+        folded: FoldedTimeline {
+            entries,
+            sections,
+            indents,
+            sources,
+            collapsible,
+        },
+        selected: Some(selected_visible - start_visible),
+    }
+}
+
+fn timeline_window_entry<'a>(
+    full: &'a [RyeOsTimelineEntryVm],
+    tail_entry: Option<&'a RyeOsTimelineEntryVm>,
+    index: usize,
+) -> Option<&'a RyeOsTimelineEntryVm> {
+    full.get(index)
+        .or_else(|| (index == full.len()).then_some(tail_entry).flatten())
 }
 
 /// Entries without the indent vector — a test convenience over
@@ -412,24 +527,30 @@ pub(crate) fn timeline_entries_indented(
 /// blocks the durable snapshot already carries; replaced by the durable
 /// block once the snapshot catches up.
 pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelineEntryVm>) {
-    let Some(head) = core.seat.fold().input_route().thread else {
+    let Some(entry) = live_delta_entry(core) else {
         return;
+    };
+    entries.push(entry);
+}
+
+pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
+    let Some(head) = core.seat.fold().input_route().thread else {
+        return None;
     };
     // Streaming output for the head thread → render it with a trailing cursor.
     if let Some(buf) = core.data.live_delta.as_ref() {
         if !buf.text.is_empty() && buf.thread == head {
-            entries.push(RyeOsTimelineEntryVm::Block {
+            return Some(RyeOsTimelineEntryVm::Block {
                 text: format!("{}▍", buf.text),
                 tone: RyeOsTone::Accent,
             });
-            return;
         }
     }
     // No streaming tail yet, but the head thread is still running → a quiet
     // working indicator so the feed reads as alive (just launched and awaiting
     // the first token, or running a tool that hasn't emitted prose).
     if core.head_thread_running(&head) {
-        entries.push(RyeOsTimelineEntryVm::Line {
+        return Some(RyeOsTimelineEntryVm::Line {
             primary: "▍ working…".to_string(),
             meta: None,
             tone: RyeOsTone::Accent,
@@ -437,6 +558,7 @@ pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelin
             secondary_action: None,
         });
     }
+    None
 }
 
 fn flush_flow(
@@ -2003,7 +2125,7 @@ mod tests {
     /// coalescer; the per-piece tests above don't exercise the binding.
     #[test]
     fn chain_replay_projection_coalesces_into_block_separator_pair() {
-        use super::super::content::{project_records, ViewBinding};
+        use super::super::content::{ViewBinding, project_records};
 
         // Mirrors bundles/ryeos/.ai/views/ryeos/chain/timeline.yaml.
         let binding: ViewBinding = serde_json::from_value(json!({
@@ -2070,7 +2192,7 @@ mod tests {
 
     #[test]
     fn graph_runtime_events_render_payload_details_not_bare_event_types() {
-        use super::super::content::{project_records, ViewBinding};
+        use super::super::content::{ViewBinding, project_records};
 
         // This intentionally keeps the shipped tool projection shape
         // (`tool/call_id`) while feeding graph action events (`item_id/node/step`)
