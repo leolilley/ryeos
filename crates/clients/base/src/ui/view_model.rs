@@ -1358,21 +1358,26 @@ fn bound_view_vm_keyed(
                     })
                 })
                 .collect();
-            let entry_details: Vec<Vec<RyeOsRowDetailVm>> = folded
-                .sources
-                .iter()
-                .zip(entry_expanded.iter())
-                .map(|(source, expanded)| {
-                    if !*expanded {
-                        Vec::new()
-                    } else {
-                        source
-                            .as_ref()
-                            .map(|source| detail_vm(&source.raw, &expand_fields))
-                            .unwrap_or_default()
-                    }
-                })
-                .collect();
+            let entry_details: Vec<Vec<RyeOsRowDetailVm>> =
+                if entry_expanded.iter().any(|expanded| *expanded) {
+                    folded
+                        .sources
+                        .iter()
+                        .zip(entry_expanded.iter())
+                        .map(|(source, expanded)| {
+                            if !*expanded {
+                                Vec::new()
+                            } else {
+                                source
+                                    .as_ref()
+                                    .map(|source| detail_vm(&source.raw, &expand_fields))
+                                    .unwrap_or_default()
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             RyeOsViewVm::Timeline {
                 title,
                 provenance: Some(view_ref.to_string()),

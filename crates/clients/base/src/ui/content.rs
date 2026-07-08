@@ -593,6 +593,20 @@ pub fn expanded_detail(record: &Value, fields: &[String]) -> Vec<(String, String
         .collect()
 }
 
+/// Pull the source collection named by a view binding. Rows, tables, and
+/// timelines all share this source shape; projection decides how each record
+/// is rendered after collection selection.
+pub fn source_collection<'a>(binding: &ViewBinding, response: &'a Value) -> &'a [Value] {
+    binding
+        .source
+        .as_ref()
+        .and_then(|s| s.collection.as_deref())
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 /// One projected table row: a cell per column (in column order), the per-cell
 /// tones (parallel to `cells`; `None` where the column declares no tone or
 /// the record misses its field), the row tone, and the raw record kept for
@@ -615,15 +629,7 @@ pub fn project_table(
     response: &Value,
     columns: &[TableColumn],
 ) -> Vec<ProjectedTableRow> {
-    let records: &[Value] = binding
-        .source
-        .as_ref()
-        .and_then(|s| s.collection.as_deref())
-        .and_then(|path| field_path(response, path))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    records
+    source_collection(binding, response)
         .iter()
         .map(|record| ProjectedTableRow {
             cells: columns
@@ -648,15 +654,6 @@ pub fn project_table(
 /// the record's `event_type`, falling back to `default`, falling back to
 /// raw — degradation is the v0, not an error path.
 pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<ProjectedRecord> {
-    let records: &[Value] = binding
-        .source
-        .as_ref()
-        .and_then(|s| s.collection.as_deref())
-        .and_then(|path| field_path(response, path))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-
     let event_kinds = binding.projections.get("event_kinds");
     let default_projection = binding
         .projections
@@ -664,7 +661,7 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
         .cloned()
         .unwrap_or_else(|| binding.projections.clone());
 
-    records
+    source_collection(binding, response)
         .iter()
         .map(|record| {
             let projection = event_kinds

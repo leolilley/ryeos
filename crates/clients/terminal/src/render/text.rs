@@ -34,24 +34,27 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     let mut line = String::new();
+    let mut line_w = 0usize;
     for word in text.split_whitespace() {
         let word_w = display_width(word);
         if word_w > width {
             if !line.is_empty() {
                 out.push(std::mem::take(&mut line));
+                line_w = 0;
             }
             out.extend(wrap_long_word(word, width));
             continue;
         }
-        let line_w = display_width(&line);
         if line_w > 0 && line_w + 1 + word_w > width {
-            out.push(line);
-            line = String::new();
+            out.push(std::mem::take(&mut line));
+            line_w = 0;
         }
         if !line.is_empty() {
             line.push(' ');
+            line_w += 1;
         }
         line.push_str(word);
+        line_w += word_w;
     }
     if !line.is_empty() {
         out.push(line);

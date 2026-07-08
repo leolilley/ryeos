@@ -10,7 +10,7 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTableRowVm, RyeOs
 use super::super::primitives::fill_line;
 use super::super::text::{letterspace, truncate};
 use super::super::theme::{
-    mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT,
+    ACCENT, mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style,
 };
 
 /// Cells sit two columns in, past the tone-glyph gutter.
@@ -63,10 +63,23 @@ pub fn draw_table(
         return;
     }
 
+    let selected_idx = rows.iter().position(|row| row.selected).unwrap_or(0);
+    if rows.iter().all(|row| row.detail.is_empty()) {
+        let max_offset = rows.len().saturating_sub(rows_area);
+        let offset = selected_idx.saturating_sub(rows_area / 2).min(max_offset);
+        for row in rows.iter().skip(offset) {
+            if y >= bottom {
+                break;
+            }
+            draw_row(surface, left, y, width, ncols, col_w, cell_w, row, now_ms);
+            y += 1;
+        }
+        return;
+    }
+
     // Scroll to keep the selected row on screen: no scroll while the cursor is
     // in the top half, then scroll so the cursor holds the halfway line —
     // clamped so the last page fills the view instead of trailing blank space.
-    let selected_idx = rows.iter().position(|row| row.selected).unwrap_or(0);
     let selected_line = rows
         .iter()
         .take(selected_idx)
@@ -99,60 +112,7 @@ pub fn draw_table(
             break;
         }
         if line_skip == 0 {
-            let mut style = if row.selected {
-                style_selected()
-            } else {
-                style_fg()
-            };
-            style = active_pulse_style(style, row.tone, now_ms);
-            style = shimmer_style(style, row.changed_at_ms, now_ms);
-            fill_line(surface, left, y, width, style);
-
-            let glyph_style = if row.selected {
-                style
-            } else {
-                tone_style(row.tone)
-            };
-            let glyph = if row.expandable {
-                if row.expanded {
-                    "▾"
-                } else {
-                    "▸"
-                }
-            } else {
-                tone_glyph(row.tone)
-            };
-            surface.draw_text(left, y, glyph, glyph_style);
-
-            for (i, cell) in row.cells.iter().enumerate().take(ncols) {
-                // First column is the identifier (foreground); later columns are
-                // secondary detail (muted) — unless the whole row is selected or
-                // the column projected its own tone for this cell. Neutral is
-                // "no override", not a color: both renderers fall back to their
-                // default cell styling for it, so an authored `default: neutral`
-                // (or a typoed tone name) can't diverge between them.
-                let cell_tone = row
-                    .cell_tones
-                    .get(i)
-                    .copied()
-                    .flatten()
-                    .filter(|tone| *tone != RyeOsTone::Neutral);
-                let cell_style = if row.selected {
-                    style
-                } else if let Some(tone) = cell_tone {
-                    tone_style(tone)
-                } else if i == 0 {
-                    style
-                } else {
-                    style_muted()
-                };
-                surface.draw_text(
-                    left + GUTTER + i * col_w,
-                    y,
-                    &truncate(cell, cell_w),
-                    cell_style,
-                );
-            }
+            draw_row(surface, left, y, width, ncols, col_w, cell_w, row, now_ms);
             y += 1;
         }
         let detail_start = line_skip.saturating_sub(1);
@@ -164,6 +124,66 @@ pub fn draw_table(
             y += 1;
         }
         skipped += height;
+    }
+}
+
+fn draw_row(
+    surface: &mut TextSurface,
+    left: usize,
+    y: usize,
+    width: usize,
+    ncols: usize,
+    col_w: usize,
+    cell_w: usize,
+    row: &RyeOsTableRowVm,
+    now_ms: u64,
+) {
+    let mut style = if row.selected {
+        style_selected()
+    } else {
+        style_fg()
+    };
+    style = active_pulse_style(style, row.tone, now_ms);
+    style = shimmer_style(style, row.changed_at_ms, now_ms);
+    fill_line(surface, left, y, width, style);
+
+    let glyph_style = if row.selected {
+        style
+    } else {
+        tone_style(row.tone)
+    };
+    let glyph = if row.expandable {
+        if row.expanded { "▾" } else { "▸" }
+    } else {
+        tone_glyph(row.tone)
+    };
+    surface.draw_text(left, y, glyph, glyph_style);
+
+    for (i, cell) in row.cells.iter().enumerate().take(ncols) {
+        // First column is the identifier (foreground); later columns are
+        // secondary detail (muted) — unless the whole row is selected or
+        // the column projected its own tone for this cell.
+        let cell_tone = row
+            .cell_tones
+            .get(i)
+            .copied()
+            .flatten()
+            .filter(|tone| *tone != RyeOsTone::Neutral);
+        let cell_style = if row.selected {
+            style
+        } else if let Some(tone) = cell_tone {
+            tone_style(tone)
+        } else if i == 0 {
+            style
+        } else {
+            style_muted()
+        };
+        surface.draw_text(
+            left + GUTTER + i * col_w,
+            y,
+            &truncate(cell, cell_w),
+            cell_style,
+        );
     }
 }
 

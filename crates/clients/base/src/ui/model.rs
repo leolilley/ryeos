@@ -1359,19 +1359,9 @@ impl RyeOsCore {
         };
         let response = self.data.sources.get(&tile_id.0.to_string())?;
         match binding.widget.as_str() {
-            "rows" => super::content::project_records(binding, response)
-                .into_iter()
-                .enumerate()
-                .nth(cursor)
-                .map(|(index, record)| (row_key(&record.raw, index), record.raw)),
-            "table" => {
-                let columns = super::content::table_columns(binding);
-                super::content::project_table(binding, response, &columns)
-                    .into_iter()
-                    .enumerate()
-                    .nth(cursor)
-                    .map(|(index, record)| (row_key(&record.raw, index), record.raw))
-            }
+            "rows" | "table" => super::content::source_collection(binding, response)
+                .get(cursor)
+                .map(|record| (row_key(record, cursor), record.clone())),
             "timeline" => {
                 let (mut entries, mut indents, mut sources) = self
                     .data
