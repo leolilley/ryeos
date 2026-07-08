@@ -58,6 +58,10 @@ impl PrincipalPaths {
     pub fn ryeos_recent(&self) -> PathBuf {
         self.state("ryeos-ui/recent.yaml")
     }
+
+    pub fn ryeos_shell_home(&self) -> PathBuf {
+        self.state("ryeos-shell/home.yaml")
+    }
 }
 
 /// Resolves logical storage space for a principal.
@@ -300,6 +304,10 @@ mod tests {
         assert_eq!(
             paths.ryeos_recent(),
             PathBuf::from("/tmp/user/.ai/state/ryeos-ui/recent.yaml")
+        );
+        assert_eq!(
+            paths.ryeos_shell_home(),
+            PathBuf::from("/tmp/user/.ai/state/ryeos-shell/home.yaml")
         );
     }
 

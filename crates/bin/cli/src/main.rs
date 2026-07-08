@@ -11,6 +11,7 @@ mod lifecycle_commands;
 mod node_descriptors;
 mod offline_dispatch;
 mod project_resolve;
+mod shell_home;
 #[cfg(test)]
 mod test_env;
 mod transport;

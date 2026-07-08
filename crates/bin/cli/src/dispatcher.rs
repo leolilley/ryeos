@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use ryeos_runtime::{
@@ -50,6 +51,12 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //      ryeos node status                — inspect lifecycle state
     if lifecycle_commands::try_dispatch(&cli.rest).await? {
         return Ok(());
+    }
+
+    if should_show_shell_home(&cli.rest, std::io::stdout().is_terminal())
+        && std::env::var_os("RYEOSD_URL").is_none()
+    {
+        return crate::shell_home::run(&app_root, cli.project.as_deref(), cli.debug).await;
     }
 
     // Load the verified node-config snapshot once per invocation; help,
@@ -226,6 +233,10 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     print_result(result);
     Ok(())
+}
+
+fn should_show_shell_home(rest: &[String], stdout_is_tty: bool) -> bool {
+    rest.is_empty() && stdout_is_tty
 }
 
 /// Parse a stream descriptor from an `/execute` response into `(path, braid)`.
