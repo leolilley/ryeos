@@ -1,5 +1,5 @@
 version: "0.1.0"
-category: "apps/tv-tracker"
+category: "tv-tracker-authoring"
 name: "read-identity-context-doc"
 executor_id: "@subprocess"
 description: "Read the raw signed source of the tv-tracker Identity context doc (resolve + verify + read the on-disk file). Read-only — no authoring authority. Returns fetch report incl. raw content + signature_status."

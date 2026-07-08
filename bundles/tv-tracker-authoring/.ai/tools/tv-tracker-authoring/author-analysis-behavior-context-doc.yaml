@@ -1,8 +1,8 @@
 version: "0.1.0"
-category: "apps/tv-tracker"
-name: "author-chat-instructions-context-doc"
+category: "tv-tracker-authoring"
+name: "author-analysis-behavior-context-doc"
 executor_id: "@subprocess"
-description: "Author the signed tv-tracker ChatInstructions context doc via the daemon runtime.author_item callback. Authority is scoped to this one doc; the daemon signs (this wrapper never holds a key)."
+description: "Author the signed tv-tracker AnalysisBehavior context doc via the daemon runtime.author_item callback. Authority is scoped to this one doc; the daemon signs (this wrapper never holds a key)."
 
 requires:
   capabilities:
@@ -10,7 +10,7 @@ requires:
       runtime_authority:
         item_authoring:
           - kind: knowledge
-            namespace: apps/tv-tracker/ChatInstructions
+            namespace: apps/tv-tracker/AnalysisBehavior
 
 config:
   command: "bin:core/ryeos-core-tools"
@@ -25,7 +25,7 @@ config_schema:
   properties:
     item_ref:
       type: string
-      enum: ["knowledge:apps/tv-tracker/ChatInstructions"]
+      enum: ["knowledge:apps/tv-tracker/AnalysisBehavior"]
     content:
       type: string
       description: "Unsigned item body. Must not contain a signature line or ryeos:authored: marker."
