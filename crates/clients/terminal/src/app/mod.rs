@@ -10,18 +10,23 @@ mod hints;
 mod keys;
 mod seat;
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use ryeos_client_base::surface::LoadedSurface;
-use ryeos_client_base::ui::{BrowserSession, BrowserViewport, RyeOsCore, RyeOsEvent};
+use ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
+use ryeos_client_base::ui::{
+    BrowserSession, BrowserViewport, RyeOsCore, RyeOsEffectResult, RyeOsEvent,
+};
 
 use crate::render::RyeOsTerminalRenderer;
 use crate::terminal::TerminalGuard;
 use crate::transport::daemon::DaemonClient;
 
-use effects::dispatch_effects;
+use effects::spawn_effects;
 use keys::{handle_key, should_quit};
-use seat::sync_seat_braid;
 
 pub async fn run(
     project_path: &str,
@@ -82,9 +87,14 @@ pub async fn run(
     client
         .mint_ui_session(&surface_ref, Some(project_path), read_only)
         .await?;
-    let client = std::sync::Arc::new(client);
+    let client = Arc::new(client);
 
-    dispatch_effects(&mut core, &client, start_effects).await;
+    // Effect results come home over this channel: batches run off the
+    // loop, folds happen on arrival, and a round trip in flight never
+    // blocks a frame.
+    let (effect_tx, mut effect_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<RyeOsEffectResult>>();
+    spawn_effects(&client, project_path_of(&core), start_effects, &effect_tx);
 
     // The seat is itself a thread: braided, owned, replayable. Reattach
     // to the latest running owned seat for this surface when possible;
@@ -102,6 +112,23 @@ pub async fn run(
     }
     let mut seat_thread: Option<String> = None;
     let mut seat_synced: usize = 0;
+    // One braid writer, one batch in flight: mirrored order matches local
+    // append order, and the loop never waits on the mirror.
+    let (seat_write_tx, mut seat_write_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Vec<serde_json::Value>, usize)>();
+    let (seat_ack_tx, mut seat_ack_rx) = tokio::sync::mpsc::unbounded_channel::<(bool, usize)>();
+    {
+        let client = client.clone();
+        tokio::spawn(async move {
+            while let Some((thread_id, batch, upto)) = seat_write_rx.recv().await {
+                let ok = seat::append_braid(&client, &thread_id, batch).await;
+                if seat_ack_tx.send((ok, upto)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let mut seat_sync_inflight = false;
 
     // Session hints: transient "look" signals; bound views declaring
     // `refresh.on_hint` refetch their sources. This replaces polling —
@@ -112,17 +139,20 @@ pub async fn run(
 
     let mut events = EventStream::new();
     // Adaptive frame clock: the backdrop's breathe/sweep animation reads
-    // fluid at ~14fps, so the tick quickens while the center is empty (the
-    // diff renderer repaints only the handful of changed cells). With
-    // tiles up nothing animates per-tick, so 4fps keeps the debounce and
-    // seat sync cadence without burning cycles.
-    const TICK_BACKDROP_MS: u64 = 72;
+    // fluid at the scene cadence, so the tick quickens while the center is
+    // empty (the diff renderer repaints only the handful of changed
+    // cells). With tiles up nothing animates per-tick, so 4fps keeps the
+    // debounce and seat sync cadence without burning cycles.
+    const TICK_BACKDROP_MS: u64 = SCENE_FRAME_MS;
     const TICK_TILES_MS: u64 = 250;
+    const HINT_FLUSH_MS: u64 = 500;
     let mut tick_ms = TICK_TILES_MS;
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+    let mut tick = frame_clock(tick_ms);
     // A live-filter edit defers its list refetch to the tick (debounce), so
     // typing a filter never blocks on a per-keystroke daemon round-trip.
     let mut feed_dirty = false;
+    let mut pending_hints: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut last_hint_flush_ms = 0;
 
     loop {
         if dirty {
@@ -138,7 +168,7 @@ pub async fn run(
         };
         if want_tick_ms != tick_ms {
             tick_ms = want_tick_ms;
-            tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+            tick = frame_clock(tick_ms);
         }
 
         // Reconcile the SSE tail with the route facet. The timeline source is
@@ -181,23 +211,54 @@ pub async fn run(
                         {
                             feed_dirty = true;
                         }
-                        dispatch_effects(&mut core, &client, effects).await;
-                        sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
+                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        queue_seat_sync(
+                            &core,
+                            &seat_thread,
+                            seat_synced,
+                            &mut seat_sync_inflight,
+                            &seat_write_tx,
+                        );
                         dirty = true;
                     }
                     Event::Resize(w, h) => {
                         let _ = term.update_size();
                         let effects = core.dispatch(RyeOsEvent::Resize { viewport: viewport(w, h) });
-                        dispatch_effects(&mut core, &client, effects).await;
+                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                         dirty = true;
                     }
                     _ => {}
                 }
             }
+            Some(results) = effect_rx.recv() => {
+                // Fold one batch's results in emission order; any effects
+                // the folds emit form the next spawned generation.
+                let mut follow = Vec::new();
+                for result in results {
+                    follow.extend(core.dispatch(RyeOsEvent::EffectResult { result }));
+                }
+                spawn_effects(&client, project_path_of(&core), follow, &effect_tx);
+                dirty = true;
+            }
+            Some((ok, upto)) = seat_ack_rx.recv() => {
+                seat_sync_inflight = false;
+                if ok {
+                    seat_synced = upto;
+                }
+                queue_seat_sync(
+                    &core,
+                    &seat_thread,
+                    seat_synced,
+                    &mut seat_sync_inflight,
+                    &seat_write_tx,
+                );
+            }
             Some((event_type, data)) = tail_rx.recv() => {
                 // Transport only: forward the raw frame to the shared reducer,
                 // which accumulates cognition deltas or refetches the snapshot
-                // on a durable milestone. Same path the web client uses.
+                // on a durable milestone. Same path the web client uses. No
+                // direct repaint: the activity pulse holds fast ticks while
+                // deltas stream, so the tick paints coalesced frames.
                 if let Some(thread_id) = tail_thread.clone() {
                     let payload = serde_json::from_str::<serde_json::Value>(&data)
                         .unwrap_or(serde_json::Value::Null);
@@ -206,22 +267,17 @@ pub async fn run(
                         event_type,
                         payload,
                     });
-                    dispatch_effects(&mut core, &client, effects).await;
-                    dirty = true;
+                    spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                 }
             }
             Some(message) = session_rx.recv() => {
                 match message {
                     hints::SessionMessage::Hint { kind, payload } => {
-                        let effects = core.note_hint(&kind, &payload);
-                        if !effects.is_empty() {
-                            dispatch_effects(&mut core, &client, effects).await;
-                            dirty = true;
-                        }
+                        pending_hints.insert(kind, payload);
                     }
                     hints::SessionMessage::DaemonEvent { payload } => {
                         let effects = core.dispatch(RyeOsEvent::DaemonEvent { payload });
-                        dispatch_effects(&mut core, &client, effects).await;
+                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                         dirty = true;
                     }
                 }
@@ -231,7 +287,13 @@ pub async fn run(
                     // Fresh (or facet-less) braid: adopt it and mirror the
                     // local log from the top, seeds included.
                     seat_thread = bootstrap.thread_id;
-                    sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
+                    queue_seat_sync(
+                        &core,
+                        &seat_thread,
+                        seat_synced,
+                        &mut seat_sync_inflight,
+                        &seat_write_tx,
+                    );
                 } else if core.seat.events().len() == seeded_events {
                     for event in bootstrap.replayed {
                         core.seat.append_replayed(event);
@@ -254,15 +316,33 @@ pub async fn run(
                 }
             }
             _ = tick.tick() => {
+                let tick_now = now_ms();
+                if !pending_hints.is_empty()
+                    && tick_now.saturating_sub(last_hint_flush_ms) >= HINT_FLUSH_MS
+                {
+                    last_hint_flush_ms = tick_now;
+                    let hints = std::mem::take(&mut pending_hints);
+                    let mut effects = Vec::new();
+                    for (kind, payload) in hints {
+                        effects.extend(core.note_hint(&kind, &payload));
+                    }
+                    spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                }
                 // Flush a debounced live-filter refetch once typing has settled.
                 if feed_dirty {
                     feed_dirty = false;
                     let effects = core.refresh_focused_feeds();
-                    dispatch_effects(&mut core, &client, effects).await;
+                    spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                 }
-                let effects = core.dispatch(RyeOsEvent::Tick { now_ms: now_ms() });
-                dispatch_effects(&mut core, &client, effects).await;
-                sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
+                let effects = core.dispatch(RyeOsEvent::Tick { now_ms: tick_now });
+                spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                queue_seat_sync(
+                    &core,
+                    &seat_thread,
+                    seat_synced,
+                    &mut seat_sync_inflight,
+                    &seat_write_tx,
+                );
                 dirty = true;
             }
         }
@@ -273,6 +353,47 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// A frame clock that skips missed ticks: a stalled loop resumes on the
+/// next beat instead of replaying the backlog in a burst.
+fn frame_clock(period_ms: u64) -> tokio::time::Interval {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(period_ms));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick
+}
+
+fn project_path_of(core: &RyeOsCore) -> Option<String> {
+    core.data
+        .session
+        .as_ref()
+        .and_then(|session| session.project_path.clone())
+}
+
+/// Hand the braid writer the next unmirrored slice, at most one batch in
+/// flight. A failed batch retries on the next nudge because the synced
+/// watermark only advances on the writer's ack.
+fn queue_seat_sync(
+    core: &RyeOsCore,
+    seat_thread: &Option<String>,
+    synced: usize,
+    inflight: &mut bool,
+    tx: &tokio::sync::mpsc::UnboundedSender<(String, Vec<serde_json::Value>, usize)>,
+) {
+    if *inflight {
+        return;
+    }
+    let Some(thread_id) = seat_thread else {
+        return;
+    };
+    let events = core.seat.events();
+    if events.len() <= synced {
+        return;
+    }
+    let batch = seat::braid_batch(&events[synced..]);
+    if tx.send((thread_id.clone(), batch, events.len())).is_ok() {
+        *inflight = true;
+    }
 }
 
 fn session_for(

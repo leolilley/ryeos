@@ -90,8 +90,12 @@ impl RyeOsCore {
     fn apply_daemon_event(&mut self, payload: serde_json::Value) -> Vec<RyeOsEffect> {
         match decode_ui_intent_applied(payload) {
             UiIntentDecode::Known(intent) => self.apply_ui_intent_applied(intent),
+            // A real `ui_intent.applied` this build cannot decode means
+            // another client mutated shared session state — resync.
             UiIntentDecode::Unsupported => self.initial_effects(),
-            UiIntentDecode::NotUiIntent => self.initial_effects(),
+            // Anything else on the session bus never drives a refetch;
+            // bound views refresh through hints they declared.
+            UiIntentDecode::NotUiIntent => Vec::new(),
         }
     }
 

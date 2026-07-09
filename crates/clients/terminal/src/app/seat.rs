@@ -3,7 +3,7 @@
 //! the braid as they append, settle on exit. Fold-from-braid keeps live
 //! and replay the same fold.
 
-use ryeos_client_base::ui::{RyeOsCore, SeatEvent, SeatEventKind};
+use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 
 use crate::transport::daemon::DaemonClient;
 
@@ -110,22 +110,10 @@ fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {
     })
 }
 
-/// Mirror newly-appended seat events into the seat thread's braid. The
-/// local log is the write-ahead view; the braid is the durable truth.
-pub async fn sync_seat_braid(
-    client: &DaemonClient,
-    core: &RyeOsCore,
-    seat_thread: &Option<String>,
-    synced: &mut usize,
-) {
-    let Some(thread_id) = seat_thread else {
-        return;
-    };
-    let events = core.seat.events();
-    if events.len() <= *synced {
-        return;
-    }
-    let batch: Vec<serde_json::Value> = events[*synced..]
+/// Serialize newly-appended seat events for the braid mirror. The local
+/// log is the write-ahead view; the braid is the durable truth.
+pub fn braid_batch(events: &[SeatEvent]) -> Vec<serde_json::Value> {
+    events
         .iter()
         .filter_map(|event| serde_json::to_value(event).ok())
         .filter_map(|value| {
@@ -138,14 +126,22 @@ pub async fn sync_seat_braid(
                 },
             }))
         })
-        .collect();
+        .collect()
+}
+
+/// Append one mirrored batch to the seat thread's braid. A single writer
+/// task calls this with at most one batch in flight, so braid order
+/// matches local append order without the loop ever waiting on it.
+pub async fn append_braid(
+    client: &DaemonClient,
+    thread_id: &str,
+    events: Vec<serde_json::Value>,
+) -> bool {
     let body = serde_json::json!({
         "item_ref": "service:seat/append",
-        "parameters": { "thread_id": thread_id, "events": batch },
+        "parameters": { "thread_id": thread_id, "events": events },
     });
-    if client.signed_post("/execute", &body).await.is_ok() {
-        *synced = events.len();
-    }
+    client.signed_post("/execute", &body).await.is_ok()
 }
 
 /// Settle the seat thread on clean exit; best effort.

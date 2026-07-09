@@ -53,6 +53,18 @@ impl RyeOsCore {
         self.apply_source_result(&expected, result.kind, result.id, data)
     }
 
+    /// Effect batches resolve concurrently, so an older shared-dataset
+    /// snapshot can arrive after a newer one; only the freshest may land.
+    fn dataset_is_latest(&mut self, key: &'static str, result_id: u64) -> bool {
+        let latest = self.data.dataset_epoch.entry(key).or_insert(0);
+        if result_id >= *latest {
+            *latest = result_id;
+            true
+        } else {
+            false
+        }
+    }
+
     /// The command-result arms (`InvocationDispatch` / `ThreadCommandSubmitted` /
     /// `Invoked`) — a synthetic-`Null`-defaulted body that always resolves to a
     /// notice plus a refresh, never to the parse-and-store path.
@@ -254,9 +266,11 @@ impl RyeOsCore {
     ) -> Vec<RyeOsEffect> {
         match kind {
             RyeOsEffectResultKind::Dimension => {
-                self.apply_parsed::<RyeOsDimensionDto>(data, "dimension", |core, dimension| {
-                    core.data.dimension = Some(dimension);
-                });
+                if self.dataset_is_latest("dimension", result_id) {
+                    self.apply_parsed::<RyeOsDimensionDto>(data, "dimension", |core, dimension| {
+                        core.data.dimension = Some(dimension);
+                    });
+                }
             }
             RyeOsEffectResultKind::SourceData => {
                 if let RyeOsEffectKind::FetchSource { tile_id, .. } = expected {
@@ -279,18 +293,22 @@ impl RyeOsCore {
                 }
             }
             RyeOsEffectResultKind::Projects => {
-                self.apply_parsed::<super::dto::RyeOsProjectsDto>(
-                    data,
-                    "projects",
-                    |core, projects| {
-                        core.data.projects = Some(projects);
-                    },
-                );
+                if self.dataset_is_latest("projects", result_id) {
+                    self.apply_parsed::<super::dto::RyeOsProjectsDto>(
+                        data,
+                        "projects",
+                        |core, projects| {
+                            core.data.projects = Some(projects);
+                        },
+                    );
+                }
             }
             RyeOsEffectResultKind::Topology => {
-                self.apply_parsed::<RyeOsTopologyDto>(data, "topology", |core, topology| {
-                    core.data.topology = Some(topology);
-                });
+                if self.dataset_is_latest("topology", result_id) {
+                    self.apply_parsed::<RyeOsTopologyDto>(data, "topology", |core, topology| {
+                        core.data.topology = Some(topology);
+                    });
+                }
             }
             RyeOsEffectResultKind::InvocationDispatch
             | RyeOsEffectResultKind::ThreadCommandSubmitted
@@ -322,9 +340,11 @@ impl RyeOsCore {
                 return self.apply_project_opened(data);
             }
             RyeOsEffectResultKind::Threads => {
-                self.apply_parsed::<RyeOsThreadsDto>(data, "threads", |core, threads| {
-                    core.data.threads = Some(threads);
-                });
+                if self.dataset_is_latest("threads", result_id) {
+                    self.apply_parsed::<RyeOsThreadsDto>(data, "threads", |core, threads| {
+                        core.data.threads = Some(threads);
+                    });
+                }
             }
             RyeOsEffectResultKind::Items => {
                 self.apply_parsed::<RyeOsItemsDto>(data, "items", |core, items| {
@@ -335,7 +355,7 @@ impl RyeOsCore {
                         } = expected
                         {
                             core.data.tile_items.insert(tile_id.clone(), items.clone());
-                        } else {
+                        } else if core.dataset_is_latest("items", result_id) {
                             core.data.items = Some(items);
                         }
                     }

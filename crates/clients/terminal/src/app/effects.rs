@@ -1,41 +1,42 @@
 //! The terminal effect executor: each `RyeOsEffect` from the core maps
-//! to one daemon call; results fold back into the core as
-//! `EffectResult` events. No ryeos state lives here — this is the
-//! boundary where engine intent becomes transport calls.
+//! to one daemon call; results come home over the loop's effect channel
+//! and fold back into the core as `EffectResult` events. No ryeos state
+//! lives here — this is the boundary where engine intent becomes
+//! transport calls, and the boundary where the render loop stops
+//! waiting: a round trip in flight never blocks a frame.
 
-use ryeos_client_base::ui::{
-    RyeOsCore, RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind, RyeOsEvent,
-};
+use std::sync::Arc;
+
+use ryeos_client_base::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
 
 use crate::transport::daemon::{ClientError, DaemonClient};
 
-pub async fn dispatch_effects(
-    core: &mut RyeOsCore,
-    client: &DaemonClient,
+/// Launch one generation of effects as a concurrent batch off the loop —
+/// a startup burst of independent fetches costs one round trip, not one
+/// per view. The joined results arrive as a single message in emission
+/// order; the loop folds them and spawns any follow-up generation the
+/// folds emit. Freshness is the core's job (per-key epochs), so batches
+/// from different generations may resolve in any order.
+pub fn spawn_effects(
+    client: &Arc<DaemonClient>,
+    project_path: Option<String>,
     effects: Vec<RyeOsEffect>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Vec<RyeOsEffectResult>>,
 ) {
-    // Each generation of effects runs as one concurrent batch — a startup
-    // burst of independent fetches costs one round trip, not one per view.
-    // Results fold back sequentially in emission order, and any effects
-    // those folds emit form the next batch.
-    let mut pending = effects;
-    while !pending.is_empty() {
-        let project_path = core
-            .data
-            .session
-            .as_ref()
-            .and_then(|session| session.project_path.clone());
-        let batch = std::mem::take(&mut pending);
+    if effects.is_empty() {
+        return;
+    }
+    let client = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
         let results = futures_util::future::join_all(
-            batch
+            effects
                 .iter()
-                .map(|effect| run_effect(client, effect, project_path.as_deref())),
+                .map(|effect| run_effect(&client, effect, project_path.as_deref())),
         )
         .await;
-        for result in results {
-            pending.extend(core.dispatch(RyeOsEvent::EffectResult { result }));
-        }
-    }
+        let _ = tx.send(results);
+    });
 }
 
 async fn run_effect(

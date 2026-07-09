@@ -404,6 +404,12 @@ pub struct RyeOsDataState {
     /// section fetches could render mixed data from two threads.
     #[serde(default)]
     pub source_epoch: HashMap<String, u64>,
+    /// The newest applied result id per shared dataset snapshot
+    /// (dimension, topology, projects, threads, items). Effect batches
+    /// resolve concurrently, so an older snapshot can arrive after a
+    /// newer one; only the freshest may land.
+    #[serde(default, skip)]
+    pub(crate) dataset_epoch: HashMap<&'static str, u64>,
     /// Transient live cognition stream for the tailed head thread —
     /// ephemeral deltas accumulated between durable snapshots. Not truth;
     /// the braid snapshot is. Cleared once a fresh snapshot supersedes it.
