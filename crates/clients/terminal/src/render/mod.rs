@@ -477,9 +477,9 @@ mod tests {
             cells
         };
         let mut core = empty_center_core();
-        core.generation = 0;
+        core.runtime.now_ms = 0;
         let a = styled(&build_surface(&build_view_model(&core), 96, 28));
-        core.generation = 1;
+        core.runtime.now_ms = ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
         let b = styled(&build_surface(&build_view_model(&core), 96, 28));
         assert_ne!(a, b, "the backdrop renders differently across generations");
     }

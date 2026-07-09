@@ -464,8 +464,8 @@ mod tests {
             primary: primary.to_string(),
             meta: None,
             tone: RyeOsTone::Neutral,
-            action: None,
-            secondary_action: None,
+            intent: None,
+            secondary_intent: None,
         }
     }
 

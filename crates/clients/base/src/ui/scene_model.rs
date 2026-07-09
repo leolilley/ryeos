@@ -8,6 +8,13 @@ use crate::atlas::{
 use super::event::RyeOsUiIntent;
 use super::view_model::RyeOsTone;
 
+/// The scene's design cadence: one animation step per this many
+/// milliseconds of wall clock. The breathe curve (16 steps ≈ 2s), sweep
+/// periods, and light cycles are all tuned against it, and animating
+/// clients derive their fast tick from it so the sampled clock and the
+/// declared pacing cannot drift apart.
+pub const SCENE_FRAME_MS: u64 = 72;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsSceneModel {
     pub schema_version: String,
@@ -244,7 +251,7 @@ pub fn build_scene_model(
     file_space: Option<&super::dto::RyeOsFileSpaceDto>,
 ) -> RyeOsSceneModel {
     let mut scene = RyeOsSceneModel {
-        generation: core.generation,
+        generation: core.scene_frame(),
         ..RyeOsSceneModel::default()
     };
     scene.objects.push(scene_object(
@@ -485,7 +492,7 @@ pub fn build_scene_model(
 
         if atlas.active_projection == AtlasProjectionVm::AiSpace {
             scene.atlas = Some(build_namespace_atlas(AtlasInput {
-                generation: core.generation,
+                generation: core.scene_frame(),
                 root_label: ".ai".to_string(),
                 items: items
                     .items
@@ -527,7 +534,7 @@ pub fn build_scene_model(
                 )
             });
         scene.atlas = Some(build_file_space_atlas(AtlasFileSpaceInput {
-            generation: core.generation,
+            generation: core.scene_frame(),
             root_label: "File Space".to_string(),
             root: file_space
                 .map(|file_space| file_space.root.clone())
@@ -995,7 +1002,7 @@ mod tests {
     #[test]
     fn scene_model_includes_namespace_atlas_for_items() {
         let mut core = RyeOsCore::default();
-        core.generation = 42;
+        core.runtime.now_ms = 42 * SCENE_FRAME_MS;
         core.data.items = Some(RyeOsItemsDto {
             items: vec![
                 RyeOsItemDto {
@@ -1038,7 +1045,7 @@ mod tests {
     #[test]
     fn per_tile_items_override_the_shared_dataset() {
         let mut core = RyeOsCore::default();
-        core.generation = 7;
+        core.runtime.now_ms = 7 * SCENE_FRAME_MS;
         // Shared/global dataset: one namespace.
         core.data.items = Some(RyeOsItemsDto {
             items: vec![RyeOsItemDto {

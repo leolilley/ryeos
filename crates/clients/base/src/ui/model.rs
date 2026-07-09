@@ -742,17 +742,6 @@ impl RyeOsCore {
         self.workspace.center_is_empty()
             || (self.surface_uses_backdrop_underlay() && self.workspace_has_transparent_view())
             || self.runtime.activity_pulse > 0.02
-            || self.row_shimmer_active()
-    }
-
-    fn row_shimmer_active(&self) -> bool {
-        let now_ms = self.runtime.now_ms;
-        self.workspace.tiles.values().any(|tile| match &tile.local {
-            ViewLocalState::GenericList { changed_rows, .. } => changed_rows
-                .values()
-                .any(|changed_at| now_ms.saturating_sub(*changed_at) < 1_200),
-            ViewLocalState::None => false,
-        })
     }
 
     /// Hint arrival: refetch every bound tile or visible slot whose binding
@@ -958,6 +947,15 @@ impl RyeOsCore {
 
     pub fn bump_generation(&mut self) {
         self.generation = self.generation.saturating_add(1);
+    }
+
+    /// The scene animation frame: wall clock quantized to the scene's
+    /// design cadence. Scene motion samples this — never `generation`,
+    /// which counts events — so animation speed is uniform regardless of
+    /// event traffic or the client's tick rate, and a stalled frame skips
+    /// ahead instead of compressing the missed steps.
+    pub fn scene_frame(&self) -> u64 {
+        self.runtime.now_ms / super::scene_model::SCENE_FRAME_MS
     }
 
     /// Atlas arrangement for a specific tile, falling back to the ambient

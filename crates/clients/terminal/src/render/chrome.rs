@@ -46,8 +46,10 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let base = Style::new().fg(MUTED).bg(bg);
     fill_line(surface, 0, y, surface.width, base);
     let mut x = 1usize;
+    // Wall-clock stepped (144ms/step) so the pulse holds a steady rate no
+    // matter how many events folded this frame.
     let heartbeat = if energy > 0.05 {
-        ["⋄", "◇", "◈", "◆"][(vm.generation as usize / 2) % 4]
+        ["⋄", "◇", "◈", "◆"][(vm.now_ms as usize / 144) % 4]
     } else {
         "⋄"
     };
@@ -225,7 +227,7 @@ pub fn draw_tile(
     _tile_id: &str,
     focused: bool,
     title: &str,
-    _action_count: usize,
+    _intent_count: usize,
     view: &RyeOsViewVm,
     input: Option<&RyeOsInputVm>,
     border: Option<Border>,
@@ -242,7 +244,7 @@ pub fn draw_tile(
     // The tile reads like the input box: a bordered frame on the page
     // background, with its label in the TOP border and provenance in the
     // BOTTOM border — no separate title bar, rule, corner marks, tile id, or
-    // action count. Border weight/colour carries focus.
+    // intent count. Border weight/colour carries focus.
     let border_style = if focused {
         Style::new().fg(ACCENT).bg(BG)
     } else {
@@ -418,7 +420,7 @@ mod tests {
                 cells: vec!["T-ab".into()],
                 cell_tones: Vec::new(),
                 tone: RyeOsTone::Neutral,
-                action: None,
+                intent: None,
                 selected: false,
                 expandable: false,
                 expanded: false,

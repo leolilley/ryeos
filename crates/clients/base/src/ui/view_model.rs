@@ -976,7 +976,7 @@ fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
     if binding.widget != "scene" {
         return None;
     }
-    let mut scene = super::scene_model::scene_from_body(&binding.body, core.generation);
+    let mut scene = super::scene_model::scene_from_body(&binding.body, core.scene_frame());
     scene.break_amount = core.ui.backdrop_break_amount.clamp(0.0, 1.0);
     // The backdrop breathes with the node: live threads lift the scene's
     // energy, so the empty center visibly quickens while cognition runs

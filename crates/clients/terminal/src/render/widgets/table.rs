@@ -249,7 +249,7 @@ mod tests {
             cells: cells.iter().map(|c| c.to_string()).collect(),
             cell_tones: Vec::new(),
             tone,
-            action: None,
+            intent: None,
             selected: false,
             expandable: false,
             expanded: false,

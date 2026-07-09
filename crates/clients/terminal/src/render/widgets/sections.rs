@@ -115,7 +115,7 @@ mod tests {
             secondary: None,
             meta: meta.map(str::to_string),
             kind: None,
-            action: None,
+            intent: None,
             tone: RyeOsTone::Neutral,
             selected: false,
             expandable: false,
