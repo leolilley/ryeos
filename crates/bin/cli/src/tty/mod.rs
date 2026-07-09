@@ -17,7 +17,7 @@ use crate::error::{CliError, CliTransportError};
 use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
-const TTY_HOME_VERSION: u32 = 1;
+const TTY_HOME_VERSION: u32 = 2;
 const TTY_CONFIG_VERSION: u32 = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
@@ -360,7 +360,7 @@ fn loading_projection(
                 count: None,
                 detail: Some(loading_command_detail(screen).to_string()),
             },
-            actions: screen_actions(screen, false),
+            items: screen_items(screen, false, Vec::new()),
         },
     }
 }
@@ -384,23 +384,28 @@ async fn build_live_projection(
         None => lifecycle_summary(app_root).await,
     };
     let snapshot = crate::node_descriptors::load_verified_snapshot(app_root);
-    let (node_config_status, command_count, has_tui_command) = match snapshot {
+    let (node_config_status, command_count, has_tui_command, verified_items) = match snapshot {
         Ok(snapshot) => {
-            let has_tui_command = crate::node_descriptors::load_command_descriptors_from_snapshot(
-                &snapshot,
-            )
-            .iter()
-            .any(|command| command.tokens.len() == 1 && command.tokens[0] == "tui");
+            let descriptors =
+                crate::node_descriptors::load_command_descriptors_from_snapshot(&snapshot);
+            let has_tui_command = descriptors
+                .iter()
+                .any(|command| command.tokens.len() == 1 && command.tokens[0] == "tui");
             (
                 SourceStatus::live(),
-                Some(snapshot.commands.len()),
+                Some(
+                    snapshot.commands.len()
+                        + crate::lifecycle_commands::local_command_descriptors().len(),
+                ),
                 has_tui_command,
+                verified_command_items(descriptors),
             )
         }
         Err(err) => (
             SourceStatus::error(format!("verified node config: {err:#}")),
-            None,
+            Some(crate::lifecycle_commands::local_command_descriptors().len()),
             false,
+            Vec::new(),
         ),
     };
 
@@ -435,9 +440,22 @@ async fn build_live_projection(
                     .is_none()
                     .then(|| "run `ryeos node doctor` for diagnostics".to_string()),
             },
-            actions: screen_actions(screen, has_tui_command),
+            items: screen_items(screen, has_tui_command, verified_items),
         },
     }
+}
+
+fn verified_command_items(
+    descriptors: Vec<crate::node_descriptors::LoadedCommandDescriptor>,
+) -> Vec<TtyItem> {
+    let mut items = descriptors
+        .into_iter()
+        .filter(|command| !(command.tokens.len() == 1 && command.tokens[0].len() <= 1))
+        .map(|command| command_item(command.tokens, command.description))
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.dedup_by(|a, b| a.label == b.label);
+    items
 }
 
 async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
@@ -516,72 +534,65 @@ async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
     }
 }
 
-fn screen_actions(screen: TtyScreen, has_tui_command: bool) -> Vec<TtyAction> {
-    let mut actions = match screen {
-        TtyScreen::Home => home_actions(),
-        TtyScreen::Help => help_actions(),
+fn screen_items(
+    screen: TtyScreen,
+    has_tui_command: bool,
+    verified_items: Vec<TtyItem>,
+) -> Vec<TtyItem> {
+    let mut items = match screen {
+        TtyScreen::Home => home_items(),
+        TtyScreen::Help => help_items(verified_items),
     };
     if has_tui_command {
-        actions.insert(
+        items.insert(
             0,
-            TtyAction {
-                label: "tui".to_string(),
-                command: "tui".to_string(),
-                description: "open terminal workspace".to_string(),
-            },
+            command_item(vec!["tui".to_string()], "open terminal workspace".to_string()),
         );
     }
-    actions
+    items
 }
 
-fn home_actions() -> Vec<TtyAction> {
+fn home_items() -> Vec<TtyItem> {
     vec![
-        TtyAction {
-            label: "help".to_string(),
-            command: "help".to_string(),
-            description: "open the compact TTY help screen".to_string(),
-        },
-        TtyAction {
-            label: "status".to_string(),
-            command: "node status".to_string(),
-            description: "show local node lifecycle status".to_string(),
-        },
-        TtyAction {
-            label: "doctor".to_string(),
-            command: "node doctor".to_string(),
-            description: "diagnose local node startup and config".to_string(),
-        },
+        command_item(
+            vec!["help".to_string()],
+            "open the compact TTY help screen".to_string(),
+        ),
+        command_item(
+            vec!["node".to_string(), "status".to_string()],
+            "show local node lifecycle status".to_string(),
+        ),
+        command_item(
+            vec!["node".to_string(), "doctor".to_string()],
+            "diagnose local node startup and config".to_string(),
+        ),
     ]
 }
 
-fn help_actions() -> Vec<TtyAction> {
-    vec![
-        TtyAction {
-            label: "open".to_string(),
-            command: "help <command>".to_string(),
-            description: "show focused help for one command".to_string(),
-        },
-        TtyAction {
-            label: "list".to_string(),
-            command: "commands".to_string(),
-            description: "print the full verified command list".to_string(),
-        },
-        TtyAction {
-            label: "all".to_string(),
-            command: "help --all".to_string(),
-            description: "print the exhaustive CLI reference".to_string(),
-        },
-        TtyAction {
-            label: "status".to_string(),
-            command: "node status".to_string(),
-            description: "show local node lifecycle status".to_string(),
-        },
-        TtyAction {
-            label: "doctor".to_string(),
-            command: "node doctor".to_string(),
-            description: "diagnose local node startup and config".to_string(),
-        },
-    ]
+fn help_items(verified_items: Vec<TtyItem>) -> Vec<TtyItem> {
+    let mut items = crate::lifecycle_commands::local_command_descriptors()
+        .iter()
+        .map(|command| {
+            command_item(
+                command.tokens.iter().map(|token| (*token).to_string()).collect(),
+                command.summary.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    items.extend(verified_items);
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.dedup_by(|a, b| a.label == b.label);
+    items
+}
+
+fn command_item(tokens: Vec<String>, detail: String) -> TtyItem {
+    let label = tokens.join(" ");
+    TtyItem {
+        id: format!("command:{label}"),
+        kind: TtyItemKind::Command,
+        label,
+        detail: Some(detail),
+    }
 }
 
 fn loading_command_detail(screen: TtyScreen) -> &'static str {
@@ -707,7 +718,7 @@ struct TtyHomeSections {
     node: TtyNodeSummary,
     project: Option<TtyProjectSummary>,
     commands: TtyCommandSummary,
-    actions: Vec<TtyAction>,
+    items: Vec<TtyItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -749,10 +760,24 @@ struct TtyCommandSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TtyAction {
+struct TtyItem {
+    id: String,
+    kind: TtyItemKind,
     label: String,
-    command: String,
-    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TtyItemKind {
+    Command,
+    View,
+    Resource,
+    Thread,
+    Project,
+    File,
+    Text,
 }
 
 enum RenderMode {
@@ -1134,7 +1159,7 @@ fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
     });
     lines.push(match home.screen {
         TtyScreen::Home => "portable verified execution".to_string(),
-        TtyScreen::Help => "compact TTY help".to_string(),
+        TtyScreen::Help => "verified command surface".to_string(),
     });
     lines.push(String::new());
     lines.push(format!(
@@ -1171,11 +1196,45 @@ fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
         home.source.node_config.state.label()
     ));
     lines.push(String::new());
-    for action in &home.sections.actions {
-        lines.push(format!("  {:<24} {}", action.command, action.description));
+    match home.screen {
+        TtyScreen::Home => render_home_items(&home.sections.items, &mut lines),
+        TtyScreen::Help => render_help_items(&home.sections.items, &mut lines),
     }
     lines.push(String::new());
     lines
+}
+
+fn render_home_items(items: &[TtyItem], lines: &mut Vec<String>) {
+    lines.push("items".to_string());
+    for item in items {
+        lines.push(format!(
+            "  {:<24} {}",
+            item.label,
+            item.detail.as_deref().unwrap_or_default()
+        ));
+    }
+}
+
+fn render_help_items(items: &[TtyItem], lines: &mut Vec<String>) {
+    lines.push("commands".to_string());
+    let visible = items.iter().take(24).collect::<Vec<_>>();
+    if visible.is_empty() {
+        lines.push("  no commands available".to_string());
+    } else {
+        for item in visible {
+            lines.push(format!(
+                "  {:<28} {}",
+                item.label,
+                item.detail.as_deref().unwrap_or_default()
+            ));
+        }
+        let remaining = items.len().saturating_sub(24);
+        if remaining > 0 {
+            lines.push(format!(
+                "  ... {remaining} more · use `ryeos commands` for the full reference"
+            ));
+        }
+    }
 }
 
 fn write_frame(

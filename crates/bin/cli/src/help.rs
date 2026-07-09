@@ -513,7 +513,7 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
             writeln!(out)?;
             writeln!(out, "USAGE: ryeos node status [--json] [--app-root <DIR>]")?;
         }
-        Some("node" | "system") if command_tokens.get(1).map(String::as_str) == Some("doctor") => {
+        Some("node") if command_tokens.get(1).map(String::as_str) == Some("doctor") => {
             writeln!(
                 out,
                 "ryeos node doctor — Offline node-environment checklist: init state, \
@@ -524,17 +524,6 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
             writeln!(
                 out,
                 "USAGE: ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]"
-            )?;
-        }
-        Some("system") if command_tokens.get(1).map(String::as_str) == Some("status") => {
-            writeln!(
-                out,
-                "ryeos system status — Show local node lifecycle status"
-            )?;
-            writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos system status [--json] [--app-root <DIR>]"
             )?;
         }
         Some("start") => {

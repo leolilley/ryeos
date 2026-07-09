@@ -56,13 +56,9 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     }
 
     if should_show_tty_screen(&cli.rest, stdout_supports_tty()) {
-        return crate::tty::run(
-            &app_root,
-            cli.project.as_deref(),
-            tty_screen_for(&cli.rest),
-            cli.debug,
-        )
-        .await;
+        let screen = tty_screen_for(&cli.rest);
+        crate::tty::run(&app_root, cli.project.as_deref(), screen, cli.debug).await?;
+        return Ok(());
     }
 
     // Load the verified node-config snapshot once per invocation; help,
