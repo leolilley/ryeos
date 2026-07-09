@@ -40,7 +40,7 @@ pub enum OfflineDispatchOutcome {
 /// Returns `Ok(None)` if the command is not offline-capable (caller should fall
 /// through to daemon dispatch). Returns `Err` if the command is offline-capable
 /// but something went wrong.
-pub fn try_offline_dispatch(
+pub async fn try_offline_dispatch(
     argv: &[String],
     app_root: &Path,
     project_path: &str,
@@ -91,7 +91,16 @@ pub fn try_offline_dispatch(
     let tail = &argv[matched.consumed..];
 
     if has_launch_binary_ref(&item.composed_value) {
-        return exec_client(&engine, item, &matched.command, tail, project_path).map(Some);
+        return exec_client(
+            &engine,
+            item,
+            &matched.command,
+            tail,
+            app_root,
+            project_path,
+        )
+        .await
+        .map(Some);
     }
 
     if has_service_offline_dispatch(&item.composed_value) {
@@ -210,14 +219,19 @@ fn has_tool_command(value: &Value) -> bool {
 // Client dispatch
 // ---------------------------------------------------------------------------
 
-fn exec_client(
+async fn exec_client(
     engine: &ryeos_engine::engine::Engine,
     item: EffectiveItem,
     command_def: &CommandDef,
     tail: &[String],
+    app_root: &Path,
     project_path: &str,
 ) -> Result<OfflineDispatchOutcome, CliError> {
     let item_ref = item.canonical_ref.clone();
+
+    if client_requires_daemon(&item.composed_value) {
+        crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    }
 
     let launch = item
         .composed_value
@@ -299,6 +313,14 @@ fn exec_client(
     }
 
     Ok(OfflineDispatchOutcome::Silent)
+}
+
+fn client_requires_daemon(value: &Value) -> bool {
+    value
+        .get("capabilities")
+        .and_then(|v| v.get("requires_daemon"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn client_args_from_launch(
@@ -1388,7 +1410,14 @@ else:
     ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
         let snapshot =
             crate::node_descriptors::load_verified_snapshot(app_root).map_err(local_err)?;
-        try_offline_dispatch(argv, app_root, project_path, &snapshot)
+        tokio::runtime::Runtime::new()
+            .expect("create test runtime")
+            .block_on(try_offline_dispatch(
+                argv,
+                app_root,
+                project_path,
+                &snapshot,
+            ))
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod arg_bind;
+mod daemon_preflight;
 mod dispatcher;
 mod effective_metadata;
 mod error;
