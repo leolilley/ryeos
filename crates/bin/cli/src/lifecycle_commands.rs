@@ -26,6 +26,65 @@ use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv, StopOp
 
 use crate::error::CliError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalCommandDescriptor {
+    pub tokens: &'static [&'static str],
+    pub summary: &'static str,
+    pub category: &'static str,
+}
+
+const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
+    LocalCommandDescriptor {
+        tokens: &["identity"],
+        summary: "Print the local node public identity",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["init"],
+        summary: "Bootstrap local node state and packaged bundles",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["start"],
+        summary: "Bring the local node runtime online",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["stop"],
+        summary: "Gracefully stop the local node runtime",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "status"],
+        summary: "Show local node lifecycle status",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "doctor"],
+        summary: "Diagnose local node startup and config",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["help"],
+        summary: "Open the compact TTY help screen",
+        category: "meta",
+    },
+    LocalCommandDescriptor {
+        tokens: &["help", "--all"],
+        summary: "Print the exhaustive CLI reference",
+        category: "meta",
+    },
+    LocalCommandDescriptor {
+        tokens: &["commands"],
+        summary: "Print the full verified command list",
+        category: "meta",
+    },
+];
+
+pub fn local_command_descriptors() -> &'static [LocalCommandDescriptor] {
+    LOCAL_COMMANDS
+}
+
 /// Returns `Ok(true)` if the argv was handled by a lifecycle command, `Ok(false)`
 /// if no lifecycle command matched.
 ///
@@ -43,24 +102,28 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
             run_init_command(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node" | "system", Some("status")) => {
+        ("node", Some("status")) => {
             run_status_command(&argv[2..])
                 .await
                 .map_err(map_local_err)?;
             Ok(true)
         }
-        ("node" | "system", Some("doctor")) => {
+        ("node", Some("doctor")) => {
             run_node_doctor_command(&argv[2..])
                 .await
                 .map_err(map_local_err)?;
             Ok(true)
         }
         ("start", _) => {
-            run_start_command(&argv[1..]).await.map_err(map_local_err)?;
+            run_start_command(&argv[1..])
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("stop", _) => {
-            run_stop_command(&argv[1..]).await.map_err(map_local_err)?;
+            run_stop_command(&argv[1..])
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -755,6 +818,9 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
 /// Parse argv with clap, but treat `--help` / `--version` as a successful
 /// exit (print to stdout, exit 0) rather than an error. Other parse
 /// failures are mapped to anyhow errors that propagate as `CliError::Local`.
+///
+/// This direct process exit is acceptable for one-shot CLI dispatch. It must be
+/// converted to a returned outcome before extracting an in-process command core.
 fn parse_or_handle_help<P: Parser>(argv: &[String]) -> Result<P> {
     use clap::error::ErrorKind;
     match P::try_parse_from(argv) {
