@@ -257,7 +257,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         return;
     }
     if let RyeOsViewVm::Sections { sections, .. } = view {
-        widgets::sections::draw_sections(surface, rect, sections);
+        widgets::sections::draw_sections(surface, rect, sections, now_ms);
         return;
     }
     if let RyeOsViewVm::Table { columns, rows, .. } = view {

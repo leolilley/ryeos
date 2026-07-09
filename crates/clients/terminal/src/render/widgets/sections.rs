@@ -10,13 +10,21 @@ use ryeos_client_base::ui::view_model::{RyeOsRowVm, RyeOsSectionVm};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
-use super::super::theme::{style_fg, style_muted, style_selected, tone_glyph, tone_style};
+use super::super::theme::{
+    active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
+    tone_style,
+};
 
 /// Rows sit two cells in from the section header so the fold glyph column
 /// stays clear of content.
 const ROW_INDENT: usize = 2;
 
-pub fn draw_sections(surface: &mut TextSurface, rect: Rect, sections: &[RyeOsSectionVm]) {
+pub fn draw_sections(
+    surface: &mut TextSurface,
+    rect: Rect,
+    sections: &[RyeOsSectionVm],
+    now_ms: u64,
+) {
     let width = rect.w as usize;
     let height = rect.h as usize;
     if width == 0 || height == 0 {
@@ -57,19 +65,28 @@ pub fn draw_sections(surface: &mut TextSurface, rect: Rect, sections: &[RyeOsSec
             if y >= bottom {
                 break;
             }
-            draw_row(surface, left, y, width, row);
+            draw_row(surface, left, y, width, row, now_ms);
             y += 1;
         }
     }
 }
 
 /// One indented row, matching the rows widget's layout offset by `ROW_INDENT`.
-fn draw_row(surface: &mut TextSurface, left: usize, y: usize, width: usize, row: &RyeOsRowVm) {
-    let style = if row.selected {
+fn draw_row(
+    surface: &mut TextSurface,
+    left: usize,
+    y: usize,
+    width: usize,
+    row: &RyeOsRowVm,
+    now_ms: u64,
+) {
+    let mut style = if row.selected {
         style_selected()
     } else {
         style_fg()
     };
+    style = active_pulse_style(style, row.tone, now_ms);
+    style = shimmer_style(style, row.changed_at_ms, now_ms);
     fill_line(surface, left, y, width, style);
 
     let glyph_style = if row.selected {
@@ -162,6 +179,7 @@ mod tests {
                 false,
                 vec![row("T-ab", Some("running"))],
             )],
+            0,
         );
         let header = row_text(&s, 40, 0);
         assert!(header.starts_with('▾'), "expanded glyph leads: {header:?}");
@@ -185,6 +203,7 @@ mod tests {
                 true,
                 vec![row("T-ab", None), row("T-cd", None)],
             )],
+            0,
         );
         let header = row_text(&s, 40, 0);
         assert!(header.starts_with('▸'), "collapsed glyph leads: {header:?}");
@@ -204,7 +223,7 @@ mod tests {
         let (mut s, rect) = surface(40, 4);
         let mut sec = section("Threads", true, vec![row("T-ab", None)]);
         sec.header_selected = true;
-        draw_sections(&mut s, rect, &[sec]);
+        draw_sections(&mut s, rect, &[sec], 0);
         // The collapsed header is the re-expand point; selecting it fills the
         // line with the selection background across the full width.
         assert!(
@@ -224,6 +243,7 @@ mod tests {
                 section("Threads", false, vec![row("T-ab", None)]),
                 section("Bundles", false, vec![row("ryeos", None)]),
             ],
+            0,
         );
         assert!(row_text(&s, 40, 0).contains("Threads"));
         assert!(row_text(&s, 40, 1).contains("T-ab"));
@@ -234,7 +254,7 @@ mod tests {
     #[test]
     fn empty_view_reports_no_sections() {
         let (mut s, rect) = surface(40, 4);
-        draw_sections(&mut s, rect, &[]);
+        draw_sections(&mut s, rect, &[], 0);
         assert!(row_text(&s, 40, 0).contains("no sections loaded"));
     }
 }

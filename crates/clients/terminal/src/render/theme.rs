@@ -65,6 +65,37 @@ pub fn mix_toward(from: Color, to: Color, t: f32) -> Color {
     }
 }
 
+/// A row's foreground eases toward ACCENT for a moment after it changed,
+/// fading out over 1.2s — shared by every widget that draws `RyeOsRowVm`-like
+/// rows so a changed row animates identically no matter which widget hosts it.
+pub(crate) fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style {
+    let Some(changed_at_ms) = changed_at_ms else {
+        return style;
+    };
+    let age = now_ms.saturating_sub(changed_at_ms);
+    if age >= 1_200 {
+        return style;
+    }
+    let weight = 0.35 * (1.0 - age as f32 / 1_200.0);
+    style.fg(mix_toward(style.fg, ACCENT, weight))
+}
+
+/// An accent-toned row breathes: its foreground eases toward ACCENT on an
+/// 8-phase wave so an actively-running row reads as alive.
+pub(crate) fn active_pulse_style(style: Style, tone: RyeOsTone, now_ms: u64) -> Style {
+    if tone != RyeOsTone::Accent {
+        return style;
+    }
+    let phase = (now_ms / 180) % 8;
+    let wave = match phase {
+        0 | 7 => 0.08,
+        1 | 6 => 0.14,
+        2 | 5 => 0.20,
+        _ => 0.26,
+    };
+    style.fg(mix_toward(style.fg, ACCENT, wave))
+}
+
 /// The single authority mapping the VM-declared border name to a
 /// drawable. `None` means draw no border cells at all; `hidden` keeps
 /// the border cells but draws them blank (layout stable); unknown or

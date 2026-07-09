@@ -4,14 +4,16 @@
 //! for now (weighted/right-aligned columns are a later refinement).
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::text_surface::{Style, TextSurface};
-use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTableRowVm, RyeOsTone};
+use ryeos_client_base::text_surface::TextSurface;
+use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
 use super::super::text::{letterspace, truncate};
 use super::super::theme::{
-    mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT,
+    active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
+    tone_style,
 };
+use super::rows::draw_detail;
 
 /// Cells sit two columns in, past the tone-glyph gutter.
 const GUTTER: usize = 2;
@@ -195,53 +197,10 @@ fn row_height(row: &RyeOsTableRowVm) -> usize {
     1 + row.detail.len()
 }
 
-fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style {
-    let Some(changed_at_ms) = changed_at_ms else {
-        return style;
-    };
-    let age = now_ms.saturating_sub(changed_at_ms);
-    if age >= 1_200 {
-        return style;
-    }
-    let weight = 0.35 * (1.0 - age as f32 / 1_200.0);
-    style.fg(mix_toward(style.fg, ACCENT, weight))
-}
-
-fn active_pulse_style(style: Style, tone: RyeOsTone, now_ms: u64) -> Style {
-    if tone != RyeOsTone::Accent {
-        return style;
-    }
-    let phase = (now_ms / 180) % 8;
-    let wave = match phase {
-        0 | 7 => 0.08,
-        1 | 6 => 0.14,
-        2 | 5 => 0.20,
-        _ => 0.26,
-    };
-    style.fg(mix_toward(style.fg, ACCENT, wave))
-}
-
-fn draw_detail(
-    surface: &mut TextSurface,
-    left: usize,
-    y: usize,
-    width: usize,
-    detail: &RyeOsRowDetailVm,
-) {
-    fill_line(surface, left, y, width, style_fg());
-    let label = format!("  {}: ", detail.field);
-    surface.draw_text(left, y, &truncate(&label, width), style_muted());
-    let x = left + label.chars().count().min(width);
-    if x < left + width {
-        let style = detail.tone.map(tone_style).unwrap_or_else(style_fg);
-        surface.draw_text(x, y, &truncate(&detail.value, left + width - x), style);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::ui::view_model::RyeOsTone;
+    use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTone};
 
     fn trow(tone: RyeOsTone, cells: &[&str]) -> RyeOsTableRowVm {
         RyeOsTableRowVm {

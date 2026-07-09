@@ -60,36 +60,39 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
         Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg),
     );
     x += 2;
+
+    // The key hint is the affordance the operator relies on to know what's
+    // available — reserve its width (plus the "· " separator) up front so
+    // the segment loop degrades into whatever budget remains instead of
+    // squeezing the hint out entirely when the bar is tight.
+    let key_hint = &vm.presentation.chrome.status_bar.key_hint;
+    let hint_width = display_width(key_hint);
+    let hint_reserve = if hint_width > 0 { hint_width + 3 } else { 0 };
+    let segments_end = surface.width.saturating_sub(hint_reserve);
+
     for segment in &vm.presentation.chrome.status_bar.segments {
-        if x >= surface.width {
-            return;
+        if x >= segments_end {
+            break;
         }
         if let Some(label) = &segment.label {
             let label = format!("{}: ", letterspace(label));
             surface.draw_text(
                 x,
                 y,
-                &truncate(&label, surface.width - x),
+                &truncate(&label, segments_end - x),
                 style_muted().bg(bg),
             );
             x = x.saturating_add(display_width(&label));
         }
-        let value = truncate(&segment.value, surface.width.saturating_sub(x));
+        let value = truncate(&segment.value, segments_end.saturating_sub(x));
         surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg));
         x = x.saturating_add(display_width(&value) + 2);
     }
-    if x + 3 < surface.width {
+
+    if hint_width > 0 && x + hint_width < surface.width {
         surface.draw_text(x, y, "·", style_muted().bg(bg));
         x += 2;
-        surface.draw_text(
-            x,
-            y,
-            &truncate(
-                &vm.presentation.chrome.status_bar.key_hint,
-                surface.width - x,
-            ),
-            style_muted().bg(bg),
-        );
+        surface.draw_text(x, y, key_hint, style_muted().bg(bg));
     }
 }
 

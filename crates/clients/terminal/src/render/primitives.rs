@@ -28,15 +28,20 @@ pub fn fill_line(surface: &mut TextSurface, x: usize, y: usize, width: usize, st
 /// Dim the entire surface toward the page background — the scrim behind an
 /// overlay. Each cell's colours are blended toward `BG` so content stays
 /// readable but recedes; the overlay then draws on top at full brightness.
+/// A single in-place pass over the cell buffer — no per-cell get/draw_char
+/// round trip — so the diff renderer still sees unchanged cells as unchanged
+/// on every frame an overlay is open, not just the frame it opened on.
 pub fn dim_surface(surface: &mut TextSurface) {
-    use ryeos_client_base::text_surface::Style;
-    for y in 0..surface.height {
-        for x in 0..surface.width {
-            let cell = surface.get(x, y);
-            let fg = dim_color(cell.fg, 0.62);
-            let bg = dim_color(cell.bg, 0.45);
-            let rune = if cell.rune == '\0' { ' ' } else { cell.rune };
-            surface.draw_char(x, y, rune, Style::new().fg(fg).bg(bg));
+    for cell in surface.cells.iter_mut() {
+        cell.fg = dim_color(cell.fg, 0.62);
+        cell.bg = dim_color(cell.bg, 0.45);
+        if cell.rune == '\0' {
+            // A wide-char continuation cell (rune '\0', width 0) becomes a
+            // plain space under the scrim, same as the old get/draw_char
+            // pass — draw_char always resolved the rune's display width,
+            // which is 1 for a space.
+            cell.rune = ' ';
+            cell.width = 1;
         }
     }
 }
