@@ -997,7 +997,7 @@ impl RyeOsCore {
     }
 
     /// Like `notice`, but skips when the most recent notice carries the same
-    /// message — for repeatable actions (e.g. Tab on an untargetable route)
+    /// message — for repeatable intents (e.g. Tab on an untargetable route)
     /// that must surface the reason once without spamming it on every press.
     pub fn notice_deduped(&mut self, message: impl Into<String>, tone: RyeOsTone) {
         let message = message.into();
@@ -1680,7 +1680,7 @@ mod tests {
                     },
                     "view:ryeos/node/status": {
                         "widget": "text",
-                        "source": { "ref": "service:system/status" },
+                        "source": { "ref": "service:node/status" },
                         "refresh": { "on_hint": "thread" }
                     }
                 }
@@ -1709,7 +1709,7 @@ mod tests {
             })
             .collect();
         assert!(thread_fetches.contains(&"service:ui/ryeos-ui/threads/list".to_string()));
-        assert!(thread_fetches.contains(&"service:system/status".to_string()));
+        assert!(thread_fetches.contains(&"service:node/status".to_string()));
     }
 
     #[test]
@@ -1724,7 +1724,7 @@ mod tests {
                 "views": {
                     "view:ryeos/node/status": {
                         "widget": "text",
-                        "source": { "ref": "service:system/status" },
+                        "source": { "ref": "service:node/status" },
                         "refresh": { "on_hint": "thread" }
                     }
                 }
@@ -1747,7 +1747,7 @@ mod tests {
             .collect();
         assert_eq!(
             fetches,
-            vec![("dock:top".to_string(), "service:system/status".to_string())]
+            vec![("dock:top".to_string(), "service:node/status".to_string())]
         );
     }
 

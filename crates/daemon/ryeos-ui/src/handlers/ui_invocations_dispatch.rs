@@ -1,17 +1,8 @@
-//! `ui/actions/invoke` — browser-side action invocation.
+//! `ui/invocations/dispatch` — browser-session invocation transport.
 //!
-//! Browser clients send affordance invocations through this endpoint.
-//! The handler enforces session capabilities and `read_only` before
-//! dispatching.
-//!
-//! ## Dispatch model
-//!
-//! - `InvocationSpec::Rye`: dispatches through the daemon's service
-//!   registry. Returns the service result.
-//! - `InvocationSpec::Ui`: published to the session bus as a
-//!   `facet.upsert` event. UI effects belong client-side; the daemon
-//!   echoes them for other session subscribers (e.g. the other
-//!   renderer in a dual-renderer session).
+//! This endpoint accepts already-lowered executable refs from an authenticated
+//! UI session. UI-local session changes belong to `ui/intents/apply`; this
+//! transport does not accept arbitrary event names or command tokens.
 
 use std::sync::Arc;
 
@@ -32,11 +23,26 @@ use crate::state::get_ui_state;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// The affordance ID to invoke.
-    pub command_id: String,
-    /// Optional invocation parameters.
+    pub target: InvocationTarget,
     #[serde(default)]
-    pub args: Value,
+    pub params: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InvocationTarget {
+    Ref {
+        #[serde(rename = "ref")]
+        item_ref: String,
+    },
+}
+
+impl Request {
+    fn item_ref(&self) -> &str {
+        match &self.target {
+            InvocationTarget::Ref { item_ref } => item_ref,
+        }
+    }
 }
 
 /// Extract session_id from the handler context's fingerprint.
@@ -44,7 +50,7 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
 }
 
-fn action_context_for_session(ctx: &HandlerContext, session: &BrowserSession) -> HandlerContext {
+fn invocation_context_for_session(ctx: &HandlerContext, session: &BrowserSession) -> HandlerContext {
     if let Some(user_principal_id) = session.user_principal_id.clone() {
         HandlerContext::new(user_principal_id, session.granted_caps.clone(), true)
     } else {
@@ -52,17 +58,58 @@ fn action_context_for_session(ctx: &HandlerContext, session: &BrowserSession) ->
     }
 }
 
-fn is_session_local_action(command_id: &str) -> bool {
-    command_id.starts_with("service:ui/seat/")
+fn is_session_local_invocation(item_ref: &str) -> bool {
+    item_ref.starts_with("service:ui/seat/")
+}
+
+fn is_declared_read_source_ref(item_ref: &str) -> bool {
+    matches!(
+        item_ref,
+        "service:bundle/list"
+            | "service:commands/list"
+            | "service:events/chain_replay"
+            | "service:items/effective"
+            | "service:node/status"
+            | "service:projects/list"
+            | "service:scheduler/list"
+            | "service:threads/list"
+            | "service:ui/ryeos-ui/files/list"
+            | "service:ui/ryeos-ui/gc/status"
+            | "service:ui/ryeos-ui/item/inspect"
+            | "service:ui/ryeos-ui/items/list"
+            | "service:ui/ryeos-ui/node/activity"
+            | "service:ui/ryeos-ui/remotes/list"
+            | "service:ui/ryeos-ui/schedules/list"
+            | "service:ui/ryeos-ui/thread/inspect"
+            | "service:ui/ryeos-ui/threads/list"
+    )
+}
+
+fn service_descriptor_for<'a>(
+    state: &'a AppState,
+    item_ref: &str,
+) -> Option<&'a ServiceDescriptor> {
+    state
+        .service_descriptors
+        .iter()
+        .find(|descriptor| descriptor.service_ref == item_ref)
+}
+
+fn read_only_invocation_allowed(state: &AppState, item_ref: &str) -> bool {
+    is_session_local_invocation(item_ref)
+        || (is_declared_read_source_ref(item_ref)
+            && service_descriptor_for(state, item_ref)
+                .is_some_and(|descriptor| descriptor.required_caps.is_empty()))
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let req: Request = serde_json::from_value(input)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid ui.actions.invoke request: {e}")))?;
+        .map_err(|e| HandlerError::BadRequest(format!("invalid ui.invocations.dispatch request: {e}")))?;
+    let item_ref = req.item_ref().to_string();
 
     // Require browser session.
     let session_id = session_id_from_context(&ctx).ok_or_else(|| {
-        HandlerError::Forbidden("session cookie required for action invocation".into())
+        HandlerError::Forbidden("session cookie required for UI invocation dispatch".into())
     })?;
 
     let ui = get_ui_state(&state).expect("UiState not set");
@@ -72,28 +119,27 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
-    // Enforce read_only: write-class actions refused.
-    if session.read_only && !is_session_local_action(&req.command_id) {
+    if session.read_only && !read_only_invocation_allowed(&state, &item_ref) {
         return Err(
-            HandlerError::Forbidden("read-only session cannot invoke actions".into()).into(),
+            HandlerError::Forbidden(
+                "read-only session cannot dispatch protected invocations".into(),
+            )
+            .into(),
         );
     }
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
 
-    if is_session_local_action(&req.command_id) {
-        let descriptor = state
-            .service_descriptors
-            .iter()
-            .find(|descriptor| descriptor.service_ref == req.command_id)
+    if is_session_local_invocation(&item_ref) {
+        let descriptor = service_descriptor_for(&state, &item_ref)
             .ok_or_else(|| HandlerError::NotFound)?;
-        let result = (descriptor.handler)(req.args.clone(), ctx.clone(), state.clone()).await?;
+        let result = (descriptor.handler)(req.params.clone(), ctx.clone(), state.clone()).await?;
 
         ui.session_bus.publish(
             &session_id,
-            "action.invoked",
+            "invocation.dispatched",
             json!({
-                "command_id": req.command_id,
+                "target": { "kind": "ref", "ref": item_ref },
                 "invocation_id": invocation_id,
                 "status": "executed",
             }),
@@ -101,26 +147,26 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
 
         return Ok(json!({
             "status": "executed",
-            "command_id": req.command_id,
+            "target": { "kind": "ref", "ref": item_ref },
             "invocation_id": invocation_id,
             "result": result,
         }));
     }
 
-    if CanonicalRef::parse(&req.command_id).is_ok() {
+    if CanonicalRef::parse(&item_ref).is_ok() {
         let project_path = session
             .project_root
             .as_deref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| state.config.app_root.clone());
-        let action_ctx = action_context_for_session(&ctx, &session);
-        let result = execute_item_ref(&req, &action_ctx, &state, &project_path).await?;
+        let invocation_ctx = invocation_context_for_session(&ctx, &session);
+        let result = execute_item_ref(&req, &invocation_ctx, &state, &project_path).await?;
 
         ui.session_bus.publish(
             &session_id,
-            "action.invoked",
+            "invocation.dispatched",
             json!({
-                "command_id": req.command_id,
+                "target": { "kind": "ref", "ref": item_ref },
                 "invocation_id": invocation_id,
                 "status": "executed",
             }),
@@ -128,27 +174,13 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
 
         return Ok(json!({
             "status": "executed",
-            "command_id": req.command_id,
+            "target": { "kind": "ref", "ref": item_ref },
             "invocation_id": invocation_id,
             "result": result,
         }));
     }
 
-    ui.session_bus.publish(
-        &session_id,
-        "action.invoked",
-        json!({
-            "command_id": req.command_id,
-            "invocation_id": invocation_id,
-            "args": req.args,
-        }),
-    );
-
-    Ok(json!({
-        "status": "dispatched",
-        "command_id": req.command_id,
-        "invocation_id": invocation_id
-    }))
+    Err(HandlerError::BadRequest("UI invocation target must be a canonical ref".into()).into())
 }
 
 async fn execute_item_ref(
@@ -172,7 +204,8 @@ async fn execute_item_ref(
     )
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
-    let root_canonical = CanonicalRef::parse(&req.command_id)
+    let item_ref = req.item_ref();
+    let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
     let plan_ctx = ryeos_engine::contracts::PlanContext {
@@ -208,7 +241,7 @@ async fn execute_item_ref(
         launch_mode: "inline",
         target_site_id: None,
         validate_only: false,
-        params: req.args.clone(),
+        params: req.params.clone(),
         acting_principal: ctx.fingerprint.as_str(),
         project_path: &project_ctx.effective_path,
         provenance,
@@ -220,7 +253,7 @@ async fn execute_item_ref(
         parent_execution_context: None,
     };
 
-    ryeos_executor::dispatch::dispatch(&req.command_id, &dispatch_req, &exec_ctx, state)
+    ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, state)
         .await
         .map_err(|e| HandlerError::Structured {
             code: "dispatch_error".into(),
@@ -230,8 +263,8 @@ async fn execute_item_ref(
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/actions/invoke",
-    endpoint: "ui.actions.invoke",
+    service_ref: "service:ui/invocations/dispatch",
+    endpoint: "ui.invocations.dispatch",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
@@ -257,9 +290,17 @@ mod tests {
     }
 
     #[test]
-    fn action_context_uses_durable_session_principal_when_present() {
+    fn read_only_allowlist_is_limited_to_declared_sources() {
+        assert!(is_declared_read_source_ref("service:node/status"));
+        assert!(is_declared_read_source_ref("service:ui/ryeos-ui/threads/list"));
+        assert!(!is_declared_read_source_ref("service:commands/submit"));
+        assert!(!is_declared_read_source_ref("tool:demo/run"));
+    }
+
+    #[test]
+    fn invocation_context_uses_durable_session_principal_when_present() {
         let browser_ctx = HandlerContext::new("session:session-1".to_string(), vec![], false);
-        let action_ctx = action_context_for_session(
+        let invocation_ctx = invocation_context_for_session(
             &browser_ctx,
             &session(Some(
                 "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -267,24 +308,24 @@ mod tests {
         );
 
         assert_eq!(
-            action_ctx.fingerprint,
+            invocation_ctx.fingerprint,
             "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert!(action_ctx.verified);
-        assert_eq!(action_ctx.scopes, vec!["ui.read".to_string()]);
+        assert!(invocation_ctx.verified);
+        assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
 
     #[test]
-    fn action_context_falls_back_to_browser_context_without_principal() {
+    fn invocation_context_falls_back_to_browser_context_without_principal() {
         let browser_ctx = HandlerContext::new(
             "session:session-1".to_string(),
             vec!["ui.read".to_string()],
             false,
         );
-        let action_ctx = action_context_for_session(&browser_ctx, &session(None));
+        let invocation_ctx = invocation_context_for_session(&browser_ctx, &session(None));
 
-        assert_eq!(action_ctx.fingerprint, "session:session-1");
-        assert!(!action_ctx.verified);
-        assert_eq!(action_ctx.scopes, vec!["ui.read".to_string()]);
+        assert_eq!(invocation_ctx.fingerprint, "session:session-1");
+        assert!(!invocation_ctx.verified);
+        assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
     }
 }

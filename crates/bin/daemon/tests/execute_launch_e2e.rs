@@ -657,7 +657,7 @@ async fn execute_launch_in_process_service_is_rejected() {
         .post_json(
             "/execute/launch",
             json!({
-                "item_ref": "service:system/status",
+                "item_ref": "service:node/status",
                 "project_path": project_path,
                 "parameters": {},
                 "launch_mode": "accepted"

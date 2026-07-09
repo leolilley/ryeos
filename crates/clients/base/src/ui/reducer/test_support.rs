@@ -2,7 +2,7 @@
 
 pub(crate) use crate::ui::dto::RyeOsThreadsDto;
 pub(crate) use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
-pub(crate) use crate::ui::event::{RyeOsAction, RyeOsEvent, RyeOsUiEvent};
+pub(crate) use crate::ui::event::{RyeOsUiIntent, RyeOsEvent, RyeOsUiEvent};
 pub(crate) use crate::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
 pub(crate) use crate::ui::view_model::{
     build_view_model, command_overlay_items_for, view_overlay_items,

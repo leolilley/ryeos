@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:13:19Z:aef663d49789f9c0def9c57c95b4ac48d34c97b8ef22518b9bc03d8ac113c9e1:w0/BLOwaM+uaKsc83auFMtoo40p09IgMX5UXhzAem5sfqK8mxk2e2xrVSwiKAaO+yfZtlTtf/nXY5rIJlOMcCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-09T01:21:44Z:8d534c60719d4625b0d46e559fc140e0b28820d8a929093603122d698e532ab6:Cwg9hS7Hbu2vO7nAPvTeplQFYPGC6jY3Id9F1vb3Bwn4YQ9cJGTJ8jaIfekQ4ZWI/gfveMevp7FPH3p1mlW8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -45,7 +45,7 @@ file hashes through CAS.
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
-| `system/status` | `system.status` | none |
+| `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
 | `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |
 

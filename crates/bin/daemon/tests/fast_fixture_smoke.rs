@@ -2,7 +2,7 @@
 //!
 //! Proves that pre-populated deterministic state (no real `ryeos init`)
 //! is sufficient for the daemon to boot, accept HTTP traffic, and
-//! return its own self-introspection via `/health` + `service:system/status`.
+//! return its own self-introspection via `/health` + `service:node/status`.
 
 mod common;
 

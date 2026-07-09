@@ -31,10 +31,10 @@ struct Cli {
     #[arg(long = "read-only")]
     read_only: bool,
 
-    /// Allow browser actions that can mutate daemon/project state.
+    /// Allow browser intents that can mutate daemon/project state.
     /// RyeOs defaults to read-only unless this is explicit.
-    #[arg(long = "allow-actions")]
-    allow_actions: bool,
+    #[arg(long = "allow-intents")]
+    allow_intents: bool,
 
     /// Print the minted one-shot launch URL to stdout.
     #[arg(long = "print-url")]
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
     let mint_req = MintRequest {
         surface_ref: cli.surface,
         project_path: project_path.map(|p| p.to_string_lossy().to_string()),
-        read_only: cli.read_only || !cli.allow_actions,
+        read_only: cli.read_only || !cli.allow_intents,
         user_principal_id: cli
             .hosted_principal
             .then(|| format!("fp:{}", signer.fingerprint)),

@@ -75,7 +75,7 @@ pub enum DaemonCommand {
 
     /// Run a service handler in standalone mode (daemon must be stopped).
     RunService {
-        /// Canonical service ref, e.g. service:system/status
+        /// Canonical service ref, e.g. service:node/status
         service_ref: String,
 
         /// JSON parameters for the service call

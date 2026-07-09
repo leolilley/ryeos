@@ -311,7 +311,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:test/list".to_string(),
                     affordance_id: "select-item".to_string(),
                     record: serde_json::json!({ "canonical_ref": "tool:demo/run" }),
@@ -367,7 +367,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -425,7 +425,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-7" }),
@@ -477,7 +477,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -677,7 +677,7 @@ mod tests {
         // Step into child C (a fresh root: both coords = C).
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::DrillThread {
+                intent: RyeOsUiIntent::DrillThread {
                     thread_id: "C".to_string(),
                     chain_root_id: "C".to_string(),
                     label: Some("study".to_string()),
@@ -738,7 +738,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-demo" }),
@@ -787,7 +787,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "aim-input".to_string(),
                     record: serde_json::json!({ "thread_id": "T-route" }),
@@ -811,7 +811,7 @@ mod tests {
         );
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec::bound("view:ryeos/graph/topology"),
                 },
             },

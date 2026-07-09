@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-09T01:14:05Z:f299c1d35e5e69e2ee7a526043e79aa712cac8c5e97e1f5279d8b6e5d740eea2:oRylOtw729V0EHLtiwnxhXNGkMderohvuPENl5GJskYRRao44ftjvxdofQaoAySUxYvSvCmb/HqMHRxTVsg9Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/intents/apply
+path: /ui/api/intents/apply
+methods:
+  - POST
+auth: browser_session
+limits:
+  body_bytes_max: 16384
+  timeout_ms: 10000
+  concurrent_max: 64
+request:
+  body: json
+response:
+  mode: json
+  source: "service:ui/intents/apply"

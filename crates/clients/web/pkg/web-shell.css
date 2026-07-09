@@ -676,7 +676,7 @@ body {
 .ryeos-section dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0; }
 .ryeos-section dt { color: var(--ryeos-muted); text-transform: uppercase; font-size: 0.76rem; }
 .ryeos-section dd { margin: 0; overflow-wrap: anywhere; }
-.ryeos-section-action {
+.ryeos-section-intent {
   margin-top: 14px;
   border: 1px solid rgba(var(--ryeos-accent-rgb), 0.55);
   background: rgba(var(--ryeos-accent-rgb), 0.12);
@@ -685,11 +685,11 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
-.ryeos-section-action:hover {
+.ryeos-section-intent:hover {
   background: var(--ryeos-accent);
   color: var(--ryeos-bg);
 }
-.ryeos-section-action:active {
+.ryeos-section-intent:active {
   transform: translate(2px, 2px);
 }
 
@@ -1034,13 +1034,13 @@ body,
   white-space: nowrap;
 }
 
-.ryeos-tile-actions {
+.ryeos-tile-intents {
   display: flex;
   gap: 5px;
   align-items: center;
 }
 
-.ryeos-tile-action {
+.ryeos-tile-intent {
   width: 24px;
   height: 24px;
   display: grid;
@@ -1053,11 +1053,11 @@ body,
   padding: 0;
 }
 
-.ryeos-tile-action:hover {
+.ryeos-tile-intent:hover {
   border-color: var(--ryeos-accent);
   color: var(--ryeos-warn);
 }
-.ryeos-tile-action:active {
+.ryeos-tile-intent:active {
   transform: translate(2px, 2px);
 }
 
@@ -1416,7 +1416,7 @@ body,
   text-transform: uppercase;
 }
 
-.ryeos-home-actions {
+.ryeos-home-items {
   display: flex;
   gap: 14px;
   align-items: stretch;
@@ -2217,7 +2217,7 @@ body,
 }
 
 .ryeos-tile-chrome small,
-.ryeos-tile-actions {
+.ryeos-tile-intents {
   display: none;
 }
 

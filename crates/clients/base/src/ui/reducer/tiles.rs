@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {
-        use crate::ui::view_model::{action_for_focused_row, RyeOsLayoutNodeVm, RyeOsViewVm};
+        use crate::ui::view_model::{intent_for_focused_row, RyeOsLayoutNodeVm, RyeOsViewVm};
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
                 "name": "t",
@@ -354,8 +354,8 @@ mod tests {
             },
         });
         assert_eq!(selected_primaries(&core), vec!["T-ab".to_string()]);
-        match action_for_focused_row(&core).expect("threads row activates") {
-            RyeOsAction::InvokeAffordance {
+        match intent_for_focused_row(&core).expect("threads row activates") {
+            RyeOsUiIntent::InvokeAffordance {
                 affordance_id,
                 record,
                 ..
@@ -367,7 +367,7 @@ mod tests {
         }
 
         // Flat cursor 2 = the first Bundles row (Threads contributed 2). Bundles
-        // declares no activation, so the point resolves a row but no action.
+        // declares no activation, so the point resolves a row but no intent.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
                 tile_id: key.clone(),
@@ -376,7 +376,7 @@ mod tests {
         });
         assert_eq!(selected_primaries(&core), vec!["ryeos".to_string()]);
         assert!(
-            action_for_focused_row(&core).is_none(),
+            intent_for_focused_row(&core).is_none(),
             "a bundles row has no section activation"
         );
     }
@@ -489,7 +489,7 @@ mod tests {
         seed_view(&mut core, "view:test/services");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -499,7 +499,7 @@ mod tests {
         let before = core.workspace.tile_ids().len();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -540,7 +540,7 @@ mod tests {
         // First open fills the empty center with the one lens.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -553,7 +553,7 @@ mod tests {
         // Switching the lens replaces in place — still exactly one tile.
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -589,7 +589,7 @@ mod tests {
         // OpenNewView also collapses to a replace — no second tile.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -639,7 +639,7 @@ mod tests {
         let open = |core: &mut RyeOsCore, view_ref: &str| {
             core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::Activate {
-                    action: RyeOsAction::OpenView {
+                    intent: RyeOsUiIntent::OpenView {
                         view: ViewSpec {
                             view_ref: view_ref.to_string(),
                         },
@@ -650,7 +650,7 @@ mod tests {
         let cycle = |core: &mut RyeOsCore| {
             core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::Activate {
-                    action: RyeOsAction::CycleTab {
+                    intent: RyeOsUiIntent::CycleTab {
                         direction: RyeOsStackMoveDirection::Down,
                     },
                 },
@@ -682,7 +682,7 @@ mod tests {
         seed_view(&mut core, "view:ryeos/items/space");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -692,7 +692,7 @@ mod tests {
         let before = core.workspace.tile_ids().len();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -726,7 +726,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -735,7 +735,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
@@ -745,7 +745,7 @@ mod tests {
         let tile_id = core.workspace.tile_ids()[1];
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::CloseTile {
+                intent: RyeOsUiIntent::CloseTile {
                     tile_id: tile_id.0.to_string(),
                 },
             },
@@ -764,7 +764,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -775,7 +775,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::CloseFocused,
+                intent: RyeOsUiIntent::CloseFocused,
             },
         });
 
@@ -793,7 +793,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -802,7 +802,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
@@ -811,7 +811,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
@@ -848,7 +848,7 @@ mod tests {
         seed_view(&mut core, "view:test/files");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -857,7 +857,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
@@ -868,7 +868,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SwitchTab { index: 1 },
+                intent: RyeOsUiIntent::SwitchTab { index: 1 },
             },
         });
 
@@ -878,7 +878,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
@@ -887,7 +887,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -897,13 +897,13 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SwitchTab { index: 0 },
+                intent: RyeOsUiIntent::SwitchTab { index: 0 },
             },
         });
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SwitchTab { index: 1 },
+                intent: RyeOsUiIntent::SwitchTab { index: 1 },
             },
         });
 
@@ -920,7 +920,7 @@ mod tests {
         seed_view(&mut core, "view:test/services");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -932,7 +932,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::CloseTile {
+                intent: RyeOsUiIntent::CloseTile {
                     tile_id: "999".to_string(),
                 },
             },

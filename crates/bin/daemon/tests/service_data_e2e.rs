@@ -68,20 +68,20 @@ fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> V
     })
 }
 
-// ── 3.1 system/status ────────────────────────────────────────────────────
+// ── 3.1 node/status ────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_system_status_returns_snapshot() {
+async fn service_node_status_returns_snapshot() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (status, body) = exec(&h, "service:system/status", json!({})).await;
-    let result = unwrap_result(status, &body, "system.status");
+    let (status, body) = exec(&h, "service:node/status", json!({})).await;
+    let result = unwrap_result(status, &body, "node.status");
     // The status snapshot is an object; assert at least one expected key.
     assert!(result.is_object(), "expected object, got {result}");
     // Don't pin exact keys — just assert it's non-empty so we know the
     // handler produced data, not an empty stub.
     assert!(
         !result.as_object().unwrap().is_empty(),
-        "system.status returned empty object: {result}"
+        "node.status returned empty object: {result}"
     );
 }
 
@@ -167,11 +167,11 @@ async fn service_threads_list_empty_on_fresh_daemon() {
 async fn service_threads_list_grows_with_each_call() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     // Each successful service call creates an audit thread row. Call
-    // `system.status` 3 times, then check `threads.list` returns at
+    // `node.status` 3 times, then check `threads.list` returns at
     // least 4 (the 3 calls plus the threads.list call itself).
     for _ in 0..3 {
-        let (s, b) = exec(&h, "service:system/status", json!({})).await;
-        assert!(s.is_success(), "system.status failed: {b}");
+        let (s, b) = exec(&h, "service:node/status", json!({})).await;
+        assert!(s.is_success(), "node.status failed: {b}");
     }
     let (status, body) = exec(&h, "service:threads/list", json!({"limit": 100})).await;
     let result = unwrap_result(status, &body, "threads.list");
@@ -193,7 +193,7 @@ async fn service_threads_list_grows_with_each_call() {
 async fn service_threads_get_returns_audit_row() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     // Run any Both service to mint an audit thread.
-    let (_, body1) = exec(&h, "service:system/status", json!({})).await;
+    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
     let tid = body1
         .get("thread")
         .and_then(|t| t.get("thread_id"))
@@ -246,7 +246,7 @@ async fn service_threads_get_missing_returns_null() {
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_chain_returns_chain_for_audit_thread() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:system/status", json!({})).await;
+    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
     let (status, body2) = exec(&h, "service:threads/chain", json!({"thread_id": tid})).await;
@@ -267,7 +267,7 @@ async fn service_threads_chain_returns_chain_for_audit_thread() {
 #[tokio::test(flavor = "multi_thread")]
 async fn service_threads_children_returns_empty_for_audit_thread() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:system/status", json!({})).await;
+    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
     let (status, body2) = exec(&h, "service:threads/children", json!({"thread_id": tid})).await;
@@ -288,7 +288,7 @@ async fn service_threads_children_returns_empty_for_audit_thread() {
 #[tokio::test(flavor = "multi_thread")]
 async fn service_events_replay_returns_events_for_audit_thread() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:system/status", json!({})).await;
+    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
     let (status, body2) = exec(
@@ -314,7 +314,7 @@ async fn service_events_replay_returns_events_for_audit_thread() {
 #[tokio::test(flavor = "multi_thread")]
 async fn service_events_chain_replay_returns_events_for_audit_chain() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:system/status", json!({})).await;
+    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
     // For service-run threads, chain_root_id == thread_id (see service_executor.rs).
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
@@ -343,14 +343,14 @@ async fn tool_fetch_resolves_known_service() {
     let (status, body) = exec(
         &h,
         "tool:ryeos/core/fetch",
-        json!({"item_ref": "service:system/status", "with_content": false, "verify": true}),
+        json!({"item_ref": "service:node/status", "with_content": false, "verify": true}),
     )
     .await;
     let result = unwrap_tool_result(status, &body, "fetch");
     let obj = result.as_object().expect("fetch returns object");
     assert_eq!(
         obj.get("item_ref").and_then(|v| v.as_str()),
-        Some("service:system/status")
+        Some("service:node/status")
     );
     assert_eq!(obj.get("kind").and_then(|v| v.as_str()), Some("service"));
     assert!(
@@ -373,13 +373,13 @@ async fn tool_fetch_with_content_includes_body() {
     let (status, body) = exec(
         &h,
         "tool:ryeos/core/fetch",
-        json!({"item_ref": "service:system/status", "with_content": true, "verify": false}),
+        json!({"item_ref": "service:node/status", "with_content": true, "verify": false}),
     )
     .await;
     let result = unwrap_tool_result(status, &body, "fetch with_content");
     assert_eq!(
         result.get("item_ref").and_then(|v| v.as_str()),
-        Some("service:system/status")
+        Some("service:node/status")
     );
 }
 
@@ -426,14 +426,14 @@ async fn tool_verify_returns_trusted_for_core_service() {
     let (status, body) = exec(
         &h,
         "tool:ryeos/core/verify",
-        json!({"item_ref": "service:system/status"}),
+        json!({"item_ref": "service:node/status"}),
     )
     .await;
     let result = unwrap_tool_result(status, &body, "verify");
     let obj = result.as_object().expect("verify returns object");
     assert_eq!(
         obj.get("item_ref").and_then(|v| v.as_str()),
-        Some("service:system/status")
+        Some("service:node/status")
     );
     let trust_class = obj
         .get("trust_class")
@@ -546,7 +546,7 @@ async fn service_maintenance_gc_real_run_writes_event_log() {
 async fn service_commands_submit_against_audit_thread() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     // First mint an audit thread by running a Both service.
-    let (_, body1) = exec(&h, "service:system/status", json!({})).await;
+    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
     let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
 
     let (status, body) = exec(

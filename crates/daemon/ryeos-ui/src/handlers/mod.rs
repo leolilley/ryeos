@@ -2,11 +2,12 @@
 
 use ryeos_api::registry::ServiceDescriptor;
 
-pub mod ui_actions_invoke;
 pub mod ui_dimension;
 pub mod ui_files;
 pub mod ui_gc;
 pub mod ui_graph_topology;
+pub mod ui_intents_apply;
+pub mod ui_invocations_dispatch;
 pub mod ui_items;
 pub mod ui_launch;
 pub mod ui_launch_mint;
@@ -22,7 +23,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
-    ui_actions_invoke::DESCRIPTOR,
+    ui_intents_apply::DESCRIPTOR,
+    ui_invocations_dispatch::DESCRIPTOR,
     ui_graph_topology::DESCRIPTOR,
     ui_dimension::DESCRIPTOR,
     ui_items::ITEMS_LIST_DESCRIPTOR,

@@ -9,18 +9,36 @@ use std::sync::Arc;
 
 use crate::transport::daemon::DaemonClient;
 
-pub type HintMessage = (String, serde_json::Value);
+#[derive(Debug)]
+pub enum SessionMessage {
+    Hint {
+        kind: String,
+        payload: serde_json::Value,
+    },
+    DaemonEvent {
+        payload: serde_json::Value,
+    },
+}
 
-/// Subscribe to the session event bus and forward hint kind plus payload.
-pub fn spawn_hint_listener(
+/// Subscribe to the session event bus and forward hints plus typed UI intents.
+pub fn spawn_session_listener(
     client: Arc<DaemonClient>,
-    tx: tokio::sync::mpsc::UnboundedSender<HintMessage>,
+    tx: tokio::sync::mpsc::UnboundedSender<SessionMessage>,
 ) {
     tokio::spawn(async move {
         let Ok(mut stream) = client.open_session_events().await else {
             return;
         };
         while let Some(frame) = stream.next_event().await {
+            if frame.event_type == "ui_intent.applied" {
+                let payload = serde_json::from_str::<serde_json::Value>(&frame.data)
+                    .unwrap_or(serde_json::Value::Null);
+                if tx.send(SessionMessage::DaemonEvent { payload }).is_err() {
+                    break;
+                }
+                continue;
+            }
+
             if frame.event_type == "message" || frame.event_type.ends_with(".hint") {
                 let Some((kind, payload)) = serde_json::from_str::<serde_json::Value>(&frame.data)
                     .ok()
@@ -32,7 +50,7 @@ pub fn spawn_hint_listener(
                 else {
                     continue;
                 };
-                if tx.send((kind, payload)).is_err() {
+                if tx.send(SessionMessage::Hint { kind, payload }).is_err() {
                     break;
                 }
             }

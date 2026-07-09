@@ -47,8 +47,8 @@ function activeOverlayState(vm) {
       label: item.primary || item.category || "",
       hint: item.secondary || item.meta || item.category || "",
       enabled: item.enabled !== false,
-      action: item.action,
-      secondary_action: item.secondary_action,
+      intent: item.intent,
+      secondary_intent: item.secondary_intent,
     })),
   };
 }

@@ -456,9 +456,9 @@ function sceneMap(scene, dispatchUi) {
     node.style.setProperty("--node-color", object.color || "#fabd2f");
     node.style.opacity = String(object.opacity ?? 1);
     if (object.kind === "link") node.style.width = `${Math.max(72, (object.scale?.[0] || 1) * 24)}px`;
-    node.disabled = !object.action;
+    node.disabled = !object.intent;
     node.append(textEl("strong", object.label || object.id), textEl("span", object.kind || "object"));
-    if (object.action) node.addEventListener("click", () => dispatchUi({ type: "activate", action: object.action }));
+    if (object.intent) node.addEventListener("click", () => dispatchUi({ type: "activate", intent: object.intent }));
     stage.append(node);
   }
   wrap.append(header, stage);
@@ -559,7 +559,7 @@ function atlasMap(atlas, dispatchUi, wrap = el("section", "ryeos-scene")) {
         dot.addEventListener("click", (event) => {
           event.stopPropagation();
           if (!item.canonical_ref) return;
-          dispatchUi({ type: "activate", action: { type: "inspect_item", canonical_ref: item.canonical_ref } });
+          dispatchUi({ type: "activate", intent: { type: "inspect_item", canonical_ref: item.canonical_ref } });
         });
         cluster.append(dot);
       }
@@ -642,14 +642,14 @@ function rows(items, kind, dispatchUi) {
     const row = el("button", `ryeos-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
     row.type = "button";
     row.dataset.rowIndex = String(index);
-    row.disabled = !item.action;
+    row.disabled = !item.intent;
     row.append(
       textEl("span", rowGlyph(item, kind), "ryeos-row-glyph"),
       textEl("strong", item.primary),
       textEl("span", item.secondary || ""),
       textEl("small", item.meta || ""),
     );
-    if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
+    if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
     list.append(row);
   });
   return list;
@@ -701,7 +701,7 @@ function tableRow(item, ncols, index, dispatchUi) {
   const row = el("button", `ryeos-table-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
   row.type = "button";
   row.dataset.rowIndex = String(index);
-  row.disabled = !item.action;
+  row.disabled = !item.intent;
   row.append(textEl("span", rowGlyph(item), "ryeos-table-glyph"));
   const cells = item.cells || [];
   // Per-cell tone overrides (parallel to cells; absent for tables whose
@@ -713,7 +713,7 @@ function tableRow(item, ncols, index, dispatchUi) {
     const tone = cellTones[i] && cellTones[i] !== "neutral" ? ` tone-${cellTones[i]}` : "";
     row.append(textEl("span", cells[i] || "", `ryeos-table-cell${i === 0 ? " lead" : ""}${tone}`));
   }
-  if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
+  if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
   return row;
 }
 
@@ -722,7 +722,7 @@ function tableRow(item, ncols, index, dispatchUi) {
 // indented; a collapsed section shows only its header, and its `count` still
 // reflects the hidden rows. Reference semantics live in the terminal's
 // widgets/sections.rs. Rows reuse the rows-widget renderer (RyeOsRowVm), so
-// tone glyph, primary/secondary/meta, and per-row actions come for free.
+// tone glyph, primary/secondary/meta, and per-row intents come for free.
 function sectionsView(viewVm, dispatchUi) {
   const wrap = el("section", "ryeos-sections");
   wrap.append(listHeader(viewVm.title || "sections", ""));

@@ -79,7 +79,7 @@ pub mod seat;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;
-pub mod system_status;
+pub mod node_status;
 pub mod threads_cancel;
 pub mod threads_chain;
 pub mod threads_children;
@@ -113,7 +113,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     federation_heads_list::DESCRIPTOR,
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
-    system_status::DESCRIPTOR,
+    node_status::DESCRIPTOR,
     system_routes::DESCRIPTOR,
     ingest_ignore::DESCRIPTOR,
     objects_has::DESCRIPTOR,
