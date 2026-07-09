@@ -93,6 +93,75 @@ const BREATHE: [f32; 16] = [
     0.30, 0.36, 0.45, 0.54, 0.62, 0.71, 0.80, 0.87, 0.92, 0.87, 0.80, 0.71, 0.62, 0.54, 0.45, 0.36,
 ];
 
+/// The scene ↔ cell projection, unified so the forward (object → cell)
+/// and inverse (cell → scene) mappings share one set of fields and can
+/// never drift apart. `screen_offset` is already in cells (the content
+/// fraction multiplied by the rect's width/height).
+struct SceneTransform {
+    rect: Rect,
+    scale: f32,
+    zoom: f32,
+    cell_aspect: f32,
+    center: (f32, f32),
+    camera_target: (f32, f32),
+    screen_offset: (f32, f32),
+}
+
+impl SceneTransform {
+    /// Forward-project a scene point to an unrounded (col, row), absolute
+    /// (including the rect origin) — the pre-round, pre-bounds-check body
+    /// of `to_cell`, and the basis `draw_fill`'s bbox culling projects
+    /// extent corners through.
+    fn to_cell_f(&self, x: f32, y: f32) -> (f32, f32) {
+        let w = self.rect.w as usize;
+        let h = self.rect.h as usize;
+        let sx = (x - self.camera_target.0 - self.center.0) * self.zoom;
+        // +y is up in scene space; rows grow downward, so flip.
+        let sy = (y - self.camera_target.1 - self.center.1) * self.zoom;
+        let col = self.rect.x as f32
+            + (w - 1) as f32 / 2.0
+            + self.screen_offset.0
+            + sx * self.scale * self.cell_aspect;
+        let row =
+            self.rect.y as f32 + (h - 1) as f32 / 2.0 + self.screen_offset.1 - sy * self.scale;
+        (col, row)
+    }
+
+    /// Forward-project a scene point to its cell, rounded and bounds-
+    /// checked against the rect — `None` off-rect.
+    fn to_cell(&self, p: [f32; 3]) -> Option<(usize, usize)> {
+        let w = self.rect.w as usize;
+        let h = self.rect.h as usize;
+        let (col, row) = self.to_cell_f(p[0], p[1]);
+        let col = col.round();
+        let row = row.round();
+        if col < self.rect.x as f32
+            || row < self.rect.y as f32
+            || col > (self.rect.x as usize + w - 1) as f32
+            || row > (self.rect.y as usize + h - 1) as f32
+        {
+            return None;
+        }
+        Some((col as usize, row as usize))
+    }
+
+    /// Inverse-project a rect-local cell (as `draw_fill`'s loop indexes
+    /// it, before the `rect.x`/`rect.y` draw offset) to scene coordinates.
+    fn to_scene(&self, col: usize, row: usize) -> (f32, f32) {
+        let w = self.rect.w as usize;
+        let h = self.rect.h as usize;
+        let x = (col as f32 - (w - 1) as f32 / 2.0 - self.screen_offset.0)
+            / (self.scale * self.cell_aspect * self.zoom)
+            + self.center.0
+            + self.camera_target.0;
+        let y = ((h - 1) as f32 / 2.0 + self.screen_offset.1 - row as f32)
+            / (self.scale * self.zoom)
+            + self.center.1
+            + self.camera_target.1;
+        (x, y)
+    }
+}
+
 pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel) {
     let w = rect.w as usize;
     let h = rect.h as usize;
@@ -123,23 +192,16 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel
     let center_y = (bounds.min_y + bounds.max_y) / 2.0;
     let screen_col_offset = scene.screen_offset[0] * w as f32;
     let screen_row_offset = scene.screen_offset[1] * h as f32;
-    let project = |position: [f32; 3]| -> Option<(usize, usize)> {
-        let x = (position[0] - scene.camera.target[0] - center_x) * zoom;
-        // +y is up in scene space; rows grow downward, so flip.
-        let y = (position[1] - scene.camera.target[1] - center_y) * zoom;
-        let col =
-            (rect.x as f32 + (w - 1) as f32 / 2.0 + screen_col_offset + x * scale * CELL_ASPECT)
-                .round();
-        let row = (rect.y as f32 + (h - 1) as f32 / 2.0 + screen_row_offset - y * scale).round();
-        if col < rect.x as f32
-            || row < rect.y as f32
-            || col > (rect.x as usize + w - 1) as f32
-            || row > (rect.y as usize + h - 1) as f32
-        {
-            return None;
-        }
-        Some((col as usize, row as usize))
+    let transform = SceneTransform {
+        rect,
+        scale,
+        zoom,
+        cell_aspect: CELL_ASPECT,
+        center: (center_x, center_y),
+        camera_target: (scene.camera.target[0], scene.camera.target[1]),
+        screen_offset: (screen_col_offset, screen_row_offset),
     };
+    let project = |position: [f32; 3]| -> Option<(usize, usize)> { transform.to_cell(position) };
 
     // Energy quickens the whole scene: pacing multiplier for the breathe
     // steps and the sweep traversal.
@@ -160,18 +222,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel
     // (edges, motes, and text draw over them).
     for object in &scene.objects {
         if matches!(object.kind, RyeOsSceneObjectKind::Fill) {
-            draw_fill(
-                surface,
-                rect,
-                scene,
-                object,
-                scale,
-                CELL_ASPECT,
-                (center_x, center_y),
-                zoom,
-                sweep_band,
-                pace,
-            );
+            draw_fill(surface, rect, scene, object, &transform, sweep_band, pace);
         }
     }
 
@@ -375,6 +426,10 @@ fn particle_cell(
         * object.opacity.clamp(0.1, 1.0)
         * reveal
         * (0.55 + 0.45 * depth.clamp(0.0, 1.0));
+    // Quantized so a cell's blended color is byte-stable across frames
+    // the particle doesn't actually move in — the diff renderer can skip
+    // it.
+    let intensity = (intensity * 12.0).round() / 12.0;
 
     // Intensity walks the whole ramp; size biases the walk upward. A big
     // large body diamond breathes `◈` ↔ `◆`, a mid facet edge `⋄` ↔ `◇`,
@@ -410,10 +465,7 @@ fn draw_fill(
     rect: Rect,
     scene: &RyeOsSceneModel,
     object: &RyeOsSceneObjectVm,
-    scale: f32,
-    cell_aspect: f32,
-    center: (f32, f32),
-    zoom: f32,
+    transform: &SceneTransform,
     sweep_band: Option<(f32, f32)>,
     pace: u64,
 ) {
@@ -436,23 +488,58 @@ fn draw_fill(
         .rem_euclid(360.0) as f32)
         .to_radians();
     // One cell's width in scene units: the anti-alias band.
-    let soft = 1.0 / (scale * cell_aspect * zoom).max(0.001);
+    let soft = 1.0 / (transform.scale * transform.cell_aspect * transform.zoom).max(0.001);
     let ramp = ramp_for(object);
     let noise_amp = 0.10 + 0.12 * energy;
     let opacity = object.opacity.clamp(0.0, 1.0) * reveal_multiplier(object, scene, pace);
     let (position, _depth) = orbited_position(object, scene, pace);
 
-    for row in 0..h {
-        for col in 0..w {
-            // Inverse of `project`: cell → scene coordinates.
-            let x = (col as f32 - (w - 1) as f32 / 2.0 - scene.screen_offset[0] * w as f32)
-                / (scale * cell_aspect * zoom)
-                + center.0
-                + scene.camera.target[0];
-            let y = ((h - 1) as f32 / 2.0 + scene.screen_offset[1] * h as f32 - row as f32)
-                / (scale * zoom)
-                + center.1
-                + scene.camera.target[1];
+    // Bounding box: the object's scene-space extent (tightened by its
+    // clip window), projected to the cell grid and padded by the AA band
+    // so no silhouette cell is skipped — only cells that can only ever
+    // read as empty.
+    let half_x = object.scale[0];
+    // A sphere's vertical reach is its radius (`scale[0]`), whatever its
+    // other scale components say — the max covers both shapes.
+    let reach = (object.scale[1] + object.scale[2]).max(object.scale[0]);
+    let (mut min_x, mut max_x) = (position[0] - half_x, position[0] + half_x);
+    let (mut min_y, mut max_y) = (position[1] - reach, position[1] + reach);
+    if let Some(clip) = object.clip {
+        if let Some(x_min) = clip.x_min {
+            min_x = position[0] + x_min.max(-half_x);
+        }
+        if let Some(x_max) = clip.x_max {
+            max_x = position[0] + x_max.min(half_x);
+        }
+        if let Some(y_min) = clip.y_min {
+            min_y = position[1] + y_min.max(-reach);
+        }
+        if let Some(y_max) = clip.y_max {
+            max_y = position[1] + y_max.min(reach);
+        }
+    }
+    let (col_a, row_a) = transform.to_cell_f(min_x, min_y);
+    let (col_b, row_b) = transform.to_cell_f(max_x, max_y);
+    const PAD: f32 = 2.0;
+    let col_lo = col_a.min(col_b) - PAD;
+    let col_hi = col_a.max(col_b) + PAD;
+    let row_lo = row_a.min(row_b) - PAD;
+    let row_hi = row_a.max(row_b) + PAD;
+    if col_hi < rect.x as f32
+        || col_lo > (rect.x as usize + w - 1) as f32
+        || row_hi < rect.y as f32
+        || row_lo > (rect.y as usize + h - 1) as f32
+    {
+        return;
+    }
+    let col_start = (col_lo - rect.x as f32).floor().max(0.0) as usize;
+    let col_end = ((col_hi - rect.x as f32).ceil().min(w as f32 - 1.0)).max(0.0) as usize;
+    let row_start = (row_lo - rect.y as f32).floor().max(0.0) as usize;
+    let row_end = ((row_hi - rect.y as f32).ceil().min(h as f32 - 1.0)).max(0.0) as usize;
+
+    for row in row_start..=row_end {
+        for col in col_start..=col_end {
+            let (x, y) = transform.to_scene(col, row);
             let lx = x - position[0];
             let ly = y - position[1];
             if !local_clip_allows(object, lx, ly) {
@@ -491,6 +578,10 @@ fn draw_fill(
                 + (noise - 0.5) * noise_amp)
                 .clamp(0.0, 1.0)
                 * opacity;
+            // Quantized so a cell's blended color is byte-stable across
+            // frames the shape doesn't actually move in — the diff
+            // renderer can skip it.
+            let density = (density * 12.0).round() / 12.0;
             if density < 0.04 {
                 continue;
             }
@@ -552,10 +643,21 @@ fn local_cutout_blocks(
         }
         let x = lx - cutout.position[0];
         let y = ly - cutout.position[1];
+        let shape = cutout.shape.as_deref();
+        // Bbox precheck against the declared scale (amount ≤ 1 only
+        // shrinks, so the declared scale always bounds the hole): skip
+        // the SDF entirely outside it.
+        let (half_x, half_y) = match shape {
+            Some("sphere") => (cutout.scale[0], cutout.scale[0]),
+            _ => (cutout.scale[0], cutout.scale[1] + cutout.scale[2]),
+        };
+        if x.abs() > half_x || y.abs() > half_y {
+            return false;
+        }
         let sx = cutout.scale[0] * amount;
         let sy = cutout.scale[1] * amount;
         let sz = cutout.scale[2] * amount;
-        let (sd, _) = match cutout.shape.as_deref() {
+        let (sd, _) = match shape {
             Some("sphere") => sphere_sample(sx, x, y, light_az),
             _ => prism_sample(sx, sy, sz, x, y, light_az, spin),
         };

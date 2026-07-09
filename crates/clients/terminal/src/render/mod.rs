@@ -50,7 +50,9 @@ impl RyeOsTerminalRenderer {
         height: u16,
     ) -> std::io::Result<()> {
         let surface = build_surface(vm, width as usize, height as usize);
-        render_text::render_text_surface(stdout, &surface, &mut self.prev, 0, 0)
+        render_text::render_text_surface(stdout, &surface, self.prev.as_ref(), 0, 0)?;
+        self.prev = Some(surface);
+        Ok(())
     }
 }
 
