@@ -1160,7 +1160,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         for method in [
             // V5.2 removed catalog methods
-            "system.status",
+            "node.status",
             "identity.public_key",
             "threads.get",
             "threads.list",

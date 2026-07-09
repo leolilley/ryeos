@@ -33,7 +33,7 @@ impl RyeOsCore {
 
         if matches!(
             result.kind,
-            RyeOsEffectResultKind::ActionInvocation
+            RyeOsEffectResultKind::InvocationDispatch
                 | RyeOsEffectResultKind::ThreadCommandSubmitted
                 | RyeOsEffectResultKind::Invoked
         ) {
@@ -53,7 +53,7 @@ impl RyeOsCore {
         self.apply_source_result(&expected, result.kind, result.id, data)
     }
 
-    /// The command-result arms (`ActionInvocation` / `ThreadCommandSubmitted` /
+    /// The command-result arms (`InvocationDispatch` / `ThreadCommandSubmitted` /
     /// `Invoked`) — a synthetic-`Null`-defaulted body that always resolves to a
     /// notice plus a refresh, never to the parse-and-store path.
     fn apply_invocation_result(
@@ -63,7 +63,7 @@ impl RyeOsCore {
         data: serde_json::Value,
     ) -> Vec<RyeOsEffect> {
         match kind {
-            RyeOsEffectResultKind::ActionInvocation => {
+            RyeOsEffectResultKind::InvocationDispatch => {
                 self.notice(effect_success_notice(expected, &data), RyeOsTone::Good);
                 vec![
                     self.emit(RyeOsEffectKind::FetchDimension),
@@ -292,7 +292,7 @@ impl RyeOsCore {
                     core.data.topology = Some(topology);
                 });
             }
-            RyeOsEffectResultKind::ActionInvocation
+            RyeOsEffectResultKind::InvocationDispatch
             | RyeOsEffectResultKind::ThreadCommandSubmitted
             | RyeOsEffectResultKind::Invoked => {
                 unreachable!("command results are handled before optional data extraction")
@@ -512,9 +512,9 @@ const REFUSED_NOTICE: &str = "Delivery refused.";
 
 fn effect_success_notice(expected: &RyeOsEffectKind, data: &serde_json::Value) -> String {
     match expected {
-        RyeOsEffectKind::InvokeAction { command_id, .. } => {
+        RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
             let item_ref =
-                json_field_text(data, &["command_id"]).unwrap_or_else(|| command_id.clone());
+                json_field_text(data, &["target", "ref"]).unwrap_or_else(|| item_ref.clone());
             format!("Ran {item_ref}.")
         }
         RyeOsEffectKind::SubmitThreadCommand {
@@ -531,8 +531,8 @@ fn effect_failure_notice(expected: &RyeOsEffectKind, error: Option<&str>) -> Str
         .and_then(effect_error_summary)
         .unwrap_or_else(|| "RyeOS platform effect failed".to_string());
     match expected {
-        RyeOsEffectKind::InvokeAction { command_id, .. } => {
-            format!("Run {command_id} failed: {reason}")
+        RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
+            format!("Run {item_ref} failed: {reason}")
         }
         RyeOsEffectKind::SubmitThreadCommand {
             thread_id,
@@ -633,8 +633,8 @@ fn effect_result_kind_matches(expected: &RyeOsEffectKind, actual: &RyeOsEffectRe
             RyeOsEffectKind::ReadFile { .. },
             RyeOsEffectResultKind::FileRead
         ) | (
-            RyeOsEffectKind::InvokeAction { .. },
-            RyeOsEffectResultKind::ActionInvocation
+            RyeOsEffectKind::DispatchInvocation { .. },
+            RyeOsEffectResultKind::InvocationDispatch
         ) | (
             RyeOsEffectKind::SubmitThreadCommand { .. },
             RyeOsEffectResultKind::ThreadCommandSubmitted
@@ -663,7 +663,7 @@ fn effect_depends_on_project_binding(kind: &RyeOsEffectKind) -> bool {
             | RyeOsEffectKind::FetchFileSpace { .. }
             | RyeOsEffectKind::ListFiles { .. }
             | RyeOsEffectKind::ReadFile { .. }
-            | RyeOsEffectKind::InvokeAction { .. }
+            | RyeOsEffectKind::DispatchInvocation { .. }
     )
 }
 
@@ -979,7 +979,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenProject {
+                intent: RyeOsUiIntent::OpenProject {
                     local_id: "prj_1".to_string(),
                 },
             },
@@ -1032,7 +1032,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::AddCurrentProject,
+                intent: RyeOsUiIntent::AddCurrentProject,
             },
         });
         assert!(matches!(
@@ -1224,11 +1224,11 @@ mod tests {
     }
 
     #[test]
-    fn action_invocation_result_notices_and_refreshes() {
+    fn invocation_dispatch_result_notices_and_refreshes() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1243,10 +1243,10 @@ mod tests {
             result: RyeOsEffectResult {
                 id: invoke_id,
                 ok: true,
-                kind: RyeOsEffectResultKind::ActionInvocation,
+                kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: Some(serde_json::json!({
                     "status": "executed",
-                    "command_id": "tool:demo/run",
+                    "target": { "kind": "ref", "ref": "tool:demo/run" },
                     "invocation_id": "inv-1"
                 })),
                 error: None,
@@ -1267,11 +1267,11 @@ mod tests {
     }
 
     #[test]
-    fn action_invocation_failure_names_item_and_structured_error() {
+    fn invocation_dispatch_failure_names_item_and_structured_error() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1286,10 +1286,10 @@ mod tests {
             result: RyeOsEffectResult {
                 id: invoke_id,
                 ok: false,
-                kind: RyeOsEffectResultKind::ActionInvocation,
+                kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: None,
                 error: Some(
-                    "/ui/api/actions/invoke: 500 {\"message\":\"capability denied\"}".to_string(),
+                    "/ui/api/invocations/dispatch: 500 {\"message\":\"capability denied\"}".to_string(),
                 ),
             },
         });
@@ -1302,11 +1302,11 @@ mod tests {
     }
 
     #[test]
-    fn action_invocation_success_without_body_still_notices_and_refreshes() {
+    fn invocation_dispatch_success_without_body_still_notices_and_refreshes() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1321,7 +1321,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: invoke_id,
                 ok: true,
-                kind: RyeOsEffectResultKind::ActionInvocation,
+                kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: None,
                 error: None,
             },
@@ -1465,7 +1465,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         let old = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ReadFile {
+                intent: RyeOsUiIntent::ReadFile {
                     root: "project_ai".to_string(),
                     path: "README.md".to_string(),
                 },
@@ -1473,7 +1473,7 @@ mod tests {
         });
         let new = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ReadFile {
+                intent: RyeOsUiIntent::ReadFile {
                     root: "user_ai".to_string(),
                     path: "README.md".to_string(),
                 },
@@ -1522,7 +1522,7 @@ mod tests {
         seed_view(&mut core, "view:ryeos/items/space");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },

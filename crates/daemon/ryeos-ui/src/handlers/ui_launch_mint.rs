@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn launch_sessions_only_grant_ui_read() {
-        // `ui.actions.invoke` may execute a canonical item ref using a durable
+        // `ui.invocations.dispatch` may execute a canonical item ref using a durable
         // session principal, so browser launch sessions must not silently grow
         // execution capabilities. Surface affordances remain the UI contract;
         // this is the daemon-side backstop that keeps cookie-authenticated

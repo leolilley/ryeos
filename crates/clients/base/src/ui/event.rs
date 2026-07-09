@@ -15,7 +15,7 @@ pub enum RyeOsFilterField {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RyeOsAction {
+pub enum RyeOsUiIntent {
     Refresh,
     /// Run a content-declared affordance against a projected row: the
     /// ONE generic row interaction. The engine resolves the binding's
@@ -143,7 +143,7 @@ pub enum RyeOsAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiEvent {
     Activate {
-        action: RyeOsAction,
+        intent: RyeOsUiIntent,
     },
     SetFilter {
         tile_id: String,

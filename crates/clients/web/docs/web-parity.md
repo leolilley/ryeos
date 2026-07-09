@@ -32,7 +32,7 @@ in a TTY); the core still receives a well-formed effect result.
 | `list_files` | fetch | daemon fetch |
 | `fetch_file_space` | fetch | daemon fetch |
 | `read_file` | fetch | daemon fetch |
-| `invoke_action` | fetch | daemon fetch |
+| `dispatch_invocation` | fetch | daemon fetch |
 | `cancel_thread` | fetch | daemon fetch |
 | `invoke` | fetch | daemon fetch |
 | `set_location_hash` | `location.hash` (browser-only) | null result (no hash in TTY) |

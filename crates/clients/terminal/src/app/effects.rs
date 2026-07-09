@@ -105,7 +105,13 @@ async fn effect_data(
         RyeOsEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/ryeos-ui/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         RyeOsEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/ryeos-ui/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
         RyeOsEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/ryeos-ui/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        RyeOsEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
+        RyeOsEffectKind::DispatchInvocation { item_ref, params } => client.signed_post(
+            "/ui/api/invocations/dispatch",
+            &serde_json::json!({
+                "target": { "kind": "ref", "ref": item_ref },
+                "params": params,
+            }),
+        ).await,
         RyeOsEffectKind::SubmitThreadCommand { thread_id, command_type } => {
             // Steer the head thread through the shared control channel. Authority
             // == the CLI's `commands submit`; see .tmp/thread-authorization-review.md
@@ -182,7 +188,7 @@ fn result_kind_for(kind: &RyeOsEffectKind) -> RyeOsEffectResultKind {
         RyeOsEffectKind::ListFiles { .. } => RyeOsEffectResultKind::FilesList,
         RyeOsEffectKind::FetchFileSpace { .. } => RyeOsEffectResultKind::FileSpace,
         RyeOsEffectKind::ReadFile { .. } => RyeOsEffectResultKind::FileRead,
-        RyeOsEffectKind::InvokeAction { .. } => RyeOsEffectResultKind::ActionInvocation,
+        RyeOsEffectKind::DispatchInvocation { .. } => RyeOsEffectResultKind::InvocationDispatch,
         RyeOsEffectKind::SubmitThreadCommand { .. } => {
             RyeOsEffectResultKind::ThreadCommandSubmitted
         }

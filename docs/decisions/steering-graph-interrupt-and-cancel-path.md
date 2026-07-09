@@ -100,26 +100,10 @@ operator-facing affordance and the launcher now share the one path.
 
 - `service:threads/cancel` stays as the raw core cancel (CLI `thread cancel`,
   and the delegate target of the ryeos-ui shim). Not a ryeos-ui affordance.
-- `service:ui/ryeos-ui/thread/cancel` still backs the Esc / head-interrupt path:
-  `RyeOsUiEvent::InterruptHead` → `RyeOsAction::CancelThread` →
-  `RyeOsEffectKind::CancelThread` → the terminal executor's
-  `/ui/api/ryeos-ui/thread/cancel` mapping. This is a client-internal typed effect,
-  not the operator affordance, and semantically it too is a head cancel.
-
-### Follow-up (needs files outside this branch's ownership)
-
-Collapsing the Esc path onto `commands/submit` as well — so
-`service:ui/ryeos-ui/thread/cancel` and the `CancelThread` /
-`ThreadCancelled` effect family can be deleted outright — is a clean negative
-diff, but it touches files this branch does not own: `reducer/mod.rs`
-(`InterruptHead` should dispatch `SubmitThreadCommand { Cancel }`; drop the
-`CancelThread` action handler), `event.rs` (`RyeOsAction::CancelThread`),
-`effect.rs` (`RyeOsEffectKind::CancelThread` + `RyeOsEffectResultKind::ThreadCancelled`),
-`reducer/effect_results.rs` (the `ThreadCancelled` arms — this branch owns this
-file, but the removal is only valid as part of the cross-file switch),
-`clients/terminal/src/app/effects.rs` and `clients/web/pkg/ryeos_effects.js`
-(the executor mappings), plus the `CancelThread` tests in `mod.rs` /
-`effect_results.rs`. Booked for a follow-up that owns the effect family.
+- `service:ui/ryeos-ui/thread/cancel` is no longer a client effect target. The
+  client reducer rejects the removed `cancel_thread` effect wire form; operator
+  cancel flows through `SubmitThreadCommand { command_type: "cancel" }` and the
+  shared command-submit path.
 
 ## Republish
 

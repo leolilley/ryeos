@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-08T06:03:18Z:83a512c246eb7d0020e6aa0a0be16afa9e4c12d14827605f9b043d095d87c9f9:cb4zdKUFzFZiyDi5qh8GCYZMNFcfVGGAut/o5x/zZ/5oQqXuA/3Ngxc0yR1/Vw/qrITMXv0EE6oTstcy33RNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T02:07:24Z:81bc10b0d08c32d573037c83177170de4ea4b4db15efd4e0d1a6cf57ea460ffe:6wH5QKQLLnFO4cXPxRDExPKw0ous0AU8YhmWm8lQqIz6M6X4ZR+Sw4U4FPrJdVBCBLmEwZpkqhFBF8snJLchAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 version: "1.0.0"
 description: RyeOS UI home space
@@ -59,7 +58,7 @@ overlays:
   shortcuts:
     title: Shortcuts
     widget: table
-    columns: [Keys, Action]
+    columns: [Keys, Intent]
     source: { ref: "runtime:shortcuts" }
     hint: "type to filter shortcuts · esc to close"
 

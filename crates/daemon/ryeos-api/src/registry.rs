@@ -74,12 +74,12 @@ mod tests {
     #[test]
     fn extract_endpoint_from_metadata() {
         let mut extra = HashMap::new();
-        extra.insert("endpoint".to_string(), serde_json::json!("system.status"));
+        extra.insert("endpoint".to_string(), serde_json::json!("node.status"));
         extra.insert(
             "required_caps".to_string(),
             serde_json::json!(["system.read"]),
         );
-        assert_eq!(extract_endpoint(&extra).unwrap(), "system.status");
+        assert_eq!(extract_endpoint(&extra).unwrap(), "node.status");
     }
 
     #[test]

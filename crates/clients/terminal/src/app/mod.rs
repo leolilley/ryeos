@@ -106,8 +106,9 @@ pub async fn run(
     // Session hints: transient "look" signals; bound views declaring
     // `refresh.on_hint` refetch their sources. This replaces polling —
     // content decides its own liveness.
-    let (hint_tx, mut hint_rx) = tokio::sync::mpsc::unbounded_channel::<hints::HintMessage>();
-    hints::spawn_hint_listener(client.clone(), hint_tx.clone());
+    let (session_tx, mut session_rx) =
+        tokio::sync::mpsc::unbounded_channel::<hints::SessionMessage>();
+    hints::spawn_session_listener(client.clone(), session_tx.clone());
 
     let mut events = EventStream::new();
     // Adaptive frame clock: the backdrop's breathe/sweep animation reads
@@ -209,11 +210,20 @@ pub async fn run(
                     dirty = true;
                 }
             }
-            Some((kind, payload)) = hint_rx.recv() => {
-                let effects = core.note_hint(&kind, &payload);
-                if !effects.is_empty() {
-                    dispatch_effects(&mut core, &client, effects).await;
-                    dirty = true;
+            Some(message) = session_rx.recv() => {
+                match message {
+                    hints::SessionMessage::Hint { kind, payload } => {
+                        let effects = core.note_hint(&kind, &payload);
+                        if !effects.is_empty() {
+                            dispatch_effects(&mut core, &client, effects).await;
+                            dirty = true;
+                        }
+                    }
+                    hints::SessionMessage::DaemonEvent { payload } => {
+                        let effects = core.dispatch(RyeOsEvent::DaemonEvent { payload });
+                        dispatch_effects(&mut core, &client, effects).await;
+                        dirty = true;
+                    }
                 }
             }
             Some(bootstrap) = seat_rx.recv() => {

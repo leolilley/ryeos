@@ -1,0 +1,8 @@
+# ryeos:signed:2026-07-09T01:14:05Z:5dc60e396b3ecdf7c9bb79ca5a7b706dc08107c25be1d9a31db4821322b2b262:Z9ftq0upduWcc5g1nMzsiqFKAsNZzFVM/aIsHiBidrUlXBiAP3EalJa9BmTP9SZAIyywQuUWIJLaBFirRI1IDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: intents/apply
+version: "1.0.0"
+description: Apply allowlisted local UI intents to a Rye OS UI session.
+endpoint: ui.intents.apply
+availability: daemon
+required_caps: []

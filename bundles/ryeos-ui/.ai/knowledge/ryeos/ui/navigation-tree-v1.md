@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-08T01:26:03Z:e6e3919eb4f4eabc74b977f8c3cd9aabd8950f0fa8050dd84b92c65894729605:UGvAFtz2Wa8oF66POSQkPSGkhcFWJD+FeFEe9g/TBmqN51aUbPFTzbt0f6ZEY3L4EMH0UiCnKpIj8ZTRx563Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-09T01:23:50Z:f037b01dc4ec84c4c0d25acce18b34a9ccafe6368486c3da6ad33589999d5551:vm3WI5erEWX20gNjsPgV3FAPqzoRPxQfHVr2Vs/2MpH0YuG7cZhJKZ0rvpWqCDIV28Y0EevX1+4KUCiGluMfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -334,7 +334,7 @@ and receipts are lenses over the same durable event braid.
 
 `view:ryeos/thread/chat` is the planned driving lens. It groups turns, keeps
 tool calls collapsed, shows artifact chips, and exposes steer/interrupt/continue
-actions. It should feel close to a chat interface while staying explicitly
+intents. It should feel close to a chat interface while staying explicitly
 routed to a thread. Do not surface this ref until its widget/source contract
 exists.
 

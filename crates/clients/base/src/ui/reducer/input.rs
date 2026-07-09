@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn editing_a_live_filter_resets_the_table_cursor_to_the_top() {
-        use crate::ui::view_model::action_for_focused_row;
+        use crate::ui::view_model::intent_for_focused_row;
         use crate::workspace::ViewLocalState;
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
@@ -690,8 +690,8 @@ mod tests {
             key.clone(),
             serde_json::json!({ "threads": [ { "thread_id": "T-only" } ] }),
         );
-        match action_for_focused_row(&core).expect("first narrowed row activates") {
-            RyeOsAction::InvokeAffordance { record, .. } => {
+        match intent_for_focused_row(&core).expect("first narrowed row activates") {
+            RyeOsUiIntent::InvokeAffordance { record, .. } => {
                 assert_eq!(record["thread_id"], "T-only")
             }
             other => panic!("expected affordance invoke, got {other:?}"),

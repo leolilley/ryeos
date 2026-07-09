@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:9a15cf731bd00f3f08371ee27af632d2bc578eff51e7a67c10bedacaf6ec595e:zXmo83TwcVX08gQ65KBIJPaaa1r/Ux1PQAcFnnLFvUK/uQrl9DxwPN30LNLk3iU2sf6/0kOmtHLZxH5af515BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T01:23:50Z:9e59a37982105ee0683f795a93c68391fe10a4006acdcfa19b3f6c74d317c52e:wpBMsmumBefcbo9i1JslR4RUfem6o+SUCIHrMlhrYA5CWOafpIuBvZKxmLzZVzKqxXS1GT94kuAZKeJTupUEBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: client
 name: web
 version: "1.0.0"
@@ -14,7 +14,7 @@ launch:
   args:
     surface: "--surface"
     read_only: "--read-only"
-    allow_actions: "--allow-actions"
+    allow_intents: "--allow-intents"
     print_url: "--print-url"
     no_open: "--no-open"
     hosted_principal: "--hosted-principal"

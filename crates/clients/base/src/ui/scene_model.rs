@@ -5,7 +5,7 @@ use crate::atlas::{
     AtlasItemInput, AtlasProjectionVm, AtlasUiStateVm, NamespaceAtlasVm,
 };
 
-use super::event::RyeOsAction;
+use super::event::RyeOsUiIntent;
 use super::view_model::RyeOsTone;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,7 +67,7 @@ pub struct RyeOsSceneObjectVm {
     pub label: Option<String>,
     pub tone: RyeOsTone,
     pub selected: bool,
-    pub action: Option<RyeOsAction>,
+    pub intent: Option<RyeOsUiIntent>,
     /// Named glyph ramp the renderer draws this object's cells from
     /// (`"diamond"` for facet geometry; absent = the default dot ramp).
     /// A ramp NAME is generic widget vocabulary like a tone — which
@@ -387,7 +387,7 @@ pub fn build_scene_model(
                 tone_for_topology(&node.kind, node.missing, node.trust.as_ref()),
             );
             object.opacity = if node.missing { 0.45 } else { 0.86 };
-            object.action = Some(RyeOsAction::InspectSummary {
+            object.intent = Some(RyeOsUiIntent::InspectSummary {
                 title: format!("Topology: {label}"),
                 detail,
             });
@@ -418,7 +418,7 @@ pub fn build_scene_model(
                 RyeOsTone::Neutral,
             );
             object.opacity = 0.34;
-            object.action = Some(RyeOsAction::InspectSummary {
+            object.intent = Some(RyeOsUiIntent::InspectSummary {
                 title: format!("Topology edge: {label}"),
                 detail: serde_json::json!({
                     "id": edge.id,
@@ -839,7 +839,7 @@ fn scene_object(
         label,
         tone,
         selected: false,
-        action: None,
+        intent: None,
         glyph: None,
         end: None,
         shape: None,
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(node.kind, RyeOsSceneObjectKind::ItemCluster);
         assert_eq!(node.label.as_deref(), Some("run"));
         assert_eq!(node.tone, RyeOsTone::Good);
-        let Some(RyeOsAction::InspectSummary { detail, .. }) = &node.action else {
+        let Some(RyeOsUiIntent::InspectSummary { detail, .. }) = &node.intent else {
             panic!("topology node should inspect summary")
         };
         assert_eq!(detail["status"]["executable"], true);
@@ -1167,7 +1167,7 @@ mod tests {
         assert_eq!(edge.kind, RyeOsSceneObjectKind::Link);
         assert_eq!(edge.label.as_deref(), Some("uses"));
         assert!(edge.scale[0] > 0.2);
-        let Some(RyeOsAction::InspectSummary { detail, .. }) = &edge.action else {
+        let Some(RyeOsUiIntent::InspectSummary { detail, .. }) = &edge.intent else {
             panic!("topology edge should inspect summary")
         };
         assert_eq!(detail["source"]["field"], "context");

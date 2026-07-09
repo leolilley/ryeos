@@ -275,14 +275,19 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let headers = self.sign("GET", path, b"")?;
 
-        let resp = self
+        let mut req = self
             .http
             .get(&url)
             .header("accept", "text/event-stream")
             .header("x-ryeos-key-id", &headers.key_id)
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
-            .header("x-ryeos-signature", &headers.signature)
+            .header("x-ryeos-signature", &headers.signature);
+        if let Some(cookie) = self.ui_cookie(path) {
+            req = req.header("cookie", cookie);
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| CliTransportError::Unreachable {

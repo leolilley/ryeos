@@ -128,10 +128,10 @@ async fn read_only_actions_allow_session_local_seat_services() {
         .mint_token(session_context(None));
     let ctx = handler_context(&session_id);
 
-    let result = (ryeos_ui::handlers::ui_actions_invoke::DESCRIPTOR.handler)(
+    let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "command_id": "service:ui/seat/open",
-            "args": { "surface_ref": "surface:ryeos/ui/base" }
+            "target": { "kind": "ref", "ref": "service:ui/seat/open" },
+            "params": { "surface_ref": "surface:ryeos/ui/base" }
         }),
         ctx,
         Arc::new(state),

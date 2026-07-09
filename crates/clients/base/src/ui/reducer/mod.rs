@@ -1,7 +1,7 @@
 //! RyeOs reducer: the single dispatch over `RyeOsCore`.
 //!
 //! `RyeOsCore::dispatch` is the one public entry; it fans out to the UI and
-//! action routers here, then to the concern-cluster modules. State is genuinely
+//! intent routers here, then to the concern-cluster modules. State is genuinely
 //! shared across clusters (`open_view` touches workspace + seat + data), so the
 //! dispatch is not sliced — the split is by concern, not by state ownership, and
 //! `RyeOsCore`'s public API is unchanged.
@@ -25,11 +25,12 @@ mod test_support;
 mod tiles;
 
 use super::effect::{RyeOsEffect, RyeOsEffectKind};
-use super::event::{RyeOsAction, RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent};
+use super::event::{RyeOsUiIntent, RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent};
 use super::model::RyeOsCore;
-use super::view_model::{action_for_focused_row, RyeOsMotionEventVm, RyeOsTone};
+use super::view_model::{intent_for_focused_row, RyeOsMotionEventVm, RyeOsTone};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
 use crate::workspace::ViewSpec;
+use serde::Deserialize;
 
 impl RyeOsCore {
     pub fn dispatch(&mut self, event: RyeOsEvent) -> Vec<RyeOsEffect> {
@@ -46,7 +47,7 @@ impl RyeOsCore {
             }
             RyeOsEvent::Ui { event } => self.dispatch_ui(event),
             RyeOsEvent::EffectResult { result } => self.apply_effect_result(result),
-            RyeOsEvent::DaemonEvent { payload: _ } => self.initial_effects(),
+            RyeOsEvent::DaemonEvent { payload } => self.apply_daemon_event(payload),
             RyeOsEvent::ThreadTail {
                 thread_id,
                 event_type,
@@ -86,9 +87,38 @@ impl RyeOsCore {
         }
     }
 
+    fn apply_daemon_event(&mut self, payload: serde_json::Value) -> Vec<RyeOsEffect> {
+        match decode_ui_intent_applied(payload) {
+            UiIntentDecode::Known(intent) => self.apply_ui_intent_applied(intent),
+            UiIntentDecode::Unsupported => self.initial_effects(),
+            UiIntentDecode::NotUiIntent => self.initial_effects(),
+        }
+    }
+
+    fn apply_ui_intent_applied(&mut self, intent: AppliedUiIntent) -> Vec<RyeOsEffect> {
+        match intent {
+            AppliedUiIntent::OpenView { view } => self.open_view(view),
+            AppliedUiIntent::OpenOverlay { overlay_id, query } => {
+                let mut effects = self.dispatch_ui(RyeOsUiEvent::OpenOverlay { overlay_id });
+                if let Some(query) = query {
+                    effects.extend(self.dispatch_ui(RyeOsUiEvent::SetOverlayQuery { query }));
+                }
+                effects
+            }
+            AppliedUiIntent::CloseOverlay => self.dispatch_ui(RyeOsUiEvent::CloseOverlay),
+            AppliedUiIntent::SetOverlayQuery { query } => {
+                self.dispatch_ui(RyeOsUiEvent::SetOverlayQuery { query })
+            }
+            AppliedUiIntent::FocusInput => self.dispatch_ui(RyeOsUiEvent::FocusInput),
+            AppliedUiIntent::FocusView { tile_id } => self.dispatch_ui(RyeOsUiEvent::FocusChanged {
+                target: Some(tile_id),
+            }),
+        }
+    }
+
     pub(crate) fn dispatch_ui(&mut self, event: RyeOsUiEvent) -> Vec<RyeOsEffect> {
         match event {
-            RyeOsUiEvent::Activate { action } => self.dispatch_action(action),
+            RyeOsUiEvent::Activate { intent } => self.dispatch_intent(intent),
             RyeOsUiEvent::SetFilter {
                 tile_id,
                 field,
@@ -413,26 +443,26 @@ impl RyeOsCore {
             RyeOsUiEvent::ChooseOverlay { secondary } => {
                 let items = super::view_model::active_overlay_items(self);
                 let selected = self.ui.overlay.selected.min(items.len().saturating_sub(1));
-                let action = items.get(selected).and_then(|item| {
+                let intent = items.get(selected).and_then(|item| {
                     if !item.enabled {
                         return None;
                     }
                     if secondary {
-                        item.secondary_action
+                        item.secondary_intent
                             .clone()
-                            .or_else(|| item.action.clone())
+                            .or_else(|| item.intent.clone())
                     } else {
-                        item.action.clone()
+                        item.intent.clone()
                     }
                 });
-                let Some(action) = action else {
+                let Some(intent) = intent else {
                     return Vec::new();
                 };
                 self.ui.overlay.active = None;
                 self.ui.overlay.query.clear();
                 self.ui.overlay.selected = 0;
                 self.bump_generation();
-                self.dispatch_action(action)
+                self.dispatch_intent(intent)
             }
             RyeOsUiEvent::SetTileCursor { tile_id, index } => {
                 let Some(tile_id) = parse_tile_id(&tile_id) else {
@@ -462,24 +492,24 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsUiEvent::ActivateFocused => action_for_focused_row(self)
-                .map_or_else(Vec::new, |action| self.dispatch_action(action)),
+            RyeOsUiEvent::ActivateFocused => intent_for_focused_row(self)
+                .map_or_else(Vec::new, |intent| self.dispatch_intent(intent)),
             RyeOsUiEvent::PopLens => self.pop_view(),
         }
     }
 
-    pub(crate) fn dispatch_action(&mut self, action: RyeOsAction) -> Vec<RyeOsEffect> {
-        match action {
-            RyeOsAction::Refresh => self.initial_effects(),
-            RyeOsAction::InvokeAffordance {
+    pub(crate) fn dispatch_intent(&mut self, intent: RyeOsUiIntent) -> Vec<RyeOsEffect> {
+        match intent {
+            RyeOsUiIntent::Refresh => self.initial_effects(),
+            RyeOsUiIntent::InvokeAffordance {
                 view_ref,
                 affordance_id,
                 record,
             } => self.invoke_affordance(&view_ref, &affordance_id, &record),
-            RyeOsAction::OpenOverlay { overlay_id } => self.dispatch(RyeOsEvent::Ui {
+            RyeOsUiIntent::OpenOverlay { overlay_id } => self.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenOverlay { overlay_id },
             }),
-            RyeOsAction::OpenView { view } => {
+            RyeOsUiIntent::OpenView { view } => {
                 let mut effects = self.open_view(view.clone());
                 if let Some(hash) = route_for_view(&view) {
                     effects.push(self.emit(RyeOsEffectKind::SetLocationHash {
@@ -488,7 +518,7 @@ impl RyeOsCore {
                 }
                 effects
             }
-            RyeOsAction::OpenNewView { view } => {
+            RyeOsUiIntent::OpenNewView { view } => {
                 // Single-lens surfaces have no "another tile": a new-view
                 // request collapses to replacing the one center lens.
                 if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens {
@@ -499,13 +529,13 @@ impl RyeOsCore {
                     effects
                 }
             }
-            RyeOsAction::CloseFocused => {
+            RyeOsUiIntent::CloseFocused => {
                 if self.close_tile_or_empty(self.workspace.focused_tile) {
                     self.bump_generation();
                 }
                 Vec::new()
             }
-            RyeOsAction::CloseTile { tile_id } => {
+            RyeOsUiIntent::CloseTile { tile_id } => {
                 let Some(tile_id) = parse_tile_id(&tile_id) else {
                     return Vec::new();
                 };
@@ -514,7 +544,7 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsAction::ToggleFocusedMaster => {
+            RyeOsUiIntent::ToggleFocusedMaster => {
                 if self.workspace.zoom_focused() {
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
                         tile_id: self.workspace.focused_tile.0.to_string(),
@@ -523,7 +553,7 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsAction::MoveFocusedTile { direction } => {
+            RyeOsUiIntent::MoveFocusedTile { direction } => {
                 let delta = match direction {
                     RyeOsStackMoveDirection::Up => -1,
                     RyeOsStackMoveDirection::Down => 1,
@@ -536,23 +566,23 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
-            RyeOsAction::CycleTab { direction } => self.cycle_workspace_tab(direction),
-            RyeOsAction::SwitchTab { index } => self.switch_workspace_tab(index),
-            RyeOsAction::ToggleTopStatusBar => {
+            RyeOsUiIntent::CycleTab { direction } => self.cycle_workspace_tab(direction),
+            RyeOsUiIntent::SwitchTab { index } => self.switch_workspace_tab(index),
+            RyeOsUiIntent::ToggleTopStatusBar => {
                 self.ui.top_status_visible = !self.ui.top_status_visible;
                 self.bump_generation();
                 Vec::new()
             }
-            RyeOsAction::ToggleBottomStatusBar => {
+            RyeOsUiIntent::ToggleBottomStatusBar => {
                 self.ui.bottom_status_visible = !self.ui.bottom_status_visible;
                 self.bump_generation();
                 Vec::new()
             }
-            RyeOsAction::ToggleBackdropBreak => {
+            RyeOsUiIntent::ToggleBackdropBreak => {
                 self.toggle_backdrop_break();
                 Vec::new()
             }
-            RyeOsAction::ToggleDock { edge } => {
+            RyeOsUiIntent::ToggleDock { edge } => {
                 // Toggling flips a surface-declared slot open/closed; a
                 // closed slot frees its space. Absent edges have no slot.
                 let Some(slot) = self.ui.docks.slot_mut(edge) else {
@@ -579,13 +609,13 @@ impl RyeOsCore {
                     .map(|view_ref| self.emit_fetch_source_keyed(key, &view_ref))
                     .unwrap_or_default()
             }
-            RyeOsAction::ResizeFocused { direction } => {
+            RyeOsUiIntent::ResizeFocused { direction } => {
                 if self.resize_focused_dock(direction) || self.workspace.resize_master(direction) {
                     self.bump_generation();
                 }
                 Vec::new()
             }
-            RyeOsAction::SelectDimension => {
+            RyeOsUiIntent::SelectDimension => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "dimension": true }),
@@ -598,7 +628,7 @@ impl RyeOsCore {
             // The engine never opens or names the inspector — it's a view that
             // reads `@facet:selection.*` and refreshes `on_facet: selection`,
             // shown as a slot or a lens like any other facet-bound view.
-            RyeOsAction::InspectItem { canonical_ref } => {
+            RyeOsUiIntent::InspectItem { canonical_ref } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "item": canonical_ref }),
@@ -606,8 +636,8 @@ impl RyeOsCore {
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
-            RyeOsAction::EnterItemFolder { .. } => Vec::new(),
-            RyeOsAction::InspectThread { thread_id } => {
+            RyeOsUiIntent::EnterItemFolder { .. } => Vec::new(),
+            RyeOsUiIntent::InspectThread { thread_id } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "thread": thread_id }),
@@ -615,7 +645,7 @@ impl RyeOsCore {
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
-            RyeOsAction::AimThread { thread_id } => self.apply_ui_affordance(
+            RyeOsUiIntent::AimThread { thread_id } => self.apply_ui_affordance(
                 super::seat::KEY_INPUT_ROUTE.to_string(),
                 None,
                 Some(serde_json::json!({ "thread": thread_id })),
@@ -626,7 +656,7 @@ impl RyeOsCore {
             // push a return frame (drill = true), so Backspace walks back to the
             // parent braid. No `open_view` — the braid lens re-projects onto the
             // child via the route facet, keeping view refs out of code.
-            RyeOsAction::DrillThread {
+            RyeOsUiIntent::DrillThread {
                 thread_id,
                 chain_root_id,
                 label,
@@ -645,7 +675,7 @@ impl RyeOsCore {
                 }
                 effects
             }
-            RyeOsAction::PrefillRetryTurn {
+            RyeOsUiIntent::PrefillRetryTurn {
                 thread_id,
                 chain_root_id,
                 input,
@@ -675,7 +705,7 @@ impl RyeOsCore {
                 self.bump_generation();
                 effects
             }
-            RyeOsAction::InspectSummary { title, detail } => {
+            RyeOsUiIntent::InspectSummary { title, detail } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "summary": { "title": title, "detail": detail } }),
@@ -683,7 +713,7 @@ impl RyeOsCore {
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
-            RyeOsAction::AddCurrentProject => {
+            RyeOsUiIntent::AddCurrentProject => {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", RyeOsTone::Warn);
                     Vec::new()
@@ -694,7 +724,7 @@ impl RyeOsCore {
                     Vec::new()
                 }
             }
-            RyeOsAction::OpenProject { local_id } => {
+            RyeOsUiIntent::OpenProject { local_id } => {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", RyeOsTone::Warn);
                     Vec::new()
@@ -702,8 +732,8 @@ impl RyeOsCore {
                     vec![self.emit(RyeOsEffectKind::OpenProject { local_id })]
                 }
             }
-            RyeOsAction::ListFiles { .. } => Vec::new(),
-            RyeOsAction::ReadFile { root, path } => {
+            RyeOsUiIntent::ListFiles { .. } => Vec::new(),
+            RyeOsUiIntent::ReadFile { root, path } => {
                 if !self.has_project_bound() && file_root_requires_project(&root) {
                     self.notice("No project is bound to this session.", RyeOsTone::Warn);
                     return Vec::new();
@@ -716,13 +746,13 @@ impl RyeOsCore {
                 self.bump_generation();
                 vec![self.emit(RyeOsEffectKind::ReadFile { root, path })]
             }
-            RyeOsAction::CopyText { text } => {
+            RyeOsUiIntent::CopyText { text } => {
                 vec![self.emit(RyeOsEffectKind::CopyToClipboard { text })]
             }
-            RyeOsAction::OpenExternal { url } => {
+            RyeOsUiIntent::OpenExternal { url } => {
                 vec![self.emit(RyeOsEffectKind::OpenUrl { url })]
             }
-            RyeOsAction::ExecuteItem {
+            RyeOsUiIntent::ExecuteItem {
                 item_ref,
                 parameters,
             } => {
@@ -736,13 +766,13 @@ impl RyeOsCore {
                     );
                     Vec::new()
                 } else {
-                    vec![self.emit(RyeOsEffectKind::InvokeAction {
-                        command_id: item_ref,
-                        args: parameters,
+                    vec![self.emit(RyeOsEffectKind::DispatchInvocation {
+                        item_ref,
+                        params: parameters,
                     })]
                 }
             }
-            RyeOsAction::SubmitThreadCommand { command } => {
+            RyeOsUiIntent::SubmitThreadCommand { command } => {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", RyeOsTone::Warn);
                     Vec::new()
@@ -795,8 +825,8 @@ impl RyeOsCore {
         self.pending_effects.values().any(|kind| {
             matches!(
                 kind,
-                RyeOsEffectKind::InvokeAction { command_id, args }
-                    if command_id == item_ref && args == parameters
+                RyeOsEffectKind::DispatchInvocation { item_ref: pending_ref, params }
+                    if pending_ref == item_ref && params == parameters
             )
         })
     }
@@ -902,6 +932,126 @@ fn route_for_view(view: &ViewSpec) -> Option<String> {
     Some(view.view_ref.clone())
 }
 
+enum UiIntentDecode {
+    Known(AppliedUiIntent),
+    Unsupported,
+    NotUiIntent,
+}
+
+enum AppliedUiIntent {
+    OpenView {
+        view: ViewSpec,
+    },
+    OpenOverlay {
+        overlay_id: String,
+        query: Option<String>,
+    },
+    CloseOverlay,
+    SetOverlayQuery {
+        query: String,
+    },
+    FocusInput,
+    FocusView {
+        tile_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct UiIntentEnvelope {
+    event_type: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct UiIntentApplied {
+    intent: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenViewPayload {
+    #[serde(default)]
+    view_ref: Option<String>,
+    #[serde(default)]
+    view: Option<ViewSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenOverlayPayload {
+    overlay_id: String,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetOverlayQueryPayload {
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FocusViewPayload {
+    tile_id: String,
+}
+
+fn decode_ui_intent_applied(payload: serde_json::Value) -> UiIntentDecode {
+    let payload = match serde_json::from_value::<UiIntentEnvelope>(payload.clone()) {
+        Ok(envelope) if envelope.event_type == "ui_intent.applied" => envelope.payload,
+        Ok(_) => return UiIntentDecode::NotUiIntent,
+        Err(_) => payload,
+    };
+
+    let Ok(applied) = serde_json::from_value::<UiIntentApplied>(payload) else {
+        return UiIntentDecode::NotUiIntent;
+    };
+
+    match applied.intent.as_str() {
+        "open_view" => {
+            let Ok(payload) = serde_json::from_value::<OpenViewPayload>(applied.payload) else {
+                return UiIntentDecode::Unsupported;
+            };
+            let view = payload.view.or_else(|| {
+                payload
+                    .view_ref
+                    .map(|view_ref| ViewSpec { view_ref })
+            });
+            match view {
+                Some(view) => UiIntentDecode::Known(AppliedUiIntent::OpenView { view }),
+                None => UiIntentDecode::Unsupported,
+            }
+        }
+        "open_overlay" => {
+            let Ok(payload) = serde_json::from_value::<OpenOverlayPayload>(applied.payload) else {
+                return UiIntentDecode::Unsupported;
+            };
+            UiIntentDecode::Known(AppliedUiIntent::OpenOverlay {
+                overlay_id: payload.overlay_id,
+                query: payload.query,
+            })
+        }
+        "close_overlay" => UiIntentDecode::Known(AppliedUiIntent::CloseOverlay),
+        "set_overlay_query" => {
+            let Ok(payload) = serde_json::from_value::<SetOverlayQueryPayload>(applied.payload)
+            else {
+                return UiIntentDecode::Unsupported;
+            };
+            UiIntentDecode::Known(AppliedUiIntent::SetOverlayQuery {
+                query: payload.query,
+            })
+        }
+        "focus_input" => UiIntentDecode::Known(AppliedUiIntent::FocusInput),
+        "focus_view" => {
+            let Ok(payload) = serde_json::from_value::<FocusViewPayload>(applied.payload) else {
+                return UiIntentDecode::Unsupported;
+            };
+            UiIntentDecode::Known(AppliedUiIntent::FocusView {
+                tile_id: payload.tile_id,
+            })
+        }
+        _ => UiIntentDecode::NotUiIntent,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ui::reducer::test_support::*;
@@ -950,8 +1100,8 @@ mod tests {
         assert!(items.iter().any(|item| {
             item.label == "ryeos/graph/topology"
                 && matches!(
-                    &item.action,
-                    RyeOsAction::OpenView {
+                    &item.intent,
+                    RyeOsUiIntent::OpenView {
                         view: ViewSpec { view_ref }
                     } if view_ref == "view:ryeos/graph/topology"
                 )
@@ -960,8 +1110,8 @@ mod tests {
         assert!(items.iter().any(|item| {
             item.label == "ryeos/threads/list"
                 && matches!(
-                    &item.action,
-                    RyeOsAction::OpenView {
+                    &item.intent,
+                    RyeOsUiIntent::OpenView {
                         view: ViewSpec { view_ref }
                     } if view_ref == "view:ryeos/threads/list"
                 )
@@ -976,8 +1126,8 @@ mod tests {
         assert!(items.iter().any(|item| {
             item.label == "Hide bottom slot"
                 && matches!(
-                    item.action,
-                    RyeOsAction::ToggleDock {
+                    item.intent,
+                    RyeOsUiIntent::ToggleDock {
                         edge: crate::ui::model::RyeOsDockEdge::Bottom
                     }
                 )
@@ -985,16 +1135,16 @@ mod tests {
         assert!(items.iter().any(|item| {
             item.label == "Show left slot"
                 && matches!(
-                    item.action,
-                    RyeOsAction::ToggleDock {
+                    item.intent,
+                    RyeOsUiIntent::ToggleDock {
                         edge: crate::ui::model::RyeOsDockEdge::Left
                     }
                 )
         }));
         // No surface-declared top slot → nothing to toggle there.
         assert!(!items.iter().any(|item| matches!(
-            item.action,
-            RyeOsAction::ToggleDock {
+            item.intent,
+            RyeOsUiIntent::ToggleDock {
                 edge: crate::ui::model::RyeOsDockEdge::Top
             }
         )));
@@ -1015,7 +1165,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ToggleDock {
+                intent: RyeOsUiIntent::ToggleDock {
                     edge: crate::ui::model::RyeOsDockEdge::Left,
                 },
             },
@@ -1037,7 +1187,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ToggleDock {
+                intent: RyeOsUiIntent::ToggleDock {
                     edge: crate::ui::model::RyeOsDockEdge::Bottom,
                 },
             },
@@ -1054,7 +1204,7 @@ mod tests {
         assert!(core.ui.docks.top.is_none());
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ToggleDock {
+                intent: RyeOsUiIntent::ToggleDock {
                     edge: crate::ui::model::RyeOsDockEdge::Top,
                 },
             },
@@ -1107,7 +1257,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenProject {
+                intent: RyeOsUiIntent::OpenProject {
                     local_id: "prj_1".to_string(),
                 },
             },
@@ -1142,7 +1292,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1158,7 +1308,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({ "target": "demo" }),
                 },
@@ -1167,8 +1317,8 @@ mod tests {
 
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::InvokeAction { command_id, args })
-                if command_id == "tool:demo/run" && args["target"] == "demo"
+            Some(RyeOsEffectKind::DispatchInvocation { item_ref, params })
+                if item_ref == "tool:demo/run" && params["target"] == "demo"
         ));
     }
 
@@ -1282,7 +1432,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let first = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({ "target": "demo" }),
                 },
@@ -1292,7 +1442,7 @@ mod tests {
 
         let duplicate = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({ "target": "demo" }),
                 },
@@ -1410,7 +1560,7 @@ mod tests {
         // Start on a list lens.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -1421,7 +1571,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InspectItem {
+                intent: RyeOsUiIntent::InspectItem {
                     canonical_ref: "tool:ryeos/x".to_string(),
                 },
             },
@@ -1485,7 +1635,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -1496,7 +1646,7 @@ mod tests {
         let master = core.workspace.focused_tile;
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
@@ -1525,7 +1675,7 @@ mod tests {
         );
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SubmitThreadCommand {
+                intent: RyeOsUiIntent::SubmitThreadCommand {
                     command: crate::ui::dto::ThreadControlCommand::Interrupt,
                 },
             },
@@ -1547,7 +1697,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SubmitThreadCommand {
+                intent: RyeOsUiIntent::SubmitThreadCommand {
                     command: crate::ui::dto::ThreadControlCommand::Interrupt,
                 },
             },
@@ -1584,7 +1734,7 @@ mod tests {
         // detail = the full raw event).
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InspectSummary {
+                intent: RyeOsUiIntent::InspectSummary {
                     title: "failed — boom".to_string(),
                     detail: serde_json::json!({
                         "event_type": "thread_failed",
@@ -1640,7 +1790,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::PrefillRetryTurn {
+                intent: RyeOsUiIntent::PrefillRetryTurn {
                     thread_id: "T-failed".to_string(),
                     chain_root_id: "R-1".to_string(),
                     input: "run the thing".to_string(),
@@ -1673,7 +1823,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0); // read-only
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::PrefillRetryTurn {
+                intent: RyeOsUiIntent::PrefillRetryTurn {
                     thread_id: "T-failed".to_string(),
                     chain_root_id: "R-1".to_string(),
                     input: "run".to_string(),
@@ -1709,7 +1859,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::PrefillRetryTurn {
+                intent: RyeOsUiIntent::PrefillRetryTurn {
                     thread_id: "T-failed".to_string(),
                     chain_root_id: "R-1".to_string(),
                     input: "retry me".to_string(),

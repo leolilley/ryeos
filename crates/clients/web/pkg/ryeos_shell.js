@@ -144,7 +144,10 @@ function safeSeatEvents() {
 }
 
 async function invokeSeatService(commandId, args) {
-  const resp = await postJson("/ui/api/actions/invoke", { command_id: commandId, args });
+  const resp = await postJson("/ui/api/invocations/dispatch", {
+    target: { kind: "ref", ref: commandId },
+    params: args,
+  });
   return resp?.result?.result ?? resp?.result ?? resp;
 }
 
@@ -240,14 +243,16 @@ function attachSessionEvents(session) {
   const eventsUrl = session?.events_url || session?.event_url;
   if (!eventsUrl) return;
   const source = new EventSource(eventsUrl);
-  source.addEventListener("message", (event) => {
+  const dispatchDaemonEvent = (event) => {
     try {
       const payload = JSON.parse(event.data);
       void commit(ryeos_dispatch({ type: "daemon_event", payload }));
     } catch (error) {
       console.warn("Failed to process RyeOS event stream message", error);
     }
-  });
+  };
+  source.addEventListener("message", dispatchDaemonEvent);
+  source.addEventListener("ui_intent.applied", dispatchDaemonEvent);
 }
 
 function attachBrowserEvents() {
@@ -287,13 +292,13 @@ function attachBrowserEvents() {
   window.addEventListener("pagehide", () => {
     if (!seatThreadId) return;
     const body = JSON.stringify({
-      command_id: "service:ui/seat/close",
-      args: { thread_id: seatThreadId },
+      target: { kind: "ref", ref: "service:ui/seat/close" },
+      params: { thread_id: seatThreadId },
     });
     if (navigator.sendBeacon) {
-      navigator.sendBeacon("/ui/api/actions/invoke", new Blob([body], { type: "application/json" }));
+      navigator.sendBeacon("/ui/api/invocations/dispatch", new Blob([body], { type: "application/json" }));
     } else {
-      fetch("/ui/api/actions/invoke", {
+      fetch("/ui/api/invocations/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,

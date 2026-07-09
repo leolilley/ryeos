@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T12:24:56Z:2ffbb230ca38b44f774f6cba3a87487ca39cddfd083aa24a2a33ecf374ade767:688IursVU6oK3olsPHlORkHtIL1OLV74QBQCwHVgEYe5qkHdnIrr6pAqf+VemofLISXA/x6xM340eG/4BZy1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T01:18:09Z:bac8ec5fd33b6458960cea96557a13e7da4237ec918a6c2f7ddd48237343a3b6:7yCm4QbBLpJjhZOLHLNPyHPuGrIFXvPZh4rk+JRWcTONh/niaMpLXGje/Ij38wU+Cml26VhsWER99yBfy0ScBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-status
 version: "1.0.0"
 description: >-
@@ -44,7 +44,7 @@ sections:
       meta: version
   - title: Node
     source:
-      ref: service:system/status
+      ref: service:node/status
       params: {}
     projection:
       primary: version

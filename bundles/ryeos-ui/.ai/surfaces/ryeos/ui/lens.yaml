@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-07T04:10:29Z:9693f198e32f01db4b6e521fee82410d2b06da1761fe16bc63a7f252d37aa338:bls5svqwZPzqlS9g4YNXcZPbJq+8/IGd0IC4Kx5liWFrqam/TwgJTKm/qetjFQVkhaJ4ya9L4b2k3/aq8eu/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T02:07:24Z:2fa5ceb795b9310bf8edf7df2eca18076c46fa92efbc27d5dc119163f8f0e3b3:l9AiziEy5o8svSsg1JzEwhXjSRu15KjrxgoLBOpSh1LUmXeMyeNXEo2tt8qu/KSDZrQfLfdfq/sxFGA8lE8CCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 version: "1.0.0"
 description: >-
@@ -71,7 +70,7 @@ overlays:
   shortcuts:
     title: Shortcuts
     widget: table
-    columns: [Keys, Action]
+    columns: [Keys, Intent]
     source: { ref: "runtime:shortcuts" }
     hint: "type to filter shortcuts · esc to close"
 

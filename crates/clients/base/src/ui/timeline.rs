@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::content::{ProjectedRecord, TimelineRole};
 use super::dto::CognitionOutPayload;
 use super::effect::RyeOsEffect;
-use super::event::RyeOsAction;
+use super::event::RyeOsUiIntent;
 use super::model::RyeOsCore;
 use super::view_model::{tone_from_name, RyeOsTone};
 
@@ -63,15 +63,15 @@ pub enum RyeOsTimelineEntryVm {
         /// What activating this entry (Enter on the point) does — e.g. a
         /// forked-subthread line aims the route at that child thread so the
         /// feed re-projects to its braid; an error terminal inspects its full
-        /// structured error. Most lines carry no action.
+        /// structured error. Most lines carry no intent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        action: Option<RyeOsAction>,
+        intent: Option<RyeOsUiIntent>,
         /// A second affordance for this entry, surfaced through command overlays
         /// (its Shift+Enter secondary and a distinct context item) rather than
         /// a direct key — e.g. "retry this failed turn" beside the entry's
-        /// Enter=inspect action. Most lines carry none.
+        /// Enter=inspect intent. Most lines carry none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        secondary_action: Option<RyeOsAction>,
+        secondary_intent: Option<RyeOsUiIntent>,
     },
     Pair {
         summary: String,
@@ -358,7 +358,7 @@ pub(crate) fn timeline_entries_indented(
             }
             // Paired runtime exchanges (graph steps, tool calls) have multiple
             // producer shapes: directive tools emit `{tool, call_id}`, graph
-            // action nodes emit `{item_id, node, step}`. When the authored
+            // intent nodes emit `{item_id, node, step}`. When the authored
             // projection does not match the producer's shape, the raw event would
             // otherwise degrade to a bare `event_type` line. Read the stable
             // payload fields directly and pair start with settle so the tail
@@ -397,8 +397,8 @@ pub(crate) fn timeline_entries_indented(
                             primary: content.to_string(),
                             meta: None,
                             tone: RyeOsTone::Accent,
-                            action: None,
-                            secondary_action: None,
+                            intent: None,
+                            secondary_intent: None,
                         },
                         Some(&record),
                     );
@@ -554,8 +554,8 @@ pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm>
             primary: "▍ working…".to_string(),
             meta: None,
             tone: RyeOsTone::Accent,
-            action: None,
-            secondary_action: None,
+            intent: None,
+            secondary_intent: None,
         });
     }
     None
@@ -627,8 +627,8 @@ fn line_entry(record: ProjectedRecord) -> RyeOsTimelineEntryVm {
         primary: record.primary,
         meta: record.meta,
         tone: tone_from_name(record.tone.as_deref()),
-        action: None,
-        secondary_action: None,
+        intent: None,
+        secondary_intent: None,
     }
 }
 
@@ -813,7 +813,7 @@ fn execution_entry(
         // being stepped into (`↘ study`) so the entry reads as a call into a
         // named cognition, not an anonymous fork. Falls back to "forked
         // subthread" when the producer carries no `node`. The child id (meta)
-        // is the drill target the `DrillThread` action below steps into.
+        // is the drill target the `DrillThread` intent below steps into.
         FeedEventType::ChildThreadSpawned => (
             payload
                 .and_then(|p| payload_text(p, "node"))
@@ -824,7 +824,7 @@ fn execution_entry(
         ),
         // A graph `follow:` node suspended the run (`continued`) to await its
         // child chain. Renders as a boundary milestone — the follow node in the
-        // meta — but carries NO drill-in action: the suspend event names only
+        // meta — but carries NO drill-in intent: the suspend event names only
         // the local follow node, never the child chain (it is dispatched after
         // the checkpoint), so there is no child ref to aim at. The child braid is
         // reached from the thread row's `watch child` affordance, which reads the
@@ -915,12 +915,12 @@ fn execution_entry(
     //   turn additionally offers retry — re-submitting its own stimulus as a
     //   continuation. timed_out / killed are inspectable but NOT retryable:
     //   the daemon refuses continuation for those settled statuses (v1).
-    let (action, secondary_action) = match event {
+    let (intent, secondary_intent) = match event {
         // Step INTO the spawned child (the dispatch edge): a child is a fresh
         // root, so its chain_root equals its own id. DrillThread pushes a return
         // frame, so Backspace walks back to this parent braid.
         FeedEventType::ChildThreadSpawned => (
-            meta.clone().map(|id| RyeOsAction::DrillThread {
+            meta.clone().map(|id| RyeOsUiIntent::DrillThread {
                 thread_id: id.clone(),
                 chain_root_id: id,
                 label: payload.and_then(|p| payload_text(p, "node")),
@@ -928,11 +928,11 @@ fn execution_entry(
             None,
         ),
         FeedEventType::ThreadFailed => (
-            Some(inspect_action(&primary, record)),
-            retry_action(record, stimulus),
+            Some(inspect_intent(&primary, record)),
+            retry_intent(record, stimulus),
         ),
         FeedEventType::ThreadKilled | FeedEventType::ThreadTimedOut => {
-            (Some(inspect_action(&primary, record)), None)
+            (Some(inspect_intent(&primary, record)), None)
         }
         _ => (None, None),
     };
@@ -940,8 +940,8 @@ fn execution_entry(
         primary,
         meta,
         tone,
-        action,
-        secondary_action,
+        intent,
+        secondary_intent,
     })
 }
 
@@ -956,32 +956,32 @@ fn terminal_reason(status: &str, payload: Option<&Value>) -> String {
     }
 }
 
-/// The inspect action for an error terminal: the title is the visible line
+/// The inspect intent for an error terminal: the title is the visible line
 /// (carrying `failed — <reason>`), the detail is the FULL raw event —
 /// `{ event_type, thread_id, chain_root_id, chain_seq, payload, … }` — not
 /// just the payload, so inspecting a failure in an interleaved chain shows
 /// which turn (and sequence) it was.
-fn inspect_action(title: &str, record: &ProjectedRecord) -> RyeOsAction {
-    RyeOsAction::InspectSummary {
+fn inspect_intent(title: &str, record: &ProjectedRecord) -> RyeOsUiIntent {
+    RyeOsUiIntent::InspectSummary {
         title: title.to_string(),
         detail: record.raw.clone(),
     }
 }
 
-/// The retry action for a recoverable failed turn: re-submit that thread's own
+/// The retry intent for a recoverable failed turn: re-submit that thread's own
 /// stimulus as a continuation, retargeted at the selected failed thread.
 /// `None` unless BOTH the thread's chain coordinates and its stimulus text are
 /// known — a marker-only turn (`cognition_in` with no `content`) yields no
 /// retry input, and correlation is keyed by `thread_id` so interleaved chains
 /// never cross-attribute.
-fn retry_action(
+fn retry_intent(
     record: &ProjectedRecord,
     stimulus: &std::collections::BTreeMap<String, String>,
-) -> Option<RyeOsAction> {
+) -> Option<RyeOsUiIntent> {
     let thread_id = record.raw.get("thread_id").and_then(Value::as_str)?;
     let chain_root_id = record.raw.get("chain_root_id").and_then(Value::as_str)?;
     let input = stimulus.get(thread_id)?.clone();
-    Some(RyeOsAction::PrefillRetryTurn {
+    Some(RyeOsUiIntent::PrefillRetryTurn {
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         input,
@@ -1161,8 +1161,8 @@ fn apply_paired_runtime_entry(
                         primary: graph_step_summary(payload),
                         meta,
                         tone,
-                        action: None,
-                        secondary_action: None,
+                        intent: None,
+                        secondary_intent: None,
                     },
                     Some(&record),
                 );
@@ -1214,8 +1214,8 @@ fn apply_paired_runtime_entry(
                         primary: tool_call_summary(payload, &record),
                         meta,
                         tone,
-                        action: None,
-                        secondary_action: None,
+                        intent: None,
+                        secondary_intent: None,
                     },
                     Some(&record),
                 );
@@ -1279,7 +1279,7 @@ fn graph_step_result_meta(payload: &Value) -> Option<String> {
 }
 
 /// The stable identity of one tool exchange: the directive runtime keys by
-/// `call_id`; graph action nodes carry none, so their identity is composed
+/// `call_id`; graph intent nodes carry none, so their identity is composed
 /// from the run coordinates.
 fn tool_call_key(payload: &Value) -> String {
     payload_text(payload, "call_id").unwrap_or_else(|| {
@@ -1779,7 +1779,7 @@ mod tests {
         let Some(RyeOsTimelineEntryVm::Line {
             primary,
             meta,
-            action,
+            intent,
             ..
         }) = entry
         else {
@@ -1789,8 +1789,8 @@ mod tests {
         assert_eq!(meta.as_deref(), Some("T-child"));
         assert!(
             matches!(
-                action,
-                Some(RyeOsAction::DrillThread { thread_id, chain_root_id, label })
+                intent,
+                Some(RyeOsUiIntent::DrillThread { thread_id, chain_root_id, label })
                     if thread_id == "T-child" && chain_root_id == "T-child"
                         && label.as_deref() == Some("study")
             ),
@@ -1806,13 +1806,13 @@ mod tests {
             "payload": { "child_thread_id": "T-child" }
         }));
         let Some(RyeOsTimelineEntryVm::Line {
-            primary, action, ..
+            primary, intent, ..
         }) = entry
         else {
             panic!("expected a forked-subthread line");
         };
         assert_eq!(primary, "forked subthread");
-        assert!(matches!(action, Some(RyeOsAction::DrillThread { .. })));
+        assert!(matches!(intent, Some(RyeOsUiIntent::DrillThread { .. })));
     }
 
     #[test]
@@ -1851,7 +1851,7 @@ mod tests {
     fn graph_follow_suspend_renders_a_boundary_milestone_without_a_drill_in() {
         // The suspend event names only the local follow node (the child chain is
         // dispatched after the checkpoint), so it renders as an accent milestone
-        // with the follow node in the meta and NO action — there is no child ref
+        // with the follow node in the meta and NO intent — there is no child ref
         // to aim at (drill-in to the child is the row's `watch child` affordance).
         let entry = exec(json!({
             "event_type": "graph_follow_suspended",
@@ -1861,7 +1861,7 @@ mod tests {
             primary,
             meta,
             tone,
-            action,
+            intent,
             ..
         }) = entry
         else {
@@ -1871,7 +1871,7 @@ mod tests {
         assert_eq!(meta.as_deref(), Some("fetch"));
         assert!(matches!(tone, RyeOsTone::Accent));
         assert!(
-            action.is_none(),
+            intent.is_none(),
             "the suspend event carries no child ref to drill into"
         );
     }
@@ -1895,10 +1895,10 @@ mod tests {
         assert!(
             matches!(
                 entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, tone, action, .. }]
+                [RyeOsTimelineEntryVm::Line { primary, tone, intent, .. }]
                     if primary == "resumed with child result"
                         && matches!(tone, RyeOsTone::Accent)
-                        && action.is_none()
+                        && intent.is_none()
             ),
             "only the follow-resume boundary survives; the segment-cut continued is dropped: {entries:?}"
         );
@@ -1910,8 +1910,8 @@ mod tests {
         assert!(matches!(
             entry,
             Some(RyeOsTimelineEntryVm::Line {
-                action: None,
-                secondary_action: None,
+                intent: None,
+                secondary_intent: None,
                 ..
             })
         ));
@@ -1919,7 +1919,7 @@ mod tests {
 
     #[test]
     fn error_terminals_are_inspectable_but_completed_and_cancelled_are_not() {
-        // failed / timed_out / killed each carry an inspect (Enter) action whose
+        // failed / timed_out / killed each carry an inspect (Enter) intent whose
         // title is the visible line and whose detail is the FULL raw event.
         for event_type in ["thread_failed", "thread_timed_out", "thread_killed"] {
             let raw = json!({
@@ -1931,13 +1931,13 @@ mod tests {
             });
             let entry = exec(raw.clone());
             let Some(RyeOsTimelineEntryVm::Line {
-                primary, action, ..
+                primary, intent, ..
             }) = entry
             else {
                 panic!("expected a terminal line for {event_type}");
             };
-            match action {
-                Some(RyeOsAction::InspectSummary { title, detail }) => {
+            match intent {
+                Some(RyeOsUiIntent::InspectSummary { title, detail }) => {
                     assert_eq!(title, primary, "inspect title is the visible line");
                     assert_eq!(detail, raw, "inspect detail is the full raw event");
                 }
@@ -1951,8 +1951,8 @@ mod tests {
                 matches!(
                     entry,
                     Some(RyeOsTimelineEntryVm::Line {
-                        action: None,
-                        secondary_action: None,
+                        intent: None,
+                        secondary_intent: None,
                         ..
                     })
                 ),
@@ -1975,15 +1975,15 @@ mod tests {
         // failed + known stimulus → retry pre-fills that turn's own input,
         // retargeted at the selected failed thread.
         let Some(RyeOsTimelineEntryVm::Line {
-            secondary_action, ..
+            secondary_intent, ..
         }) = execution_entry(&raw_record(failed.clone()), &stimulus)
         else {
             panic!("expected a failed line");
         };
         assert!(
             matches!(
-                secondary_action,
-                Some(RyeOsAction::PrefillRetryTurn { thread_id, chain_root_id, input })
+                secondary_intent,
+                Some(RyeOsUiIntent::PrefillRetryTurn { thread_id, chain_root_id, input })
                     if thread_id == "T-1" && chain_root_id == "R-1" && input == "run the thing"
             ),
             "retry recovers the failed thread's own stimulus"
@@ -1992,15 +1992,15 @@ mod tests {
         // failed but stimulus unknown (marker-only turn / missing) → inspect
         // only, no retry input to offer.
         let Some(RyeOsTimelineEntryVm::Line {
-            action,
-            secondary_action,
+            intent,
+            secondary_intent,
             ..
         }) = execution_entry(&raw_record(failed), &std::collections::BTreeMap::new())
         else {
             panic!("expected a failed line");
         };
-        assert!(matches!(action, Some(RyeOsAction::InspectSummary { .. })));
-        assert!(secondary_action.is_none(), "no stimulus → no retry");
+        assert!(matches!(intent, Some(RyeOsUiIntent::InspectSummary { .. })));
+        assert!(secondary_intent.is_none(), "no stimulus → no retry");
 
         // timed_out / killed are inspectable but NOT retryable even with a known
         // stimulus — the daemon refuses continuation for those statuses (v1).
@@ -2012,16 +2012,16 @@ mod tests {
                 "payload": {}
             });
             let Some(RyeOsTimelineEntryVm::Line {
-                action,
-                secondary_action,
+                intent,
+                secondary_intent,
                 ..
             }) = execution_entry(&raw_record(raw), &stimulus)
             else {
                 panic!("expected a terminal line for {event_type}");
             };
-            assert!(matches!(action, Some(RyeOsAction::InspectSummary { .. })));
+            assert!(matches!(intent, Some(RyeOsUiIntent::InspectSummary { .. })));
             assert!(
-                secondary_action.is_none(),
+                secondary_intent.is_none(),
                 "{event_type} is inspectable but not retryable"
             );
         }
@@ -2052,8 +2052,8 @@ mod tests {
         let entries = timeline_entries(records);
         let retry = entries.iter().find_map(|entry| match entry {
             RyeOsTimelineEntryVm::Line {
-                secondary_action:
-                    Some(RyeOsAction::PrefillRetryTurn {
+                secondary_intent:
+                    Some(RyeOsUiIntent::PrefillRetryTurn {
                         input, thread_id, ..
                     }),
                 ..
@@ -2089,7 +2089,7 @@ mod tests {
             entries.iter().all(|entry| !matches!(
                 entry,
                 RyeOsTimelineEntryVm::Line {
-                    secondary_action: Some(_),
+                    secondary_intent: Some(_),
                     ..
                 }
             )),
@@ -2195,7 +2195,7 @@ mod tests {
         use super::super::content::{project_records, ViewBinding};
 
         // This intentionally keeps the shipped tool projection shape
-        // (`tool/call_id`) while feeding graph action events (`item_id/node/step`)
+        // (`tool/call_id`) while feeding graph intent events (`item_id/node/step`)
         // to prove the coalescer repairs the fallback from raw event_type lines.
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",

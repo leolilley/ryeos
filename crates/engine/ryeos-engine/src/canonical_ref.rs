@@ -394,9 +394,9 @@ mod tests {
 
     #[test]
     fn parse_service_ref_with_suffix() {
-        let r = CanonicalRef::parse("service:system/status@t:2026-04-26T00:00:00Z").unwrap();
+        let r = CanonicalRef::parse("service:node/status@t:2026-04-26T00:00:00Z").unwrap();
         assert_eq!(r.kind, "service");
-        assert_eq!(r.bare_id, "system/status");
+        assert_eq!(r.bare_id, "node/status");
         assert!(r.suffix.is_some());
     }
 
@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(set.len(), 1);
 
         // Suffix difference must split into distinct keys.
-        let c = CanonicalRef::parse("service:system/status@t:2026-04-26T00:00:00Z").unwrap();
+        let c = CanonicalRef::parse("service:node/status@t:2026-04-26T00:00:00Z").unwrap();
         assert!(set.insert(c));
         assert_eq!(set.len(), 2);
     }

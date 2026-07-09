@@ -54,8 +54,8 @@ export function overlayDialog(state, shell) {
     );
     row.addEventListener("click", () => {
       if (item.enabled === false) return;
-      if (item.action && shell.dispatchUi) {
-        shell.dispatchUi({ type: "activate", action: item.action });
+      if (item.intent && shell.dispatchUi) {
+        shell.dispatchUi({ type: "activate", intent: item.intent });
         shell.closeOverlay?.();
       } else {
         shell.chooseOverlay?.(false);
