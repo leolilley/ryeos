@@ -1,5 +1,6 @@
-# ryeos:signed:2026-06-17T01:35:08Z:31bf3332b5490431fea83144e9bfe567322875a89b8c5fe5ab08237f5b5e51fe:N4+mZV87HjXlqGyAO46A0+NYtlHUHJGzAE+46ywIzTp+bX3+8FVvLAQMYX/alMFwScRf8ri2XIiSEfATwVnVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T06:05:19Z:d97d238fad765ae2fbc48d8b2fb97886595ec0f2bfc67d615b65d7b3dbe3c679:IlSwiItLJDFao8z03hGYDKUrYkltYk6pA+ODjxqcxf1CluzeXiB/03V3Emv7w5uiE7+crORXyulbspEQM73kAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: graph-topology
+title: Topology
 version: "1.0.0"
 description: >-
   The RyeOS topology as a 3D scene — local node, projects, services, and

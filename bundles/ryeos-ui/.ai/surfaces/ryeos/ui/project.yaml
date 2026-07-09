@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-07T04:10:29Z:45d85d95e56750ec88f0edfdb87f635665ac43fde7d8fcdfa4d5cbbff9c23867:IMvsbGfztBDl6wkRkWReNXD7TncfKB0L91zMpaDvRkeJ5T8WaefhQEiQJEeRWJWoxcS8VaQEmbUBcImezOObDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:19Z:802bb7d18eae74de1f357990cdbf0c4d54934b0699766ea1d563319f4742d98f:EEyGSi0s4yrT2CEGfEA0HESwHyGYNVhq1UcaQYaQ4Zh+jnkmSlxanahLIEEKWK+MYb2X14JUS20VY4gSiGAcAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 version: "1.0.0"
 description: Active project explorer for files, signed items, and related execution

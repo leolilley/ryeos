@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-08T01:26:03Z:1d959d69d25c6f8641cae59231eb8aa4d248c70a87e6360be90df49f4d39c0b2:cyqD3gJNIUyBhcH0Kg3seFPnJw5GaWG9I17CqSDvJcSwozmPoHAJxlxnhEtraY7ldwRKZTQN+gzYSTScc4i7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:20Z:5b627351dc449a5ace4a8590a9028f8a5f8b347b1bc1678f22791312892a25ed:wEP8SCbTLkC1LKXHByoP0j2pfxKtH4PQyK1CIv8LjxTUGwFI3T6t2oe+uyBa8cIjuyg53p2gsV2hugRu5cZbAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
+title: Project Threads
 version: "1.0.0"
 description: >-
   Active-project thread history. This is the broad project execution table:

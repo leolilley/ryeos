@@ -35,6 +35,11 @@ pub enum RyeOsUiIntent {
     OpenOverlay {
         overlay_id: String,
     },
+    /// Fold or unfold one launcher group. The overlay stays open — this
+    /// mutates presentation state, never launches anything.
+    ToggleOverlayGroup {
+        group: String,
+    },
     CloseFocused,
     CloseTile {
         tile_id: String,

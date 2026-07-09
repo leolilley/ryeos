@@ -462,6 +462,10 @@ impl RyeOsCore {
                 let Some(intent) = intent else {
                     return Vec::new();
                 };
+                // A group fold acts inside the overlay — it never closes it.
+                if matches!(intent, RyeOsUiIntent::ToggleOverlayGroup { .. }) {
+                    return self.dispatch_intent(intent);
+                }
                 self.ui.overlay.active = None;
                 self.ui.overlay.query.clear();
                 self.ui.overlay.selected = 0;
@@ -513,6 +517,13 @@ impl RyeOsCore {
             RyeOsUiIntent::OpenOverlay { overlay_id } => self.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenOverlay { overlay_id },
             }),
+            RyeOsUiIntent::ToggleOverlayGroup { group } => {
+                if !self.ui.overlay.collapsed.remove(&group) {
+                    self.ui.overlay.collapsed.insert(group);
+                }
+                self.bump_generation();
+                Vec::new()
+            }
             RyeOsUiIntent::OpenView { view } => {
                 let mut effects = self.open_view(view.clone());
                 if let Some(hash) = route_for_view(&view) {
@@ -1100,26 +1111,30 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "widget": "graph" })).unwrap(),
         );
         let items = view_overlay_items(&core);
-        // The scene-widget view launches as a Bound tile, labeled by ref.
+        // No declared library: the completeness groups still surface every
+        // embedded view, labeled by ref, under a path-derived header.
         assert!(items.iter().any(|item| {
-            item.label == "ryeos/graph/topology"
+            item.primary == "ryeos/graph/topology"
                 && matches!(
                     &item.intent,
-                    RyeOsUiIntent::OpenView {
+                    Some(RyeOsUiIntent::OpenView {
                         view: ViewSpec { view_ref }
-                    } if view_ref == "view:ryeos/graph/topology"
+                    }) if view_ref == "view:ryeos/graph/topology"
                 )
         }));
-        // Content views launch as Bound tiles, labeled by ref.
         assert!(items.iter().any(|item| {
-            item.label == "ryeos/threads/list"
+            item.primary == "ryeos/threads/list"
                 && matches!(
                     &item.intent,
-                    RyeOsUiIntent::OpenView {
+                    Some(RyeOsUiIntent::OpenView {
                         view: ViewSpec { view_ref }
-                    } if view_ref == "view:ryeos/threads/list"
+                    }) if view_ref == "view:ryeos/threads/list"
                 )
         }));
+        // Each derived group leads with a foldable header row.
+        assert!(items
+            .iter()
+            .any(|item| item.header && item.primary == "graph" && item.expanded));
     }
 
     #[test]

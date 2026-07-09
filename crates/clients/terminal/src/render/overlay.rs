@@ -6,7 +6,7 @@ use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 use ryeos_client_base::ui::view_model::{RyeOsOverlayItemVm, RyeOsOverlayVm};
 
-use super::primitives::fill_rect;
+use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, truncate};
 use super::theme::{ACCENT, BG, FG, GOOD, MUTED, PANEL};
 
@@ -90,19 +90,36 @@ fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
         } else {
             MUTED
         };
-        for col in 0..w.saturating_sub(2) {
-            surface.draw_char(x + 1 + col, ry, ' ', Style::new().fg(fg).bg(bg));
+        fill_line(surface, x + 1, ry, w.saturating_sub(2), Style::new().fg(fg).bg(bg));
+        if item.header {
+            // A group header: fold glyph + title across the row; its
+            // Enter intent folds the group, so it reads as a control.
+            let glyph = if item.expanded { "▾" } else { "▸" };
+            let header_fg = if selected { BG } else { GOOD };
+            surface.draw_text(
+                x + 2,
+                ry,
+                &truncate(&format!("{glyph} {}", item.primary), w.saturating_sub(4)),
+                Style::new().fg(header_fg).bg(bg).bold(),
+            );
+            continue;
         }
+        let indent = 2 * item.depth as usize;
         surface.draw_text(
-            x + 2,
+            x + 2 + indent,
             ry,
-            &truncate(&item.primary, first_w.saturating_sub(1)),
+            &truncate(&item.primary, first_w.saturating_sub(1 + indent)),
             Style::new().fg(fg).bg(bg).bold(),
         );
+        let detail = if item.meta.is_empty() {
+            item.secondary.clone()
+        } else {
+            format!("{} · {}", item.secondary, item.meta)
+        };
         surface.draw_text(
             x + 2 + first_w,
             ry,
-            &truncate(&item.secondary, w.saturating_sub(first_w + 5)),
+            &truncate(&detail, w.saturating_sub(first_w + 5)),
             Style::new().fg(if selected { BG } else { MUTED }).bg(bg),
         );
     }
@@ -162,8 +179,16 @@ fn draw_palette_row(
     let row_fg = if selected { BG } else { FG };
     let cat_fg = if selected { BG } else { GOOD };
     let desc_fg = if selected { BG } else { MUTED };
-    for col in 0..w {
-        surface.draw_char(x + col, y, ' ', Style::new().fg(row_fg).bg(bg));
+    fill_line(surface, x, y, w, Style::new().fg(row_fg).bg(bg));
+    if item.header {
+        let glyph = if item.expanded { "▾" } else { "▸" };
+        surface.draw_text(
+            x + 1,
+            y,
+            &truncate(&format!("{glyph} {}", item.primary), w.saturating_sub(2)),
+            Style::new().fg(cat_fg).bg(bg).bold(),
+        );
+        return;
     }
     let cat = truncate(&item.category, CAT_W);
     let cat_x = x + CAT_W.saturating_sub(display_width(&cat));

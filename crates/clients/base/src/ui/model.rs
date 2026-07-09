@@ -95,6 +95,11 @@ pub struct RyeOsOverlayState {
     pub active: Option<String>,
     pub query: String,
     pub selected: usize,
+    /// Launcher groups the operator folded shut. Presentation state that
+    /// outlives one overlay open/close, so the tree reads the way it was
+    /// left; a live search ignores it (matches always show).
+    #[serde(default)]
+    pub collapsed: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -422,6 +427,13 @@ pub(crate) struct RyeOsTimelineSourceCache {
     pub entries: Vec<super::timeline::RyeOsTimelineEntryVm>,
     pub indents: Vec<u8>,
     pub sources: Vec<Option<super::timeline::TimelineEntrySource>>,
+    /// Section (turn) index per entry, parallel to `entries`. Depends only on
+    /// `entries`, so it is derived once here rather than rescanned by every
+    /// windowed render frame (`timeline::fold_timeline_window`).
+    pub sections: Vec<usize>,
+    /// Sections headed by a real `Separator` — the ones a fold key can
+    /// collapse. Derived alongside `sections`.
+    pub collapsible: std::collections::BTreeSet<usize>,
 }
 
 // The live cognition buffer type + its accumulation logic live with the rest
@@ -1041,12 +1053,15 @@ impl RyeOsCore {
             indents.insert(0, 0);
             sources.insert(0, None);
         }
+        let (sections, collapsible) = super::timeline::timeline_section_index(&entries);
         self.data.timeline_sources.insert(
             source_key.to_string(),
             RyeOsTimelineSourceCache {
                 entries,
                 indents,
                 sources,
+                sections,
+                collapsible,
             },
         );
     }

@@ -7,6 +7,26 @@ use crate::ids::TileId;
 use crate::surface::ArrangeSpec;
 use crate::workspace::{ViewLocalState, ViewSpec};
 
+/// One launcher group: a surface-declared (or ref-path-derived) title and
+/// its lensable view refs, in declared order.
+pub(crate) struct LibraryGroup {
+    pub title: String,
+    pub refs: Vec<String>,
+}
+
+/// The mechanical group for a view no surface group lists: the ref's path
+/// segments between the namespace and the leaf (`view:ryeos/node/events`
+/// → `node`), or `views` for refs too short to carry one.
+fn derived_group_title(view_ref: &str) -> String {
+    let path = view_ref.strip_prefix("view:").unwrap_or(view_ref);
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() > 2 {
+        segments[1..segments.len() - 1].join("/")
+    } else {
+        "views".to_string()
+    }
+}
+
 impl RyeOsCore {
     pub(crate) fn cycle_workspace_tab(
         &mut self,
@@ -26,32 +46,94 @@ impl RyeOsCore {
         self.switch_workspace_tab(next)
     }
 
-    /// The surface's ordered library, filtered to refs that work as a center
-    /// lens: a real bound view that is neither a scene backdrop nor the foot
-    /// input. Single-lens `Ctrl+←/→` cycles this list.
-    pub(crate) fn lens_library(&self) -> Vec<String> {
+    /// Whether a view works as a center lens: a real bound view that is
+    /// neither a scene backdrop nor the foot input.
+    fn lensable(&self, view_ref: &str) -> bool {
+        self.views
+            .get(view_ref)
+            .is_some_and(|binding| binding.widget != "scene" && binding.input.is_none())
+    }
+
+    /// The surface's declared library groups, filtered to lensable refs.
+    /// The `library:` shape is grouped — `[{ group, views: [ref…] }]` —
+    /// one key serving two consumers: `lens_library` cycles the flattened
+    /// declared order, `library_groups` hands the launcher the tree.
+    fn library_groups_declared(&self) -> Vec<LibraryGroup> {
         self.data
             .session
             .as_ref()
             .and_then(|session| session.effective_surface.as_ref())
             .and_then(|surface| surface.get("library"))
             .and_then(|library| library.as_array())
-            .map(|refs| {
-                refs.iter()
-                    .filter_map(|value| value.as_str())
-                    .filter(|view_ref| {
-                        self.views.get(*view_ref).is_some_and(|binding| {
-                            binding.widget != "scene" && binding.input.is_none()
-                        })
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let title = entry.get("group")?.as_str()?.trim().to_string();
+                        let refs = entry
+                            .get("views")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(|value| value.as_str())
+                            .filter(|view_ref| self.lensable(view_ref))
+                            .map(str::to_string)
+                            .collect::<Vec<_>>();
+                        (!title.is_empty()).then_some(LibraryGroup { title, refs })
                     })
-                    .map(str::to_string)
                     .collect()
             })
             .unwrap_or_default()
     }
 
+    /// The launcher's full tree: the declared groups plus every OTHER
+    /// lensable view in the surface, grouped by its ref's path segments.
+    /// The append is a completeness invariant, not curation — a view that
+    /// exists is always reachable, whether or not the surface author
+    /// listed it.
+    pub(crate) fn library_groups(&self) -> Vec<LibraryGroup> {
+        let mut groups = self.library_groups_declared();
+        let declared: std::collections::BTreeSet<&str> = groups
+            .iter()
+            .flat_map(|group| group.refs.iter().map(String::as_str))
+            .collect();
+        let mut derived: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for view_ref in self.views.keys() {
+            if declared.contains(view_ref.as_str()) || !self.lensable(view_ref) {
+                continue;
+            }
+            derived
+                .entry(derived_group_title(view_ref))
+                .or_default()
+                .push(view_ref.clone());
+        }
+        for (title, refs) in derived {
+            groups.push(LibraryGroup { title, refs });
+        }
+        groups
+    }
+
+    /// The flattened declared library, in group order. Single-lens
+    /// `Ctrl+←/→` cycles this list.
+    pub(crate) fn lens_library(&self) -> Vec<String> {
+        self.library_groups_declared()
+            .into_iter()
+            .flat_map(|group| group.refs)
+            .collect()
+    }
+
     pub(crate) fn cycle_lens(&mut self, delta: i32) -> Vec<RyeOsEffect> {
-        let lenses = self.lens_library();
+        // Cycling only lands on views whose facet params the seat fold can
+        // satisfy — the same gate the launcher shows as a disabled row.
+        let lenses: Vec<String> = self
+            .lens_library()
+            .into_iter()
+            .filter(|lens| {
+                self.views.get(lens).is_none_or(|binding| {
+                    super::view_model::unsatisfied_facets(self, binding).is_empty()
+                })
+            })
+            .collect();
         if lenses.is_empty() {
             return Vec::new();
         }
@@ -614,7 +696,9 @@ mod tests {
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             effective_surface: Some(serde_json::json!({
                 "name": "lens-test",
-                "library": ["view:a", "view:scene", "view:input", "view:b"],
+                "library": [
+                    { "group": "Lenses", "views": ["view:a", "view:scene", "view:input", "view:b"] }
+                ],
                 "views": {
                     "view:a": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } },
                     "view:scene": { "widget": "scene" },

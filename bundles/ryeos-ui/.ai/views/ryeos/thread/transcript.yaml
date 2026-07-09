@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-06T12:24:56Z:aa1dad9c20f7e96586d64068b3bcf14f945198dc9e7f1f101d61a06c7cfff62b:TYDyxdclUMRAcKT9rW9Cy9mrldipkoYDKiNk6+lVJZZYm8YLt7xWgWrB6mRP3iU2VCYk4pxQ5eODXhveZsoIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:20Z:693abe16bf70d6bb6323937f2b22b2869c613fa89e2ec4c0a07d36b625178f19:WIznNjCubK3bJGFLT1BGp9kiRQ+4n3A05upq1A62TsZzTaRE3BG370ssZJ160x/KGxm08LjhUeR1xu7ejFY1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
+title: Transcript
 version: "1.0.0"
 description: >-
   Full event braid transcript for the input route's conversation chain. This is

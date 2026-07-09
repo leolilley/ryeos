@@ -1,5 +1,6 @@
-# ryeos:signed:2026-06-11T22:51:47Z:3645cc02af80f5474b697cc4c781e374e96669936b2eae6fac2f295a2a283662:i6sCzi78x0AmlfuyojP9r2Xt8KcSVDylfeShQ8fo9fuuiMMgyt7+6zaNpc+ouMFwq9jZYOVBkMzUi2aD5ffuBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T06:05:19Z:916ce9e7c45d257619fecd44b4711029f001ed5d448cf511955a67d9114fab23:6ORcRsbJTXx8wMDK2vPo0JhWJ5P90Kl1ouc99xvIKn7+4vYFSYEXvxoZ+h7fu7ZB1x/60ViZ9IyZ5RVES01qCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: commands-grammar
+title: Command Grammar
 version: "1.0.0"
 description: The node's command grammar (the spellbook) - what operator text can do
 

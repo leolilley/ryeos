@@ -1,5 +1,6 @@
-# ryeos:signed:2026-07-09T02:07:24Z:f99bff296a3bf68e5a89b2edbf0e80e309dfb67f98819306835a422c896ece18:g5yZeVxNynhPZ56Aekq7qYkDHX8ZAWTq5K6wuMd4FSE1OOyMku2NKLNFhs7lsJbi5Uiqd0upAdsi/UqGPUN9Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T06:05:20Z:7f30e056da0582e2becfb477dda24f42235f262dae8f6f4bfc1d783e15e402e8:bHf/hlp6wm5I+X++kBbm529vc1N1R66bLVbSg+4hKB0YdF2C/NpwB8x3DEzEymhVVx/oPjqERbknybDBylgODw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-remotes
+title: Remotes
 version: "1.0.0"
 description: Configured remote nodes
 

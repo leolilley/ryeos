@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-07T04:10:29Z:011e543f65514b67ec193f9730dc9cbcccb9ff7619db8dbcd9185fcbd8842f8f:x9vjWZgRUT91+w1L8LL8b270nWmXBnq3xgleY0miQPVtWx6nh34FRJHKbRGiVaC8kmnydjvF9TTALqOCKdXDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:19Z:18a1991738a6058d7834b6d292b3f92742a667da73a3f93cc2e35a0207560835:yrFurBhHAVGReR5g6PZR1mopzluNx4U0OiJNKC0Pr7ToutUZN0Q/7NbHdVk18AZk/7OxVUbyvA+r8wNro2yJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
 version: "1.0.0"
 description: Directive thread — watch and drive a single execution stream

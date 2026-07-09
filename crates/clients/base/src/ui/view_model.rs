@@ -530,7 +530,7 @@ pub struct RyeOsOverlayVm {
     pub items: Vec<RyeOsOverlayItemVm>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RyeOsOverlayItemVm {
     pub category: String,
     pub primary: String,
@@ -539,6 +539,16 @@ pub struct RyeOsOverlayItemVm {
     pub enabled: bool,
     pub intent: Option<RyeOsUiIntent>,
     pub secondary_intent: Option<RyeOsUiIntent>,
+    /// Tree indent level: 0 for flat items and group headers, 1 for a
+    /// header's children.
+    #[serde(default)]
+    pub depth: u8,
+    /// A launcher group header row — its intent folds the group, and
+    /// renderers draw the fold glyph from `expanded`.
+    #[serde(default)]
+    pub header: bool,
+    #[serde(default)]
+    pub expanded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1348,26 +1358,34 @@ fn bound_view_vm_keyed(
             use std::borrow::Cow;
 
             let cached = core.data.timeline_sources.get(source_key);
-            let (full, full_indents, full_sources) = if let Some(cache) = cached {
-                (
-                    Cow::Borrowed(cache.entries.as_slice()),
-                    Cow::Borrowed(cache.indents.as_slice()),
-                    Cow::Borrowed(cache.sources.as_slice()),
-                )
-            } else {
-                let (mut entries, mut indents, mut sources) =
-                    timeline_entries_indented(super::content::project_records(binding, response));
-                if let Some(summary) = timeline_summary_entry(response) {
-                    entries.insert(0, summary);
-                    indents.insert(0, 0);
-                    sources.insert(0, None);
-                }
-                (
-                    Cow::Owned(entries),
-                    Cow::Owned(indents),
-                    Cow::Owned(sources),
-                )
-            };
+            let (full, full_indents, full_sources, full_sections, collapsible) =
+                if let Some(cache) = cached {
+                    (
+                        Cow::Borrowed(cache.entries.as_slice()),
+                        Cow::Borrowed(cache.indents.as_slice()),
+                        Cow::Borrowed(cache.sources.as_slice()),
+                        Cow::Borrowed(cache.sections.as_slice()),
+                        Cow::Borrowed(&cache.collapsible),
+                    )
+                } else {
+                    let (mut entries, mut indents, mut sources) = timeline_entries_indented(
+                        super::content::project_records(binding, response),
+                    );
+                    if let Some(summary) = timeline_summary_entry(response) {
+                        entries.insert(0, summary);
+                        indents.insert(0, 0);
+                        sources.insert(0, None);
+                    }
+                    let (sections, collapsible_set) =
+                        super::timeline::timeline_section_index(&entries);
+                    (
+                        Cow::Owned(entries),
+                        Cow::Owned(indents),
+                        Cow::Owned(sources),
+                        Cow::Owned(sections),
+                        Cow::Owned(collapsible_set),
+                    )
+                };
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
@@ -1375,6 +1393,8 @@ fn bound_view_vm_keyed(
                 full.as_ref(),
                 full_indents.as_ref(),
                 full_sources.as_ref(),
+                full_sections.as_ref(),
+                collapsible.as_ref(),
                 super::timeline::live_delta_entry(core),
                 collapsed.unwrap_or(&empty),
                 cursor.unwrap_or(0),
@@ -2093,59 +2113,112 @@ fn ambient_vm(core: &RyeOsCore) -> RyeOsAmbientVm {
 /// Launchable views: every view embedded in the effective surface,
 /// graph/atlas included (they are ordinary `view:` items now). Nothing
 /// here names a product concept — labels and hints come from the items.
-pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
-    let mut items: Vec<RyeOsOverlayChoice> = Vec::new();
-    for view_ref in core.lens_library() {
-        let Some(binding) = core.views.get(&view_ref) else {
+pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> {
+    let mut items: Vec<RyeOsOverlayItemVm> = Vec::new();
+    for group in core.library_groups() {
+        if group.refs.is_empty() {
             continue;
-        };
-        let view = ViewSpec {
-            view_ref: view_ref.clone(),
-        };
-        let (label, hint) = launchable_view_text(&view_ref, binding);
-        items.push(RyeOsOverlayChoice {
-            label,
-            hint,
-            intent: RyeOsUiIntent::OpenView { view: view.clone() },
-            secondary_intent: Some(RyeOsUiIntent::OpenNewView { view }),
+        }
+        let expanded = !core.ui.overlay.collapsed.contains(&group.title);
+        items.push(RyeOsOverlayItemVm {
+            category: group.title.clone(),
+            primary: group.title.clone(),
             enabled: true,
+            intent: Some(RyeOsUiIntent::ToggleOverlayGroup {
+                group: group.title.clone(),
+            }),
+            header: true,
+            expanded,
+            ..Default::default()
         });
+        for view_ref in group.refs {
+            let Some(binding) = core.views.get(&view_ref) else {
+                continue;
+            };
+            let missing = unsatisfied_facets(core, binding);
+            let enabled = missing.is_empty();
+            let view = ViewSpec {
+                view_ref: view_ref.clone(),
+            };
+            items.push(RyeOsOverlayItemVm {
+                category: group.title.clone(),
+                primary: launchable_view_label(&view_ref, binding),
+                secondary: binding
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| binding.widget.clone()),
+                meta: if enabled {
+                    String::new()
+                } else {
+                    format!("needs {}", missing.join(", "))
+                },
+                enabled,
+                intent: enabled.then(|| RyeOsUiIntent::OpenView { view: view.clone() }),
+                secondary_intent: enabled.then(|| RyeOsUiIntent::OpenNewView { view }),
+                depth: 1,
+                ..Default::default()
+            });
+        }
     }
     items
 }
 
-fn launchable_view_text(view_ref: &str, binding: &ViewBinding) -> (String, String) {
-    let clean_ref = view_ref.strip_prefix("view:").unwrap_or(view_ref);
-    let (category, title) = match view_ref {
-        "view:ryeos/threads/history" => ("Project", "Threads"),
-        "view:ryeos/node/threads/history" => ("Node", "Threads"),
-        "view:ryeos/projects/list" => ("Node", "Projects"),
-        "view:ryeos/project/files" => ("Project", "Files"),
-        "view:ryeos/project/items" => ("Project", "Items"),
-        "view:ryeos/project/schedules" => ("Project", "Schedules"),
-        "view:ryeos/items/space" => ("Project", "Item space"),
-        "view:ryeos/node/events" => ("Node", "Events"),
-        "view:ryeos/node/remotes" => ("Node", "Remotes"),
-        "view:ryeos/node/bundles" => ("Node", "Bundles"),
-        "view:ryeos/node/gc" => ("Node", "Garbage collection"),
-        "view:ryeos/commands/grammar" => ("Node", "Command grammar"),
-        "view:ryeos/graph/topology" => ("Node", "Topology"),
-        "view:ryeos/atlas" => ("System", "Atlas"),
-        _ => (
-            "View",
-            binding
-                .name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(clean_ref),
-        ),
-    };
-    let hint = binding
-        .description
-        .clone()
-        .unwrap_or_else(|| binding.widget.clone());
-    (format!("{category}/{title}"), hint)
+/// A view's launcher label, from content: authored `title:`, else the
+/// authored `name:`, else the stripped ref.
+fn launchable_view_label(view_ref: &str, binding: &ViewBinding) -> String {
+    binding
+        .title
+        .as_deref()
+        .or(binding.name.as_deref())
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| view_ref.strip_prefix("view:").unwrap_or(view_ref))
+        .to_string()
+}
+
+/// The `@facet:` references in a view's declarations that the current
+/// seat fold cannot resolve. Defaulting refs (`@facet:x|…`) never gate —
+/// they resolve to their default. Generic over the grammar; the engine
+/// never names a facet.
+pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec<String> {
+    let mut refs: Vec<String> = Vec::new();
+    collect_required_facet_refs(&binding.body, &mut refs);
+    if let Some(source) = &binding.source {
+        collect_required_facet_refs(&source.params, &mut refs);
+    }
+    refs.sort();
+    refs.dedup();
+    let fold = core.seat.fold();
+    refs.retain(|spec| {
+        super::content::resolve_params(&serde_json::Value::String(format!("@facet:{spec}")), |key| {
+            fold.get(key).cloned()
+        })
+        .is_null()
+    });
+    refs
+}
+
+fn collect_required_facet_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some(rest) = s.strip_prefix("@facet:") {
+                if !rest.contains('|') {
+                    out.push(rest.to_string());
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for nested in map.values() {
+                collect_required_facet_refs(nested, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for nested in items {
+                collect_required_facet_refs(nested, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
@@ -2310,6 +2383,7 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
         enabled: false,
         intent: None,
         secondary_intent: None,
+        ..Default::default()
     };
     let overlay =
         |category: &str, primary: &str, secondary: &str, overlay_id: &str| RyeOsOverlayItemVm {
@@ -2322,6 +2396,7 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
                 overlay_id: overlay_id.to_string(),
             }),
             secondary_intent: None,
+            ..Default::default()
         };
     let view =
         |category: &str, primary: &str, secondary: &str, view_ref: &str| RyeOsOverlayItemVm {
@@ -2336,6 +2411,7 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
                 },
             }),
             secondary_intent: None,
+            ..Default::default()
         };
     vec![
         overlay("Start", "Views", "Open the view launcher", "views"),
@@ -2506,17 +2582,52 @@ pub(crate) fn active_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> 
         return Vec::new();
     };
     let query = core.ui.overlay.query.trim().to_lowercase();
-    overlay_source_items(core, &source_ref)
-        .into_iter()
-        .filter(|item| {
-            let haystack = format!(
-                "{} {} {} {}",
-                item.category, item.primary, item.secondary, item.meta
-            )
-            .to_lowercase();
-            query.is_empty() || haystack.contains(&query)
-        })
-        .collect()
+    let items = overlay_source_items(core, &source_ref);
+    if query.is_empty() {
+        // Tree presentation: a collapsed header hides its children. Flat
+        // sources carry no headers, so everything passes.
+        let mut hidden = false;
+        return items
+            .into_iter()
+            .filter(|item| {
+                if item.header {
+                    hidden = !item.expanded;
+                    true
+                } else {
+                    !hidden
+                }
+            })
+            .collect();
+    }
+    // A live search matches over every child regardless of fold state and
+    // presents hits under their forced-open headers — a collapsed group
+    // can never hide a match, and Enter always lands on one (headers go
+    // inert while the query is live).
+    let mut out: Vec<RyeOsOverlayItemVm> = Vec::new();
+    let mut pending_header: Option<RyeOsOverlayItemVm> = None;
+    for item in items {
+        if item.header {
+            pending_header = Some(item);
+            continue;
+        }
+        let haystack = format!(
+            "{} {} {} {}",
+            item.category, item.primary, item.secondary, item.meta
+        )
+        .to_lowercase();
+        if !haystack.contains(&query) {
+            continue;
+        }
+        if let Some(mut header) = pending_header.take() {
+            header.expanded = true;
+            header.enabled = false;
+            header.intent = None;
+            header.secondary_intent = None;
+            out.push(header);
+        }
+        out.push(item);
+    }
+    out
 }
 
 fn overlay_source_items(core: &RyeOsCore, source_ref: &str) -> Vec<RyeOsOverlayItemVm> {
@@ -2527,10 +2638,7 @@ fn overlay_source_items(core: &RyeOsCore, source_ref: &str) -> Vec<RyeOsOverlayI
             .collect(),
         "runtime:help" => help_overlay_items(),
         "runtime:shortcuts" => shortcut_overlay_items(),
-        "runtime:views/launchable" => view_overlay_items(core)
-            .into_iter()
-            .map(overlay_item_from_choice)
-            .collect(),
+        "runtime:views/launchable" => view_overlay_items(core),
         _ => Vec::new(),
     }
 }
@@ -2545,6 +2653,7 @@ fn overlay_item_from_choice(item: RyeOsOverlayChoice) -> RyeOsOverlayItemVm {
         enabled: item.enabled,
         intent: Some(item.intent),
         secondary_intent: item.secondary_intent,
+        ..Default::default()
     }
 }
 
@@ -2559,6 +2668,7 @@ fn shortcut_overlay_items() -> Vec<RyeOsOverlayItemVm> {
             enabled: false,
             intent: None,
             secondary_intent: None,
+            ..Default::default()
         })
         .collect()
 }
@@ -2966,7 +3076,6 @@ mod tests {
             effective_surface: Some(json!({
                 "name": "ryeos-base",
                 "tiles": tiles,
-                "library": tiles,
                 "views": views,
             })),
             ..Default::default()
@@ -3000,24 +3109,34 @@ mod tests {
     }
 
     #[test]
-    fn view_overlay_label_uses_launcher_scope_and_ref_fallback() {
+    fn view_overlay_labels_come_from_content_with_ref_fallback() {
         let core = session_with_views(
             json!({
-                "view:ryeos/atlas": { "widget": "atlas", "name": "Atlas", "description": "the namespace atlas" },
+                "view:ryeos/atlas": { "widget": "atlas", "name": "atlas-slug", "title": "Atlas", "description": "the namespace atlas" },
                 "view:ryeos/x/raw": { "widget": "rows" },
             }),
             json!(["view:ryeos/atlas", "view:ryeos/x/raw"]),
         );
         let items = view_overlay_items(&core);
-        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = items
+            .iter()
+            .filter(|item| !item.header)
+            .map(|item| item.primary.as_str())
+            .collect();
         assert!(
-            labels.contains(&"System/Atlas"),
-            "known view uses launcher scope: {labels:?}"
+            labels.contains(&"Atlas"),
+            "authored title labels the view: {labels:?}"
         );
         assert!(
-            labels.contains(&"View/ryeos/x/raw"),
+            labels.contains(&"ryeos/x/raw"),
             "unnamed view falls back to stripped ref: {labels:?}"
         );
+        // Every leaf sits under its group header, indented one level.
+        assert!(items.iter().any(|item| item.header));
+        assert!(items
+            .iter()
+            .filter(|item| !item.header)
+            .all(|item| item.depth == 1));
     }
 
     #[test]

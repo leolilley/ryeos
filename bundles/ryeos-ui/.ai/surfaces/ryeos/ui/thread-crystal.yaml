@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-08T06:03:18Z:836bd395753ddb82cf1d34057a6c08c17dd15572b6a8c9ca20cf8ab2051738ab:nwpuKHKziu72/yykcR9jHrDpaDBASZD4lupGME/M3u4mzctGI9Ohsvw9vEmTeUQ5Rkgxd6y6A9XJu0eKC+dWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:19Z:a910f6c9eb20a083d1e1f6704a4e99538047142cad84e8e56e657cf6e6340047:MA74XSc9efrATjPf9x1gWcKk2B/MhDCMHwVk31h2zt1L4PdaYC6rhUkUwn2/vrzVYKbnMl82eLFb/eZn5zerBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
 description: Focused thread transcript over the live prism backdrop

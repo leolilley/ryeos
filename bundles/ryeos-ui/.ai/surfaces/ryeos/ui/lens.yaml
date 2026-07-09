@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T02:07:24Z:2fa5ceb795b9310bf8edf7df2eca18076c46fa92efbc27d5dc119163f8f0e3b3:l9AiziEy5o8svSsg1JzEwhXjSRu15KjrxgoLBOpSh1LUmXeMyeNXEo2tt8qu/KSDZrQfLfdfq/sxFGA8lE8CCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T06:05:19Z:797cd808b9af93c359f5a2e8763f7814e4280a959377544ed198bc682ad5f332:Mkp7A05bp8hDz3MRV/OmJPoaVTIZ1YIz77bWxryqPy6NoWoPf4xt/XS2Sjmj68962SzXZgNuaScXU456l1h5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 version: "1.0.0"
 description: >-
@@ -33,21 +33,32 @@ style:
 
 backdrop: view:ryeos/backdrop/prism-shards
 
-# The full lens set — swap the single center lens to reach any of these.
+# The full lens set as the launcher's tree — each group a foldable header,
+# every view under it launchable. Ctrl+←/→ cycles the flattened declared
+# order. Views no group lists still surface: the engine appends them under
+# path-derived groups, so nothing is unreachable.
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/projects/list
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
-  - view:ryeos/node/events
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/graph/topology
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+      - view:ryeos/thread/transcript
+      - view:ryeos/threads/detail
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/graph/topology
+      - view:ryeos/commands/grammar
 
 overlays:
   views:

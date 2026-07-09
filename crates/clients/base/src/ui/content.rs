@@ -53,6 +53,11 @@ pub struct ViewBinding {
     /// declare one — callers fall back to the ref tail.
     #[serde(default)]
     pub name: Option<String>,
+    /// The view's authored display `title:` — the launcher/header label a
+    /// human reads, where `name` stays the item's slug. Absent → callers
+    /// fall back to `name`, then the ref tail.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     /// The view's data source. Absent for sourceless views (e.g. a pure

@@ -100,6 +100,25 @@ pub(crate) fn timeline_sections(entries: &[RyeOsTimelineEntryVm]) -> Vec<usize> 
     sections
 }
 
+/// The section index per entry, plus the sections headed by a real
+/// `Separator` (the ones a fold key can collapse) — the per-entry metadata
+/// [`fold_timeline_window`] needs but does not itself derive. Depends only
+/// on `full`, so it is computed once when a source's entries are (re)built
+/// (`RyeOsTimelineSourceCache::sections`/`collapsible`) rather than
+/// rescanned on every windowed render frame.
+pub(crate) fn timeline_section_index(
+    full: &[RyeOsTimelineEntryVm],
+) -> (Vec<usize>, std::collections::BTreeSet<usize>) {
+    let sections = timeline_sections(full);
+    let mut collapsible = std::collections::BTreeSet::new();
+    for (i, entry) in full.iter().enumerate() {
+        if matches!(entry, RyeOsTimelineEntryVm::Separator { .. }) {
+            collapsible.insert(sections[i]);
+        }
+    }
+    (sections, collapsible)
+}
+
 /// A timeline with folds applied: collapsed turns keep only their header
 /// (the `Separator`, marked), their bodies hidden.
 pub(crate) struct FoldedTimeline {
@@ -178,69 +197,133 @@ pub(crate) fn fold_timeline(
 /// Fold a render window around the selected visible entry, cloning only the
 /// entries the renderer can plausibly draw. This keeps transcript render cost
 /// bounded while preserving the cursor's distance-from-bottom semantics.
+///
+/// `full_sections`/`collapsible` are `full`'s per-entry section index and
+/// foldable-section set — [`timeline_section_index`], cached alongside `full`
+/// at build time (`RyeOsTimelineSourceCache`) rather than rescanned here. So
+/// this does only bounded work: locating the selected entry scans at most
+/// `cursor_from_bottom` (+ any folded runs skipped) entries back from the
+/// bottom, and collecting the window scans at most `window` entries out from
+/// there in each direction — never the full transcript length, no matter how
+/// long the thread is.
 pub(crate) fn fold_timeline_window(
     full: &[RyeOsTimelineEntryVm],
     full_indents: &[u8],
     full_sources: &[Option<TimelineEntrySource>],
+    full_sections: &[usize],
+    collapsible: &std::collections::BTreeSet<usize>,
     tail_entry: Option<RyeOsTimelineEntryVm>,
     collapsed: &std::collections::BTreeSet<usize>,
     cursor_from_bottom: usize,
     window: usize,
 ) -> FoldedTimelineWindow {
-    let mut section_of = timeline_sections(full);
-    if tail_entry.is_some() {
-        section_of.push(section_of.last().copied().unwrap_or(0));
+    let total = full.len() + tail_entry.is_some() as usize;
+    // The live tail entry is never a `Separator` (a Block or a "working…"
+    // Line), so it always extends the last real section rather than opening
+    // one — it needs no entry of its own in `full_sections`/`collapsible`.
+    let tail_section = full_sections.last().copied().unwrap_or(0);
+    let section_at = |i: usize| {
+        if i < full.len() {
+            full_sections[i]
+        } else {
+            tail_section
+        }
+    };
+    let entry_at = |i: usize| timeline_window_entry(full, tail_entry.as_ref(), i);
+    let is_header_at =
+        |i: usize| i == 0 || matches!(entry_at(i), Some(RyeOsTimelineEntryVm::Separator { .. }));
+    let is_visible_at = |i: usize| {
+        let sec = section_at(i);
+        !(collapsed.contains(&sec) && collapsible.contains(&sec) && !is_header_at(i))
+    };
+
+    let empty = || FoldedTimelineWindow {
+        folded: FoldedTimeline {
+            entries: Vec::new(),
+            sections: Vec::new(),
+            indents: Vec::new(),
+            sources: Vec::new(),
+            collapsible: collapsible.clone(),
+        },
+        selected: None,
+    };
+    if total == 0 {
+        return empty();
     }
-    let total = section_of.len();
-    let is_header: Vec<bool> = (0..total)
-        .map(|i| i == 0 || section_of[i] != section_of[i - 1])
-        .collect();
-    let mut collapsible = std::collections::BTreeSet::new();
-    for i in 0..total {
-        if is_header[i]
-            && timeline_window_entry(full, tail_entry.as_ref(), i)
-                .is_some_and(|entry| matches!(entry, RyeOsTimelineEntryVm::Separator { .. }))
-        {
-            collapsible.insert(section_of[i]);
+
+    // Locate the selected entry: the visible entry `cursor_from_bottom` back
+    // from the bottom. Falls back to the topmost visible entry if the
+    // transcript has fewer visible entries than that (cursor pinned to the
+    // top), mirroring the old `cursor_from_bottom.min(last_visible)` clamp.
+    let mut selected_index = None;
+    let mut remaining = cursor_from_bottom;
+    let mut i = total;
+    while i > 0 {
+        i -= 1;
+        if is_visible_at(i) {
+            selected_index = Some(i);
+            if remaining == 0 {
+                break;
+            }
+            remaining -= 1;
         }
     }
-
-    let visible_full_indices: Vec<usize> = (0..total)
-        .filter(|i| {
-            let sec = section_of[*i];
-            !(collapsed.contains(&sec) && collapsible.contains(&sec) && !is_header[*i])
-        })
-        .collect();
-    let Some(last_visible) = visible_full_indices.len().checked_sub(1) else {
-        return FoldedTimelineWindow {
-            folded: FoldedTimeline {
-                entries: Vec::new(),
-                sections: Vec::new(),
-                indents: Vec::new(),
-                sources: Vec::new(),
-                collapsible,
-            },
-            selected: None,
-        };
+    let Some(selected_index) = selected_index else {
+        return empty();
     };
-    let selected_visible = last_visible.saturating_sub(cursor_from_bottom.min(last_visible));
-    let window = window.max(1).min(visible_full_indices.len());
-    let start_visible = selected_visible
-        .saturating_sub(window / 2)
-        .min(visible_full_indices.len().saturating_sub(window));
-    let end_visible = start_visible + window;
 
-    let mut entries = Vec::with_capacity(window);
-    let mut sections = Vec::with_capacity(window);
-    let mut indents = Vec::with_capacity(window);
-    let mut sources = Vec::with_capacity(window);
-    for i in visible_full_indices[start_visible..end_visible]
-        .iter()
-        .copied()
-    {
-        let sec = section_of[i];
+    // Collect the window's visible entries centered on `selected_index`:
+    // nominally `window / 2` above and the rest at-or-below. Either side
+    // that runs out early (the selection sits near the top or bottom of the
+    // visible list) hands its shortfall to the other side, so a full
+    // `window` is still shown whenever that many visible entries exist
+    // anywhere in the transcript — matching the prior min-clamped centering.
+    let window = window.max(1);
+    let want_above = window / 2;
+    let want_below = window - want_above;
+
+    let mut below = Vec::with_capacity(want_below);
+    let mut i = selected_index;
+    while below.len() < want_below && i < total {
+        if is_visible_at(i) {
+            below.push(i);
+        }
+        i += 1;
+    }
+    let short_below = want_below - below.len();
+
+    let want_above_total = want_above + short_below;
+    let mut above = Vec::with_capacity(want_above_total);
+    let mut i = selected_index;
+    while above.len() < want_above_total && i > 0 {
+        i -= 1;
+        if is_visible_at(i) {
+            above.push(i);
+        }
+    }
+    let short_above = want_above_total - above.len();
+    if short_above > 0 {
+        let mut i = below.last().map_or(selected_index + 1, |last| last + 1);
+        let target = below.len() + short_above;
+        while below.len() < target && i < total {
+            if is_visible_at(i) {
+                below.push(i);
+            }
+            i += 1;
+        }
+    }
+    above.reverse();
+    let selected_visible = above.len();
+    let visible_full_indices: Vec<usize> = above.into_iter().chain(below).collect();
+
+    let mut entries = Vec::with_capacity(visible_full_indices.len());
+    let mut sections = Vec::with_capacity(visible_full_indices.len());
+    let mut indents = Vec::with_capacity(visible_full_indices.len());
+    let mut sources = Vec::with_capacity(visible_full_indices.len());
+    for i in visible_full_indices {
+        let sec = section_at(i);
         let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
-        let Some(source_entry) = timeline_window_entry(full, tail_entry.as_ref(), i) else {
+        let Some(source_entry) = entry_at(i) else {
             continue;
         };
         let entry = if folded {
@@ -269,9 +352,9 @@ pub(crate) fn fold_timeline_window(
             sections,
             indents,
             sources,
-            collapsible,
+            collapsible: collapsible.clone(),
         },
-        selected: Some(selected_visible - start_visible),
+        selected: Some(selected_visible),
     }
 }
 

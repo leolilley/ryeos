@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-06T12:24:56Z:32fba951a834332ce24359cd95b800614fc625fbd332b36768c00707f56baa64:Pq++iQDaHwJ6vPjIF7U/V7R15mmT2U1uwzFPEko0sdkRvhDcG6iclGU8fubjJwJx8xrmpNmEMdIFT3Z2BsnHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:20Z:49f78d6abfcc3bbb46577fcc322697f0592c4baeb31fe43a54d5a70e878c83f1:Gpw4ohz+ULywYPBiqp2r58lrrkYibyQG+8UBkvZozOB7EfYlwfN0vVnqZ7Ng2e7w3Rb9H7e6xGxbZckt6y/uAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-events
+title: Events
 version: "1.0.0"
 description: Recent durable events across every thread on the node
 

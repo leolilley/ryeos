@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T02:07:24Z:81bc10b0d08c32d573037c83177170de4ea4b4db15efd4e0d1a6cf57ea460ffe:6wH5QKQLLnFO4cXPxRDExPKw0ous0AU8YhmWm8lQqIz6M6X4ZR+Sw4U4FPrJdVBCBLmEwZpkqhFBF8snJLchAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T06:05:19Z:8400d283afd8c52564c482e2b8d17d045bffc1424a4ef2ded15dcef57dd457a2:0rfD6LWnqXgh8NU1lVF4X7ATT1CF7t8diKIu8QeRx7n0CLBKPvazyRhSfwCXnJ0C8e5beKdQN6bGDSsBkNOSCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 version: "1.0.0"
 description: RyeOS UI home space
@@ -24,18 +24,26 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/projects/list
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
-  - view:ryeos/node/events
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+      - view:ryeos/thread/transcript
+      - view:ryeos/threads/detail
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/commands/grammar
 
 overlays:
   views:

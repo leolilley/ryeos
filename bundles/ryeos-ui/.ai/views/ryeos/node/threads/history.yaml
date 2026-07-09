@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-08T01:26:03Z:f1b49b313f54d00292c8c514b03f590e0fe6e98acd8b3ba18ed4edeb0ce5e2f6:Ze3Adbc3i0z7MWbBC66qIK1MMYs7PuNCRFvGmOCynLzWfQQ5XtqOjLPc+uADQ00tCy88U0sv5g14gDbIG0elCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:20Z:b124fc68e407c480a77c69120e001cfde0a19ae35bb4532cf4945f89f0be28b1:KSSvmLTL+jluAYUINb2f7qQNjhnociyP5H9BAYoqWl1fmCOD521ShlHNz3SzThF48jaFdOY0bOLfW6IByt/JCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
+title: Node Threads
 version: "1.0.0"
 description: >-
   Node-wide thread history across project contexts. The input acts as the
