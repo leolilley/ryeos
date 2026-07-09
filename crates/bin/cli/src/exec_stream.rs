@@ -8,21 +8,10 @@
 
 use std::io::Write;
 
+use ryeos_state::event_types::{thread_terminal_outcome, ThreadOutcomeKind};
 use serde_json::Value;
 
 use crate::transport::http::SseEvent;
-
-/// Successful terminal events (run finished normally). `thread_continued` is a
-/// normal handoff to a successor, not a failure.
-const SUCCESS_TERMINALS: &[&str] = &["thread_completed", "thread_continued"];
-
-/// Failing terminal events — the run did not succeed; the CLI must exit non-zero.
-const FAILURE_TERMINALS: &[&str] = &[
-    "thread_failed",
-    "thread_cancelled",
-    "thread_killed",
-    "thread_timed_out",
-];
 
 /// What the caller should do after an event.
 pub enum StreamOutcome {
@@ -53,45 +42,47 @@ pub fn render_event(ev: &SseEvent) -> StreamOutcome {
             eprintln!("\n✗ {code}: {msg}");
             StreamOutcome::Failed(format!("{code}: {msg}"))
         }
-        event if SUCCESS_TERMINALS.contains(&event) => {
-            println!("\n● {event}");
-            StreamOutcome::Done
-        }
-        event if FAILURE_TERMINALS.contains(&event) => {
-            // Persisted lifecycle events wrap the real payload under `payload`.
-            let inner = data.get("payload").unwrap_or(&data);
-            let reason = failure_reason(inner);
-            if reason.is_empty() {
-                eprintln!("\n✗ {event}");
-                StreamOutcome::Failed(event.to_string())
-            } else {
-                eprintln!("\n✗ {event}: {reason}");
-                StreamOutcome::Failed(format!("{event}: {reason}"))
+        event => match thread_terminal_outcome(event) {
+            Some(ThreadOutcomeKind::Success) => {
+                println!("\n● {event}");
+                StreamOutcome::Done
             }
-        }
-        _ => {
-            // Best-effort: stream the assistant's text inline. Persisted events
-            // wrap their payload under `payload`; fall back to top-level for
-            // synthetic envelopes (stream_started/error already handled above).
-            let inner = data.get("payload").unwrap_or(&data);
-            if let Some(text) = human_text(inner) {
-                print!("{text}");
-                let _ = std::io::stdout().flush();
-            } else {
-                // The event already carries a rich payload; surface it instead
-                // of dropping it. `payload_summary` reflects whatever fields are
-                // there generically — it names no event's fields, so a new event
-                // kind needs no change here (the vocabulary stays in the events,
-                // not this binary).
-                let summary = payload_summary(inner);
-                if summary.is_empty() {
-                    println!("· {}", ev.event);
+            Some(ThreadOutcomeKind::Failure) => {
+                // Persisted lifecycle events wrap the real payload under `payload`.
+                let inner = data.get("payload").unwrap_or(&data);
+                let reason = failure_reason(inner);
+                if reason.is_empty() {
+                    eprintln!("\n✗ {event}");
+                    StreamOutcome::Failed(event.to_string())
                 } else {
-                    println!("· {}  {summary}", ev.event);
+                    eprintln!("\n✗ {event}: {reason}");
+                    StreamOutcome::Failed(format!("{event}: {reason}"))
                 }
             }
-            StreamOutcome::Continue
-        }
+            None => {
+                // Best-effort: stream the assistant's text inline. Persisted events
+                // wrap their payload under `payload`; fall back to top-level for
+                // synthetic envelopes (stream_started/error already handled above).
+                let inner = data.get("payload").unwrap_or(&data);
+                if let Some(text) = human_text(inner) {
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
+                } else {
+                    // The event already carries a rich payload; surface it instead
+                    // of dropping it. `payload_summary` reflects whatever fields are
+                    // there generically — it names no event's fields, so a new event
+                    // kind needs no change here (the vocabulary stays in the events,
+                    // not this binary).
+                    let summary = payload_summary(inner);
+                    if summary.is_empty() {
+                        println!("· {}", ev.event);
+                    } else {
+                        println!("· {}  {summary}", ev.event);
+                    }
+                }
+                StreamOutcome::Continue
+            }
+        },
     }
 }
 

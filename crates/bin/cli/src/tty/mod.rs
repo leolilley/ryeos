@@ -1,15 +1,13 @@
 //! Rye OS CLI TTY presentation.
 //!
-//! This is a normal stdout renderer, not the full TUI. Cached data is only a
-//! presentation projection and is never used for dispatch or authorization.
+//! This is a normal stdout renderer, not the full TUI: every render reads
+//! live local state and prints directly, with no on-disk projection.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result as AnyhowResult};
-use ryeos_app::principal::{PrincipalPaths, PrincipalResolver, PrincipalStore};
 use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv};
-use serde::{Deserialize, Serialize};
+use ryeos_state::event_types::{outcome_code_is_failure, thread_terminal_outcome, ThreadOutcomeKind};
 use serde_json::Value;
 
 use crate::exec_stream::StreamOutcome;
@@ -17,149 +15,47 @@ use crate::error::{CliError, CliTransportError};
 use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
-const TTY_HOME_VERSION: u32 = 2;
-const TTY_CONFIG_VERSION: u32 = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtyScreen {
     Home,
     Help,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TtyEntryKind {
-    Bare,
-    ExplicitScreen,
 }
 
 pub async fn run(
     app_root: &Path,
     explicit_project: Option<&Path>,
     screen: TtyScreen,
-    debug: bool,
 ) -> std::result::Result<(), CliError> {
-    let app_root_key = normalize_path_for_key(app_root);
-    let app_root_path = PathBuf::from(&app_root_key);
-    let entry_kind = match screen {
-        TtyScreen::Home => TtyEntryKind::Bare,
-        TtyScreen::Help => TtyEntryKind::ExplicitScreen,
-    };
-    let screen = configured_screen(&app_root_path, screen, entry_kind, debug);
     let project = resolve_project_for_display(explicit_project);
-    let signer = resolve_operator(app_root);
+    let operator_problem = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
-    let cache_enabled = remote_url.is_none();
-    let mut rendered_lines = 0;
 
-    if let (Some(operator), true, true) = (
-        signer.operator_principal_id.as_ref(),
-        project.cacheable,
-        cache_enabled,
-    ) {
-        let resolver = AppRootPrincipalResolver {
-            root: app_root_path.clone(),
-        };
-        if let Ok(store) = PrincipalStore::resolve_with(&resolver, operator) {
-            let path = store.paths().ryeos_tty_home();
-            match load_optional_tty_home(&path) {
-                Ok(Some(cached))
-                    if cache_matches(&cached, &app_root_key, operator, &project.key, screen) =>
-                {
-                    rendered_lines = render(&cached, RenderMode::Cached, rendered_lines)?;
-                }
-                Ok(_) => {}
-                Err(err) => debug_warn(debug, format!("ignore tty home cache: {err:#}")),
-            }
-        }
-    }
-
-    if rendered_lines == 0 {
-        rendered_lines = render(
-            &loading_projection(
-                &app_root_key,
-                signer.operator_principal_id.as_deref(),
-                &project,
-                screen,
-            ),
-            RenderMode::Live,
-            rendered_lines,
-        )?;
-    }
+    let rendered_lines = render(&loading_projection(screen, &project), 0)?;
 
     let live = build_live_projection(
         app_root,
-        &app_root_key,
         &project,
-        &signer,
+        operator_problem.as_deref(),
         screen,
         remote_url.as_deref(),
     )
     .await;
-    render(&live, RenderMode::Live, rendered_lines)?;
-
-    if let (Some(operator), true, true, true) = (
-        signer.operator_principal_id.as_ref(),
-        project.cacheable,
-        signer.cache_writable,
-        cache_enabled,
-    ) {
-        let resolver = AppRootPrincipalResolver {
-            root: app_root_path,
-        };
-        match PrincipalStore::locked_with(&resolver, operator).await {
-            Ok(locked) => {
-                let path = locked.paths().ryeos_tty_home();
-                if let Err(err) = locked.write_yaml(&path, &live) {
-                    debug_warn(debug, format!("write tty home cache: {err:#}"));
-                }
-            }
-            Err(err) => debug_warn(debug, format!("lock tty home cache: {err:#}")),
-        }
-    }
+    render(&live, rendered_lines)?;
 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct AppRootPrincipalResolver {
-    root: PathBuf,
-}
-
-impl PrincipalResolver for AppRootPrincipalResolver {
-    fn resolve(&self, principal_id: &str) -> AnyhowResult<PrincipalPaths> {
-        if principal_id.trim().is_empty() {
-            anyhow::bail!("principal id is required");
-        }
-        Ok(PrincipalPaths::new(self.root.clone()))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct OperatorState {
-    operator_principal_id: Option<String>,
-    cache_writable: bool,
-    key_status: SourceStatus,
-}
-
-fn resolve_operator(app_root: &Path) -> OperatorState {
+/// `Some(problem)` when the operator signing key is missing or errors,
+/// surfaced in the node detail line; `None` when it resolves fine.
+fn resolve_operator(app_root: &Path) -> Option<String> {
     match Signer::resolve(app_root) {
-        Ok(signer) => OperatorState {
-            operator_principal_id: Some(format!("fp:{}", signer.fingerprint)),
-            cache_writable: true,
-            key_status: SourceStatus::live(),
-        },
-        Err(CliTransportError::SigningKeyMissing { .. }) => OperatorState {
-            operator_principal_id: None,
-            cache_writable: false,
-            key_status: SourceStatus::missing("operator signing key missing"),
-        },
-        Err(err) => OperatorState {
-            operator_principal_id: None,
-            cache_writable: false,
-            key_status: SourceStatus::error(format!("operator signing key error: {err}")),
-        },
+        Ok(_) => None,
+        Err(CliTransportError::SigningKeyMissing { .. }) => {
+            Some("operator signing key missing".to_string())
+        }
+        Err(err) => Some(format!("operator signing key error: {err}")),
     }
 }
 
@@ -168,7 +64,6 @@ struct ProjectDisplay {
     key: Option<String>,
     label: String,
     detail: Option<String>,
-    cacheable: bool,
 }
 
 fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDisplay {
@@ -181,20 +76,17 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
                     label: path_label(&canonical),
                     detail: Some(key.clone()),
                     key: Some(key),
-                    cacheable: true,
                 }
             }
             Ok(canonical) => ProjectDisplay {
                 key: None,
                 label: canonical.display().to_string(),
                 detail: Some("not a directory".to_string()),
-                cacheable: false,
             },
             Err(err) => ProjectDisplay {
                 key: None,
                 label: abs.display().to_string(),
                 detail: Some(format!("unavailable: {err}")),
-                cacheable: false,
             },
         };
     }
@@ -204,7 +96,6 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
             key: None,
             label: "none".to_string(),
             detail: Some("current directory unavailable".to_string()),
-            cacheable: false,
         };
     };
 
@@ -215,7 +106,6 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
                 label: path_label(ancestor),
                 detail: Some(key.clone()),
                 key: Some(key),
-                cacheable: true,
             };
         }
     }
@@ -224,7 +114,6 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
         key: None,
         label: "none".to_string(),
         detail: None,
-        cacheable: true,
     }
 }
 
@@ -244,14 +133,6 @@ fn path_label(path: &Path) -> String {
         .to_string()
 }
 
-fn normalize_path_for_key(path: &Path) -> String {
-    let abs = absolutize(path);
-    abs.canonicalize()
-        .unwrap_or(abs)
-        .display()
-        .to_string()
-}
-
 fn remote_daemon_url() -> Option<String> {
     std::env::var("RYEOSD_URL")
         .ok()
@@ -259,97 +140,9 @@ fn remote_daemon_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn load_optional_tty_home(path: &Path) -> AnyhowResult<Option<TtyHomeFile>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_yaml::from_str(&raw)
-            .map(Some)
-            .with_context(|| format!("parse {}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
-    }
-}
-
-fn configured_screen(
-    app_root: &Path,
-    default: TtyScreen,
-    entry_kind: TtyEntryKind,
-    debug: bool,
-) -> TtyScreen {
-    if entry_kind != TtyEntryKind::Bare {
-        return default;
-    }
-
-    let resolver = AppRootPrincipalResolver {
-        root: app_root.to_path_buf(),
-    };
-    let store = match PrincipalStore::resolve_with(
-        &resolver,
-        ryeos_app::principal::LOCAL_PRINCIPAL_ID,
-    ) {
-        Ok(store) => store,
-        Err(err) => {
-            debug_warn(debug, format!("resolve tty config path: {err:#}"));
-            return default;
-        }
-    };
-    match load_optional_tty_config(&store.paths().ryeos_tty_config()) {
-        Ok(Some(config)) if config.version == TTY_CONFIG_VERSION => config.bare_action.screen(),
-        Ok(Some(config)) => {
-            debug_warn(
-                debug,
-                format!("ignore tty config version {}", config.version),
-            );
-            default
-        }
-        Ok(None) => default,
-        Err(err) => {
-            debug_warn(debug, format!("ignore tty config: {err:#}"));
-            default
-        }
-    }
-}
-
-fn load_optional_tty_config(path: &Path) -> AnyhowResult<Option<TtyConfigFile>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_yaml::from_str(&raw)
-            .map(Some)
-            .with_context(|| format!("parse {}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
-    }
-}
-
-fn cache_matches(
-    cached: &TtyHomeFile,
-    app_root: &str,
-    operator_principal_id: &str,
-    project_root: &Option<String>,
-    screen: TtyScreen,
-) -> bool {
-    cached.version == TTY_HOME_VERSION
-        && cached.screen == screen
-        && cached.app_root == app_root
-        && cached.operator_principal_id == operator_principal_id
-        && &cached.project_root == project_root
-}
-
-fn loading_projection(
-    app_root: &str,
-    operator_principal_id: Option<&str>,
-    project: &ProjectDisplay,
-    screen: TtyScreen,
-) -> TtyHomeFile {
+fn loading_projection(screen: TtyScreen, project: &ProjectDisplay) -> TtyHomeFile {
     TtyHomeFile {
-        version: TTY_HOME_VERSION,
         screen,
-        generated_at: lillux::time::iso8601_now(),
-        app_root: app_root.to_string(),
-        operator_principal_id: operator_principal_id.unwrap_or("missing").to_string(),
-        project_root: project.key.clone(),
-        source: TtyHomeSource {
-            node: SourceStatus::loading(),
-            node_config: SourceStatus::loading(),
-        },
         sections: TtyHomeSections {
             node: TtyNodeSummary {
                 status: "loading".to_string(),
@@ -367,24 +160,20 @@ fn loading_projection(
 
 async fn build_live_projection(
     app_root: &Path,
-    app_root_key: &str,
     project: &ProjectDisplay,
-    signer: &OperatorState,
+    operator_problem: Option<&str>,
     screen: TtyScreen,
     remote_url: Option<&str>,
 ) -> TtyHomeFile {
-    let (node, node_status) = match remote_url {
-        Some(remote_url) => (
-            TtyNodeSummary {
-                status: "remote override".to_string(),
-                detail: Some(format!("RYEOSD_URL={remote_url}")),
-            },
-            SourceStatus::live(),
-        ),
+    let mut node = match remote_url {
+        Some(remote_url) => TtyNodeSummary {
+            status: "remote override".to_string(),
+            detail: Some(format!("RYEOSD_URL={remote_url}")),
+        },
         None => lifecycle_summary(app_root).await,
     };
     let snapshot = crate::node_descriptors::load_verified_snapshot(app_root);
-    let (node_config_status, command_count, has_tui_command, verified_items) = match snapshot {
+    let (command_count, has_tui_command, verified_items) = match snapshot {
         Ok(snapshot) => {
             let descriptors =
                 crate::node_descriptors::load_command_descriptors_from_snapshot(&snapshot);
@@ -392,7 +181,6 @@ async fn build_live_projection(
                 .iter()
                 .any(|command| command.tokens.len() == 1 && command.tokens[0] == "tui");
             (
-                SourceStatus::live(),
                 Some(
                     snapshot.commands.len()
                         + crate::lifecycle_commands::local_command_descriptors().len(),
@@ -401,36 +189,22 @@ async fn build_live_projection(
                 verified_command_items(descriptors),
             )
         }
-        Err(err) => (
-            SourceStatus::error(format!("verified node config: {err:#}")),
+        Err(_) => (
             Some(crate::lifecycle_commands::local_command_descriptors().len()),
             false,
             Vec::new(),
         ),
     };
 
-    let mut node = node;
-    if !matches!(signer.key_status.state, SourceState::Live) {
+    if let Some(problem) = operator_problem {
         node.detail = Some(match node.detail {
-            Some(detail) => format!("{detail}; {}", signer.key_status.label()),
-            None => signer.key_status.label(),
+            Some(detail) => format!("{detail}; {problem}"),
+            None => problem.to_string(),
         });
     }
 
     TtyHomeFile {
-        version: TTY_HOME_VERSION,
         screen,
-        generated_at: lillux::time::iso8601_now(),
-        app_root: app_root_key.to_string(),
-        operator_principal_id: signer
-            .operator_principal_id
-            .clone()
-            .unwrap_or_else(|| "missing".to_string()),
-        project_root: project.key.clone(),
-        source: TtyHomeSource {
-            node: node_status,
-            node_config: node_config_status,
-        },
         sections: TtyHomeSections {
             node,
             project: Some(TtyProjectSummary::from_project(project)),
@@ -458,35 +232,26 @@ fn verified_command_items(
     items
 }
 
-async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
+async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
     let env = match LocalLifecycleEnv::load(Some(app_root.to_path_buf())) {
         Ok(env) => env,
         Err(err) => {
-            return (
-                TtyNodeSummary {
-                    status: "config error".to_string(),
-                    detail: Some(err.to_string()),
-                },
-                SourceStatus::error(format!("local lifecycle config: {err:#}")),
-            )
+            return TtyNodeSummary {
+                status: "config error".to_string(),
+                detail: Some(err.to_string()),
+            }
         }
     };
     let controller = LifecycleController::from_env(env);
     match controller.status().await {
-        Ok(LifecycleStatus::NotInitialized { diagnostics }) => (
-            TtyNodeSummary {
-                status: "not initialized".to_string(),
-                detail: Some(diagnostics.message),
-            },
-            SourceStatus::missing("not initialized"),
-        ),
-        Ok(LifecycleStatus::Stopped { app_root }) => (
-            TtyNodeSummary {
-                status: "stopped".to_string(),
-                detail: Some(format!("app root: {}", app_root.display())),
-            },
-            SourceStatus::live(),
-        ),
+        Ok(LifecycleStatus::NotInitialized { diagnostics }) => TtyNodeSummary {
+            status: "not initialized".to_string(),
+            detail: Some(diagnostics.message),
+        },
+        Ok(LifecycleStatus::Stopped { app_root }) => TtyNodeSummary {
+            status: "stopped".to_string(),
+            detail: Some(format!("app root: {}", app_root.display())),
+        },
         Ok(LifecycleStatus::Running { metadata }) => {
             let mut detail = Vec::new();
             if let Some(pid) = metadata.pid {
@@ -495,42 +260,27 @@ async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
             if let Some(bind) = metadata.bind {
                 detail.push(format!("http://{bind}"));
             }
-            (
-                TtyNodeSummary {
-                    status: "running".to_string(),
-                    detail: (!detail.is_empty()).then(|| detail.join(" · ")),
-                },
-                SourceStatus::live(),
-            )
+            TtyNodeSummary {
+                status: "running".to_string(),
+                detail: (!detail.is_empty()).then(|| detail.join(" · ")),
+            }
         }
-        Ok(LifecycleStatus::Stale { diagnostics, .. }) => (
-            TtyNodeSummary {
-                status: "stale".to_string(),
-                detail: Some(diagnostics.message),
-            },
-            SourceStatus::error("stale daemon metadata"),
-        ),
-        Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => (
-            TtyNodeSummary {
-                status: "busy".to_string(),
-                detail: Some(diagnostics.message),
-            },
-            SourceStatus::error("daemon is running but not answering"),
-        ),
-        Ok(LifecycleStatus::Starting { pid, started_at, .. }) => (
-            TtyNodeSummary {
-                status: "starting".to_string(),
-                detail: Some(format!("pid {pid} · since {started_at}")),
-            },
-            SourceStatus::loading(),
-        ),
-        Err(err) => (
-            TtyNodeSummary {
-                status: "status error".to_string(),
-                detail: Some(err.to_string()),
-            },
-            SourceStatus::error(format!("local lifecycle status: {err:#}")),
-        ),
+        Ok(LifecycleStatus::Stale { diagnostics, .. }) => TtyNodeSummary {
+            status: "stale".to_string(),
+            detail: Some(diagnostics.message),
+        },
+        Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => TtyNodeSummary {
+            status: "busy".to_string(),
+            detail: Some(diagnostics.message),
+        },
+        Ok(LifecycleStatus::Starting { pid, started_at, .. }) => TtyNodeSummary {
+            status: "starting".to_string(),
+            detail: Some(format!("pid {pid} · since {started_at}")),
+        },
+        Err(err) => TtyNodeSummary {
+            status: "status error".to_string(),
+            detail: Some(err.to_string()),
+        },
     }
 }
 
@@ -586,11 +336,8 @@ fn help_items(verified_items: Vec<TtyItem>) -> Vec<TtyItem> {
 }
 
 fn command_item(tokens: Vec<String>, detail: String) -> TtyItem {
-    let label = tokens.join(" ");
     TtyItem {
-        id: format!("command:{label}"),
-        kind: TtyItemKind::Command,
-        label,
+        label: tokens.join(" "),
         detail: Some(detail),
     }
 }
@@ -602,118 +349,13 @@ fn loading_command_detail(screen: TtyScreen) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyHomeFile {
-    version: u32,
     screen: TtyScreen,
-    generated_at: String,
-    app_root: String,
-    operator_principal_id: String,
-    project_root: Option<String>,
-    source: TtyHomeSource,
     sections: TtyHomeSections,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TtyConfigFile {
-    #[serde(default = "default_tty_config_version")]
-    version: u32,
-    bare_action: TtyBareAction,
-}
-
-fn default_tty_config_version() -> u32 {
-    TTY_CONFIG_VERSION
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum TtyBareAction {
-    Screen { screen: TtyScreen },
-}
-
-impl TtyBareAction {
-    fn screen(&self) -> TtyScreen {
-        match self {
-            Self::Screen { screen } => *screen,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TtyHomeSource {
-    node: SourceStatus,
-    node_config: SourceStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SourceStatus {
-    state: SourceState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
-
-impl SourceStatus {
-    fn live() -> Self {
-        Self {
-            state: SourceState::Live,
-            message: None,
-        }
-    }
-
-    fn loading() -> Self {
-        Self {
-            state: SourceState::Loading,
-            message: None,
-        }
-    }
-
-    fn missing(message: impl Into<String>) -> Self {
-        Self {
-            state: SourceState::Missing,
-            message: Some(message.into()),
-        }
-    }
-
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            state: SourceState::Error,
-            message: Some(message.into()),
-        }
-    }
-
-    fn label(&self) -> String {
-        self.message
-            .clone()
-            .unwrap_or_else(|| format!("{:?}", self.state).to_ascii_lowercase())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SourceState {
-    Missing,
-    Loading,
-    Live,
-    Error,
-}
-
-impl SourceState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Missing => "missing",
-            Self::Loading => "loading",
-            Self::Live => "live",
-            Self::Error => "error",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyHomeSections {
     node: TtyNodeSummary,
     project: Option<TtyProjectSummary>,
@@ -721,21 +363,16 @@ struct TtyHomeSections {
     items: Vec<TtyItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyNodeSummary {
     status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyProjectSummary {
     label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
@@ -749,40 +386,16 @@ impl TtyProjectSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyCommandSummary {
-    #[serde(skip_serializing_if = "Option::is_none")]
     count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyItem {
-    id: String,
-    kind: TtyItemKind,
     label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TtyItemKind {
-    Command,
-    View,
-    Resource,
-    Thread,
-    Project,
-    File,
-    Text,
-}
-
-enum RenderMode {
-    Cached,
-    Live,
 }
 
 pub fn render_command_loading(command: &str, route: &str) -> io::Result<usize> {
@@ -848,12 +461,19 @@ pub fn render_command_result(
     render_command_frame(&lines, previous_lines)
 }
 
+/// Minimum gap between repaints for non-status-changing events, so a fast
+/// stream of ordinary events doesn't thrash the terminal with one reflow
+/// per event. Status-changing events (started, error, terminal) always
+/// repaint regardless of this gap.
+const REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub struct TtyStreamPresenter {
     command: String,
     previous_lines: usize,
     thread_id: Option<String>,
     status: String,
     events: Vec<(String, String)>,
+    last_render: Option<std::time::Instant>,
 }
 
 impl TtyStreamPresenter {
@@ -868,6 +488,7 @@ impl TtyStreamPresenter {
             thread_id: None,
             status: "opening stream".to_string(),
             events: Vec::new(),
+            last_render: None,
         };
         presenter.render()?;
         Ok(presenter)
@@ -900,25 +521,26 @@ impl TtyStreamPresenter {
                 self.render()?;
                 Ok(StreamOutcome::Failed(detail))
             }
-            event if stream_success_terminal(event) => {
-                self.status = "complete".to_string();
-                self.push_event(event, &value_summary(inner));
-                self.render()?;
-                Ok(StreamOutcome::Done)
-            }
-            event if stream_failure_terminal(event) => {
-                let detail = stream_failure_reason(inner, event);
-                self.status = "error".to_string();
-                self.push_event(event, &detail);
-                self.render()?;
-                Ok(StreamOutcome::Failed(detail))
-            }
-            event => {
-                let detail = stream_event_detail(inner);
-                self.push_event(event, &detail);
-                self.render()?;
-                Ok(StreamOutcome::Continue)
-            }
+            event => match thread_terminal_outcome(event) {
+                Some(ThreadOutcomeKind::Success) => {
+                    self.status = "complete".to_string();
+                    self.push_event(event, &value_summary(inner));
+                    self.render()?;
+                    Ok(StreamOutcome::Done)
+                }
+                Some(ThreadOutcomeKind::Failure) => {
+                    let detail = stream_failure_reason(inner, event);
+                    self.status = "error".to_string();
+                    self.push_event(event, &detail);
+                    self.render()?;
+                    Ok(StreamOutcome::Failed(detail))
+                }
+                None => {
+                    self.push_event(event, &value_summary(inner));
+                    self.render_if_due()?;
+                    Ok(StreamOutcome::Continue)
+                }
+            },
         }
     }
 
@@ -928,6 +550,20 @@ impl TtyStreamPresenter {
             let excess = self.events.len() - 10;
             self.events.drain(0..excess);
         }
+    }
+
+    /// Repaint only if `REPAINT_INTERVAL` has elapsed since the last paint.
+    /// State is already updated via `push_event`; the next allowed repaint
+    /// shows it.
+    fn render_if_due(&mut self) -> io::Result<()> {
+        let due = match self.last_render {
+            Some(at) => at.elapsed() >= REPAINT_INTERVAL,
+            None => true,
+        };
+        if due {
+            self.render()?;
+        }
+        Ok(())
     }
 
     fn render(&mut self) -> io::Result<()> {
@@ -951,6 +587,7 @@ impl TtyStreamPresenter {
             payload: &refs,
         });
         self.previous_lines = render_command_frame(&lines, self.previous_lines)?;
+        self.last_render = Some(std::time::Instant::now());
         Ok(())
     }
 }
@@ -1033,54 +670,17 @@ fn value_summary(value: &Value) -> String {
     }
 }
 
+/// `result` is already unwrapped from any `payload`/envelope wrapper by the
+/// caller. Failure is a non-null `error` field, or an `outcome_code` the
+/// shared vocabulary (`ryeos_state::event_types`) names as a failure.
 fn result_indicates_failure(result: &Value) -> bool {
     if result.get("error").is_some_and(|error| !error.is_null()) {
         return true;
     }
-    if result.get("success").and_then(Value::as_bool) == Some(false) {
-        return true;
-    }
-    if result.get("ok").and_then(Value::as_bool) == Some(false) {
-        return true;
-    }
-    if result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .is_some_and(|code| code != 0)
-    {
-        return true;
-    }
-    if result
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(failure_status_label)
-    {
-        return true;
-    }
-    if matches!(
-        result.get("outcome_code").and_then(Value::as_str),
-        Some(code) if failure_status_label(code) || code.starts_with("exit:")
-    ) {
-        return true;
-    }
     result
-        .get("result")
-        .is_some_and(result_indicates_failure)
-}
-
-fn failure_status_label(label: &str) -> bool {
-    matches!(
-        label,
-        "failure"
-            | "failed"
-            | "error"
-            | "cancelled"
-            | "canceled"
-            | "timeout"
-            | "timed_out"
-            | "nonzero"
-            | "not_ok"
-    )
+        .get("outcome_code")
+        .and_then(Value::as_str)
+        .is_some_and(outcome_code_is_failure)
 }
 
 fn scalar_summary(value: &Value) -> Option<String> {
@@ -1101,17 +701,6 @@ fn empty_dash(value: &str) -> &str {
     }
 }
 
-fn stream_success_terminal(event: &str) -> bool {
-    matches!(event, "thread_completed" | "thread_continued")
-}
-
-fn stream_failure_terminal(event: &str) -> bool {
-    matches!(
-        event,
-        "thread_failed" | "thread_cancelled" | "thread_killed" | "thread_timed_out"
-    )
-}
-
 fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
     if let Some(error) = payload.get("error").and_then(Value::as_str) {
         return error.to_string();
@@ -1126,20 +715,9 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
         .to_string()
 }
 
-fn stream_event_detail(payload: &Value) -> String {
-    for key in ["delta", "text", "content", "message", "output"] {
-        if let Some(text) = payload.get(key).and_then(Value::as_str) {
-            if !text.is_empty() {
-                return text.to_string();
-            }
-        }
-    }
-    value_summary(payload)
-}
-
-fn render(home: &TtyHomeFile, mode: RenderMode, previous_lines: usize) -> io::Result<usize> {
+fn render(home: &TtyHomeFile, previous_lines: usize) -> io::Result<usize> {
     let width = terminal_width();
-    let lines = render_lines(home, mode)
+    let lines = render_lines(home)
         .into_iter()
         .map(|line| clamp_line(&line, width))
         .collect::<Vec<_>>();
@@ -1147,11 +725,7 @@ fn render(home: &TtyHomeFile, mode: RenderMode, previous_lines: usize) -> io::Re
     Ok(lines.len())
 }
 
-fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
-    let source = match mode {
-        RenderMode::Cached => "cached",
-        RenderMode::Live => "live",
-    };
+fn render_lines(home: &TtyHomeFile) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(match home.screen {
         TtyScreen::Home => "RYE OS".to_string(),
@@ -1187,13 +761,6 @@ fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
         "commands",
         command_label,
         detail_suffix(home.sections.commands.detail.as_deref())
-    ));
-    lines.push(format!("{:<9} {} · {}", "source", source, home.generated_at));
-    lines.push(format!(
-        "{:<9} node {} · node config {}",
-        "state",
-        home.source.node.state.label(),
-        home.source.node_config.state.label()
     ));
     lines.push(String::new());
     match home.screen {
@@ -1296,29 +863,21 @@ fn detail_suffix(detail: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn debug_warn(debug: bool, message: String) {
-    if debug {
-        eprintln!("ryeos tty: {message}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn result_failure_detection_checks_nested_shapes() {
+    fn result_failure_detection_uses_error_and_outcome_code() {
         assert!(result_indicates_failure(&serde_json::json!({
-            "result": { "success": false, "error": "boom" }
+            "error": "boom"
         })));
         assert!(result_indicates_failure(&serde_json::json!({
-            "result": { "exit_code": 2 }
-        })));
-        assert!(result_indicates_failure(&serde_json::json!({
-            "result": { "outcome_code": "exit:1" }
+            "outcome_code": "exit:1"
         })));
         assert!(!result_indicates_failure(&serde_json::json!({
-            "result": { "success": true, "outcome_code": "success" }
+            "outcome_code": "success"
         })));
+        assert!(!result_indicates_failure(&serde_json::json!({})));
     }
 }
