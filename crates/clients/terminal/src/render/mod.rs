@@ -1,7 +1,7 @@
 //! Terminal renderer for the shared RyeOs view model.
 //!
 //! This is intentionally a renderer only: it consumes `RyeOsViewModel`
-//! and emits a terminal `TextSurface`. RyeOs state, actions, and
+//! and emits a terminal `TextSurface`. RyeOs state, intents, and
 //! effects remain in `ryeos-client-base` so terminal and web share the
 //! same product semantics.
 //!
@@ -132,7 +132,7 @@ fn draw_layout_node(
             tile_id,
             focused,
             title,
-            actions,
+            intents,
             view,
             chrome_hidden,
             background_transparent,
@@ -150,7 +150,7 @@ fn draw_layout_node(
                     tile_id,
                     *focused,
                     title,
-                    actions.len(),
+                    intents.len(),
                     view,
                     input.as_ref(),
                     border,
