@@ -380,7 +380,34 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
-    // ── 8b. Default ingest ignore config ──
+    // ── 8b. Node-owned subprocess sandbox policy ──
+    let sandbox_policy_path = opts
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("sandbox.yaml");
+    if !sandbox_policy_path.exists() {
+        let default_policy = r#"version: 1
+backend_path: /usr/bin/bwrap
+allow_network: true
+allow_host_read: true
+writable_paths:
+  - "{project}"
+allowed_env:
+  - "*"
+max_open_files: 1024
+max_processes: 256
+"#;
+        lillux::atomic_write_private(&sandbox_policy_path, default_policy.as_bytes())
+            .with_context(|| {
+                format!(
+                    "write default sandbox policy {}",
+                    sandbox_policy_path.display()
+                )
+            })?;
+    }
+
+    // ── 8c. Default ingest ignore config ──
     let ignore_dir = opts
         .app_root
         .join(ryeos_engine::AI_DIR)

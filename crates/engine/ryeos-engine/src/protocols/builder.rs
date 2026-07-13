@@ -251,6 +251,7 @@ pub fn build_subprocess_spec(
         item_ref: request.item_ref.clone(),
         thread_id: request.thread_id.to_string(),
         project_path: request.project_path.to_path_buf(),
+        sandbox: None,
     })
 }
 

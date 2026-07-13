@@ -3288,9 +3288,23 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         .with_typed_bindings(protocol_bindings)?
         .build();
 
-    // sandbox_wrap is identity today; the sandbox wave fills it in.
-    let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec)
+    let sandbox_policy = load_node_sandbox_policy(app_root)?;
+    let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec, &sandbox_policy)
         .map_err(|e| anyhow::anyhow!("sandbox_wrap failed: {e}"))?;
+    let effective_sandbox = spec
+        .sandbox
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("sandbox stage returned no effective policy"))?;
+    tracing::info!(
+        thread_id,
+        backend = %effective_sandbox.backend,
+        backend_path = %effective_sandbox.backend_path.display(),
+        allow_network = effective_sandbox.allow_network,
+        writable_paths = ?effective_sandbox.writable_paths,
+        max_open_files = effective_sandbox.max_open_files,
+        max_processes = effective_sandbox.max_processes,
+        "effective subprocess sandbox"
+    );
 
     let request = super::lillux_bridge::to_lillux_request(&spec);
     let result = lillux::run(request);
@@ -3318,6 +3332,31 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
             &result.stdout[..result.stdout.len().min(500)]
         )
     })
+}
+
+fn load_node_sandbox_policy(
+    app_root: &Path,
+) -> Result<ryeos_engine::subprocess_spec::NodeSandboxPolicy> {
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("sandbox.yaml");
+    let raw = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "node sandbox policy is required at {}; run `ryeos init`",
+            path.display()
+        )
+    })?;
+    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy =
+        serde_yaml::from_str(&raw)
+            .with_context(|| format!("parse node sandbox policy {}", path.display()))?;
+    if !policy.backend_path.is_file() {
+        anyhow::bail!(
+            "sandbox backend {} is unavailable; execution refused",
+            policy.backend_path.display()
+        );
+    }
+    Ok(policy)
 }
 
 fn is_runtime_terminal_status(status: &str) -> bool {
