@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Single source of truth for which bundles belong to each bundle set.
 #
-# Sourced by scripts/populate-bundles.sh (publish + bin staging) and
-# scripts/pkg/install-local-direct.sh (ship + init). deploy/aur/ryeos/PKGBUILD
-# ships every bundle directory present under bundles/, so it needs no
-# enumeration — this file keeps the two shell installers from drifting apart
-# (the class of bug where one enumerates five bundles and the tree has seven).
+# Sourced by scripts/populate-bundles.sh (publish + bin staging),
+# scripts/release/package-bundle-artifact.sh (official release archive), and
+# scripts/pkg/install-local-direct.sh (ship + init). The AUR package consumes
+# the resulting `full` release artifact, so authoring, release, and local
+# installation cannot silently drift on bundle membership.
 #
 # `ryeos_bundle_set_names <set>` echoes the ordered bundle names for a set, one
 # per line. `central-auth` is a member of every set: it ships in the source tree

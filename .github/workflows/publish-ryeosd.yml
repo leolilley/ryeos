@@ -1,7 +1,7 @@
-name: Publish RyeOS image to GHCR
+name: Publish RyeOS release artifacts
 
-# Triggered by project release tags. The old Python PyPI publishing flow has
-# been removed; the release artifact is the signed GHCR image.
+# Triggered by project release tags. Publishes signed GHCR images plus the
+# officially signed bundle archive consumed by native packages.
 
 on:
   push:
@@ -120,11 +120,11 @@ jobs:
         run: ./scripts/gate.sh --refresh-bundles
 
   publish:
-    name: Publish qualified images
+    name: Publish qualified artifacts
     needs: qualify
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # immutable bundle assets on the GitHub release
       packages: write
       id-token: write # for cosign keyless signing
     steps:
@@ -143,6 +143,21 @@ jobs:
             exit 1
           fi
 
+      - name: Refuse overwrite of immutable bundle assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          ARCHIVE="ryeos-bundles-${VERSION}-x86_64.tar.gz"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+            if grep -Fxq -e "$ARCHIVE" -e "${ARCHIVE}.sha256" <<<"$EXISTING_ASSETS"; then
+              echo "::error::Immutable bundle release asset already exists for $TAG"
+              exit 1
+            fi
+          fi
+
       - name: Assert publisher key secret exists
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
@@ -154,10 +169,7 @@ jobs:
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         run: |
-          # Extract the compiled-in fingerprint from source (may span 2 lines).
-          EXPECTED=$(grep -A1 'OFFICIAL_PUBLISHER_FP.*&str' \
-            crates/daemon/ryeos-node/src/init.rs \
-            | grep -oE '[0-9a-f]{64}' | head -1)
+          EXPECTED="$(scripts/release/official-publisher-fingerprint.sh)"
           echo "Compiled-in OFFICIAL_PUBLISHER_FP: $EXPECTED"
 
           # Write the secret to a temp file so openssl can read it.
@@ -187,6 +199,36 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and preflight official bundle archive
+        env:
+          PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_SHA")"
+          if [[ -e "$ARTIFACT_DIR" ]]; then
+            echo "::error::Bundle artifact output already exists: $ARTIFACT_DIR"
+            exit 1
+          fi
+          mkdir "$ARTIFACT_DIR"
+          docker buildx build \
+            --file Dockerfile.release-bundles \
+            --target artifact \
+            --platform linux/amd64 \
+            --output "type=local,dest=${ARTIFACT_DIR}" \
+            --secret id=publisher-key,env=PUBLISHER_KEY \
+            --build-arg "VERSION=${VERSION}" \
+            --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
+            --build-arg "VCS_REF=${SOURCE_SHA}" \
+            --build-arg "BUILD_DATE=${BUILD_DATE}" \
+            .
+          (
+            cd "$ARTIFACT_DIR"
+            sha256sum -c "ryeos-bundles-${VERSION}-x86_64.tar.gz.sha256"
+          )
 
       - name: Build standard image for verification
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -460,8 +502,28 @@ jobs:
             --format '{{ json .SBOM }}' > sbom.json
           jq -e 'type == "object" and length > 0' sbom.json
 
-      # Mutable tags move only after both immutable artifacts have passed
-      # provenance verification, publication, and signing.
+      - name: Publish immutable official bundle assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
+          ARCHIVE="$ARTIFACT_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          test -s "$ARCHIVE"
+          test -s "$CHECKSUM"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "RyeOS ${VERSION}" \
+              --generate-notes
+          fi
+          # No --clobber: immutable release assets must never be replaced.
+          gh release upload "$TAG" "$ARCHIVE" "$CHECKSUM"
+
+      # Mutable image tags move only after both immutable images and the native
+      # bundle artifact have passed verification and publication.
       - name: Promote verified images to latest
         env:
           STANDARD_DIGEST: ${{ steps.push-standard.outputs.digest }}
