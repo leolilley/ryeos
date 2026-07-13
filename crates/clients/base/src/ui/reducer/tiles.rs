@@ -288,10 +288,16 @@ impl RyeOsCore {
                 let key = tile_id.0.to_string();
                 self.data.sources.remove(&key);
                 self.data.source_epoch.remove(&key);
+                self.data.source_stored_epoch.remove(&key);
                 self.data.timeline_sources.remove(&key);
                 self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
                 self.bump_generation();
-                return self.effects_for_view(&view);
+                let effects = self.effects_for_view(&view);
+                // The lens swapped subjects: eviction alone would let an
+                // in-flight response for the OLD lens land into the empty
+                // store — the floor refuses it outright.
+                self.floor_source_fetches(&effects, true);
+                return effects;
             }
         }
 
@@ -332,6 +338,9 @@ impl RyeOsCore {
         for key in restored_facets {
             effects.extend(self.effects_for_facet(&key));
         }
+        // Returning up the drill stack swaps the subject back: a straggler
+        // from the drilled-into lens must not land under the restored one.
+        self.floor_source_fetches(&effects, true);
         effects
     }
 

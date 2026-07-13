@@ -207,7 +207,7 @@ impl RyeOsCore {
                 subscribed.then(|| (tile_id, view_ref.clone()))
             })
             .collect();
-        targets
+        let effects: Vec<RyeOsEffect> = targets
             .into_iter()
             .flat_map(|(tile_id, view_ref)| {
                 // A facet write means the SUBJECT changed (a new selection,
@@ -230,7 +230,11 @@ impl RyeOsCore {
                 }
                 self.emit_fetch_source(tile_id, &view_ref)
             })
-            .collect()
+            .collect();
+        // The facet write changed the subject: responses from before it
+        // (any id below this batch) must never land under the new value.
+        self.floor_source_fetches(&effects, false);
+        effects
     }
 
     /// Resolve the atlas arrangement a `SetAtlas*` event targets: `Some(tile)`

@@ -401,14 +401,23 @@ pub struct RyeOsDataState {
     /// re-project long transcripts on every frame.
     #[serde(default, skip)]
     pub(crate) timeline_sources: HashMap<String, RyeOsTimelineSourceCache>,
-    /// The newest fetch effect id issued for each source key. A response only
-    /// lands if it is that newest request (freshness guard): when a single-lens
-    /// tile is reused for a new selection its source keys are stable, so an
-    /// older in-flight fetch (the previous selection) resolving late must not
-    /// overwrite the current one. Without this, a detail lens with several
-    /// section fetches could render mixed data from two threads.
+    /// The newest fetch effect id issued for each source key (the current
+    /// revalidation target; informational once a floor exists).
     #[serde(default)]
     pub source_epoch: HashMap<String, u64>,
+    /// The result id currently STORED per source key. Responses land
+    /// MONOTONICALLY against this — a superseded-but-first response still
+    /// renders (a refetch cadence faster than the query latency must not
+    /// starve the view into a permanent "loading"), while an out-of-order
+    /// older response never overwrites a newer one.
+    #[serde(default)]
+    pub source_stored_epoch: HashMap<String, u64>,
+    /// Minimum acceptable result id per source key, raised when the key's
+    /// SUBJECT changes (lens swap, drill return, selection facet write):
+    /// a straggler for the previous subject must never land under the new
+    /// one, no matter what is or isn't stored.
+    #[serde(default)]
+    pub source_floor: HashMap<String, u64>,
     /// The newest applied result id per shared dataset snapshot
     /// (dimension, topology, projects, threads, items). Effect batches
     /// resolve concurrently, so an older snapshot can arrive after a
@@ -896,6 +905,24 @@ impl RyeOsCore {
     /// `@facet:selection.item` before anything is selected): that resolves to
     /// null — nothing to fetch — and dispatching the null arg the op rejects
     /// is a 500, not an empty view.
+    /// Raise the acceptance floor to this batch's fetch ids and evict the
+    /// keys' stored payloads: the SUBJECT behind these keys changed, so a
+    /// response older than this batch must never land under it. Ordinary
+    /// refetches skip this — they keep prior data rendering while the
+    /// fresh response is in flight.
+    pub(crate) fn floor_source_fetches(&mut self, effects: &[RyeOsEffect], evict: bool) {
+        for effect in effects {
+            if let RyeOsEffectKind::FetchSource { tile_id, .. } = &effect.kind {
+                self.data.source_floor.insert(tile_id.clone(), effect.id);
+                if evict {
+                    self.data.sources.remove(tile_id);
+                    self.data.source_stored_epoch.remove(tile_id);
+                    self.data.timeline_sources.remove(tile_id);
+                }
+            }
+        }
+    }
+
     fn build_fetch_source(
         &mut self,
         source_key: String,
