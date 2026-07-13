@@ -24,6 +24,36 @@ fn rewrap_backup_path(path: &Path) -> std::path::PathBuf {
     ))
 }
 
+fn rewrap_staged_path(path: &Path) -> std::path::PathBuf {
+    path.with_extension(format!(
+        "{}.new",
+        path.extension()
+            .map(|extension| extension.to_string_lossy())
+            .unwrap_or_default()
+    ))
+}
+
+/// Durably remove the deterministic staging files used by vault rewrap.
+///
+/// Staged files are never authoritative: the journal and live key/store paths
+/// decide whether recovery commits or restores a generation. Recovery may
+/// therefore remove these files even when a crash happened before the journal
+/// itself was published.
+pub fn cleanup_staged_rewrap_files(
+    key_path: &Path,
+    public_key_path: &Path,
+    store_path: &Path,
+) -> Result<()> {
+    for path in [
+        rewrap_staged_path(key_path),
+        rewrap_staged_path(public_key_path),
+        rewrap_staged_path(store_path),
+    ] {
+        lillux::remove_file_durable(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Hold an interprocess lock for a complete sealed-store operation.
 ///
 /// Mutators must lock across read, modify, and atomic replacement; locking only
@@ -40,7 +70,7 @@ pub fn with_store_lock<T>(store_path: &Path, operation: impl FnOnce() -> Result<
 pub fn recover_rewrap(key_path: &Path, public_key_path: &Path, store_path: &Path) -> Result<()> {
     let journal_path = rewrap_journal_path(store_path);
     if !journal_path.exists() {
-        return Ok(());
+        return cleanup_staged_rewrap_files(key_path, public_key_path, store_path);
     }
     let journal_raw = std::fs::read_to_string(&journal_path)
         .with_context(|| format!("read rewrap journal {}", journal_path.display()))?;
@@ -124,7 +154,7 @@ fn cleanup_rewrap_files(key_path: &Path, public_key_path: &Path, store_path: &Pa
     ] {
         lillux::remove_file_durable(&path).with_context(|| format!("remove {}", path.display()))?;
     }
-    Ok(())
+    cleanup_staged_rewrap_files(key_path, public_key_path, store_path)
 }
 
 pub fn write_sealed_secrets(
@@ -327,5 +357,31 @@ mod tests {
         );
         let public = lillux::vault::read_public_key(&public_path).unwrap();
         assert_eq!(public.fingerprint(), new_key.public_key().fingerprint());
+    }
+
+    #[test]
+    fn recover_rewrap_removes_staging_left_before_journal_publish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join("vault/private_key.pem");
+        let public_path = tmp.path().join("vault/public_key.pem");
+        let store_path = tmp.path().join("secrets/store.enc");
+        let key = VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&key_path, &key).unwrap();
+        lillux::vault::write_public_key(&public_path, &key.public_key()).unwrap();
+
+        let staged_key = rewrap_staged_path(&key_path);
+        let staged_public = rewrap_staged_path(&public_path);
+        let staged_store = rewrap_staged_path(&store_path);
+        lillux::atomic_write_private(&staged_key, b"unused secret").unwrap();
+        lillux::atomic_write(&staged_public, b"unused public").unwrap();
+        lillux::atomic_write_private(&staged_store, b"unused store").unwrap();
+
+        recover_rewrap(&key_path, &public_path, &store_path).unwrap();
+
+        assert!(!staged_key.exists());
+        assert!(!staged_public.exists());
+        assert!(!staged_store.exists());
+        assert!(key_path.exists());
+        assert!(public_path.exists());
     }
 }

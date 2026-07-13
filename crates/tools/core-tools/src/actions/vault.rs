@@ -21,7 +21,8 @@ pub use ryeos_vault::paths::{
 };
 pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
 pub use ryeos_vault::sealed::{
-    prepare_rewrap, read_sealed_secrets, recover_rewrap, with_store_lock, write_sealed_secrets,
+    cleanup_staged_rewrap_files, prepare_rewrap, read_sealed_secrets, recover_rewrap,
+    with_store_lock, write_sealed_secrets,
 };
 
 // ── Command options + reports ────────────────────────────────────────
@@ -215,7 +216,8 @@ fn run_rewrap_locked(
     })();
 
     if let Err(e) = write_result {
-        cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
+        cleanup_staged_rewrap_files(&key_path, &pub_path, &store_path)
+            .context("clean incomplete vault rewrap staging")?;
         return Err(e);
     }
 
@@ -235,12 +237,10 @@ fn run_rewrap_locked(
     })();
     if let Err(error) = activation {
         let recovery = recover_rewrap(&key_path, &pub_path, &store_path);
-        cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
         recovery.context("recover failed vault rewrap")?;
         return Err(error);
     }
     recover_rewrap(&key_path, &pub_path, &store_path)?;
-    cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
 
     tracing::info!(
         old_fingerprint = %old_fingerprint,
@@ -256,12 +256,6 @@ fn run_rewrap_locked(
         new_fingerprint,
         keys_rewrapped: plaintext.len(),
     })
-}
-
-fn cleanup_new_files(new_key_path: &Path, new_pub_path: &Path, new_store_path: &Path) {
-    let _ = std::fs::remove_file(new_key_path);
-    let _ = std::fs::remove_file(new_pub_path);
-    let _ = std::fs::remove_file(new_store_path);
 }
 
 #[cfg(test)]
