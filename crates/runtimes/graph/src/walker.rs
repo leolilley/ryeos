@@ -26,9 +26,7 @@ use ryeos_runtime::TerminalCompletion;
 mod checkpointing;
 mod transitions;
 
-use transitions::{
-    foreach_failure_summary, resolve_next_on_error, retry_attempts_remaining,
-};
+use transitions::{foreach_failure_summary, resolve_next_on_error, retry_attempts_remaining};
 
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
 /// change to the written fields; the resume parser rejects an unknown version.
@@ -2929,7 +2927,6 @@ impl Walker {
             self.record_callback_warning("graph_branch_taken", r);
         }
     }
-
 }
 
 fn merge_into(target: &mut Value, source: &Value) {

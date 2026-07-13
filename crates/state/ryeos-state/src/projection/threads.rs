@@ -2,7 +2,6 @@ use anyhow::Context;
 
 use super::{project_event, ProjectionDb, ProjectionMeta};
 
-
 /// Project a thread snapshot into the projection database.
 ///
 /// Upserts a thread record based on the snapshot. If the snapshot has

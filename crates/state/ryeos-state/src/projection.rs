@@ -17,10 +17,10 @@ mod cursor;
 mod events;
 mod threads;
 pub use events::{project_event, project_thread_edge};
+pub(crate) use threads::project_thread_snapshot_with_events_in_transaction;
 pub use threads::{
     project_chain_state, project_thread_snapshot, project_thread_snapshot_with_events,
 };
-pub(crate) use threads::project_thread_snapshot_with_events_in_transaction;
 mod schema;
 mod transaction;
 pub(crate) use chain_commit::project_committed_chain;

@@ -114,7 +114,10 @@ mod tests {
         let schema = tool.input_schema.expect("directive return schema");
         assert_eq!(schema["required"], json!(["answer", "confidence"]));
         assert_eq!(schema["properties"]["answer"]["type"], "string");
-        assert_eq!(schema["properties"]["answer"]["description"], "Final answer");
+        assert_eq!(
+            schema["properties"]["answer"]["description"],
+            "Final answer"
+        );
         assert_eq!(schema["properties"]["confidence"]["type"], "number");
     }
 

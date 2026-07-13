@@ -260,7 +260,6 @@ CREATE INDEX IF NOT EXISTS idx_admission_attestations_issuer ON admission_attest
 CREATE INDEX IF NOT EXISTS idx_admission_attestations_subject_policy_claim_issuer ON admission_attestations(subject_hash, policy, claim, issuer);
 "#;
 
-
 /// Application ID stamp for projection.db.
 /// RYPJ = 0x5259504a ("RY" + "PJ" for "projection").
 pub(super) const PROJECTION_APP_ID: i32 = 0x5259_504a;

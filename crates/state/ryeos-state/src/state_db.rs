@@ -390,13 +390,15 @@ impl StateDb {
             &cache,
             chain_root_id,
             &result.chain_state_hash,
-            || projection::project_thread_snapshot_with_events_in_transaction(
-                &self.projection,
-                &snapshot,
-                chain_root_id,
-                &result.events,
-            )
-            .context("projecting thread and initial events"),
+            || {
+                projection::project_thread_snapshot_with_events_in_transaction(
+                    &self.projection,
+                    &snapshot,
+                    chain_root_id,
+                    &result.events,
+                )
+                .context("projecting thread and initial events")
+            },
         );
 
         let committed_hash = result.chain_state_hash.clone();
@@ -793,12 +795,9 @@ mod tests {
             .connection()
             .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
             .unwrap();
-        let event = crate::objects::thread_event::NewEvent::new(
-            "T-root",
-            "T-root",
-            "cursor_conflict_test",
-        )
-        .build();
+        let event =
+            crate::objects::thread_event::NewEvent::new("T-root", "T-root", "cursor_conflict_test")
+                .build();
 
         let committed = db
             .append_events("T-root", "T-root", vec![event], vec![], &signer)

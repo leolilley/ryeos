@@ -184,6 +184,8 @@ mod tests {
                 "graph_run_id": "run-2",
             })
         );
-        assert!(payload[follow_keys::PENDING_FOLLOW].get("child_thread_id").is_none());
+        assert!(payload[follow_keys::PENDING_FOLLOW]
+            .get("child_thread_id")
+            .is_none());
     }
 }

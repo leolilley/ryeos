@@ -26,10 +26,7 @@ fn capability_covers(granted: &str, child: &str) -> bool {
 
 /// Retain child capabilities covered by at least one parent capability.
 /// Child ordering and duplicates are deliberately preserved.
-pub(super) fn narrow_capabilities(
-    child_caps: &[String],
-    parent_caps: &[String],
-) -> Vec<String> {
+pub(super) fn narrow_capabilities(child_caps: &[String], parent_caps: &[String]) -> Vec<String> {
     child_caps
         .iter()
         .filter(|child| {

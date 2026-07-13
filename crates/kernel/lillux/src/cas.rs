@@ -7,9 +7,9 @@ use std::io::{ErrorKind, Write};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use crate::atomic_fs::{atomic_write, atomic_write_with_mode};
 #[cfg(unix)]
 use crate::atomic_fs::next_temp_sequence;
+use crate::atomic_fs::{atomic_write, atomic_write_with_mode};
 
 // ── Public library primitives ──────────────────────────────────────
 

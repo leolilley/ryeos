@@ -250,9 +250,8 @@ fn run_rewrap_locked(
 
     let activation = (|| -> std::result::Result<(), lillux::AtomicMutationError> {
         if rewrap_store {
-            let bytes = std::fs::read(&new_store_path).map_err(|error| {
-                lillux::AtomicMutationError::BeforeCommit(error.into())
-            })?;
+            let bytes = std::fs::read(&new_store_path)
+                .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
             lillux::atomic_write_private(&store_path, &bytes)?;
         }
         let public_bytes = std::fs::read(&new_pub_path)
