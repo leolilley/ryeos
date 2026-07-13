@@ -790,6 +790,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
     );
+    let inline_sandbox_enabled = state.config.sandbox_enabled;
     let mut spawned = match task::spawn_blocking(move || {
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
             engine: &engine,
@@ -799,6 +800,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
             vault_bindings: vault,
             daemon_callback_env: cb_bindings,
             roots: inline_roots,
+            sandbox_enabled: inline_sandbox_enabled,
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
             original_snapshot_hash: inline_snapshot.as_deref(),
@@ -1168,6 +1170,7 @@ async fn dispatch_detached_bg_task(
     let snap_for_spawn = bg_base_snapshot_hash.clone();
     let pushed_head_ref_for_spawn = bg_original_pushed_head_ref;
     let state_root_for_spawn = bg_state_root;
+    let sandbox_enabled_for_spawn = bg_state.config.sandbox_enabled;
 
     let spawn_result = task::spawn_blocking(move || {
         let project_root = match &res_for_spawn.plan_context.project_context {
@@ -1186,6 +1189,7 @@ async fn dispatch_detached_bg_task(
             vault_bindings: vault_for_spawn,
             daemon_callback_env: cb_for_spawn,
             roots,
+            sandbox_enabled: sandbox_enabled_for_spawn,
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),

@@ -1706,6 +1706,107 @@ mod tests {
     }
 
     #[test]
+    fn flat_library_entries_shelve_under_their_path_derived_group() {
+        // Both library shapes are supported: grouped entries are the
+        // canonical form, bare refs (the legacy flat form) shelve under
+        // their path-derived group — and merge into a declared group of
+        // the same name rather than duplicating the header.
+        let mut session = session();
+        session.effective_surface = Some(serde_json::json!({
+            "name": "mixed",
+            "library": [
+                { "group": "Alpha", "views": ["view:test/alpha/one"] },
+                "view:test/alpha/two",
+                "view:test/beta/one"
+            ]
+        }));
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        for view_ref in ["view:test/alpha/one", "view:test/alpha/two", "view:test/beta/one"] {
+            seed_view(&mut core, view_ref);
+        }
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|item| item.header)
+            .map(|item| item.category.as_str())
+            .collect();
+        assert_eq!(
+            headers,
+            ["Alpha", "beta"],
+            "flat alpha ref merges into declared Alpha; beta derives its own group"
+        );
+        assert_eq!(items.len(), 5, "two headers + three leaves");
+    }
+
+    #[test]
+    fn filter_input_views_are_launchable_but_the_bare_input_line_is_not() {
+        // The thread history views carry live FILTER inputs and are the
+        // canonical center lenses; only the content-less chat line
+        // (input, no source, no sections) stays out of the launcher.
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/threads/history",
+            serde_json::json!({
+                "widget": "table",
+                "source": { "ref": "service:test/threads", "params": {}, "collection": "threads" },
+                "input": { "id": "q", "feeds": { "param": "filter" } }
+            }),
+        );
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        assert!(
+            items
+                .iter()
+                .any(|item| !item.header && item.primary.contains("threads/history")),
+            "a sourced view with a filter input must be launchable"
+        );
+        assert!(
+            !items.iter().any(|item| item.primary.contains("ryeos/input")),
+            "the bare input line must not appear as a lens"
+        );
+    }
+
+    #[test]
+    fn derived_groups_merge_into_declared_groups_case_insensitively() {
+        // A surface declaring a "Node" group plus an embedded-but-undeclared
+        // view under a `node/` path must render ONE header, not "Node" and
+        // "node" side by side.
+        let mut session = session();
+        session.effective_surface = Some(serde_json::json!({
+            "name": "grouped",
+            "library": [
+                { "group": "Node", "views": ["view:test/node/events"] }
+            ]
+        }));
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/node/events");
+        seed_view(&mut core, "view:test/node/status");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|item| item.header)
+            .map(|item| item.category.as_str())
+            .collect();
+        assert_eq!(headers, ["Node"], "one merged header, got {headers:?}");
+        assert_eq!(items.len(), 3, "header + declared leaf + appended leaf");
+    }
+
+    #[test]
     fn fold_overlay_group_from_leaf_lands_on_its_header() {
         let mut core = fold_fixture();
         let items = crate::ui::view_model::active_overlay_items(&core);

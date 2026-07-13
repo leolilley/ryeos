@@ -47,9 +47,11 @@ fn draw_palette_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
 
 fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     let w = surface.width.clamp(44, 84);
-    let max_rows = surface.height.saturating_sub(8).max(4);
+    let max_rows = surface.height.saturating_sub(9).max(4);
     let rows = overlay.items.len().min(max_rows);
-    let h = rows + 5;
+    // Title, prompt, gap, headers, `rows` items, hint, bottom border —
+    // the hint owns its own row (h-2) and never overdraws the last item.
+    let h = rows + 6;
     let x = surface.width.saturating_sub(w) / 2;
     let y = surface.height.saturating_sub(h) / 3;
     let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);

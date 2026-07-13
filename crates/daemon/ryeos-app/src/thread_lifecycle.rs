@@ -2250,6 +2250,7 @@ pub struct SpawnItemParams<'a> {
     pub vault_bindings: std::collections::HashMap<String, String>,
     pub daemon_callback_env: std::collections::HashMap<String, String>,
     pub roots: DaemonRootEnv,
+    pub sandbox_enabled: bool,
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
@@ -2283,6 +2284,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         vault_bindings,
         daemon_callback_env,
         roots,
+        sandbox_enabled,
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
@@ -2437,6 +2439,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
 
     let engine_ctx = EngineContext {
         app_root,
+        sandbox_enabled,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),

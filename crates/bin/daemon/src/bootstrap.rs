@@ -681,6 +681,7 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
             require_auth: false,
+            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         }
     }
@@ -987,6 +988,7 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
             require_auth: false,
+            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
 

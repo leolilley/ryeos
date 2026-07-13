@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T03:01:09Z:597c4d6e0a1d2edf2e9c4ff04c5c78a7e874634f6c9bc3f9724366139321d35c:IvpwsStDwfNnBY0z55y2V+luk4+Kcq/Aw8xu3xG2xDwDwCR1z2MV7FEZlORmWAGhlxY5i+gNNOI4NE7Oe4iJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T08:32:54Z:3687d79f2dc67ff99e83423b1a5aace2bf42707a428d260e270c181a04fc2f12:fFlr6RsaNUXtv4vQ2wI731/tFvEd8UHHuBGzzBU8XyoRPgxyYu4gYPK6qVjIuD3PHYh52EIiCvayu70HCYk8AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -49,6 +49,17 @@ composer_config:
     - name: capabilities
       strategy: narrow_against_parent_effective
       expect_value_type: mapping
+    # replace_root_last, not keyed merge: entries may be bare view refs
+    # (legacy flat form) and the keyed merge silently drops keyless items.
+    - name: library
+      strategy: replace_root_last
+      expect_value_type: array
+    - name: backdrop
+      strategy: replace_root_last
+      expect_value_type: string
+    - name: overlays
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
 
 composed_value_contract:
   root_type: mapping
@@ -94,6 +105,21 @@ composed_value_contract:
       type: single
       prim: sequence
     capabilities:
+      type: single
+      prim: mapping
+    # Grouped `{ group, views }` entries are canonical; bare `view:` ref
+    # strings remain accepted (the launcher shelves them under their
+    # path-derived group).
+    library:
+      type: single
+      prim: sequence
+      elements:
+        type: union
+        prims: [string, mapping]
+    backdrop:
+      type: single
+      prim: string
+    overlays:
       type: single
       prim: mapping
 

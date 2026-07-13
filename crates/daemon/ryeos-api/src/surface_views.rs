@@ -20,23 +20,29 @@ use ryeos_engine::engine::{EffectiveItemRequest, Engine};
 
 /// Collect every `view:`-prefixed ref anywhere in the composed surface
 /// value — center `tiles`, edge `slots`, `backdrop`, `library` — skipping
-/// the `views` map itself (it holds resolved bindings keyed by ref, not
-/// refs to resolve). Walking the whole value keeps this correct as the
-/// surface schema grows.
+/// the ROOT `views` map only (it holds resolved bindings keyed by ref,
+/// not refs to resolve). The skip must not apply to nested `views` keys:
+/// each grouped `library` entry is `{ group, views: [ref…] }`, and
+/// skipping those lists is exactly how a grouped launcher loses every
+/// declared view.
 fn collect_view_refs(value: &Value, out: &mut Vec<String>) {
+    collect_view_refs_at(value, out, true);
+}
+
+fn collect_view_refs_at(value: &Value, out: &mut Vec<String>, at_root: bool) {
     match value {
         Value::String(s) if s.starts_with("view:") => out.push(s.clone()),
         Value::Array(items) => {
             for item in items {
-                collect_view_refs(item, out);
+                collect_view_refs_at(item, out, false);
             }
         }
         Value::Object(map) => {
             for (key, v) in map {
-                if key == "views" {
+                if at_root && key == "views" {
                     continue;
                 }
-                collect_view_refs(v, out);
+                collect_view_refs_at(v, out, false);
             }
         }
         _ => {}
@@ -119,7 +125,9 @@ mod tests {
             "slots": {
                 "bottom": { "content": "view:ryeos/input", "open": true }
             },
-            "library": ["view:ryeos/threads/list", "view:ryeos/chain/timeline"]
+            "library": [
+                { "group": "Threads", "views": ["view:ryeos/threads/list", "view:ryeos/chain/timeline"] }
+            ]
         })
     }
 

@@ -380,6 +380,7 @@ fn sandbox_plan_request(
         })?;
     crate::subprocess_spec::sandbox_lillux_request(
         request,
+        ctx.sandbox_enabled,
         &ctx.app_root,
         project_path,
         "tool:ryeos/internal/plan-subprocess",
@@ -463,6 +464,7 @@ mod tests {
         .unwrap();
         EngineContext {
             app_root,
+            sandbox_enabled: true,
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),

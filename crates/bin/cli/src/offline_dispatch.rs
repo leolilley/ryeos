@@ -87,7 +87,12 @@ pub async fn try_offline_dispatch(
     })?;
 
     // 4. Boot engine (lazy — only reached when we know we have a match)
-    let engine = boot_engine(app_root, project_path, &bundle_roots)?;
+    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        ..Default::default()
+    })
+    .map_err(local_err)?;
+    let engine = boot_engine(&node_config, project_path, &bundle_roots)?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
@@ -114,13 +119,22 @@ pub async fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
+            node_config.sandbox_enabled,
         );
     }
 
     if has_tool_command(&item.composed_value) {
         let params = bind_params_minimal(tail, &matched.command, project_path)?;
-        return exec_tool(&engine, &item, execute_ref, params, app_root, project_path)
-            .map(|result| result.map(OfflineDispatchOutcome::Json));
+        return exec_tool(
+            &engine,
+            &item,
+            execute_ref,
+            params,
+            app_root,
+            project_path,
+            node_config.sandbox_enabled,
+        )
+        .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
 
     Ok(None)
@@ -131,16 +145,10 @@ pub async fn try_offline_dispatch(
 // ---------------------------------------------------------------------------
 
 fn boot_engine(
-    app_root: &Path,
+    config: &ryeos_app::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
-
     let project_root = if project_path == "." {
         None
     } else {
@@ -148,7 +156,7 @@ fn boot_engine(
     };
 
     ryeos_app::engine_init::build_engine_for_roots(
-        &config,
+        config,
         bundle_roots,
         project_root.as_deref(),
         None, // no trust overlay
@@ -387,6 +395,7 @@ fn exec_tool(
     params: Value,
     app_root: &Path,
     project_path: &str,
+    sandbox_enabled: bool,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
     let executor_id = item
@@ -532,6 +541,7 @@ fn exec_tool(
             timeout: timeout as f64,
             limits: None,
         },
+        sandbox_enabled,
         app_root,
         Path::new(project_path),
         tool_ref_str,
@@ -581,6 +591,7 @@ fn dispatch_service(
     tail: &[String],
     app_root: &Path,
     project_path: &str,
+    sandbox_enabled: bool,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
     let availability = item
@@ -662,6 +673,7 @@ fn dispatch_service(
         params,
         app_root,
         project_path,
+        sandbox_enabled,
     )
     .map(|result| result.map(OfflineDispatchOutcome::Json))
 }

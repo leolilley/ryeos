@@ -1808,6 +1808,7 @@ async fn run_claimed_thread_row_inner(
         .as_ref()
         .and_then(|preflight| preflight.env_var.clone());
     let app_root_owned = state.config.app_root.clone();
+    let sandbox_enabled = state.config.sandbox_enabled;
     let cas_root_owned = state.config.app_root.join("cas");
     let checkpoint_dir_owned = checkpoint_dir.clone();
     // Execution starts at the exec boundary inside the blocking task, and the
@@ -1848,6 +1849,7 @@ async fn run_claimed_thread_row_inner(
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
             app_root: &app_root_owned,
+            sandbox_enabled,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
             // A machine continuation of a replay-aware kind resumes from the
