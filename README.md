@@ -2,7 +2,10 @@
 
 > _In Linux, everything is a file. In RyeOS, everything is data._
 
-RyeOS is portable verified execution.
+RyeOS is portable verified execution. That portability describes signed
+execution data moving between compatible nodes; the current production
+distribution is Linux x86-64. See the
+[platform support matrix](docs/platform-support.md).
 
 (_RYE Your Execution_.)
 
@@ -144,6 +147,12 @@ content-addressed sync. A descriptor is a trust pin, not a credential; runtime
 authority lives in the target node's authorized-key store.
 
 ## Install
+
+The supported production target is Linux x86-64 with glibc. Official container
+images are currently `linux/amd64`, and packaged bundle executables target
+`x86_64-unknown-linux-gnu`. Other targets are tracked in the
+[platform support matrix](docs/platform-support.md) and must not silently bypass
+the sandbox or durability contracts.
 
 ### Arch Linux / AUR
 
