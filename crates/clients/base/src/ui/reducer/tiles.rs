@@ -54,9 +54,8 @@ impl RyeOsCore {
     /// chat line) is input-only.
     fn lensable(&self, view_ref: &str) -> bool {
         self.views.get(view_ref).is_some_and(|binding| {
-            let input_only = binding.input.is_some()
-                && binding.source.is_none()
-                && binding.sections.is_empty();
+            let input_only =
+                binding.input.is_some() && binding.source.is_none() && binding.sections.is_empty();
             binding.widget != "scene" && !input_only
         })
     }
@@ -79,14 +78,12 @@ impl RyeOsCore {
             return Vec::new();
         };
         let mut groups: Vec<LibraryGroup> = Vec::new();
-        let add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| {
-            match groups
-                .iter_mut()
-                .find(|group| group.title.eq_ignore_ascii_case(&title))
-            {
-                Some(existing) => existing.refs.extend(refs),
-                None => groups.push(LibraryGroup { title, refs }),
-            }
+        let add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| match groups
+            .iter_mut()
+            .find(|group| group.title.eq_ignore_ascii_case(&title))
+        {
+            Some(existing) => existing.refs.extend(refs),
+            None => groups.push(LibraryGroup { title, refs }),
         };
         for entry in entries {
             if let Some(view_ref) = entry.as_str() {

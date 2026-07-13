@@ -1721,7 +1721,11 @@ mod tests {
             ]
         }));
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
-        for view_ref in ["view:test/alpha/one", "view:test/alpha/two", "view:test/beta/one"] {
+        for view_ref in [
+            "view:test/alpha/one",
+            "view:test/alpha/two",
+            "view:test/beta/one",
+        ] {
             seed_view(&mut core, view_ref);
         }
         core.dispatch(RyeOsEvent::Ui {
@@ -1771,7 +1775,9 @@ mod tests {
             "a sourced view with a filter input must be launchable"
         );
         assert!(
-            !items.iter().any(|item| item.primary.contains("ryeos/input")),
+            !items
+                .iter()
+                .any(|item| item.primary.contains("ryeos/input")),
             "the bare input line must not appear as a lens"
         );
     }
