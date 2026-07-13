@@ -42,7 +42,7 @@ FROM debian:trixie-slim
 # so project images can install their own Python tool dependencies without
 # rebuilding the RyeOS base from scratch.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg python3 python3-venv python3-pip && \
+        bubblewrap ca-certificates curl gnupg python3 python3-venv python3-pip && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get purge -y curl gnupg && apt-get autoremove -y && \

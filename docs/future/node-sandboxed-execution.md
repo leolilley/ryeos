@@ -1,5 +1,8 @@
 # Node sandboxed execution
 
+> Implemented. The normative operator and security contract is now
+> [Execution sandbox contract](../security/execution-sandbox.md).
+
 ## Status
 
 Implemented for Linux through a node-owned Bubblewrap policy at

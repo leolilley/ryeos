@@ -15,7 +15,7 @@ install=ryeos.install
 options=('!strip' '!lto')
 
 # SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
-depends=('gcc-libs' 'glibc')
+depends=('bubblewrap' 'gcc-libs' 'glibc')
 
 # cc needed for bundled libsqlite3-sys C compilation
 makedepends=('rust' 'cargo' 'cc')

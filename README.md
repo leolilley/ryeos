@@ -155,7 +155,11 @@ ryeos node status
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
 into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. `ryeos start` launches `ryeosd`.
+vault material, and writes node configuration. The package installs Bubblewrap,
+which RyeOS requires for fail-closed subprocess sandboxing on Linux. `ryeos
+start` launches `ryeosd`. See the
+[execution sandbox contract](docs/security/execution-sandbox.md) before
+tightening the node-owned policy.
 
 The user lifecycle surface is intentionally small:
 
