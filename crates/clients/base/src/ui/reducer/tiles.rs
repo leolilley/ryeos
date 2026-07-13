@@ -108,7 +108,17 @@ impl RyeOsCore {
                 .push(view_ref.clone());
         }
         for (title, refs) in derived {
-            groups.push(LibraryGroup { title, refs });
+            // A derived group that matches a declared one (path segment
+            // vs authored title, case-insensitively) appends to it —
+            // "node" must not sit beside "Node" as a second header.
+            if let Some(existing) = groups
+                .iter_mut()
+                .find(|group| group.title.eq_ignore_ascii_case(&title))
+            {
+                existing.refs.extend(refs);
+            } else {
+                groups.push(LibraryGroup { title, refs });
+            }
         }
         groups
     }

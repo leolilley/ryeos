@@ -1706,6 +1706,36 @@ mod tests {
     }
 
     #[test]
+    fn derived_groups_merge_into_declared_groups_case_insensitively() {
+        // A surface declaring a "Node" group plus an embedded-but-undeclared
+        // view under a `node/` path must render ONE header, not "Node" and
+        // "node" side by side.
+        let mut session = session();
+        session.effective_surface = Some(serde_json::json!({
+            "name": "grouped",
+            "library": [
+                { "group": "Node", "views": ["view:test/node/events"] }
+            ]
+        }));
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/node/events");
+        seed_view(&mut core, "view:test/node/status");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|item| item.header)
+            .map(|item| item.category.as_str())
+            .collect();
+        assert_eq!(headers, ["Node"], "one merged header, got {headers:?}");
+        assert_eq!(items.len(), 3, "header + declared leaf + appended leaf");
+    }
+
+    #[test]
     fn fold_overlay_group_from_leaf_lands_on_its_header() {
         let mut core = fold_fixture();
         let items = crate::ui::view_model::active_overlay_items(&core);
