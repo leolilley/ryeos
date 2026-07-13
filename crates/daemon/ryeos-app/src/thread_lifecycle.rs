@@ -214,38 +214,47 @@ pub struct FollowFact {
     /// child's result).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_successor_thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cohort: Option<FollowCohortProgress>,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FollowCohortProgress { pub done: u32, pub expected: u32 }
 
 impl FollowFact {
     /// A suspended parent (found by its own thread id in the live waiter).
     fn suspended_parent(w: &crate::runtime_db::FollowWaiter) -> Self {
+        let child = w.children.first();
         Self {
             role: follow_role::SUSPENDED_PARENT,
             display_state: follow_display_state::SUSPENDED,
             phase: Some(w.phase.clone()),
             follow_node: Some(w.follow_node.clone()),
-            child_thread_id: w.child_thread_id.clone(),
-            child_chain_root_id: w.child_chain_root_id.clone(),
-            child_terminal_status: w.child_terminal_status.clone(),
+            child_thread_id: child.map(|c| c.child_thread_id.clone()),
+            child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
+            child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+            cohort: Some(FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
         }
     }
 
     /// A resume successor recognized from the still-live waiter.
     fn resume_successor_live(w: &crate::runtime_db::FollowWaiter) -> Self {
+        let child = w.children.first();
         Self {
             role: follow_role::RESUME_SUCCESSOR,
-            display_state: if w.child_terminal_status.is_some() {
+            display_state: if w.children.iter().all(|c| c.terminal_status.is_some()) {
                 follow_display_state::RESUMED
             } else {
                 follow_display_state::RESUME_QUEUED
             },
             phase: None,
             follow_node: Some(w.follow_node.clone()),
-            child_thread_id: w.child_thread_id.clone(),
-            child_chain_root_id: w.child_chain_root_id.clone(),
-            child_terminal_status: w.child_terminal_status.clone(),
+            child_thread_id: child.map(|c| c.child_thread_id.clone()),
+            child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
+            child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+            cohort: Some(FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
         }
     }
 
@@ -263,6 +272,7 @@ impl FollowFact {
             child_chain_root_id: None,
             child_terminal_status: None,
             parent_successor_thread_id: Some(successor_thread_id.to_string()),
+            cohort: None,
         }
     }
 }

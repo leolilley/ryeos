@@ -2384,6 +2384,11 @@ impl StateStore {
         g.runtime_db.launch_window_is_queued(child_chain_root_id)
     }
 
+    pub fn launch_window_remove_queued(&self, chain_roots: &[String]) -> Result<Vec<String>> {
+        let mut g = self.lock()?;
+        g.runtime_db.launch_window_remove_queued(chain_roots)
+    }
+
     pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db.launch_window_is_member(child_chain_root_id)

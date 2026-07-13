@@ -1747,6 +1747,24 @@ impl RuntimeDb {
         self.launch_window_admit(&key, global_live_limit, now_ms)
     }
 
+    /// Remove exactly the requested members that are still queued. This is used
+    /// by cancellation and intentionally does not admit replacements.
+    pub fn launch_window_remove_queued(&mut self, chain_roots: &[String]) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let mut removed = Vec::new();
+        for root in chain_roots {
+            if tx.execute(
+                "DELETE FROM launch_window WHERE child_chain_root_id = ?1 AND launched_at_ms IS NULL",
+                params![root],
+            )? != 0
+            {
+                removed.push(root.clone());
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Whether this chain is a window member deliberately awaiting admission
     /// — reconcile must leave such a `created` row alone rather than
     /// finalize it as an interrupted spawn.

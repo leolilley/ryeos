@@ -885,9 +885,9 @@ fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Op
 /// pass and the periodic recovery sweep; every launch is claim-guarded, so
 /// concurrent drives are benign skips.
 fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowReconcileAction>) {
-    for action in actions {
-        let st = state.clone();
-        tokio::spawn(async move {
+    let st = state.clone();
+    tokio::spawn(async move {
+        for action in actions {
             use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
             let (label, outcome) = match action {
                 reconcile::FollowReconcileAction::Resume { follow_key } => {
@@ -914,8 +914,8 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
                     tracing::error!(action = %label, error = %err, "reconcile: follow action failed");
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 fn drain_running_threads(state: &AppState) {

@@ -59,7 +59,7 @@ fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> bool {
         state
             .state_store
             .get_follow_waiter_by_child_chain(&thread.chain_root_id),
-        Ok(Some(w)) if w.child_thread_id.as_deref() == Some(thread.thread_id.as_str())
+        Ok(Some(w)) if w.children.iter().any(|c| c.child_thread_id == thread.thread_id)
     )
 }
 
@@ -608,7 +608,7 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
     let now_ms = lillux::time::timestamp_millis();
     let mut actions: Vec<FollowReconcileAction> = Vec::new();
     for w in state.state_store.list_follow_waiters()? {
-        let action = match w.phase.as_str() {
+        let waiter_actions = match w.phase.as_str() {
             follow_phase::READY | follow_phase::RESUMING => {
                 // A `resuming` waiter re-drives its idempotent parent resume every
                 // pass; one that stays `resuming` across the staleness window is
@@ -628,9 +628,9 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
                         "follow waiter carries a stored child result — collecting parent-resume"
                     );
                 }
-                Some(FollowReconcileAction::Resume {
+                vec![FollowReconcileAction::Resume {
                     follow_key: w.follow_key.clone(),
-                })
+                }]
             }
             follow_phase::WAITING => waiting_follow_action(state, &w)?,
             follow_phase::RESERVED => converge_reserved_follow(state, &w)?,
@@ -640,18 +640,18 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
                     phase = %other,
                     "follow waiter in an unrecognized phase — skipped"
                 );
-                None
+                Vec::new()
             }
         };
-        match action {
-            Some(a) => actions.push(a),
+        match waiter_actions.is_empty() {
+            false => actions.extend(waiter_actions),
             // Age-based escalation: a waiter that yields NO recovery action AND
             // whose issuing parent row is gone is an orphan whose lineage can
             // never be reconstructed. Clear it loudly once stale rather than
             // warn-skipping it forever (the table must converge to empty on an
             // idle daemon). A parent-present skip is left alone — it may still be
             // recoverable on a later pass.
-            None => {
+            true => {
                 if follow_waiter_is_stale(&w, now_ms)
                     && state.state_store.get_thread(&w.parent_thread_id)?.is_none()
                 {
@@ -689,48 +689,52 @@ fn follow_waiter_is_stale(w: &ryeos_app::runtime_db::FollowWaiter, now_ms: i64) 
 fn waiting_follow_action(
     state: &AppState,
     w: &ryeos_app::runtime_db::FollowWaiter,
-) -> Result<Option<FollowReconcileAction>> {
-    let child_id = match w.child_thread_id.as_deref() {
-        Some(id) => id,
-        None => {
+) -> Result<Vec<FollowReconcileAction>> {
+    if w.children.is_empty() {
             tracing::warn!(follow_key = %w.follow_key, "waiting follow waiter has no child thread recorded");
-            return Ok(None);
-        }
-    };
-    match state.state_store.get_thread(child_id)? {
+            return Ok(Vec::new());
+    }
+    let mut actions = Vec::new();
+    let mut resume = false;
+    for slot in &w.children {
+      if slot.terminal_status.is_some() { continue; }
+      let child_id = &slot.child_thread_id;
+      match state.state_store.get_thread(child_id)? {
         // Pre-launch window: the child provably never launched.
-        Some(child) if is_pending_follow_child(state, &child) => {
+        Some(child) if is_pending_follow_child(state, &child)
+            && !state.state_store.launch_window_is_queued(&slot.child_chain_root_id)? => {
             tracing::info!(
                 follow_key = %w.follow_key,
                 child_thread_id = %child_id,
                 "follow child stranded pre-launch — collecting relaunch"
             );
-            Ok(Some(FollowReconcileAction::RelaunchChild {
+            actions.push(FollowReconcileAction::RelaunchChild {
                 child_thread_id: child_id.to_string(),
-            }))
+            });
         }
         // Launching / running are owned by native resume + the finalize kick. But a
         // NON-continued terminal never recorded (the crash window between finalize-
         // persist and record_follow_child_terminal, which reconcile skips) would hang
         // the parent forever — recover it.
         Some(_) => {
-            let chain_root = w.child_chain_root_id.as_deref().unwrap_or(child_id);
-            match state.threads.recover_terminal_follow_child(chain_root)? {
+            match state.threads.recover_terminal_follow_child(&slot.child_chain_root_id)? {
                 Some(follow_key) => {
                     tracing::info!(
                         follow_key = %follow_key,
                         "follow child chain terminal but unrecorded — recovered, collecting parent-resume"
                     );
-                    Ok(Some(FollowReconcileAction::Resume { follow_key }))
+                    resume = true;
                 }
-                None => Ok(None),
+                None => {}
             }
         }
         None => {
             tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id, "waiting follow waiter's child row is missing");
-            Ok(None)
         }
+      }
     }
+    if resume { actions.push(FollowReconcileAction::Resume { follow_key: w.follow_key.clone() }); }
+    Ok(actions)
 }
 
 /// Converge a `reserved` follow waiter left by a partial spawn (crash between
@@ -744,7 +748,7 @@ fn waiting_follow_action(
 fn converge_reserved_follow(
     state: &AppState,
     w: &ryeos_app::runtime_db::FollowWaiter,
-) -> Result<Option<FollowReconcileAction>> {
+) -> Result<Vec<FollowReconcileAction>> {
     let parent_continued = w.parent_successor_thread_id.is_some()
         || matches!(
             state.state_store.get_thread(&w.parent_thread_id),
@@ -752,12 +756,13 @@ fn converge_reserved_follow(
         );
     if !parent_continued {
         tracing::debug!(follow_key = %w.follow_key, "reserved follow waiter, parent not yet continued — parent resume re-drives");
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    if w.child_thread_id.is_none() {
+    if w.children.len() != w.expected_children as usize
+        || w.children.iter().enumerate().any(|(i, c)| c.item_index != i as u32) {
         tracing::warn!(follow_key = %w.follow_key, "reserved waiter: parent continued but no child recorded — clearing orphan");
         let _ = state.state_store.clear_follow_waiter(&w.follow_key);
-        return Ok(None);
+        return Ok(Vec::new());
     }
     // Adopt the parent's follow-resume successor if step 3 created it but did not
     // record it on the waiter.
@@ -778,12 +783,12 @@ fn converge_reserved_follow(
     }
     if let Err(e) = state.state_store.mark_follow_waiting(&w.follow_key) {
         tracing::warn!(follow_key = %w.follow_key, error = %e, "reserved waiter: could not converge to waiting (missing child/successor) — leaving");
-        return Ok(None);
+        return Ok(Vec::new());
     }
     tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter to waiting");
     match state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
         Some(updated) => waiting_follow_action(state, &updated),
-        None => Ok(None),
+        None => Ok(Vec::new()),
     }
 }
 
