@@ -194,7 +194,7 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapOutcome> {
 
     with_store_lock(&store_path, || {
         lillux::with_exclusive_file_lock(&key_path, || {
-            run_rewrap_locked(key_path.clone(), pub_path, store_path)
+            run_rewrap_locked(key_path.clone(), pub_path, store_path.clone())
         })
     })
 }
