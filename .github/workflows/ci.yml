@@ -21,6 +21,11 @@ on:
         required: true
         default: false
         type: boolean
+      installed_resume_smoke:
+        description: "Run the installed init/start/restart resume smoke (expensive)"
+        required: true
+        default: false
+        type: boolean
       bundle_set:
         description: "Bundle set for refresh_bundles"
         required: true
@@ -199,3 +204,33 @@ jobs:
         env:
           BUNDLE_SET: ${{ inputs.bundle_set }}
         run: ./scripts/gate.sh --refresh-bundles --no-tests --bundle-set "$BUNDLE_SET"
+
+  installed-resume-smoke:
+    name: Installed restart/resume smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build and install standard distribution
+        run: |
+          sudo ./scripts/pkg/install-local-direct.sh \
+            --populate --all --bundle-set standard --no-init --no-daemon-restart
+
+      - name: Exercise installed restart and resume
+        run: ./scripts/smoke-installed-resume.sh
