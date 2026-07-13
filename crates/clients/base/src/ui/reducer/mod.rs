@@ -286,7 +286,14 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::SetOverlayQuery { query } => {
                 self.ui.overlay.query = query;
+                // Enter always lands on a match: a live query renders group
+                // headers inert, so the selection snaps to the first
+                // actionable row rather than resting on an inert header.
                 self.ui.overlay.selected = 0;
+                let items = super::view_model::active_overlay_items(self);
+                if let Some(first) = items.iter().position(|item| item.enabled) {
+                    self.ui.overlay.selected = first;
+                }
                 self.bump_generation();
                 Vec::new()
             }
@@ -471,6 +478,46 @@ impl RyeOsCore {
                 self.ui.overlay.selected = 0;
                 self.bump_generation();
                 self.dispatch_intent(intent)
+            }
+            RyeOsUiEvent::FoldOverlayGroup { expand } => {
+                // Folds act on the tree presentation; a live search shows
+                // matches under force-expanded, inert headers.
+                if !self.ui.overlay.query.trim().is_empty() {
+                    return Vec::new();
+                }
+                let items = super::view_model::active_overlay_items(self);
+                if items.is_empty() {
+                    return Vec::new();
+                }
+                let selected = self.ui.overlay.selected.min(items.len() - 1);
+                let group = items[selected].category.clone();
+                // Only rows under a real header fold — flat overlays
+                // (commands, help) share the item shape but have none.
+                if !items
+                    .iter()
+                    .any(|item| item.header && item.category == group)
+                {
+                    return Vec::new();
+                }
+                let collapsed = self.ui.overlay.collapsed.contains(&group);
+                if expand == collapsed {
+                    if expand {
+                        self.ui.overlay.collapsed.remove(&group);
+                    } else {
+                        self.ui.overlay.collapsed.insert(group.clone());
+                        // The fold hides the group's leaves — land the
+                        // selection on its header.
+                        let items = super::view_model::active_overlay_items(self);
+                        if let Some(idx) = items
+                            .iter()
+                            .position(|item| item.header && item.category == group)
+                        {
+                            self.ui.overlay.selected = idx;
+                        }
+                    }
+                    self.bump_generation();
+                }
+                Vec::new()
             }
             RyeOsUiEvent::SetTileCursor { tile_id, index } => {
                 let Some(tile_id) = parse_tile_id(&tile_id) else {
@@ -1647,6 +1694,111 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(RyeOsEffectKind::FetchSource { .. })
         ));
+    }
+
+    /// Two derived launcher groups (`alpha`, `beta`) with the views
+    /// overlay open — items: [alpha header, one, two, beta header, one].
+    fn fold_fixture() -> RyeOsCore {
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/alpha/one");
+        seed_view(&mut core, "view:test/alpha/two");
+        seed_view(&mut core, "view:test/beta/one");
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        core
+    }
+
+    #[test]
+    fn fold_overlay_group_from_leaf_lands_on_its_header() {
+        let mut core = fold_fixture();
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        assert_eq!(items.len(), 5, "two groups with three leaves");
+        core.ui.overlay.selected = 2; // view:test/alpha/two
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::FoldOverlayGroup { expand: false },
+        });
+        assert!(core.ui.overlay.collapsed.contains("alpha"));
+        // The fold hid the group's leaves; the selection sits on its header.
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        assert!(items[core.ui.overlay.selected].header);
+        assert_eq!(items[core.ui.overlay.selected].category, "alpha");
+    }
+
+    #[test]
+    fn fold_overlay_group_expand_reopens_a_collapsed_group() {
+        let mut core = fold_fixture();
+        core.ui.overlay.selected = 0; // alpha header
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::FoldOverlayGroup { expand: false },
+        });
+        assert!(core.ui.overlay.collapsed.contains("alpha"));
+        // Folding an already-collapsed group is a no-op…
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::FoldOverlayGroup { expand: false },
+        });
+        assert!(core.ui.overlay.collapsed.contains("alpha"));
+        // …and unfolding restores the leaves.
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::FoldOverlayGroup { expand: true },
+        });
+        assert!(core.ui.overlay.collapsed.is_empty());
+        assert_eq!(crate::ui::view_model::active_overlay_items(&core).len(), 5);
+    }
+
+    #[test]
+    fn fold_overlay_group_is_inert_while_a_query_is_live() {
+        let mut core = fold_fixture();
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetOverlayQuery {
+                query: "alpha".to_string(),
+            },
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::FoldOverlayGroup { expand: false },
+        });
+        assert!(
+            core.ui.overlay.collapsed.is_empty(),
+            "search shows matches under force-expanded, inert headers"
+        );
+    }
+
+    #[test]
+    fn fold_overlay_group_ignores_flat_overlays() {
+        let mut core = fold_fixture();
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::CloseOverlay,
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "help".to_string(),
+            },
+        });
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::FoldOverlayGroup { expand: false },
+        });
+        assert!(
+            core.ui.overlay.collapsed.is_empty(),
+            "flat overlays share the item shape but have no headers"
+        );
+    }
+
+    #[test]
+    fn overlay_query_snaps_selection_to_the_first_match() {
+        let mut core = fold_fixture();
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetOverlayQuery {
+                query: "beta".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        let selected = &items[core.ui.overlay.selected];
+        assert!(
+            selected.enabled && !selected.header,
+            "selection lands on the first actionable match, not an inert header"
+        );
     }
 
     #[test]

@@ -334,6 +334,12 @@ fn overlay_key_command(event: RyeOsKeyEvent) -> RyeOsKeyCommand {
         RyeOsKey::ArrowDown if event.modifiers.none() => {
             ui(RyeOsUiEvent::MoveOverlaySelection { delta: 1 })
         }
+        RyeOsKey::ArrowLeft if event.modifiers.none() => {
+            ui(RyeOsUiEvent::FoldOverlayGroup { expand: false })
+        }
+        RyeOsKey::ArrowRight if event.modifiers.none() => {
+            ui(RyeOsUiEvent::FoldOverlayGroup { expand: true })
+        }
         RyeOsKey::Backspace if event.modifiers.none() => RyeOsKeyCommand::DeleteOverlayChar,
         RyeOsKey::Char(ch)
             if !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.meta =>
@@ -582,10 +588,10 @@ fn initial_list_local_state() -> crate::workspace::ViewLocalState {
     }
 }
 
-fn dock_vm_for_edge<'a>(
-    docks: &'a super::view_model::RyeOsDockPlaneVm,
+fn dock_vm_for_edge(
+    docks: &super::view_model::RyeOsDockPlaneVm,
     edge: RyeOsDockEdge,
-) -> Option<&'a super::view_model::RyeOsDockTileVm> {
+) -> Option<&super::view_model::RyeOsDockTileVm> {
     match edge {
         RyeOsDockEdge::Top => docks.top.as_ref(),
         RyeOsDockEdge::Bottom => docks.bottom.as_ref(),
@@ -846,6 +852,23 @@ mod tests {
             ryeos_key_command(key(RyeOsKey::Escape), overlay),
             RyeOsKeyCommand::Ui {
                 event: RyeOsUiEvent::CloseOverlay
+            }
+        ));
+    }
+
+    #[test]
+    fn overlay_arrow_keys_fold_and_unfold_the_selected_group() {
+        let overlay = context(true, true);
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowLeft), overlay),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::FoldOverlayGroup { expand: false }
+            }
+        ));
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowRight), overlay),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::FoldOverlayGroup { expand: true }
             }
         ));
     }
