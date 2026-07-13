@@ -22,6 +22,12 @@ use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams
 use ryeos_app::vault::VaultReadError;
 use ryeos_runtime::events::RuntimeEventType;
 
+mod terminal;
+
+use terminal::{
+    fallback_finalization, is_runtime_terminal_status, normalize_runtime_terminal_status,
+};
+
 /// Typed error for native executor materialization failures.
 ///
 /// Raised by [`resolve_native_executor_path`] when the bundle CAS
@@ -1895,62 +1901,10 @@ async fn run_claimed_thread_row_inner(
         if terminal_status == "failed" && state.state_store.thread_has_kill_command(&thread_id)? {
             terminal_status = "killed";
         }
-        let terminal_error = if terminal_status == "completed" {
-            None
-        } else {
-            Some(json!({
-                "reason": "runtime_exited_without_callback_finalization",
-                "runtime_status": runtime_result.status.clone(),
-                "result": runtime_result.result.clone(),
-            }))
-        };
-        let final_cost =
-            runtime_result
-                .cost
-                .as_ref()
-                .map(|cost| ryeos_engine::contracts::FinalCost {
-                    turns: 0,
-                    input_tokens: cost.input_tokens as i64,
-                    output_tokens: cost.output_tokens as i64,
-                    spend: cost.total_usd,
-                    provider: None,
-                    basis: cost.basis.clone(),
-                    metadata: None,
-                });
-        // Build the canonical managed envelope from the parsed RuntimeResult
-        // (outputs/warnings/raw cost) BEFORE the params move `terminal_error`, so
-        // a followed child finalized on this executor-supervised fallback preserves
-        // its structured return to the parent's resume — same shape live dispatch
-        // returns.
-        let raw_cost = runtime_result
-            .cost
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok());
-        let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
-            terminal_status,
-            runtime_result.result.as_ref(),
-            terminal_error.as_ref(),
-            raw_cost.as_ref(),
-            &runtime_result.outputs,
-            &runtime_result.warnings,
-        );
+        let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
         let finalized = state.threads.finalize_thread_with_managed_envelope(
-            &ThreadFinalizeParams {
-                thread_id: thread_id.clone(),
-                status: terminal_status.to_string(),
-                outcome_code: if terminal_status == "completed" {
-                    Some("success".to_string())
-                } else {
-                    Some(terminal_status.to_string())
-                },
-                result: runtime_result.result.clone(),
-                error: terminal_error,
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost,
-                summary_json: None,
-            },
-            managed_envelope,
+            &fallback.params,
+            fallback.managed_envelope,
         )?;
         // Live parent-resume kick: a followed child finalized on this fallback
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
@@ -3324,27 +3278,6 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
     })
 }
 
-fn is_runtime_terminal_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-    )
-}
-
-fn normalize_runtime_terminal_status(status: &str) -> &'static str {
-    match status {
-        "completed" => "completed",
-        "cancelled" => "cancelled",
-        "killed" => "killed",
-        "timed_out" => "timed_out",
-        "continued" => "continued",
-        // RuntimeResult historically used "errored" internally. The thread
-        // lifecycle vocabulary uses "failed" for that terminal state.
-        "failed" | "errored" => "failed",
-        _ => "failed",
-    }
-}
-
 fn parent_limits_from_context(
     parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
 ) -> anyhow::Result<Option<HardLimits>> {
@@ -3739,24 +3672,6 @@ mod tests {
         let err = BuildAndLaunchError::from(io_err);
         let msg = format!("{err}");
         assert!(msg.contains("file gone"));
-    }
-
-    #[test]
-    fn runtime_terminal_status_normalization_matches_thread_vocabulary() {
-        assert_eq!(normalize_runtime_terminal_status("completed"), "completed");
-        assert_eq!(normalize_runtime_terminal_status("timed_out"), "timed_out");
-        assert_eq!(normalize_runtime_terminal_status("cancelled"), "cancelled");
-        assert_eq!(normalize_runtime_terminal_status("errored"), "failed");
-        assert_eq!(normalize_runtime_terminal_status("unexpected"), "failed");
-    }
-
-    #[test]
-    fn runtime_terminal_status_detection_rejects_running_states() {
-        assert!(is_runtime_terminal_status("completed"));
-        assert!(is_runtime_terminal_status("failed"));
-        assert!(is_runtime_terminal_status("timed_out"));
-        assert!(!is_runtime_terminal_status("created"));
-        assert!(!is_runtime_terminal_status("running"));
     }
 
     #[test]
