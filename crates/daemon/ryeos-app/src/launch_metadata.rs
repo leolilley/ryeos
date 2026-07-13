@@ -109,7 +109,15 @@ pub struct RuntimeLaunchMetadata {
     /// admitted later, after the live callback context is gone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow_parent_context: Option<PersistedParentExecutionContext>,
+
+    /// Durable launch-window policy for crash repair before admission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_launch_window: Option<FollowLaunchWindow>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowLaunchWindow { pub key: String, pub width: u32 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +136,7 @@ impl Default for RuntimeLaunchMetadata {
             checkpoint_dir: None,
             resume_context: None,
             follow_parent_context: None,
+            follow_launch_window: None,
         }
     }
 }

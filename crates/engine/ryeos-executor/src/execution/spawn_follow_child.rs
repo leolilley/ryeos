@@ -31,7 +31,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use ryeos_app::launch_metadata::{PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata};
+use ryeos_app::launch_metadata::{FollowLaunchWindow, PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::runtime_db::{follow_child_spec_hash, follow_phase, NewFollowWaiter};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::NewThreadRecord;
@@ -228,6 +228,24 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         expected_children: u32::try_from(children.len()).context("follow: too many children")?,
     })?;
 
+    // Normalize and validate the complete immutable cohort before any idempotent
+    // return. A re-drive may not silently adopt a changed count, ref, or spec.
+    let spec_hashes: Vec<String> = children.iter().map(|child|
+        follow_child_spec_hash(&child.item_ref, &child.parameters, child.facets.as_ref())
+    ).collect();
+    if waiter.expected_children as usize != children.len() {
+        bail!("follow: persisted child count conflicts with re-driven cohort");
+    }
+    for (index, child) in children.iter().enumerate() {
+        if let Some(slot) = state.state_store.get_follow_child(&follow_key, index as u32)? {
+            if slot.item_ref != child.item_ref || slot.spec_hash != spec_hashes[index] {
+                bail!("follow: persisted child conflicts at index {index}");
+            }
+        } else if waiter.phase != follow_phase::RESERVED {
+            bail!("follow: persisted cohort is missing child index {index}");
+        }
+    }
+
     // Already past reservation (waiting/ready/resuming): a duplicate call for an
     // in-flight or completed follow. Idempotent no-op — return the recorded IDs.
     if waiter.phase != follow_phase::RESERVED {
@@ -252,14 +270,18 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     };
     let mut child_thread_ids = Vec::with_capacity(children.len());
     for (item_index, (child, (child_thread_profile, child_executor_ref, child_runtime_ref))) in children.iter().zip(resolved_children.iter()).enumerate() {
-    let spec_hash = follow_child_spec_hash(&child.item_ref, &child.parameters, child.facets.as_ref());
+    let spec_hash = spec_hashes[item_index].clone();
     let child_thread_id = match state.state_store.get_follow_child(&follow_key, item_index as u32)? {
         Some(existing) => {
             if existing.spec_hash != spec_hash { bail!("follow: child spec conflict at index {item_index}"); }
             existing.child_thread_id
         }
         None => {
+            // Persist the stable slot identity first. If creation crashes, a
+            // re-drive recreates this exact root rather than minting an orphan.
             let child_id = new_thread_id();
+            state.state_store.set_follow_child(&follow_key, item_index as u32,
+                &child.item_ref, &spec_hash, &child_id, &child_id)?;
             state.threads.create_thread(&ThreadCreateParams {
                 thread_id: child_id.clone(),
                 chain_root_id: child_id.clone(),
@@ -316,10 +338,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             });
             let mut meta = meta;
             meta.follow_parent_context = Some(persisted_parent_context.clone());
+            meta.follow_launch_window = params.launch_window_width.map(|width| FollowLaunchWindow {
+                key: format!("follow:{follow_key}"), width,
+            });
             state.state_store.seed_launch_metadata(&child_id, &meta)?;
-            state
-                .state_store
-                .set_follow_child(&follow_key, item_index as u32, &child.item_ref, &spec_hash, &child_id, &child_id)?;
             if let Some(Value::Object(facets)) = child.facets.as_ref() {
                 for (key, value) in facets {
                     if key.trim().is_empty() { continue; }
@@ -398,10 +420,27 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
     };
 
-    // 4. Mark the waiter durably `waiting`: all IDs recorded, parent suspended.
+    // 4. Enqueue the complete ordered cohort before exposing `waiting`. Calling
+    // enqueue once per member would admit early members before later FIFO rows
+    // existed, but none are launched until the complete cohort is durable.
+    let admitted = if let Some(width) = params.launch_window_width {
+        let window_key = format!("follow:{follow_key}");
+        let mut admitted = Vec::new();
+        for child_id in &child_thread_ids {
+            admitted.extend(state.state_store.launch_window_enqueue(
+                child_id, &window_key, width,
+                crate::execution::launch::global_live_fanout_limit(),
+                lillux::time::timestamp_millis(),
+            )?);
+        }
+        admitted
+    } else { child_thread_ids.clone() };
+
+    // 5. Mark the waiter durably `waiting`: all IDs and window membership are
+    // recorded, and the parent is suspended.
     state.state_store.mark_follow_waiting(&follow_key)?;
 
-    // 5. ONLY NOW launch the child, detached. The durable `waiting` waiter above
+    // 6. ONLY NOW launch the child, detached. The durable `waiting` waiter above
     //    means a terminal child can be matched to its suspended parent even if this
     //    daemon dies right after the spawn. Fire-and-forget: the launcher is claim-
     //    guarded, so a lost spawn is safe for the reconcile sweep to re-drive.
@@ -418,18 +457,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
     };
-    let admitted = if let Some(width) = params.launch_window_width {
-        let window_key = format!("follow:{follow_key}");
-        let mut admitted = Vec::new();
-        for child_id in &child_thread_ids {
-            admitted.extend(state.state_store.launch_window_enqueue(
-                child_id, &window_key, width,
-                crate::execution::launch::global_live_fanout_limit(),
-                lillux::time::timestamp_millis(),
-            )?);
-        }
-        admitted
-    } else { child_thread_ids.clone() };
     for launch_child_id in admitted {
     let launch_state = state.clone();
     let launch_provenance = launch_provenance.clone();

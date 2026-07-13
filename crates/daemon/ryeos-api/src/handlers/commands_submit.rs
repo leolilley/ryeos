@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::cascade::{cancel_queued_descendants, stop_thread_and_descendants, CascadeMode};
+use ryeos_app::cascade::{stop_thread_and_descendants, CascadeMode};
 use ryeos_app::command_service::CommandSubmitParams;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -81,10 +81,7 @@ pub async fn handle(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        if let Err(e) = cancel_queued_descendants(&state, &thread_id) {
-            tracing::warn!(thread_id = %thread_id, error = %e, "queued descendant cancellation failed");
-        }
-        match stop_thread_and_descendants(&state.state_store, &thread_id, mode) {
+        match stop_thread_and_descendants(&state, &thread_id, mode) {
             Ok(report) => tracing::info!(
                 thread_id = %thread_id,
                 command_type = %command_type,

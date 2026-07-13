@@ -3095,8 +3095,7 @@ fn follow_resume_payload(fanout: bool, envelopes: Vec<Value>) -> Value {
         return envelopes.into_iter().next().unwrap_or(Value::Null);
     }
     let statuses: Vec<String> = envelopes.iter().map(|envelope| {
-        if envelope.get("success").and_then(Value::as_bool) == Some(true)
-            && envelope.get("status").and_then(Value::as_str) == Some("completed") {
+        if ryeos_runtime::envelope::envelope_succeeded(envelope) {
             "completed".to_string()
         } else {
             "failed".to_string()

@@ -143,13 +143,14 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
 /// operator and runtime control paths stop the target itself — not only its
 /// children.
 pub fn stop_thread_and_descendants(
-    store: &StateStore,
+    state: &AppState,
     thread_id: &str,
     mode: CascadeMode,
 ) -> anyhow::Result<Value> {
-    let target = signal_thread(store, thread_id, mode);
-    let descendants = cascade_descendants(store, thread_id, mode)?;
-    Ok(json!({ "target": target, "descendants": descendants }))
+    let queued = cancel_queued_descendants(state, thread_id)?;
+    let target = signal_thread(&state.state_store, thread_id, mode);
+    let descendants = cascade_descendants(&state.state_store, thread_id, mode)?;
+    Ok(json!({ "target": target, "descendants": descendants, "queued": queued }))
 }
 
 #[cfg(test)]

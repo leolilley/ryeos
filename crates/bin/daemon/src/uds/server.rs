@@ -802,7 +802,7 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode)
+        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode)
         {
             Ok(report) => tracing::info!(
                 thread_id = %thread_id,
