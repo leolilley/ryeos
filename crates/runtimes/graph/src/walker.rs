@@ -23,6 +23,12 @@ use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
 
+mod transitions;
+
+use transitions::{
+    foreach_failure_summary, resolve_next_on_error, retry_attempts_remaining,
+};
+
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
 /// change to the written fields; the resume parser rejects an unknown version.
 ///
@@ -3032,46 +3038,6 @@ impl Walker {
     }
 }
 
-/// Whether a node whose current dispatch just failed has retry attempts left.
-///
-/// `retry_attempt` is the number of attempts already spent BEFORE this one, so
-/// the attempt that just failed is `retry_attempt + 1`. Returns that 1-based
-/// failed-attempt number when a further attempt is allowed under the node's
-/// `retry.attempts` (the total, incl. the first), and `None` when the policy is
-/// absent or exhausted (route through `on_error`).
-fn retry_attempts_remaining(node: &GraphNode, retry_attempt: u32) -> Option<u32> {
-    let rc = node.retry.as_ref()?;
-    let failed_attempt = retry_attempt + 1;
-    (failed_attempt < rc.attempts).then_some(failed_attempt)
-}
-
-/// Resolve what to do on error based on node-level `on_error` and
-/// graph-level `on_error` mode.
-fn resolve_next_on_error(node: &GraphNode, cfg: &GraphConfig) -> NextOnError {
-    if let Some(ref target) = node.on_error {
-        NextOnError::Redirect(target.clone())
-    } else {
-        match cfg.on_error {
-            ErrorMode::Continue => NextOnError::PolicyContinue,
-            ErrorMode::Fail => NextOnError::PolicyFail,
-        }
-    }
-}
-
-/// Build one combined diagnostic for a foreach node whose per-item
-/// failures trip a fail/redirect policy. Leads with the count and the
-/// first item's error (which carries the leaf stderr excerpt).
-fn foreach_failure_summary(node: &str, errors: &[ErrorRecord]) -> String {
-    let first = errors
-        .first()
-        .map(|e| e.error.as_str())
-        .unwrap_or("unknown error");
-    format!(
-        "foreach node `{node}` failed: {} of its iterations errored; first: {first}",
-        errors.len()
-    )
-}
-
 fn merge_into(target: &mut Value, source: &Value) {
     if let (Value::Object(ref mut t_map), Value::Object(ref s_map)) = (target, source) {
         for (k, v) in s_map {
@@ -4979,41 +4945,6 @@ config:
             }
             _ => panic!("expected Terminal"),
         }
-    }
-
-    #[test]
-    fn next_on_error_redirect_from_node() {
-        let node = GraphNode {
-            on_error: Some("handler".to_string()),
-            ..make_test_node()
-        };
-        let cfg = make_test_graph_config();
-        let noe = resolve_next_on_error(&node, &cfg);
-        assert!(matches!(noe, NextOnError::Redirect(ref t) if t == "handler"));
-    }
-
-    #[test]
-    fn next_on_error_policy_fail_when_no_node_target() {
-        let node = make_test_node();
-        let cfg = GraphConfig {
-            start: "x".to_string(),
-            on_error: ErrorMode::Fail,
-            ..make_test_graph_config()
-        };
-        let noe = resolve_next_on_error(&node, &cfg);
-        assert!(matches!(noe, NextOnError::PolicyFail));
-    }
-
-    #[test]
-    fn next_on_error_policy_continue_when_no_node_target() {
-        let node = make_test_node();
-        let cfg = GraphConfig {
-            start: "x".to_string(),
-            on_error: ErrorMode::Continue,
-            ..make_test_graph_config()
-        };
-        let noe = resolve_next_on_error(&node, &cfg);
-        assert!(matches!(noe, NextOnError::PolicyContinue));
     }
 
     // ── F3 commit_step tests: event ordering + checkpoint writes ─────
