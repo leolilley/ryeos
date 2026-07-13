@@ -65,6 +65,9 @@ jobs:
       - name: Check removed compatibility vocabulary
         run: ./scripts/lint-no-content-wrap.sh
 
+      - name: Check workspace dependency direction
+        run: ./scripts/lint-dependency-layers.py
+
   rust-policy:
     name: Rust formatting, lint, and dependency policy
     runs-on: ubuntu-latest
