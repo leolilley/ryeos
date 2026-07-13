@@ -562,7 +562,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
 
     let entry_node = PlanNode::DispatchSubprocess {
         id: entrypoint_id.clone(),
-        spec: Box::new(spec),
+        spec,
         tool_path: Some(resolved.source_path.clone()),
         executor_chain: terminal.chain.clone(),
     };
