@@ -607,6 +607,11 @@ async fn main() -> Result<()> {
     let uds_state = Arc::new(app_state.clone());
     let uds_task = tokio::spawn(async move { uds::server::serve(uds_listener, uds_state).await });
 
+    let repair_store = app_state.state_store.clone();
+    let mut projection_repair_task = tokio::spawn(async move {
+        ryeos_app::projection_repair::run(repair_store, shutdown_signal()).await
+    });
+
     // HTTP server is started BEFORE dispatching resume intents.
     // A resumed subprocess that prefers RYEOSD_URL over
     // RYEOSD_SOCKET_PATH would otherwise hit a cold server when it
@@ -822,6 +827,14 @@ async fn main() -> Result<()> {
         result = uds_task => {
             result.context("uds task join failed")??;
         }
+    }
+
+    if tokio::time::timeout(Duration::from_secs(5), &mut projection_repair_task)
+        .await
+        .is_err()
+    {
+        projection_repair_task.abort();
+        let _ = projection_repair_task.await;
     }
 
     // Record a clean, handled shutdown so the next startup can distinguish it

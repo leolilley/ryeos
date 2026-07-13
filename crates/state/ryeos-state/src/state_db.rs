@@ -188,6 +188,11 @@ impl StateDb {
         &self.projection
     }
 
+    /// Catch the rebuildable thread projection up to all authoritative heads.
+    pub fn catch_up_projection(&self) -> anyhow::Result<crate::rebuild::CatchUpReport> {
+        crate::rebuild::catch_up_projection(&self.projection, &self.cas_root, &self.refs_root)
+    }
+
     /// CAS objects root (`runtime_state_dir/objects`).
     pub fn cas_root(&self) -> &Path {
         &self.cas_root

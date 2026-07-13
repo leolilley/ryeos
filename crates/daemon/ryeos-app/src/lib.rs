@@ -32,6 +32,8 @@ pub mod live_input_queue;
 pub mod node_config;
 pub mod principal;
 pub mod process;
+pub mod projection_health;
+pub mod projection_repair;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_db;

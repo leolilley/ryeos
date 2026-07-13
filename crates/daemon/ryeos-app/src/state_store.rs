@@ -16,6 +16,7 @@ use ryeos_state::UsageSubject;
 use ryeos_state::{CommittedWrite, ProjectionStatus, StateDb};
 
 use crate::runtime_db;
+use crate::projection_health::{ThreadProjectionHealth, ThreadProjectionHealthSnapshot};
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
 
@@ -221,6 +222,7 @@ struct Inner {
 
 pub struct StateStore {
     inner: Mutex<Inner>,
+    projection_health: Arc<ThreadProjectionHealth>,
 }
 
 impl std::fmt::Debug for StateStore {
@@ -422,7 +424,11 @@ impl StateStore {
         std::fs::create_dir_all(&runtime_state_dir)
             .context("failed to create runtime_state_dir directory")?;
 
-        let state_db = StateDb::open(&runtime_state_dir)?;
+        let projection_health = Arc::new(ThreadProjectionHealth::default());
+        let state_db = StateDb::open_with_projection_repair_sink(
+            &runtime_state_dir,
+            projection_health.clone(),
+        )?;
         let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
 
         Ok(Self {
@@ -432,7 +438,22 @@ impl StateStore {
                 signer,
                 write_barrier,
             }),
+            projection_health,
         })
+    }
+
+    pub fn projection_health(&self) -> Arc<ThreadProjectionHealth> {
+        self.projection_health.clone()
+    }
+
+    pub fn projection_health_snapshot(&self) -> ThreadProjectionHealthSnapshot {
+        self.projection_health.snapshot()
+    }
+
+    pub fn repair_thread_projection(&self) -> Result<()> {
+        let g = self.lock()?;
+        g.state_db.catch_up_projection()?;
+        Ok(())
     }
 
     /// Get the CAS root path for raw CAS access.
@@ -462,6 +483,9 @@ impl StateStore {
         F: FnOnce(&ryeos_state::ProjectionDb) -> Result<T>,
     {
         let g = self.lock()?;
+        if !self.projection_health.is_current() {
+            anyhow::bail!("thread projection is not current; retry after repair");
+        }
         f(g.state_db.projection())
     }
 
@@ -2547,6 +2571,24 @@ mod tests {
             WriteBarrier::new(),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn direct_projection_access_fails_closed_while_repair_is_pending() {
+        let store = test_store();
+        ryeos_state::ProjectionRepairSink::request_repair(
+            &*store.projection_health(),
+            ryeos_state::ProjectionRepairRequest {
+                chain_root_id: "T-root".into(),
+                committed_head_hash: "head".into(),
+                operation: "append_events",
+                error: "projection failed".into(),
+            },
+        );
+        let error = store
+            .with_projection(|_| Ok(()))
+            .expect_err("stale projection read must fail");
+        assert!(error.to_string().contains("not current"));
     }
 
     fn thread_record(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
