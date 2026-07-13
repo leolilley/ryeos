@@ -377,6 +377,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Source installs do not have a package manager to pull runtime dependencies.
+# Fail before builds, daemon stops, or filesystem installation if the mandatory
+# sandbox backend is absent.
+if ! command -v bwrap >/dev/null 2>&1; then
+    die "Bubblewrap is required for RyeOS subprocess sandboxing but 'bwrap' was not found in PATH. Install it first (Arch: sudo pacman -S bubblewrap; Debian/Ubuntu: sudo apt install bubblewrap; Fedora: sudo dnf install bubblewrap), then rerun this installer"
+fi
+
 cd "$repo_root"
 
 bundle_names=()

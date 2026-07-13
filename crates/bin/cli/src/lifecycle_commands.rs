@@ -431,6 +431,31 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         }
     }
 
+    // The daemon fails closed when its node-owned subprocess policy or backend
+    // is unavailable. Diagnose that boundary offline instead of making the
+    // operator infer it from a failed launch.
+    if initialized {
+        let policy_path = config.app_root.join(ryeos_engine::AI_DIR).join("node/sandbox.yaml");
+        match inspect_sandbox_policy(&policy_path) {
+            Ok(detail) => checks.push(check("sandbox", OK, detail)),
+            Err(error) => checks.push(check(
+                "sandbox",
+                FAIL,
+                serde_json::json!({
+                    "policy": policy_path,
+                    "error": format!("{error:#}"),
+                    "fix": "install Bubblewrap and repair the node policy; then run `ryeos node doctor` again",
+                }),
+            )),
+        }
+    } else {
+        checks.push(check(
+            "sandbox",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and
@@ -612,6 +637,47 @@ fn check(
         status: status.to_string(),
         detail,
     }
+}
+
+fn inspect_sandbox_policy(path: &std::path::Path) -> Result<serde_json::Value> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read sandbox policy {}", path.display()))?;
+    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
+        .with_context(|| format!("strictly parse sandbox policy {}", path.display()))?;
+    anyhow::ensure!(
+        policy.version == 1,
+        "unsupported sandbox policy version {} (expected 1)",
+        policy.version
+    );
+    anyhow::ensure!(
+        policy.backend_path.is_absolute(),
+        "sandbox backend path must be absolute: {}",
+        policy.backend_path.display()
+    );
+    let metadata = std::fs::metadata(&policy.backend_path).with_context(|| {
+        format!(
+            "sandbox backend {} is unavailable; install Bubblewrap (for example `sudo pacman -S bubblewrap` or `sudo apt install bubblewrap`)",
+            policy.backend_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "sandbox backend is not a regular file: {}",
+        policy.backend_path.display()
+    );
+    anyhow::ensure!(
+        metadata.permissions().mode() & 0o111 != 0,
+        "sandbox backend is not executable: {}",
+        policy.backend_path.display()
+    );
+    Ok(serde_json::json!({
+        "policy": path,
+        "version": policy.version,
+        "backend": policy.backend_path,
+        "backend_status": "regular executable",
+    }))
 }
 
 #[derive(Parser, Debug)]
@@ -845,6 +911,13 @@ fn default_app_root() -> PathBuf {
 mod tests {
     use super::*;
 
+    fn sandbox_policy(backend: &std::path::Path, version: u32) -> String {
+        format!(
+            "version: {version}\nbackend_path: {}\nallow_network: false\nallow_host_read: true\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
+            backend.display()
+        )
+    }
+
     #[test]
     fn revision_skew_detects_mismatch_and_missing() {
         // Same revision → not skewed.
@@ -857,5 +930,39 @@ mod tests {
         // revision can't be discriminated, but a missing one still skews.
         assert!(!is_revision_skew(Some("abc123def456"), "unknown"));
         assert!(is_revision_skew(None, "unknown"));
+    }
+
+    #[test]
+    fn sandbox_doctor_accepts_absolute_regular_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let backend = temp.path().join("bwrap");
+        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = temp.path().join("sandbox.yaml");
+        std::fs::write(&policy, sandbox_policy(&backend, 1)).unwrap();
+
+        assert!(inspect_sandbox_policy(&policy).is_ok());
+    }
+
+    #[test]
+    fn sandbox_doctor_rejects_unknown_fields_and_bad_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = temp.path().join("sandbox.yaml");
+        std::fs::write(
+            &policy,
+            format!("{}unexpected: true\n", sandbox_policy(std::path::Path::new("relative/bwrap"), 2)),
+        )
+        .unwrap();
+
+        let error = inspect_sandbox_policy(&policy).unwrap_err().to_string();
+        assert!(error.contains("strictly parse"));
+
+        std::fs::write(&policy, sandbox_policy(std::path::Path::new("relative/bwrap"), 1)).unwrap();
+        assert!(inspect_sandbox_policy(&policy)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute"));
     }
 }

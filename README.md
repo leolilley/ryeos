@@ -186,6 +186,12 @@ so keys, trust, and runtime state survive redeploys.
 
 ### From source
 
+Source installs require Bubblewrap (`bwrap`) for fail-closed subprocess
+sandboxing. Install it before running the installer, for example `sudo pacman
+-S bubblewrap` on Arch, `sudo apt install bubblewrap` on Debian/Ubuntu, or
+`sudo dnf install bubblewrap` on Fedora. The installer checks this prerequisite
+before building or changing the installed node.
+
 ```bash
 git clone https://github.com/leolilley/ryeos.git
 cd ryeos
