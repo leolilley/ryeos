@@ -47,11 +47,18 @@ impl RyeOsCore {
     }
 
     /// Whether a view works as a center lens: a real bound view that is
-    /// neither a scene backdrop nor the foot input.
+    /// neither a scene backdrop nor a pure input line. An `input` block
+    /// alone does not disqualify — the thread history views carry live
+    /// FILTER inputs and are the canonical center lenses; only a view
+    /// with no content of its own (no source, no sections — the foot
+    /// chat line) is input-only.
     fn lensable(&self, view_ref: &str) -> bool {
-        self.views
-            .get(view_ref)
-            .is_some_and(|binding| binding.widget != "scene" && binding.input.is_none())
+        self.views.get(view_ref).is_some_and(|binding| {
+            let input_only = binding.input.is_some()
+                && binding.source.is_none()
+                && binding.sections.is_empty();
+            binding.widget != "scene" && !input_only
+        })
     }
 
     /// The surface's declared library groups, filtered to lensable refs.

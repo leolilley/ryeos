@@ -1706,6 +1706,39 @@ mod tests {
     }
 
     #[test]
+    fn filter_input_views_are_launchable_but_the_bare_input_line_is_not() {
+        // The thread history views carry live FILTER inputs and are the
+        // canonical center lenses; only the content-less chat line
+        // (input, no source, no sections) stays out of the launcher.
+        let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/threads/history",
+            serde_json::json!({
+                "widget": "table",
+                "source": { "ref": "service:test/threads", "params": {}, "collection": "threads" },
+                "input": { "id": "q", "feeds": { "param": "filter" } }
+            }),
+        );
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        assert!(
+            items
+                .iter()
+                .any(|item| !item.header && item.primary.contains("threads/history")),
+            "a sourced view with a filter input must be launchable"
+        );
+        assert!(
+            !items.iter().any(|item| item.primary.contains("ryeos/input")),
+            "the bare input line must not appear as a lens"
+        );
+    }
+
+    #[test]
     fn derived_groups_merge_into_declared_groups_case_insensitively() {
         // A surface declaring a "Node" group plus an embedded-but-undeclared
         // view under a `node/` path must render ONE header, not "Node" and
