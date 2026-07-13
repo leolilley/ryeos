@@ -92,10 +92,12 @@ pub struct SurfaceSpec {
     /// background fill stands.
     #[serde(default)]
     pub backdrop: Option<String>,
-    /// Launchable view refs (the surface's library): resolved and
-    /// embedded alongside pane refs; the view overlay derives from these.
+    /// Declared launcher groups (`[{ group, views }]`): each group titles
+    /// a foldable header and lists launchable view refs. The view overlay
+    /// derives its tree from these plus the completeness append (unlisted
+    /// lensable views surface under path-derived groups).
     #[serde(default)]
-    pub library: Vec<String>,
+    pub library: Vec<SurfaceLibraryGroupSpec>,
     /// Transient overlays declared by the surface. Overlays are not workspace
     /// views: they sit over the layout, own query/selection ephemera, and
     /// dispatch actions into the workspace. Their content still comes from
@@ -110,6 +112,15 @@ pub struct SurfaceSpec {
     pub instruments: Vec<InstrumentSpec>,
     #[serde(default)]
     pub capabilities: Option<SurfaceCapabilitySpec>,
+}
+
+/// One declared launcher group: a titled, ordered set of view refs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceLibraryGroupSpec {
+    pub group: String,
+    #[serde(default)]
+    pub views: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1022,6 +1033,19 @@ mod tests {
         assert!(ws.center_is_empty());
         assert!(ws.tile_ids().is_empty());
         assert!(ws.layout().is_none());
+    }
+
+    #[test]
+    fn grouped_library_parses() {
+        // The `library:` shape is grouped — `[{ group, views }]`; a
+        // resolved surface carrying it must round-trip through the spec.
+        let spec: SurfaceSpec = serde_yaml::from_str(
+            "name: x\nlibrary:\n  - group: Threads\n    views:\n      - \"view:a/b\"\n      - \"view:c/d\"\n",
+        )
+        .expect("grouped library parses");
+        assert_eq!(spec.library.len(), 1);
+        assert_eq!(spec.library[0].group, "Threads");
+        assert_eq!(spec.library[0].views, vec!["view:a/b", "view:c/d"]);
     }
 
     #[test]
