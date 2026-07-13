@@ -36,6 +36,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install checksum-pinned workflow and shell linters
+        run: ./scripts/ci/install-static-linters.sh "$RUNNER_TEMP/ryeos-linters"
+
+      - name: Check workflows and release/install shell
+        run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
+
       - name: Resolve and validate version
         id: release
         env:
