@@ -861,8 +861,17 @@ mod tests {
         ]);
 
         let ctx = test_engine_context();
-        let error = execute_plan(&plan, &ctx).unwrap_err();
-        assert!(matches!(error, EngineError::SandboxPolicyRefused { .. }));
+        let completion = execute_plan(&plan, &ctx).unwrap();
+        assert_eq!(completion.status, ThreadTerminalStatus::Failed);
+        assert_eq!(completion.outcome_code.as_deref(), Some("exit:-1"));
+        let error = completion.error.expect("spawn failure carries error");
+        assert_eq!(error["exit_code"], -1);
+        assert!(
+            error["stderr"]
+                .as_str()
+                .is_some_and(|stderr| stderr.contains("Failed to spawn")),
+            "spawn error must be preserved: {error}"
+        );
     }
 
     #[test]
