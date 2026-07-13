@@ -79,7 +79,7 @@ impl RyeOsCore {
             return Vec::new();
         };
         let mut groups: Vec<LibraryGroup> = Vec::new();
-        let mut add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| {
+        let add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| {
             match groups
                 .iter_mut()
                 .find(|group| group.title.eq_ignore_ascii_case(&title))
