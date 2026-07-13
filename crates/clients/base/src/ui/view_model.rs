@@ -421,6 +421,10 @@ pub struct RyeOsTableRowVm {
     pub detail: Vec<RyeOsRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// The change's tone when it crossed a tone boundary (or the row just
+    /// arrived) — renderers flash in this color instead of generic accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_tone: Option<RyeOsTone>,
     /// The row's raw record — base-only (not serialized to clients). Overlays
     /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
     /// management is reachable. Skipped to avoid duplicating every record into
@@ -472,6 +476,10 @@ pub struct RyeOsRowVm {
     pub detail: Vec<RyeOsRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// The change's tone when it crossed a tone boundary (or the row just
+    /// arrived) — renderers flash in this color instead of generic accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_tone: Option<RyeOsTone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -970,7 +978,7 @@ struct RowLocalState<'a> {
     cursor: Option<usize>,
     collapsed: Option<&'a std::collections::BTreeSet<usize>>,
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
-    changed_rows: Option<&'a std::collections::BTreeMap<String, u64>>,
+    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 }
 
 fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalState<'a> {
@@ -1149,6 +1157,7 @@ fn bound_view_vm_keyed(
                             expanded: false,
                             detail: Vec::new(),
                             changed_at_ms: None,
+                    changed_tone: None,
                         });
                     }
                 }
@@ -1250,7 +1259,13 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
-                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        changed_at_ms: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .map(|flash| flash.at_ms),
+                        changed_tone: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .and_then(|flash| flash.tone.as_deref())
+                            .map(|tone| tone_from_name(Some(tone))),
                     }
                 })
                 .collect();
@@ -1416,7 +1431,13 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
-                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        changed_at_ms: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .map(|flash| flash.at_ms),
+                        changed_tone: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .and_then(|flash| flash.tone.as_deref())
+                            .map(|tone| tone_from_name(Some(tone))),
                         raw: record.raw,
                     }
                 })
@@ -1447,6 +1468,7 @@ fn bound_view_vm_keyed(
                     expanded: false,
                     detail: Vec::new(),
                     changed_at_ms: None,
+                    changed_tone: None,
                 })
                 .collect();
             let notice_start = rows.len();
@@ -1521,6 +1543,7 @@ fn status_notice_rows(
             expanded: false,
             detail: Vec::new(),
             changed_at_ms: None,
+                    changed_tone: None,
         })
         .collect()
 }
@@ -2687,7 +2710,7 @@ fn selected_row_state(
     tile_id: TileId,
 ) -> (
     Option<&std::collections::BTreeSet<String>>,
-    Option<&std::collections::BTreeMap<String, u64>>,
+    Option<&std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 ) {
     match core.workspace.tiles.get(&tile_id).map(|tile| &tile.local) {
         Some(ViewLocalState::GenericList {

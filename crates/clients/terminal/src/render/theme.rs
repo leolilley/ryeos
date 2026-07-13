@@ -68,7 +68,12 @@ pub fn mix_toward(from: Color, to: Color, t: f32) -> Color {
 /// A row's foreground eases toward ACCENT for a moment after it changed,
 /// fading out over 1.2s — shared by every widget that draws `RyeOsRowVm`-like
 /// rows so a changed row animates identically no matter which widget hosts it.
-pub(crate) fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style {
+pub(crate) fn shimmer_style(
+    style: Style,
+    changed_at_ms: Option<u64>,
+    flash: Color,
+    now_ms: u64,
+) -> Style {
     let Some(changed_at_ms) = changed_at_ms else {
         return style;
     };
@@ -76,8 +81,8 @@ pub(crate) fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u6
     if age >= 1_200 {
         return style;
     }
-    let weight = 0.35 * (1.0 - age as f32 / 1_200.0);
-    style.fg(mix_toward(style.fg, ACCENT, weight))
+    let weight = 0.45 * (1.0 - age as f32 / 1_200.0);
+    style.fg(mix_toward(style.fg, flash, weight))
 }
 
 /// Motion is a vocabulary, one treatment per state:

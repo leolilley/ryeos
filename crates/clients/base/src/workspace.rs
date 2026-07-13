@@ -40,6 +40,17 @@ pub enum FocusDirection {
 // View-local state
 // ---------------------------------------------------------------------------
 
+/// One transient row-change flash: when it happened and, when the change
+/// crossed a tone boundary (created→running, →completed, →failed) or the
+/// row is newly arrived, which tone to flash in. `None` = a content-only
+/// change; renderers flash their default accent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RowFlash {
+    pub at_ms: u64,
+    #[serde(default)]
+    pub tone: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum ViewLocalState {
     GenericList {
@@ -54,10 +65,10 @@ pub enum ViewLocalState {
         #[serde(default)]
         expanded_rows: BTreeSet<String>,
         /// Rows whose projected content changed recently, keyed by stable
-        /// record identity and timestamped in runtime ms. Renderers use this
-        /// as a transient shimmer signal.
+        /// record identity. Renderers use this as a transient flash signal;
+        /// the flash carries the transition's tone when there was one.
         #[serde(default)]
-        changed_rows: BTreeMap<String, u64>,
+        changed_rows: BTreeMap<String, RowFlash>,
     },
     #[default]
     None,

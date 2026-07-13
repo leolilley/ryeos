@@ -9,7 +9,7 @@ use super::super::primitives::fill_line;
 use super::super::text::{display_width, letterspace, truncate};
 use super::super::theme::{
     active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
-    tone_style,
+    tone_style, ACCENT,
 };
 
 pub fn draw_rows(
@@ -52,7 +52,12 @@ pub fn draw_rows(
             style_fg()
         };
         style = active_pulse_style(style, row.tone, now_ms);
-        style = shimmer_style(style, row.changed_at_ms, now_ms);
+        style = shimmer_style(
+        style,
+        row.changed_at_ms,
+        row.changed_tone.map(|tone| tone_style(tone).fg).unwrap_or(ACCENT),
+        now_ms,
+    );
         fill_line(surface, rect.x as usize, y, width, style);
         let glyph_style = if row.selected {
             style

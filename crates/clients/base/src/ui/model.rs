@@ -1424,15 +1424,28 @@ impl RyeOsCore {
         };
         let mut live = std::collections::BTreeSet::new();
         let mut changed = false;
-        for (key, signature) in new_rows {
+        for (key, (signature, tone)) in new_rows {
             live.insert(key.clone());
-            if old_rows.get(&key) != Some(&signature) {
-                changed_rows.insert(key, now_ms);
-                changed = true;
-            }
+            let flash = match old_rows.get(&key) {
+                Some((old_signature, _)) if *old_signature == signature => continue,
+                // A tone transition (created→running, →completed, →failed)
+                // flashes in the NEW tone; a same-tone content change
+                // flashes generic (None → the renderer's accent). A newly
+                // arrived row announces itself in its own tone.
+                Some((_, old_tone)) => (*old_tone != tone).then_some(tone).flatten(),
+                None => tone,
+            };
+            changed_rows.insert(
+                key,
+                crate::workspace::RowFlash {
+                    at_ms: now_ms,
+                    tone: flash,
+                },
+            );
+            changed = true;
         }
-        changed_rows.retain(|key, changed_at| {
-            live.contains(key) && now_ms.saturating_sub(*changed_at) <= 2_000
+        changed_rows.retain(|key, flash| {
+            live.contains(key) && now_ms.saturating_sub(flash.at_ms) <= 2_000
         });
         if changed {
             self.bump_activity_pulse(0.35);
@@ -1558,12 +1571,14 @@ pub(crate) fn row_key(record: &serde_json::Value, index: usize) -> String {
     format!("index:{index}")
 }
 
+/// Per-row `(signature, projected tone)` — the signature detects change,
+/// the tone names the transition so the flash can speak it.
 fn projected_row_signatures(
     binding: &super::content::ViewBinding,
     response: &serde_json::Value,
     start: usize,
     end: usize,
-) -> std::collections::BTreeMap<String, String> {
+) -> std::collections::BTreeMap<String, (String, Option<String>)> {
     let records = super::content::source_collection(binding, response);
     let start = start.min(records.len());
     let end = end.min(records.len()).max(start);
@@ -1580,7 +1595,7 @@ fn projected_row_signatures(
                     "tone": record.tone,
                 })
                 .to_string();
-                (row_key(&record.raw, index), signature)
+                (row_key(&record.raw, index), (signature, record.tone.clone()))
             })
             .collect(),
         "table" => {
@@ -1597,7 +1612,7 @@ fn projected_row_signatures(
                         "tone": record.tone,
                     })
                     .to_string();
-                    (row_key(&record.raw, index), signature)
+                    (row_key(&record.raw, index), (signature, record.tone.clone()))
                 })
                 .collect()
         }

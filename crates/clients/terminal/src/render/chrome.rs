@@ -426,6 +426,7 @@ mod tests {
                 expanded: false,
                 detail: Vec::new(),
                 changed_at_ms: None,
+                changed_tone: None,
                 raw: serde_json::Value::Null,
             }],
         };
