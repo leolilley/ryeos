@@ -20,10 +20,12 @@ use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
 
 fn committed_value<T>(write: CommittedWrite<T>) -> T {
-    if let ProjectionStatus::Stale { operation, error } = &write.projection {
+    if let ProjectionStatus::RepairRequired(request) = &write.projection {
         tracing::warn!(
-            operation,
-            error,
+            operation = request.operation,
+            chain_root_id = %request.chain_root_id,
+            committed_head_hash = %request.committed_head_hash,
+            error = %request.error,
             "authoritative state committed; projection will be repaired"
         );
     }

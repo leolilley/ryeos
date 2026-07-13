@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 
@@ -33,10 +33,39 @@ use crate::signer::Signer;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionStatus {
     Current,
-    Stale {
-        operation: &'static str,
-        error: String,
-    },
+    RepairRequired(ProjectionRepairRequest),
+}
+
+/// A request to repair a projection that fell behind an authoritative head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRepairRequest {
+    pub chain_root_id: String,
+    pub committed_head_hash: String,
+    pub operation: &'static str,
+    pub error: String,
+}
+
+/// Receives repair requests after authoritative writes have committed.
+///
+/// Implementations must make `request_repair` non-blocking and infallible from
+/// the caller's perspective. Durable queueing can be supplied by the daemon;
+/// the state crate's default sink retains requests for the database lifetime.
+pub trait ProjectionRepairSink: Send + Sync {
+    fn request_repair(&self, request: ProjectionRepairRequest);
+}
+
+#[derive(Debug, Default)]
+struct PendingProjectionRepairs {
+    requests: Mutex<Vec<ProjectionRepairRequest>>,
+}
+
+impl ProjectionRepairSink for PendingProjectionRepairs {
+    fn request_repair(&self, request: ProjectionRepairRequest) {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request);
+    }
 }
 
 /// A successfully committed authoritative write and its projection status.
@@ -47,14 +76,7 @@ pub struct CommittedWrite<T> {
 }
 
 impl<T> CommittedWrite<T> {
-    fn new(value: T, operation: &'static str, projected: anyhow::Result<()>) -> Self {
-        let projection = match projected {
-            Ok(()) => ProjectionStatus::Current,
-            Err(error) => ProjectionStatus::Stale {
-                operation,
-                error: format!("{error:#}"),
-            },
-        };
+    fn new(value: T, projection: ProjectionStatus) -> Self {
         Self { value, projection }
     }
 }
@@ -69,6 +91,7 @@ pub struct StateDb {
     locators_root: PathBuf,
     projection: ProjectionDb,
     head_cache: Mutex<HeadCache>,
+    projection_repair_sink: Arc<dyn ProjectionRepairSink>,
 }
 
 impl StateDb {
@@ -77,6 +100,17 @@ impl StateDb {
     /// Creates `objects/`, `refs/`, and `locators/` subdirectories and opens
     /// `projection.sqlite3` inside `runtime_state_dir`.
     pub fn open(runtime_state_dir: &Path) -> anyhow::Result<Self> {
+        Self::open_with_projection_repair_sink(
+            runtime_state_dir,
+            Arc::new(PendingProjectionRepairs::default()),
+        )
+    }
+
+    /// Open a state database with a caller-provided projection repair sink.
+    pub fn open_with_projection_repair_sink(
+        runtime_state_dir: &Path,
+        projection_repair_sink: Arc<dyn ProjectionRepairSink>,
+    ) -> anyhow::Result<Self> {
         let cas_root = runtime_state_dir.join("objects");
         let refs_root = runtime_state_dir.join("refs");
         let locators_root = runtime_state_dir.join("locators");
@@ -121,7 +155,32 @@ impl StateDb {
             locators_root,
             projection,
             head_cache: Mutex::new(HeadCache::new()),
+            projection_repair_sink,
         })
+    }
+
+    fn committed_write<T>(
+        &self,
+        value: T,
+        chain_root_id: &str,
+        committed_head_hash: &str,
+        operation: &'static str,
+        projected: anyhow::Result<()>,
+    ) -> CommittedWrite<T> {
+        let projection = match projected {
+            Ok(()) => ProjectionStatus::Current,
+            Err(error) => {
+                let request = ProjectionRepairRequest {
+                    chain_root_id: chain_root_id.to_owned(),
+                    committed_head_hash: committed_head_hash.to_owned(),
+                    operation,
+                    error: format!("{error:#}"),
+                };
+                self.projection_repair_sink.request_repair(request.clone());
+                ProjectionStatus::RepairRequired(request)
+            }
+        };
+        CommittedWrite::new(value, projection)
     }
 
     /// Access the underlying projection database for queries.
@@ -174,7 +233,14 @@ impl StateDb {
                     .context("projecting created thread snapshot")
             },
         );
-        Ok(CommittedWrite::new(result, "create_chain", projected))
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "create_chain",
+            projected,
+        ))
     }
 
     /// Add a new thread to an existing chain.
@@ -206,7 +272,14 @@ impl StateDb {
                     .context("projecting added thread snapshot")
             },
         );
-        Ok(CommittedWrite::new(result, "add_thread", projected))
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "add_thread",
+            projected,
+        ))
     }
 
     /// Append events to a thread in a chain.
@@ -271,7 +344,14 @@ impl StateDb {
             },
         );
 
-        Ok(CommittedWrite::new(result, "append_events", projected))
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "append_events",
+            projected,
+        ))
     }
 
     /// Add a new thread and its initial durable events in one chain-head update.
@@ -314,8 +394,11 @@ impl StateDb {
             .context("projecting thread and initial events"),
         );
 
-        Ok(CommittedWrite::new(
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
             result,
+            chain_root_id,
+            &committed_hash,
             "add_thread_with_events",
             projected,
         ))
@@ -754,7 +837,10 @@ mod tests {
             .append_events("T-root", "T-root", vec![event], vec![], &signer)
             .unwrap();
 
-        assert!(matches!(committed.projection, ProjectionStatus::Stale { .. }));
+        assert!(matches!(
+            committed.projection,
+            ProjectionStatus::RepairRequired(_)
+        ));
         let after: i64 = db
             .projection()
             .connection()
@@ -800,10 +886,10 @@ mod tests {
             .unwrap();
         assert!(matches!(
             committed.projection,
-            ProjectionStatus::Stale {
+            ProjectionStatus::RepairRequired(ProjectionRepairRequest {
                 operation: "append_events",
                 ..
-            }
+            })
         ));
         let head = crate::refs::read_signed_ref(&db.refs_root().join("generic/chains/T-root/head"))
             .unwrap();
@@ -826,6 +912,57 @@ mod tests {
             .unwrap()
             .expect("startup catch-up must restore the projection cursor");
         assert_eq!(projected.indexed_chain_state_hash, head.target_hash);
+    }
+
+    #[derive(Default)]
+    struct RecordingRepairSink {
+        requests: Mutex<Vec<ProjectionRepairRequest>>,
+    }
+
+    impl ProjectionRepairSink for RecordingRepairSink {
+        fn request_repair(&self, request: ProjectionRepairRequest) {
+            self.requests.lock().unwrap().push(request);
+        }
+    }
+
+    #[test]
+    fn projection_failure_signals_repair_even_when_status_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(RecordingRepairSink::default());
+        let db = StateDb::open_with_projection_repair_sink(dir.path(), sink.clone()).unwrap();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+        db.projection()
+            .connection()
+            .execute_batch("DROP TABLE events")
+            .unwrap();
+        let event = crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            "T-root",
+            "projection_failure_test",
+        )
+        .build();
+
+        let committed_head_hash = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap()
+            .value
+            .chain_state_hash;
+
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].chain_root_id, "T-root");
+        assert_eq!(requests[0].committed_head_hash, committed_head_hash);
+        assert_eq!(requests[0].operation, "append_events");
+        assert!(!requests[0].error.is_empty());
     }
 
     #[test]
