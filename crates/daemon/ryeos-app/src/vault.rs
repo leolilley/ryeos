@@ -65,7 +65,7 @@ use ryeos_engine::roots;
 // fixtures, dispatch) need so this module's surface is unchanged.
 pub use ryeos_vault::paths::default_sealed_store_path;
 pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
-pub use ryeos_vault::sealed::write_sealed_secrets;
+pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
 
 pub const INTERNAL_RUNTIME_VAULT_PREFIX: &str = "INTERNAL_RUNTIME_VAULT_";
 
@@ -436,14 +436,15 @@ impl SealedEnvelopeVault {
     /// Load the vault secret key from `<app_root>/.ai/node/vault/private_key.pem`
     /// and bind it to `<app_root>/.ai/state/secrets/store.enc`.
     pub fn load(app_root: &Path) -> Result<Self> {
-        let secret_path = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node")
-            .join("vault")
-            .join("private_key.pem");
+        let secret_path = ryeos_vault::paths::default_vault_secret_key_path(app_root);
+        let public_path = ryeos_vault::paths::default_vault_public_key_path(app_root);
+        let store_path = default_sealed_store_path(app_root);
+        with_store_lock(&store_path, || {
+            recover_rewrap(&secret_path, &public_path, &store_path)
+        })?;
         let secret_key = lillux::vault::read_secret_key(&secret_path)
             .map_err(|e| anyhow!("vault: load secret key {}: {e:#}", secret_path.display()))?;
-        Ok(Self::new(default_sealed_store_path(app_root), secret_key))
+        Ok(Self::new(store_path, secret_key))
     }
 
     pub fn store_path(&self) -> &Path {
@@ -494,16 +495,18 @@ impl SealedEnvelopeVault {
             .io_lock
             .lock()
             .map_err(|_| anyhow!("vault: sealed store lock poisoned"))?;
-        let mut map = if self.store_path.exists() {
-            self.read_all_internal()?
-        } else {
-            HashMap::new()
-        };
-        let result = modify(&mut map)?;
-        validate_decrypted_keys(&map, &self.store_path)?;
-        let pk = self.secret_key.public_key();
-        write_sealed_secrets(&self.store_path, &pk, &map)?;
-        Ok(result)
+        with_store_lock(&self.store_path, || {
+            let mut map = if self.store_path.exists() {
+                self.read_all_internal()?
+            } else {
+                HashMap::new()
+            };
+            let result = modify(&mut map)?;
+            validate_decrypted_keys(&map, &self.store_path)?;
+            let pk = self.secret_key.public_key();
+            write_sealed_secrets(&self.store_path, &pk, &map)?;
+            Ok(result)
+        })
     }
 }
 

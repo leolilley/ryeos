@@ -9,7 +9,8 @@ pub mod vault;
 pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
 
 pub use cas::{
-    atomic_write, atomic_write_batch, canonical_json, sha256_hex, shard_path, valid_hash, CasStore,
+    atomic_write, atomic_write_batch, atomic_write_private, canonical_json, remove_file_durable,
+    sha256_hex, shard_path, valid_hash, with_exclusive_file_lock, CasStore,
 };
 
 pub use identity::envelope::{

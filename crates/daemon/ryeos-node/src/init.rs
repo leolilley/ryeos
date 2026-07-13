@@ -368,15 +368,18 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
     let vault_secret_path = vault_dir.join("private_key.pem");
     let vault_public_path = vault_dir.join("public_key.pem");
-    let vault_sk = if vault_secret_path.exists() {
-        lillux::vault::read_secret_key(&vault_secret_path)
-            .with_context(|| format!("load vault key {}", vault_secret_path.display()))?
-    } else {
-        let sk = lillux::vault::VaultSecretKey::generate();
-        lillux::vault::write_secret_key(&vault_secret_path, &sk)
-            .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
-        sk
-    };
+    let vault_sk = lillux::with_exclusive_file_lock(&vault_secret_path, || {
+        if vault_secret_path.exists() {
+            lillux::vault::read_secret_key(&vault_secret_path)
+                .with_context(|| format!("load vault key {}", vault_secret_path.display()))
+        } else {
+            let sk = lillux::vault::VaultSecretKey::generate();
+            lillux::vault::write_secret_key(&vault_secret_path, &sk)
+                .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
+            Ok(sk)
+        }
+    })
+    .with_context(|| format!("initialize vault key {}", vault_secret_path.display()))?;
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 

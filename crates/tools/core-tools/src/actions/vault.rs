@@ -20,7 +20,9 @@ pub use ryeos_vault::paths::{
     default_sealed_store_path, default_vault_public_key_path, default_vault_secret_key_path,
 };
 pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
-pub use ryeos_vault::sealed::{read_sealed_secrets, write_sealed_secrets};
+pub use ryeos_vault::sealed::{
+    prepare_rewrap, read_sealed_secrets, recover_rewrap, with_store_lock, write_sealed_secrets,
+};
 
 // ── Command options + reports ────────────────────────────────────────
 
@@ -88,25 +90,28 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
         }
     }
     let key_path = default_vault_secret_key_path(&opts.app_root);
-    let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
-        format!(
-            "read vault secret key {} — has `ryeos init` (or daemon) ever run \
-             on this state dir?",
-            key_path.display()
-        )
-    })?;
-    let pk = sk.public_key();
     let store_path = default_sealed_store_path(&opts.app_root);
+    let public_path = default_vault_public_key_path(&opts.app_root);
 
-    let mut current = read_sealed_secrets(&store_path, &sk)?;
-    let mut keys_written = Vec::with_capacity(opts.entries.len());
-    for (k, v) in &opts.entries {
-        keys_written.push(k.clone());
-        current.insert(k.clone(), v.clone());
-    }
-
-    write_sealed_secrets(&store_path, &pk, &current)?;
-    let total = current.len();
+    let (keys_written, total) = with_store_lock(&store_path, || {
+        recover_rewrap(&key_path, &public_path, &store_path)?;
+        let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
+            format!(
+                "read vault secret key {} — has `ryeos init` (or daemon) ever run \
+                 on this state dir?",
+                key_path.display()
+            )
+        })?;
+        let pk = sk.public_key();
+        let mut current = read_sealed_secrets(&store_path, &sk)?;
+        let mut keys_written = Vec::with_capacity(opts.entries.len());
+        for (k, v) in &opts.entries {
+            keys_written.push(k.clone());
+            current.insert(k.clone(), v.clone());
+        }
+        write_sealed_secrets(&store_path, &pk, &current)?;
+        Ok((keys_written, current.len()))
+    })?;
     Ok(PutReport {
         store_path,
         keys_written,
@@ -116,10 +121,14 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
 
 pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
     let key_path = default_vault_secret_key_path(&opts.app_root);
-    let sk = lillux::vault::read_secret_key(&key_path)
-        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
     let store_path = default_sealed_store_path(&opts.app_root);
-    let current = read_sealed_secrets(&store_path, &sk)?;
+    let public_path = default_vault_public_key_path(&opts.app_root);
+    let current = with_store_lock(&store_path, || {
+        recover_rewrap(&key_path, &public_path, &store_path)?;
+        let sk = lillux::vault::read_secret_key(&key_path)
+            .with_context(|| format!("read vault secret key {}", key_path.display()))?;
+        read_sealed_secrets(&store_path, &sk)
+    })?;
     let mut keys: Vec<String> = current.keys().cloned().collect();
     keys.sort();
     Ok(ListReport { store_path, keys })
@@ -130,24 +139,27 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
         bail!("ryeos vault remove: at least one KEY required");
     }
     let key_path = default_vault_secret_key_path(&opts.app_root);
-    let sk = lillux::vault::read_secret_key(&key_path)
-        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
-    let pk = sk.public_key();
     let store_path = default_sealed_store_path(&opts.app_root);
+    let public_path = default_vault_public_key_path(&opts.app_root);
 
-    let mut current = read_sealed_secrets(&store_path, &sk)?;
-    let mut removed = Vec::new();
-    let mut not_present = Vec::new();
-    for k in &opts.keys {
-        if current.remove(k).is_some() {
-            removed.push(k.clone());
-        } else {
-            not_present.push(k.clone());
+    let (removed, not_present, total) = with_store_lock(&store_path, || {
+        recover_rewrap(&key_path, &public_path, &store_path)?;
+        let sk = lillux::vault::read_secret_key(&key_path)
+            .with_context(|| format!("read vault secret key {}", key_path.display()))?;
+        let pk = sk.public_key();
+        let mut current = read_sealed_secrets(&store_path, &sk)?;
+        let mut removed = Vec::new();
+        let mut not_present = Vec::new();
+        for k in &opts.keys {
+            if current.remove(k).is_some() {
+                removed.push(k.clone());
+            } else {
+                not_present.push(k.clone());
+            }
         }
-    }
-
-    write_sealed_secrets(&store_path, &pk, &current)?;
-    let total = current.len();
+        write_sealed_secrets(&store_path, &pk, &current)?;
+        Ok((removed, not_present, current.len()))
+    })?;
     Ok(RemoveReport {
         store_path,
         removed,
@@ -160,6 +172,20 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
     let key_path = default_vault_secret_key_path(&opts.app_root);
     let pub_path = default_vault_public_key_path(&opts.app_root);
     let store_path = default_sealed_store_path(&opts.app_root);
+
+    with_store_lock(&store_path, || {
+        lillux::with_exclusive_file_lock(&key_path, || {
+            run_rewrap_locked(key_path.clone(), pub_path, store_path)
+        })
+    })
+}
+
+fn run_rewrap_locked(
+    key_path: PathBuf,
+    pub_path: PathBuf,
+    store_path: PathBuf,
+) -> Result<RewrapReport> {
+    recover_rewrap(&key_path, &pub_path, &store_path)?;
 
     let old_sk = lillux::vault::read_secret_key(&key_path)
         .with_context(|| format!("read vault secret key {}", key_path.display()))?;
@@ -193,29 +219,28 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
         return Err(e);
     }
 
-    std::fs::rename(&new_key_path, &key_path).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            new_key_path.display(),
-            key_path.display()
-        )
-    })?;
-    std::fs::rename(&new_pub_path, &pub_path).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            new_pub_path.display(),
-            pub_path.display()
-        )
-    })?;
-    if rewrap_store {
-        std::fs::rename(&new_store_path, &store_path).with_context(|| {
-            format!(
-                "rename {} -> {}",
-                new_store_path.display(),
-                store_path.display()
-            )
-        })?;
+    prepare_rewrap(&key_path, &pub_path, &store_path)?;
+
+    let activation = (|| -> Result<()> {
+        if rewrap_store {
+            lillux::atomic_write_private(&store_path, &std::fs::read(&new_store_path)?)
+                .context("activate rewrapped sealed store")?;
+        }
+        lillux::atomic_write(&pub_path, &std::fs::read(&new_pub_path)?)
+            .context("activate rotated public key")?;
+        // Secret key last: once this changes, the current generation is complete.
+        lillux::atomic_write_private(&key_path, &std::fs::read(&new_key_path)?)
+            .context("activate rotated secret key")?;
+        Ok(())
+    })();
+    if let Err(error) = activation {
+        let recovery = recover_rewrap(&key_path, &pub_path, &store_path);
+        cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
+        recovery.context("recover failed vault rewrap")?;
+        return Err(error);
     }
+    recover_rewrap(&key_path, &pub_path, &store_path)?;
+    cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
 
     tracing::info!(
         old_fingerprint = %old_fingerprint,
