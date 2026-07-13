@@ -209,7 +209,27 @@ impl RyeOsCore {
             .collect();
         targets
             .into_iter()
-            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(tile_id, view_ref)| {
+                // A facet write means the SUBJECT changed (a new selection,
+                // a new route): a sections view's prior payloads describe
+                // the old subject and may never be replaced (a fetch can be
+                // skipped or fail), so evict them before refetching. Only
+                // here — hint-driven refetches keep rendering prior data so
+                // activity ticks never blank the lens.
+                let section_count = self
+                    .views
+                    .get(&view_ref)
+                    .filter(|binding| binding.widget == "sections")
+                    .map(|binding| binding.sections.len())
+                    .unwrap_or(0);
+                let key = tile_id.0.to_string();
+                for index in 0..section_count {
+                    self.data
+                        .sources
+                        .remove(&super::content::section_source_key(&key, index));
+                }
+                self.emit_fetch_source(tile_id, &view_ref)
+            })
             .collect()
     }
 

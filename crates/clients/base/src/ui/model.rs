@@ -545,9 +545,7 @@ impl RyeOsCore {
         // the conventional initial input focus) so a fresh session types
         // straight into the chat line; surfaces without a visible input
         // slot keep the workspace-tile fallback.
-        if let Some(edge) = core.default_input_edge() {
-            core.ui.focus_target = Some(RyeOsFocusTarget::Dock { edge });
-        }
+        core.focus_default_input();
         core.style = surface.style;
         core.workspace = surface.to_workspace();
         let blank = Workspace::from_tiling(surface.tiling.clone(), Vec::new());
@@ -1011,12 +1009,22 @@ impl RyeOsCore {
             // First driven frame: adopt the wall-clock frame so the
             // counter continues exactly where the fallback left off.
             self.runtime.scene_frame = now_ms / frame_ms;
+            self.runtime.scene_frame_anchor_ms = now_ms;
         } else {
             let elapsed = now_ms.saturating_sub(self.runtime.scene_frame_anchor_ms);
-            let steps = ((elapsed + frame_ms / 2) / frame_ms).max(1);
+            // Whole frames only — the sub-frame remainder stays in the
+            // anchor, so a cadence that isn't a multiple of the frame
+            // (the 250ms slow tick) still averages the wall-clock rate.
+            // `.max(1)` keeps every painted tick moving; it advances the
+            // anchor ahead of the wall clock, which later ticks repay
+            // with fewer steps, so the average still holds.
+            let steps = (elapsed / frame_ms).max(1);
             self.runtime.scene_frame = self.runtime.scene_frame.wrapping_add(steps);
+            self.runtime.scene_frame_anchor_ms = self
+                .runtime
+                .scene_frame_anchor_ms
+                .saturating_add(steps * frame_ms);
         }
-        self.runtime.scene_frame_anchor_ms = now_ms;
     }
 
     /// Atlas arrangement for a specific tile, falling back to the ambient
@@ -1176,6 +1184,17 @@ impl RyeOsCore {
             }
         }
         None
+    }
+
+    /// Move focus to the default input edge, the one rule shared by
+    /// session start and the explicit `FocusInput` event. `false` when
+    /// no visible slot owns input.
+    pub(crate) fn focus_default_input(&mut self) -> bool {
+        let Some(edge) = self.default_input_edge() else {
+            return false;
+        };
+        self.ui.focus_target = Some(RyeOsFocusTarget::Dock { edge });
+        true
     }
 
     pub fn default_input_edge(&self) -> Option<RyeOsDockEdge> {

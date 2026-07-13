@@ -300,11 +300,9 @@ impl RyeOsCore {
                 Vec::new()
             }
             RyeOsUiEvent::FocusInput => {
-                let Some(edge) = self.default_input_edge() else {
-                    return Vec::new();
-                };
-                self.ui.focus_target = Some(super::model::RyeOsFocusTarget::Dock { edge });
-                self.bump_generation();
+                if self.focus_default_input() {
+                    self.bump_generation();
+                }
                 Vec::new()
             }
             RyeOsUiEvent::BlurInput => {
@@ -495,27 +493,23 @@ impl RyeOsCore {
                 let group = items[selected].category.clone();
                 // Only rows under a real header fold — flat overlays
                 // (commands, help) share the item shape but have none.
-                if !items
+                let Some(header_idx) = items
                     .iter()
-                    .any(|item| item.header && item.category == group)
-                {
+                    .position(|item| item.header && item.category == group)
+                else {
                     return Vec::new();
-                }
+                };
                 let collapsed = self.ui.overlay.collapsed.contains(&group);
                 if expand == collapsed {
                     if expand {
                         self.ui.overlay.collapsed.remove(&group);
                     } else {
                         self.ui.overlay.collapsed.insert(group.clone());
-                        // The fold hides the group's leaves — land the
-                        // selection on its header.
-                        let items = super::view_model::active_overlay_items(self);
-                        if let Some(idx) = items
-                            .iter()
-                            .position(|item| item.header && item.category == group)
-                        {
-                            self.ui.overlay.selected = idx;
-                        }
+                        // The fold hides only the group's leaves, which all
+                        // sit AFTER their header in the visible list — the
+                        // header's index is unchanged, so the selection
+                        // lands there without re-projecting.
+                        self.ui.overlay.selected = header_idx;
                     }
                     self.bump_generation();
                 }

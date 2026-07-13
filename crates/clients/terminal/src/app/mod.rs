@@ -361,13 +361,11 @@ pub async fn run(
     drop(events);
     drop(term);
     if let Some(thread_id) = &seat_thread {
-        // Hard deadline on the settle: an unsettled seat is simply
-        // reattached (or superseded) on the next launch.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            seat::close_seat_thread(&client, thread_id),
-        )
-        .await;
+        // The terminal is already restored above, so waiting here holds
+        // nothing hostage — and abandoning the settle would leave a
+        // phantom running seat thread in every listing until the next
+        // launch reattaches it. Wait it out.
+        seat::close_seat_thread(&client, thread_id).await;
     }
 
     Ok(())
