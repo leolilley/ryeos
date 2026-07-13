@@ -316,6 +316,26 @@ jobs:
             sleep 1
           done
 
+      - name: Scan standard image for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          exit-code: 1
+
+      - name: Scan central-host image for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          exit-code: 1
+
       # Registry credentials are deliberately unavailable until every release
       # image has been built and its embedded provenance has been verified.
       - name: Log in to GHCR
