@@ -22,6 +22,7 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/release/official-publisher-fingerprint.sh \
     scripts/release/package-bundle-artifact.sh \
     scripts/release/test-package-bundle-artifact.sh \
+    scripts/release/verify-bundle-artifact.sh \
     scripts/release/prepare-aur.sh \
     scripts/release/test-prepare-aur.sh \
     scripts/pkg/bundle-sets.sh \

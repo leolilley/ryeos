@@ -143,20 +143,62 @@ jobs:
             exit 1
           fi
 
-      - name: Refuse overwrite of immutable bundle assets
+      - name: Resolve immutable bundle assets
+        id: bundle-assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.qualify.outputs.version }}
         run: |
           TAG="v${VERSION}"
           ARCHIVE="ryeos-bundles-${VERSION}-x86_64.tar.gz"
+          CHECKSUM="${ARCHIVE}.sha256"
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
+          ARCHIVE_EXISTS=false
+          CHECKSUM_EXISTS=false
+          [[ ! -e "$ARTIFACT_DIR" ]] || {
+            echo "::error::Bundle artifact workspace already exists: $ARTIFACT_DIR"
+            exit 1
+          }
           if gh release view "$TAG" >/dev/null 2>&1; then
             EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
-            if grep -Fxq -e "$ARCHIVE" -e "${ARCHIVE}.sha256" <<<"$EXISTING_ASSETS"; then
-              echo "::error::Immutable bundle release asset already exists for $TAG"
+            ARCHIVE_COUNT="$(grep -Fxc "$ARCHIVE" <<<"$EXISTING_ASSETS" || true)"
+            CHECKSUM_COUNT="$(grep -Fxc "$CHECKSUM" <<<"$EXISTING_ASSETS" || true)"
+            if (( ARCHIVE_COUNT > 1 || CHECKSUM_COUNT > 1 )); then
+              echo "::error::Duplicate immutable bundle assets exist for $TAG"
               exit 1
             fi
+            if (( ARCHIVE_COUNT == 1 )); then ARCHIVE_EXISTS=true; fi
+            if (( CHECKSUM_COUNT == 1 )); then CHECKSUM_EXISTS=true; fi
           fi
+          if [[ "$CHECKSUM_EXISTS" == true && "$ARCHIVE_EXISTS" != true ]]; then
+            echo "::error::Unsafe checksum-only bundle release state for $TAG; refusing regeneration"
+            echo "::error::Follow docs/release-recovery.md; never guess which archive an orphan checksum described."
+            exit 1
+          fi
+          if [[ "$ARCHIVE_EXISTS" == true ]]; then
+            mkdir "$ARTIFACT_DIR"
+            gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$ARCHIVE"
+            if [[ "$CHECKSUM_EXISTS" == true ]]; then
+              gh release download "$TAG" --dir "$ARTIFACT_DIR" --pattern "$CHECKSUM"
+              scripts/release/verify-bundle-artifact.sh \
+                --version "$VERSION" \
+                --archive "$ARTIFACT_DIR/$ARCHIVE" \
+                --checksum "$ARTIFACT_DIR/$CHECKSUM"
+            else
+              # Archive-first publication is recoverable despite nondeterministic
+              # authoring timestamps: keep the existing archive canonical and
+              # derive its missing checksum instead of re-signing content.
+              scripts/release/verify-bundle-artifact.sh \
+                --version "$VERSION" \
+                --archive "$ARTIFACT_DIR/$ARCHIVE"
+              (
+                cd "$ARTIFACT_DIR"
+                sha256sum "$ARCHIVE" > "$CHECKSUM"
+              )
+            fi
+          fi
+          echo "archive_exists=$ARCHIVE_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "checksum_exists=$CHECKSUM_EXISTS" >> "$GITHUB_OUTPUT"
 
       - name: Assert publisher key secret exists
         env:
@@ -201,6 +243,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build and preflight official bundle archive
+        if: steps.bundle-assets.outputs.archive_exists != 'true'
         env:
           PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
           VERSION: ${{ needs.qualify.outputs.version }}
@@ -272,6 +315,27 @@ jobs:
             echo "::error::image revision label mismatch: label=$LABEL_REV expected=$EXPECTED"
             exit 1
           fi
+
+      - name: Cryptographically preflight reused bundle archive
+        if: steps.bundle-assets.outputs.archive_exists == 'true'
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
+          ARCHIVE="$ARTIFACT_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
+          EXTRACTED="$RUNNER_TEMP/reused-bundle-preflight"
+          [[ ! -e "$EXTRACTED" ]]
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$ARCHIVE"
+          mkdir "$EXTRACTED"
+          tar --no-same-owner --no-same-permissions \
+            -xzf "$ARCHIVE" -C "$EXTRACTED"
+          docker run --rm \
+            --entrypoint /usr/local/bin/ryeos \
+            -v "$EXTRACTED/ryeos-bundles-${VERSION}-x86_64:/source:ro" \
+            "ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}" \
+            init --app-root /tmp/retry-bundle-app --source /source
 
       # ── central-host image: standard + central-auth + web ──
       # Base for app-hosting nodes (e.g. tv-tracker) that host their own
@@ -387,22 +451,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Refuse overwrite of immutable version tags
+      - name: Resolve immutable version tags
+        id: resolve-images
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
         run: |
-          for image in ryeos-standard ryeos-central-host; do
-            tag="ghcr.io/leolilley/${image}:${VERSION}"
-            if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
-              echo "::error::Immutable release tag already exists: $tag"
+          resolve_image() {
+            local image="$1"
+            local output_prefix="$2"
+            local tag="ghcr.io/leolilley/${image}:${VERSION}"
+            local error_file inspection digest
+            error_file="$(mktemp)"
+            if inspection="$(docker buildx imagetools inspect "$tag" 2>"$error_file")"; then
+              digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                echo "::error::Could not resolve immutable digest for $tag"
+                exit 1
+              }
+              echo "${output_prefix}_exists=true" >> "$GITHUB_OUTPUT"
+              echo "${output_prefix}_digest=$digest" >> "$GITHUB_OUTPUT"
+              echo "Reusing $tag at $digest"
+            elif grep -Eqi 'manifest unknown|not found|no such manifest|404' "$error_file"; then
+              echo "${output_prefix}_exists=false" >> "$GITHUB_OUTPUT"
+              echo "${output_prefix}_digest=" >> "$GITHUB_OUTPUT"
+              echo "No immutable tag exists yet: $tag"
+            else
+              cat "$error_file" >&2
+              echo "::error::Unable to determine whether immutable tag exists: $tag"
               exit 1
             fi
-          done
+            rm -f "$error_file"
+          }
+          resolve_image ryeos-standard standard
+          resolve_image ryeos-central-host central
 
-      # The pre-login images above exist only for local qualification. These
-      # are the final registry builds and the sole source of release digests.
+      # The pre-login images above exist only for local qualification. Build
+      # only missing immutable tags; an existing tag remains canonical after
+      # its resolved digest passes the same checks below.
       - name: Build and push attested immutable standard version
         id: push-standard
+        if: steps.resolve-images.outputs.standard_exists != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -423,6 +511,7 @@ jobs:
 
       - name: Build and push attested immutable central-host version
         id: push-central-host
+        if: steps.resolve-images.outputs.central_exists != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -441,71 +530,132 @@ jobs:
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
+      - name: Resolve qualified release digests
+        id: release-digests
+        env:
+          EXISTING_STANDARD: ${{ steps.resolve-images.outputs.standard_digest }}
+          PUSHED_STANDARD: ${{ steps.push-standard.outputs.digest }}
+          EXISTING_CENTRAL: ${{ steps.resolve-images.outputs.central_digest }}
+          PUSHED_CENTRAL: ${{ steps.push-central-host.outputs.digest }}
+        run: |
+          STANDARD_DIGEST="${EXISTING_STANDARD:-$PUSHED_STANDARD}"
+          CENTRAL_DIGEST="${EXISTING_CENTRAL:-$PUSHED_CENTRAL}"
+          [[ "$STANDARD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$CENTRAL_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "standard=$STANDARD_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "central=$CENTRAL_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release image provenance and SBOM attestations
+        env:
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          for spec in \
+            "standard ryeos-standard $STANDARD_DIGEST" \
+            "central ryeos-central-host $CENTRAL_DIGEST"
+          do
+            read -r label image digest <<<"$spec"
+            immutable="ghcr.io/leolilley/${image}@${digest}"
+            docker buildx imagetools inspect "$immutable" \
+              --format '{{ json .Provenance }}' > "$RUNNER_TEMP/${label}-provenance.json"
+            jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/${label}-provenance.json"
+            jq -e --arg sha "$SOURCE_SHA" \
+              '.. | strings | select(. == $sha)' "$RUNNER_TEMP/${label}-provenance.json"
+            docker buildx imagetools inspect "$immutable" \
+              --format '{{ json .SBOM }}' > "$RUNNER_TEMP/${label}-sbom.json"
+            jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/${label}-sbom.json"
+          done
+
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
-      - name: Cosign sign standard image (keyless)
+      - name: Resolve verified image signatures
+        id: image-signatures
         env:
-          COSIGN_EXPERIMENTAL: "true"
-          DIGEST: ${{ steps.push-standard.outputs.digest }}
-        run: |
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
-
-      - name: Cosign sign central-host image (keyless)
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-          DIGEST: ${{ steps.push-central-host.outputs.digest }}
-        run: |
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
-
-      - name: Verify standard signature and build attestations
-        env:
-          DIGEST: ${{ steps.push-standard.outputs.digest }}
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          STANDARD_EXISTED: ${{ steps.resolve-images.outputs.standard_exists }}
+          CENTRAL_EXISTED: ${{ steps.resolve-images.outputs.central_exists }}
           CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
-          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
         run: |
-          IMAGE="ghcr.io/leolilley/ryeos-standard@${DIGEST}"
-          cosign verify \
-            --certificate-identity "$CERTIFICATE_IDENTITY" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$IMAGE"
-          docker buildx imagetools inspect "$IMAGE" \
-            --format '{{ json .Provenance }}' > provenance.json
-          jq -e 'type == "object" and length > 0' provenance.json
-          jq -e --arg sha "$SOURCE_SHA" \
-            '.. | strings | select(. == $sha)' provenance.json
-          docker buildx imagetools inspect "$IMAGE" \
-            --format '{{ json .SBOM }}' > sbom.json
-          jq -e 'type == "object" and length > 0' sbom.json
+          signature_state() {
+            local label="$1"
+            local image="$2"
+            local existed="$3"
+            if cosign verify \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$image" >/dev/null 2>&1; then
+              echo "${label}=true" >> "$GITHUB_OUTPUT"
+            elif [[ "$existed" == true ]]; then
+              # Registry attestations are only authenticated after the image
+              # signature is verified. Never let a pre-positioned unsigned
+              # digest ask this trusted workflow to bless its own provenance.
+              echo "::error::Existing immutable image lacks the expected workflow signature: $image"
+              echo "::error::Treat this incomplete tag as quarantined; follow docs/release-recovery.md instead of signing or overwriting it."
+              exit 1
+            else
+              # This digest came directly from this run's successful push step;
+              # provenance and SBOM were validated above before signing.
+              echo "${label}=false" >> "$GITHUB_OUTPUT"
+            fi
+          }
+          signature_state standard \
+            "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}" \
+            "$STANDARD_EXISTED"
+          signature_state central \
+            "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}" \
+            "$CENTRAL_EXISTED"
 
-      - name: Verify central-host signature and build attestations
+      - name: Cosign sign newly pushed standard image
+        if: steps.image-signatures.outputs.standard != 'true' && steps.resolve-images.outputs.standard_exists != 'true'
         env:
-          DIGEST: ${{ steps.push-central-host.outputs.digest }}
+          COSIGN_EXPERIMENTAL: "true"
+          DIGEST: ${{ steps.release-digests.outputs.standard }}
+        run: cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
+
+      - name: Cosign sign newly pushed central-host image
+        if: steps.image-signatures.outputs.central != 'true' && steps.resolve-images.outputs.central_exists != 'true'
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          DIGEST: ${{ steps.release-digests.outputs.central }}
+        run: cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
+
+      - name: Verify release image signatures and immutable tag bindings
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
           CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
-          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
         run: |
-          IMAGE="ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
-          cosign verify \
-            --certificate-identity "$CERTIFICATE_IDENTITY" \
-            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-            "$IMAGE"
-          docker buildx imagetools inspect "$IMAGE" \
-            --format '{{ json .Provenance }}' > provenance.json
-          jq -e 'type == "object" and length > 0' provenance.json
-          jq -e --arg sha "$SOURCE_SHA" \
-            '.. | strings | select(. == $sha)' provenance.json
-          docker buildx imagetools inspect "$IMAGE" \
-            --format '{{ json .SBOM }}' > sbom.json
-          jq -e 'type == "object" and length > 0' sbom.json
+          for spec in \
+            "ryeos-standard $STANDARD_DIGEST" \
+            "ryeos-central-host $CENTRAL_DIGEST"
+          do
+            read -r image digest <<<"$spec"
+            immutable="ghcr.io/leolilley/${image}@${digest}"
+            cosign verify \
+              --certificate-identity "$CERTIFICATE_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$immutable"
+            inspection="$(docker buildx imagetools inspect \
+              "ghcr.io/leolilley/${image}:${VERSION}")"
+            bound_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
+            [[ "$bound_digest" == "$digest" ]] || {
+              echo "::error::Immutable tag moved during release: $image:$VERSION"
+              exit 1
+            }
+          done
 
       - name: Publish immutable official bundle assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.qualify.outputs.version }}
+          ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
+          CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
         run: |
           TAG="v${VERSION}"
           ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
@@ -513,21 +663,43 @@ jobs:
           CHECKSUM="${ARCHIVE}.sha256"
           test -s "$ARCHIVE"
           test -s "$CHECKSUM"
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$ARCHIVE" \
+            --checksum "$CHECKSUM"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --verify-tag \
               --title "RyeOS ${VERSION}" \
               --generate-notes
           fi
-          # No --clobber: immutable release assets must never be replaced.
-          gh release upload "$TAG" "$ARCHIVE" "$CHECKSUM"
+          # Archive first makes an interrupted upload safely resumable: the
+          # missing checksum can be derived from the already-canonical bytes.
+          # No --clobber is ever used.
+          if [[ "$ARCHIVE_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$ARCHIVE"
+          fi
+          if [[ "$CHECKSUM_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$CHECKSUM"
+          fi
+
+          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-bundle"
+          [[ ! -e "$PUBLISHED_DIR" ]]
+          mkdir "$PUBLISHED_DIR"
+          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")"
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
+            --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
       # Mutable image tags move only after both immutable images and the native
       # bundle artifact have passed verification and publication.
       - name: Promote verified images to latest
         env:
-          STANDARD_DIGEST: ${{ steps.push-standard.outputs.digest }}
-          CENTRAL_DIGEST: ${{ steps.push-central-host.outputs.digest }}
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
         run: |
           docker buildx imagetools create \
             --tag ghcr.io/leolilley/ryeos-standard:latest \

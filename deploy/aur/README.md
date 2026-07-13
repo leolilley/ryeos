@@ -49,3 +49,8 @@ is intentionally required and is not stored in this repository.
 Publish only the generated package directories. Do not replace either archive
 URL with a branch, moving ref, locally populated bundle tree, or unsigned
 mirror.
+
+Interrupted release runs are resumable when existing images already carry the
+expected workflow signature, and an archive-only upload can safely derive its
+missing checksum. See the [release recovery guide](../../docs/release-recovery.md)
+for the deliberately manual, fail-closed cases.

@@ -55,12 +55,47 @@ for run in one two; do
         --source-date-epoch 1700000000 \
         --ryeos-bin "$fake_ryeos" >/dev/null
     (cd "$tmp/$run" && sha256sum -c ryeos-bundles-1.2.3-x86_64.tar.gz.sha256)
+    "$root/scripts/release/verify-bundle-artifact.sh" \
+        --version 1.2.3 \
+        --archive "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz" \
+        --checksum "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz.sha256" >/dev/null
 done
 
 cmp "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     "$tmp/two/ryeos-bundles-1.2.3-x86_64.tar.gz"
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/core/.ai/manifest.yaml'
+
+mkdir "$tmp/malformed"
+malformed_checksum="$tmp/malformed/ryeos-bundles-1.2.3-x86_64.tar.gz.sha256"
+cp "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz.sha256" "$malformed_checksum"
+printf '%s\n' 'unexpected trailing checksum entry' >> "$malformed_checksum"
+if "$root/scripts/release/verify-bundle-artifact.sh" \
+    --version 1.2.3 \
+    --archive "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
+    --checksum "$malformed_checksum" >/dev/null 2>&1; then
+    echo "expected a non-canonical checksum file to be rejected" >&2
+    exit 1
+fi
+
+retry_fixture="$tmp/retry-private-key"
+mkdir -p "$retry_fixture/tree"
+tar -xzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" -C "$retry_fixture/tree"
+printf '%s\n' '-----BEGIN PRIVATE KEY-----' > \
+    "$retry_fixture/tree/ryeos-bundles-1.2.3-x86_64/core/leaked-material.txt"
+retry_archive="$retry_fixture/ryeos-bundles-1.2.3-x86_64.tar.gz"
+tar -C "$retry_fixture/tree" -czf "$retry_archive" ryeos-bundles-1.2.3-x86_64
+(
+    cd "$retry_fixture"
+    sha256sum "$(basename "$retry_archive")" > "$(basename "$retry_archive").sha256"
+)
+if "$root/scripts/release/verify-bundle-artifact.sh" \
+    --version 1.2.3 \
+    --archive "$retry_archive" \
+    --checksum "$retry_archive.sha256" >/dev/null 2>&1; then
+    echo "expected retry verification to reject private key material" >&2
+    exit 1
+fi
 
 printf '%s\n' '-----BEGIN PRIVATE KEY-----' > "$source_dir/core/leaked.pem"
 if "$root/scripts/release/package-bundle-artifact.sh" \
