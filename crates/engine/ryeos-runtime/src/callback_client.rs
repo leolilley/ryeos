@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::callback::{ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
+use crate::callback::{CallbackError, ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
 use crate::envelope::EnvelopeCallback;
 use crate::events::{RuntimeEventType, StorageClass};
 
@@ -145,19 +145,20 @@ impl CallbackClient {
     pub async fn dispatch_action(
         &self,
         req: crate::callback::DispatchActionRequest,
-    ) -> Result<crate::callback_contract::CallbackDispatchResponse> {
+    ) -> std::result::Result<crate::callback_contract::CallbackDispatchResponse, CallbackError> {
         let client = self.inner.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
+            CallbackError::Transport(anyhow::anyhow!(
                 "callback dispatch_action called without an inner UDS client \
                  (socket missing); runtime cannot route to the daemon"
-            )
+            ))
         })?;
         let raw: Value = client
             .dispatch_action(req)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .await?;
         serde_json::from_value::<crate::callback_contract::CallbackDispatchResponse>(raw)
-            .map_err(|e| anyhow::anyhow!("invalid CallbackDispatchResponse from daemon: {e}"))
+            .map_err(|e| CallbackError::Transport(anyhow::anyhow!(
+                "invalid CallbackDispatchResponse from daemon: {e}"
+            )))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.

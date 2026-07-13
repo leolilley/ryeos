@@ -912,7 +912,18 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
         // `{:#}` walks the anyhow cause chain, so a deep failure (e.g. a serde
         // decode error under "invalid <method> params") surfaces its root cause
         // to the caller instead of only the top-level context line.
-        Err(err) => RpcResponse::err(request_id, "request_failed", format!("{err:#}")),
+        Err(err) => {
+            if let Some(dispatch) = err.downcast_ref::<ryeos_executor::dispatch_error::DispatchError>() {
+                return RpcResponse::classified_err(
+                    request_id,
+                    dispatch.code(),
+                    dispatch.to_string(),
+                    dispatch.retryable(),
+                    json!({ "code": dispatch.code() }),
+                );
+            }
+            RpcResponse::err(request_id, "request_failed", format!("{err:#}"))
+        }
     }
 }
 

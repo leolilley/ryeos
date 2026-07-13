@@ -100,8 +100,8 @@ struct RetryEventCtx {
     step: u32,
 }
 
-/// Dispatch one foreach item, retrying on a dispatch-level failure (transport
-/// error or a classified leaf `Failure`) per the node's `retry` policy. Unlike
+/// Dispatch one foreach item, retrying only a dispatch-level or leaf failure
+/// explicitly classified retryable, within the node's attempt budget. Unlike
 /// the single-action path, a foreach's per-item retries run inside this one
 /// walker step (they do NOT consume walker steps and are not individually
 /// checkpointed); each item keeps its own attempt count. Every re-attempt
@@ -123,9 +123,12 @@ async fn dispatch_item_with_retry(
         let outcome =
             crate::dispatch::dispatch_action(client, action, thread_id, project_path, exec_ctx)
                 .await;
-        let failed = matches!(&outcome, Err(_))
-            || matches!(&outcome, Ok(crate::dispatch::ActionOutcome::Failure(_)));
-        if !failed || attempt >= total {
+        let retryable = match &outcome {
+            Err(error) => error.retryable,
+            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
+            Ok(crate::dispatch::ActionOutcome::Success(_)) => false,
+        };
+        if !retryable || attempt >= total {
             return outcome;
         }
         let rc = retry.expect("retry policy present when total attempts > 1");

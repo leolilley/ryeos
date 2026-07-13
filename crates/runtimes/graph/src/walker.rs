@@ -1458,7 +1458,7 @@ impl Walker {
         // like a live dispatch, so the resumed node runs the identical success/
         // failure path (receipt, cost, assign land normally in commit_step).
         let mut cache_hit = false;
-        let outcome: Result<dispatch::ActionOutcome, String> =
+        let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> =
             if let Some(envelope) = resumed_follow_envelope {
                 Ok(dispatch::classify_envelope(envelope))
             } else if node.is_cacheable() {
@@ -1481,6 +1481,7 @@ impl Walker {
                              inline continuation is retired — use a `follow: true` node"
                             ),
                             cost: None,
+                            retryable: false,
                         }))
                     } else {
                         Ok(dispatch::ActionOutcome::Success(
@@ -1506,7 +1507,7 @@ impl Walker {
                             Ok(dispatch::ActionOutcome::Success(success))
                         }
                         Ok(failure) => Ok(failure),
-                        Err(e) => Err(format!("{e:#}")),
+                        Err(e) => Err(e),
                     }
                 }
             } else {
@@ -1520,32 +1521,34 @@ impl Walker {
                 .await
                 {
                     Ok(o) => Ok(o),
-                    Err(e) => Err(format!("{e:#}")),
+                    Err(e) => Err(e),
                 }
             };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
         match outcome {
-            Err(err_detail) => {
+            Err(dispatch_error) => {
                 // A transport/dispatch failure with retry attempts remaining
                 // reschedules a fresh-step re-dispatch; exhausted → on_error.
-                if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                    let rc = node.retry.as_ref().expect("retry present when scheduling");
-                    return StepOutcome::RetryScheduled {
-                        item_id: dispatched_item_id,
-                        error: err_detail,
-                        failed_attempt,
-                        total_attempts: rc.attempts,
-                        delay_ms: rc.delay_ms(failed_attempt),
-                        elapsed_ms: elapsed,
-                        // Transport failed before the child returned — no cost.
-                        cost: None,
-                    };
+                if dispatch_error.retryable {
+                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
+                        let rc = node.retry.as_ref().expect("retry present when scheduling");
+                        return StepOutcome::RetryScheduled {
+                            item_id: dispatched_item_id,
+                            error: dispatch_error.diagnostic,
+                            failed_attempt,
+                            total_attempts: rc.attempts,
+                            delay_ms: rc.delay_ms(failed_attempt),
+                            elapsed_ms: elapsed,
+                            // Transport failed before the child returned — no cost.
+                            cost: None,
+                        };
+                    }
                 }
                 StepOutcome::DispatchHardError {
                     item_id: Some(dispatched_item_id),
-                    error: err_detail,
+                    error: dispatch_error.diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // Transport/dispatch failed before the child returned — no cost.
@@ -1553,19 +1556,21 @@ impl Walker {
                 }
             }
             Ok(dispatch::ActionOutcome::Failure(failure)) => {
-                // A leaf that ran but failed retries the same way; a failed
-                // native child may have spent tokens, carried on every path.
-                if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                    let rc = node.retry.as_ref().expect("retry present when scheduling");
-                    return StepOutcome::RetryScheduled {
-                        item_id: dispatched_item_id,
-                        error: failure.diagnostic,
-                        failed_attempt,
-                        total_attempts: rc.attempts,
-                        delay_ms: rc.delay_ms(failed_attempt),
-                        elapsed_ms: elapsed,
-                        cost: failure.cost,
-                    };
+                // Authored retry is an attempt budget, not blanket permission.
+                // Only a failure explicitly classified retryable may consume it.
+                if failure.retryable {
+                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
+                        let rc = node.retry.as_ref().expect("retry present when scheduling");
+                        return StepOutcome::RetryScheduled {
+                            item_id: dispatched_item_id,
+                            error: failure.diagnostic,
+                            failed_attempt,
+                            total_attempts: rc.attempts,
+                            delay_ms: rc.delay_ms(failed_attempt),
+                            elapsed_ms: elapsed,
+                            cost: failure.cost,
+                        };
+                    }
                 }
                 StepOutcome::LeafSoftError {
                     item_id: dispatched_item_id,
@@ -3530,7 +3535,16 @@ mod tests {
             if results.is_empty() {
                 Ok(json!({"thread": {}, "result": {}}))
             } else {
-                Ok(json!({"thread": {}, "result": results.remove(0)}))
+                let result = results.remove(0);
+                if result.get("__retryable_dispatch_error").is_some() {
+                    Err(CallbackError::ActionFailed {
+                        code: "service_unavailable".to_string(),
+                        message: "simulated transient dispatch failure".to_string(),
+                        retryable: true,
+                    })
+                } else {
+                    Ok(json!({"thread": {}, "result": result}))
+                }
             }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -5617,12 +5631,16 @@ config:
         json!({"outcome_code": null, "result": {"ok": true}, "error": null, "artifacts": []})
     }
 
+    fn retryable_dispatch_failure() -> Value {
+        json!({"__retryable_dispatch_error": true})
+    }
+
     #[tokio::test]
     async fn retry_redispatches_until_success() {
         // First dispatch fails, the retry re-dispatches and succeeds. The
         // failed attempt consumed a walker step, so `done` is reached at step 2.
         let graph = make_graph(RETRY_YAML);
-        let w = make_walker(graph, vec![subprocess_failure(), subprocess_success()]);
+        let w = make_walker(graph, vec![retryable_dispatch_failure(), subprocess_success()]);
         let result = w.execute(json!({}), None).await;
         assert!(result.success, "retry should recover: {result:?}");
         assert_eq!(result.status, "completed");
@@ -5653,7 +5671,10 @@ config:
       node_type: return
 "#;
         let graph = make_graph(yaml);
-        let w = make_walker(graph, vec![subprocess_failure(), subprocess_failure()]);
+        let w = make_walker(
+            graph,
+            vec![retryable_dispatch_failure(), retryable_dispatch_failure()],
+        );
         let result = w.execute(json!({}), None).await;
         assert_eq!(result.status, "completed");
         assert_eq!(
@@ -5669,7 +5690,7 @@ config:
         let graph = make_graph(RETRY_YAML);
         let (w, rec) = make_recording_walker(
             graph,
-            vec![subprocess_failure(), subprocess_success()],
+            vec![retryable_dispatch_failure(), subprocess_success()],
             None,
         );
         let result = w.execute(json!({}), Some("gr-retry".to_string())).await;
@@ -5742,6 +5763,19 @@ config:
             "the persisted count was exhausted on the single remaining attempt — no new retry; \
              events={events:#?}"
         );
+    }
+
+    #[tokio::test]
+    async fn deterministic_leaf_failure_does_not_consume_retry_budget() {
+        let graph = make_graph(RETRY_YAML);
+        let (w, recorder) = make_recording_walker(graph, vec![subprocess_failure()], None);
+        let result = w.execute(json!({}), Some("gr-nonretryable".to_string())).await;
+        assert_eq!(result.status, "failed");
+        assert_eq!(recorder.dispatch_count(), 1);
+        assert!(recorder
+            .recorded_events()
+            .iter()
+            .all(|(_, event_type, _, _)| event_type != "graph_node_retry"));
     }
 
     // ── §B2 graph hooks ──────────────────────────────────────────────

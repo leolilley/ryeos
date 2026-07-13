@@ -390,6 +390,13 @@ impl DispatchError {
             Self::Internal(_) => "internal",
         }
     }
+
+    /// Whether reissuing the same dispatch may succeed without an authored or
+    /// configuration change. This is an explicit allowlist: unknown and newly
+    /// added failures remain non-retryable until their safety is established.
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::ServiceUnavailable { .. })
+    }
 }
 
 #[cfg(test)]

@@ -38,6 +38,22 @@ pub enum CallbackError {
     Transport(#[from] anyhow::Error),
 }
 
+impl CallbackError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::ActionFailed { retryable, .. } => *retryable,
+            Self::Transport(error) => error
+                .downcast_ref::<crate::daemon_rpc::RpcError>()
+                .is_some_and(|rpc| matches!(
+                    rpc,
+                    crate::daemon_rpc::RpcError::Timeout { .. }
+                        | crate::daemon_rpc::RpcError::ConnectionClosed
+                        | crate::daemon_rpc::RpcError::Io(_)
+                )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchActionRequest {

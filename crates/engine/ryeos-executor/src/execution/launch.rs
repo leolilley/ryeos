@@ -237,6 +237,21 @@ pub enum BuildAndLaunchError {
     Internal(#[from] anyhow::Error),
 }
 
+impl BuildAndLaunchError {
+    /// Whether a launch failure is an infrastructure interruption that is safe
+    /// to re-drive without changing the authored execution. Keep this deliberately
+    /// narrow: capability, secret, materialization, and unknown failures are
+    /// deterministic until proven otherwise.
+    fn retryable_launch_interruption(&self) -> bool {
+        match self {
+            Self::Internal(error) => error.chain().any(|cause| cause.is::<std::io::Error>()),
+            Self::Materialization(_)
+            | Self::MissingSecrets { .. }
+            | Self::CapabilityRejected { .. } => false,
+        }
+    }
+}
+
 impl From<serde_json::Error> for BuildAndLaunchError {
     fn from(e: serde_json::Error) -> Self {
         Self::Internal(anyhow::anyhow!(e))
@@ -2670,14 +2685,15 @@ pub async fn launch_follow_child(
     // and wake its own follow chain immediately.
     if state.state_store.launch_window_is_cancelled(&thread.chain_root_id)? {
         let chain_root = thread.chain_root_id.clone();
-        let _ = state.threads.finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+        let cancelled = state.threads.finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
             thread_id: thread.thread_id.clone(), status: "cancelled".into(),
             outcome_code: Some("cancelled".into()), result: None,
             error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
             metadata: None, artifacts: Vec::new(), final_cost: None, summary_json: None,
         });
-        let _ = state.state_store.discard_window_member(&chain_root);
         let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+        cancelled?;
+        state.state_store.discard_window_member(&chain_root)?;
         kick_follow_resume_if_ready(&state, &chain_root);
         return Ok(SuccessorLaunchOutcome::Skipped("cancelled"));
     }
@@ -3091,6 +3107,19 @@ pub async fn launch_follow_resume_successor(
         // not-created branch below).
         Ok(skipped) => Ok(skipped),
         Err(e) => {
+            // A transient filesystem/CAS interruption leaves the successor
+            // `created` and the waiter `resuming`. Preserve both so the periodic
+            // follow reconciler can safely re-drive the idempotent checkpoint
+            // splice and launch. Deterministic defects still terminalize below.
+            if e.retryable_launch_interruption() {
+                tracing::warn!(
+                    follow_key,
+                    successor_id,
+                    error = %e,
+                    "follow-resume launch interrupted; leaving waiter for reconcile"
+                );
+                return Err(e);
+            }
             // A failed parent-resume finalizes the successor. If THIS parent chain is
             // itself the child of an OUTER follow (nested follow), that finalize flips
             // the outer waiter to ready — so kick it. The follow-resume successor

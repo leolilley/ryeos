@@ -81,12 +81,17 @@ pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyh
     let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
     // Admission is only a durable marker, not proof of a spawn. Include admitted
     // members only while the authoritative row is still created with no live pgid.
-    let cancellable = descendants.into_iter().filter_map(|root| {
-        let thread = state.state_store.get_thread(&root).ok().flatten()?;
-        (thread.status == "created"
-            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive))
-            .then_some(root)
-    }).collect::<Vec<_>>();
+    let mut cancellable = Vec::new();
+    for root in descendants {
+        let Some(thread) = state.state_store.get_thread(&root)? else {
+            continue;
+        };
+        if thread.status == "created"
+            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
+        {
+            cancellable.push(root);
+        }
+    }
     let removed = state.state_store.launch_window_cancel_members(&cancellable, lillux::time::timestamp_millis())?;
     for chain_root in &removed {
         let Some(thread) = state.state_store.get_thread(chain_root)? else {
