@@ -1,6 +1,10 @@
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::Path;
+
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -56,14 +60,42 @@ impl std::error::Error for AtomicMutationError {
 
 pub type AtomicMutationResult<T> = std::result::Result<T, AtomicMutationError>;
 
+#[cfg(unix)]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(unix)]
 pub(crate) fn next_temp_sequence() -> u64 {
     TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
 pub fn atomic_write(target: &Path, data: &[u8]) -> AtomicMutationResult<()> {
-    atomic_write_portable(target, data, None)
+    #[cfg(unix)]
+    {
+        atomic_write_unix(target, data, 0o666)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, data);
+        unsupported_mutation("durable atomic write")
+    }
+}
+
+/// Atomically replace `target`, applying `mode` before the temp file is
+/// published into the namespace.
+pub fn atomic_write_with_mode(
+    target: &Path,
+    data: &[u8],
+    mode: u32,
+) -> AtomicMutationResult<()> {
+    #[cfg(unix)]
+    {
+        atomic_write_unix(target, data, mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, data, mode);
+        unsupported_mutation("mode-aware durable atomic write")
+    }
 }
 
 /// Atomically replace `target` with private data.
@@ -74,26 +106,39 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> AtomicMutationResult<()> {
 pub fn atomic_write_private(target: &Path, data: &[u8]) -> AtomicMutationResult<()> {
     #[cfg(unix)]
     {
-        return atomic_write_private_unix(target, data);
+        atomic_write_unix(target, data, 0o600)
     }
     #[cfg(not(unix))]
     {
-        atomic_write_portable(target, data, None)
+        let _ = (target, data);
+        unsupported_mutation("private durable atomic write")
     }
 }
 
 /// Remove a file and durably record the directory update. Missing files are
 /// already in the requested state.
 pub fn remove_file_durable(path: &Path) -> AtomicMutationResult<()> {
-    match fs::remove_file(path) {
-        Ok(()) => sync_parent_dir(path).map_err(AtomicMutationError::durability),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AtomicMutationError::before(error)),
+    #[cfg(unix)]
+    {
+        remove_file_durable_unix(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        unsupported_mutation("durable file removal")
     }
 }
 
-/// Recursively remove a directory and durably record its disappearance.
+/// Recursively remove a directory in a trusted, operator-owned tree and record
+/// its disappearance durably where the platform supports directory syncing.
+///
+/// This pathname traversal is not safe against a process concurrently
+/// substituting entries. Callers must first establish ownership/exclusion.
 pub fn remove_dir_all_durable(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    anyhow::bail!("trusted-tree durable removal is unavailable on this platform");
+
+    #[cfg(unix)]
     match fs::remove_dir_all(path) {
         Ok(()) => {
             sync_parent_dir(path)?;
@@ -112,6 +157,9 @@ pub fn remove_dir_all_durable(path: &Path) -> Result<()> {
 /// and the directory entries that make the tree reachable. Symlinks are not
 /// followed; syncing their parent directory makes the link entry durable.
 pub fn sync_tree_durable(root: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    anyhow::bail!("durable tree sync is unavailable on this platform");
+
     let metadata = fs::symlink_metadata(root)?;
     if metadata.file_type().is_symlink() {
         anyhow::bail!("durable tree root must not be a symlink: {}", root.display());
@@ -172,15 +220,17 @@ pub fn atomic_exchange_paths(left: &Path, right: &Path) -> AtomicMutationResult<
             "atomic exchange paths must share a parent directory"
         )));
     }
-    let left_c = CString::new(left.as_os_str().as_bytes()).map_err(AtomicMutationError::before)?;
-    let right_c =
-        CString::new(right.as_os_str().as_bytes()).map_err(AtomicMutationError::before)?;
+    let (parent, left_name) = open_parent_and_name(left)?;
+    let right_name = right.file_name().ok_or_else(|| {
+        AtomicMutationError::before(anyhow::anyhow!("exchange target has no file name"))
+    })?;
+    let right_c = CString::new(right_name.as_bytes()).map_err(AtomicMutationError::before)?;
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            left_c.as_ptr(),
-            libc::AT_FDCWD,
+            std::os::fd::AsRawFd::as_raw_fd(&parent),
+            left_name.as_ptr(),
+            std::os::fd::AsRawFd::as_raw_fd(&parent),
             right_c.as_ptr(),
             libc::RENAME_EXCHANGE,
         )
@@ -190,7 +240,7 @@ pub fn atomic_exchange_paths(left: &Path, right: &Path) -> AtomicMutationResult<
             std::io::Error::last_os_error(),
         ));
     }
-    sync_parent_dir(left).map_err(AtomicMutationError::durability)
+    sync_open_parent(&parent).map_err(AtomicMutationError::durability)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -207,62 +257,38 @@ pub fn rename_path_durable(source: &Path, target: &Path) -> AtomicMutationResult
             "durable rename paths must share a parent directory"
         )));
     }
-    fs::rename(source, target).map_err(AtomicMutationError::before)?;
-    sync_parent_dir(target).map_err(AtomicMutationError::durability)
-}
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
 
-fn atomic_write_portable(
-    target: &Path,
-    data: &[u8],
-    mode: Option<u32>,
-) -> AtomicMutationResult<()> {
-    #[cfg(not(unix))]
-    let _ = mode;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(AtomicMutationError::before)?;
-    }
-
-    let mut last_collision = None;
-    for _ in 0..128 {
-        let sequence = next_temp_sequence();
-        let tmp = target.with_extension(format!("tmp.{}.{sequence}", std::process::id()));
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        if let Some(mode) = mode {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(mode);
-        }
-
-        let mut file = match options.open(&tmp) {
-            Ok(file) => file,
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                last_collision = Some(err);
-                continue;
-            }
-            Err(err) => return Err(AtomicMutationError::before(err)),
+        let (parent, source_name) = open_parent_and_name(source)?;
+        let target_name = target.file_name().ok_or_else(|| {
+            AtomicMutationError::before(anyhow::anyhow!("rename target has no file name"))
+        })?;
+        let target_name =
+            CString::new(target_name.as_bytes()).map_err(AtomicMutationError::before)?;
+        let renamed = unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                source_name.as_ptr(),
+                parent.as_raw_fd(),
+                target_name.as_ptr(),
+            )
         };
-
-        let write_result = (|| -> std::io::Result<()> {
-            file.write_all(data)?;
-            file.sync_all()?;
-            drop(file);
-            Ok(())
-        })();
-        if let Err(err) = write_result {
-            let _ = fs::remove_file(&tmp);
-            return Err(AtomicMutationError::before(err));
+        if renamed != 0 {
+            return Err(AtomicMutationError::before(
+                std::io::Error::last_os_error(),
+            ));
         }
-        if let Err(error) = fs::rename(&tmp, target) {
-            let _ = fs::remove_file(&tmp);
-            return Err(AtomicMutationError::before(error));
-        }
-        return sync_parent_dir(target).map_err(AtomicMutationError::durability);
+        sync_open_parent(&parent).map_err(AtomicMutationError::durability)
     }
-
-    Err(AtomicMutationError::before(last_collision.unwrap_or_else(
-        || std::io::Error::new(ErrorKind::AlreadyExists, "temp file collision"),
-    )))
+    #[cfg(not(unix))]
+    {
+        let _ = (source, target);
+        unsupported_mutation("durable rename")
+    }
 }
 
 /// Private atomic replacement relative to an already-open final parent.
@@ -272,35 +298,12 @@ fn atomic_write_portable(
 /// create, rename, and fsync prevents a concurrent parent swap from redirecting
 /// secret material.
 #[cfg(unix)]
-fn atomic_write_private_unix(target: &Path, data: &[u8]) -> AtomicMutationResult<()> {
+fn atomic_write_unix(target: &Path, data: &[u8], mode: u32) -> AtomicMutationResult<()> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
 
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(AtomicMutationError::before)?;
-    let parent_c =
-        CString::new(parent.as_os_str().as_bytes()).map_err(AtomicMutationError::before)?;
-    let parent_fd = unsafe {
-        libc::open(
-            parent_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-        )
-    };
-    if parent_fd < 0 {
-        return Err(AtomicMutationError::before(
-            std::io::Error::last_os_error(),
-        ));
-    }
-    let parent_file = unsafe { fs::File::from_raw_fd(parent_fd) };
-
-    let file_name = target
-        .file_name()
-        .ok_or_else(|| {
-            std::io::Error::new(ErrorKind::InvalidInput, "atomic target has no file name")
-        })
-        .map_err(AtomicMutationError::before)?;
-    let target_name = CString::new(file_name.as_bytes()).map_err(AtomicMutationError::before)?;
+    let (parent_file, target_name) = open_parent_and_name(target)?;
+    let file_name = target.file_name().expect("open_parent_and_name validated name");
     let mut last_collision = None;
 
     for _ in 0..128 {
@@ -316,7 +319,7 @@ fn atomic_write_private_unix(target: &Path, data: &[u8]) -> AtomicMutationResult
                 parent_file.as_raw_fd(),
                 tmp_name.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
+                mode,
             )
         };
         if fd < 0 {
@@ -366,26 +369,74 @@ fn atomic_write_private_unix(target: &Path, data: &[u8]) -> AtomicMutationResult
 }
 
 #[cfg(unix)]
+fn open_parent_and_name(target: &Path) -> AtomicMutationResult<(fs::File, std::ffi::CString)> {
+    use std::ffi::CString;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(AtomicMutationError::before)?;
+    let parent_c = CString::new(parent.as_os_str().as_bytes()).map_err(AtomicMutationError::before)?;
+    let parent_fd = unsafe {
+        libc::open(
+            parent_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if parent_fd < 0 {
+        return Err(AtomicMutationError::before(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let parent_file = unsafe { fs::File::from_raw_fd(parent_fd) };
+    let file_name = target.file_name().ok_or_else(|| {
+        AtomicMutationError::before(anyhow::anyhow!("atomic target has no file name"))
+    })?;
+    let file_name = CString::new(file_name.as_bytes()).map_err(AtomicMutationError::before)?;
+    Ok((parent_file, file_name))
+}
+
+#[cfg(unix)]
+fn remove_file_durable_unix(path: &Path) -> AtomicMutationResult<()> {
+    use std::os::fd::AsRawFd;
+
+    let (parent, name) = open_parent_and_name(path)?;
+    let removed = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+    if removed != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(AtomicMutationError::before(error));
+    }
+    sync_open_parent(&parent).map_err(AtomicMutationError::durability)
+}
+
+#[cfg(not(unix))]
+fn unsupported_mutation(operation: &str) -> AtomicMutationResult<()> {
+    Err(AtomicMutationError::before(anyhow::anyhow!(
+        "{operation} is unavailable on this platform"
+    )))
+}
+
+#[cfg(unix)]
 fn sync_parent_dir(target: &Path) -> std::io::Result<()> {
     let parent = fs::File::open(target.parent().unwrap_or_else(|| Path::new(".")))?;
     sync_open_parent(&parent)
 }
 
-#[cfg(not(unix))]
-fn sync_parent_dir(_target: &Path) -> std::io::Result<()> {
-    injected_parent_sync_result()
-}
-
+#[cfg(unix)]
 fn sync_open_parent(parent: &fs::File) -> std::io::Result<()> {
     injected_parent_sync_result()?;
     parent.sync_all()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static FAIL_NEXT_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(unix)]
 fn injected_parent_sync_result() -> std::io::Result<()> {
     #[cfg(test)]
     if FAIL_NEXT_PARENT_SYNC.with(|fail| fail.replace(false)) {
@@ -398,6 +449,7 @@ fn injected_parent_sync_result() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn fail_next_parent_sync() {
         FAIL_NEXT_PARENT_SYNC.with(|fail| fail.set(true));
     }
@@ -432,6 +484,7 @@ mod tests {
         assert!(!target.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_parent_sync_failure_reports_committed_but_uncertain() {
         let dir = tempfile::tempdir().unwrap();
@@ -449,6 +502,7 @@ mod tests {
         assert_eq!(fs::read(target).unwrap(), b"new");
     }
 
+    #[cfg(unix)]
     #[test]
     fn rename_parent_sync_failure_reports_committed_but_uncertain() {
         let dir = tempfile::tempdir().unwrap();
@@ -516,5 +570,56 @@ mod tests {
         let result = atomic_write_private(&linked_parent.join("secret.pem"), b"secret");
         assert!(result.is_err());
         assert!(!real_parent.join("secret.pem").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn general_replace_rejects_symlink_as_final_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        fs::create_dir(&real_parent).unwrap();
+        let linked_parent = dir.path().join("linked");
+        symlink(&real_parent, &linked_parent).unwrap();
+
+        let error = atomic_write(&linked_parent.join("value"), b"value").unwrap_err();
+
+        assert!(matches!(error, AtomicMutationError::BeforeCommit(_)));
+        assert!(!real_parent.join("value").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_aware_write_sets_mode_before_publication() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("executable");
+        atomic_write_with_mode(&target, b"payload", 0o751).unwrap();
+
+        assert_eq!(
+            fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_remove_rejects_symlink_as_final_parent() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_parent = dir.path().join("real");
+        fs::create_dir(&real_parent).unwrap();
+        let target = real_parent.join("keep");
+        fs::write(&target, b"value").unwrap();
+        let linked_parent = dir.path().join("linked");
+        symlink(&real_parent, &linked_parent).unwrap();
+
+        let error = remove_file_durable(&linked_parent.join("keep")).unwrap_err();
+
+        assert!(matches!(error, AtomicMutationError::BeforeCommit(_)));
+        assert!(target.exists());
     }
 }

@@ -1,11 +1,15 @@
 use std::fs;
-use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::io::{ErrorKind, Write};
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-use crate::atomic_fs::{atomic_write, next_temp_sequence};
+use crate::atomic_fs::{atomic_write, atomic_write_with_mode};
+#[cfg(unix)]
+use crate::atomic_fs::next_temp_sequence;
 
 // ── Public library primitives ──────────────────────────────────────
 
@@ -35,6 +39,19 @@ pub fn shard_path(root: &Path, namespace: &str, hash: &str, ext: &str) -> PathBu
 /// leave some files missing or empty, which is only safe while nothing
 /// references them yet.
 pub fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        atomic_write_batch_unix(writes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = writes;
+        anyhow::bail!("durable CAS batch writes are unavailable on this platform")
+    }
+}
+
+#[cfg(unix)]
+fn atomic_write_batch_unix(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     if let [(target, data)] = writes {
         atomic_write(target, data)?;
         return Ok(());
@@ -92,7 +109,7 @@ fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     for (target, _) in writes {
         fs::File::open(target)?.sync_all()?;
@@ -104,14 +121,10 @@ fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
 /// bits so the result is executable. Like `atomic_write` but preserves
 /// the exec mode from the `ItemSource` record.
 ///
-/// On non-Unix platforms, the mode is ignored (the file is still written).
+/// Unsupported platforms fail closed rather than materializing with a mode
+/// that was not enforced.
 pub fn materialize_executable(target: &Path, data: &[u8], mode: u32) -> Result<()> {
-    atomic_write(target, data)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
-    }
+    atomic_write_with_mode(target, data, mode)?;
     Ok(())
 }
 
