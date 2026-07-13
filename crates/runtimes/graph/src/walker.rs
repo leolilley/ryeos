@@ -178,6 +178,7 @@ enum StepOutcome {
     FollowFanoutSuspend {
         children: Vec<ryeos_runtime::callback::FollowChildSpec>,
         width: Option<u32>,
+        iteration_snapshot: Vec<Value>,
     },
     FollowFanoutDone {
         results: Vec<Value>,
@@ -328,6 +329,7 @@ pub struct Walker {
 struct FollowResumeState {
     follow_node: String,
     follow_result: Value,
+    iteration_snapshot: Option<Vec<Value>>,
 }
 
 struct RunGuard {
@@ -419,12 +421,16 @@ impl Walker {
     /// If a follow result is armed for `node`, take it (consumed once). The
     /// resumed follow node classifies this envelope like a live dispatch instead
     /// of re-suspending.
-    fn take_follow_result(&self, node: &str) -> Option<Value> {
+    fn take_follow_state(&self, node: &str) -> Option<FollowResumeState> {
         let mut slot = self.follow_resume.lock().unwrap();
         if slot.as_ref().is_some_and(|fr| fr.follow_node == node) {
-            return slot.take().map(|fr| fr.follow_result);
+            return slot.take();
         }
         None
+    }
+
+    fn take_follow_result(&self, node: &str) -> Option<Value> {
+        self.take_follow_state(node).map(|state| state.follow_result)
     }
 
     /// Drain the accumulated callback-drift warnings. Called by the
@@ -654,6 +660,8 @@ impl Walker {
                         *self.follow_resume.lock().unwrap() = Some(FollowResumeState {
                             follow_node: fnode.to_string(),
                             follow_result: fr.clone(),
+                            iteration_snapshot: pf.get("iteration_snapshot")
+                                .and_then(Value::as_array).cloned(),
                         });
                     }
                 }
@@ -1688,7 +1696,18 @@ impl Walker {
     ) -> StepOutcome {
         // Consume first. An armed successor must never repeat env preflight or
         // interpolate/dispatch the child action.
-        let resumed = self.take_follow_result(current);
+        let resumed_state = self.take_follow_state(current);
+        let checkpointed_items = resumed_state.as_ref().and_then(|state| state.iteration_snapshot.clone());
+        let resumed = resumed_state.map(|state| state.follow_result);
+        if resumed.is_some() && checkpointed_items.is_none() {
+            return StepOutcome::LeafSoftError {
+                item_id: node.action.as_ref().and_then(|a| a.get("item_id")).and_then(Value::as_str).unwrap_or("").to_string(),
+                error: format!("follow fanout node `{current}` resumed without iteration snapshot"),
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                cost: None,
+            };
+        }
         let base_ctx = WalkContext {
             state: state.clone(),
             inputs: inputs.clone(),
@@ -1696,7 +1715,9 @@ impl Walker {
             execution: Some(execution.clone()),
             graph_run_id: Some(graph_run_id.to_string()),
         };
-        let over = match ryeos_runtime::interpolate(
+        // An armed cohort resume is immutable: its iteration values are local
+        // checkpoint facts and must not be re-resolved from mutable state.
+        let over = if let Some(items) = checkpointed_items { items } else { match ryeos_runtime::interpolate(
             &Value::String(node.over.as_deref().unwrap_or_default().to_string()),
             &base_ctx.as_context(),
         ) {
@@ -1719,12 +1740,15 @@ impl Walker {
                     cost: None,
                 }
             }
-        };
+        }};
         let var = node.foreach_var().to_string();
         let raw_item_id = node.action.as_ref().and_then(|a| a.get("item_id"))
             .and_then(Value::as_str).unwrap_or("").to_string();
 
         if let Some(wrapper) = resumed {
+            if wrapper.get("fanout").and_then(Value::as_bool) != Some(true) {
+                return StepOutcome::LeafSoftError { item_id: raw_item_id, error: format!("follow fanout node `{current}` resumed with malformed fanout wrapper"), next_on_error: resolve_next_on_error(node, cfg), elapsed_ms: start.elapsed().as_millis() as u64, cost: None };
+            }
             let Some(envelopes) = wrapper.get("items").and_then(Value::as_array) else {
                 return StepOutcome::LeafSoftError {
                     item_id: raw_item_id,
@@ -1734,6 +1758,12 @@ impl Walker {
                     cost: None,
                 };
             };
+            let expected = wrapper.get("expected").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+            let wrapper_statuses = wrapper.get("statuses").and_then(Value::as_array);
+            if expected != Some(envelopes.len()) || envelopes.len() != over.len()
+                || wrapper_statuses.map(Vec::len) != Some(envelopes.len()) {
+                return StepOutcome::LeafSoftError { item_id: raw_item_id, error: format!("follow fanout node `{current}` resumed with inconsistent expected/items/statuses/snapshot cardinality"), next_on_error: resolve_next_on_error(node, cfg), elapsed_ms: start.elapsed().as_millis() as u64, cost: None };
+            }
             let mut results = vec![Value::Null; envelopes.len()];
             let mut statuses = Vec::with_capacity(envelopes.len());
             let mut errors = Vec::new();
@@ -1753,7 +1783,11 @@ impl Walker {
                             }.with_foreach_item(&var, item);
                             match ryeos_runtime::interpolate(assign, &assign_ctx) {
                                 Ok(value) => merge_into(&mut delta, &value),
-                                Err(e) => errors.push(ErrorRecord { step, node: current.to_string(), error: format!("follow item {index} assign interpolation failed: {e:#}") }),
+                                Err(e) => {
+                                    statuses[index] = "failed".to_string();
+                                    results[index] = Value::Null;
+                                    errors.push(ErrorRecord { step, node: current.to_string(), error: format!("follow item {index} assign interpolation failed: {e:#}") });
+                                }
                             }
                         }
                     }
@@ -1775,13 +1809,6 @@ impl Walker {
             };
         }
 
-        if let Err(env_err) = env_preflight::check_env_requires(&cfg.env_requires, &node.env_requires) {
-            return StepOutcome::DispatchHardError {
-                item_id: Some(raw_item_id), error: format!("env preflight failed: {env_err}"),
-                next_on_error: resolve_next_on_error(node, cfg),
-                elapsed_ms: start.elapsed().as_millis() as u64, cost: None,
-            };
-        }
         if over.is_empty() {
             return StepOutcome::FollowFanoutDone {
                 results: vec![], statuses: vec![], errors: vec![],
@@ -1792,8 +1819,15 @@ impl Walker {
                 elapsed_ms: start.elapsed().as_millis() as u64,
             };
         }
+        if let Err(env_err) = env_preflight::check_env_requires(&cfg.env_requires, &node.env_requires) {
+            return StepOutcome::DispatchHardError {
+                item_id: Some(raw_item_id), error: format!("env preflight failed: {env_err}"),
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: start.elapsed().as_millis() as u64, cost: None,
+            };
+        }
         let mut children = Vec::with_capacity(over.len());
-        for item in &over {
+        for (index, item) in over.iter().enumerate() {
             let item_ctx = base_ctx.with_foreach_item(&var, item);
             let action = match ryeos_runtime::interpolate_action(node.action.as_ref().unwrap(), &item_ctx) {
                 Ok(v) => strip_none_values(&v),
@@ -1812,13 +1846,21 @@ impl Walker {
                 },
                 None => None,
             };
+            let item_ref = action.get("item_id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            if item_ref.is_empty() {
+                return StepOutcome::DispatchHardError { item_id: None, error: format!("follow fanout item {index} has missing or empty interpolated item_id"), next_on_error: resolve_next_on_error(node, cfg), elapsed_ms: start.elapsed().as_millis() as u64, cost: None };
+            }
             children.push(ryeos_runtime::callback::FollowChildSpec {
-                item_ref: action.get("item_id").and_then(Value::as_str).unwrap_or("").to_string(),
+                item_ref,
                 parameters: action.get("params").cloned().unwrap_or_else(|| json!({})),
                 facets,
             });
         }
-        StepOutcome::FollowFanoutSuspend { children, width: node.max_concurrency.map(|v| v as u32) }
+        let width = match node.max_concurrency.map(u32::try_from).transpose() {
+            Ok(width) => width,
+            Err(_) => return StepOutcome::DispatchHardError { item_id: None, error: format!("follow fanout node `{current}` max_concurrency does not fit in u32"), next_on_error: resolve_next_on_error(node, cfg), elapsed_ms: start.elapsed().as_millis() as u64, cost: None },
+        };
+        StepOutcome::FollowFanoutSuspend { children, width, iteration_snapshot: over }
     }
 
     /// D13: The ONLY function in walker.rs allowed to:
@@ -1860,7 +1902,7 @@ impl Walker {
                 // idempotently (by follow_key). A checkpoint failure is a hard error
                 // like any other resume-correctness failure.
                 if let Err(e) = self
-                    .write_follow_checkpoint(graph_run_id, current, step, state, suppressed_errors)
+                    .write_follow_checkpoint(graph_run_id, current, step, state, suppressed_errors, None)
                     .await
                 {
                     let msg = format!("follow checkpoint write failed: {e}");
@@ -1947,13 +1989,13 @@ impl Walker {
                     }
                 }
             }
-            StepOutcome::FollowFanoutSuspend { children, width } => {
+            StepOutcome::FollowFanoutSuspend { children, width, iteration_snapshot } => {
                 self.emit_graph_step_started(graph_run_id, step, current).await;
                 self.emit_graph_follow_suspended(
                     graph_run_id, step, current, "cohort", Some(children.len()),
                 ).await;
                 if let Err(e) = self.write_follow_checkpoint(
-                    graph_run_id, current, step, state, suppressed_errors,
+                    graph_run_id, current, step, state, suppressed_errors, Some(&iteration_snapshot),
                 ).await {
                     let msg = format!("follow checkpoint write failed: {e}");
                     return self.commit_terminal(CommitTerminalInput {
@@ -2266,6 +2308,7 @@ impl Walker {
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap()).await;
                 let status = if errors.is_empty() { "ok" } else { "error" };
+                self.emit_graph_branch_taken(graph_run_id, step, current, next.as_deref()).await;
                 self.emit_graph_step_completed(graph_run_id, step, current, status, diagnostic.as_deref()).await;
                 self.fire_graph_hooks("graph_step_completed",
                     self.step_hook_context(graph_run_id, current, step, status, diagnostic.as_deref(), state)).await;
@@ -3233,6 +3276,7 @@ impl Walker {
         step: u32,
         state: &Value,
         suppressed_errors: &[ErrorRecord],
+        iteration_snapshot: Option<&[Value]>,
     ) -> anyhow::Result<()> {
         let Some(writer) = &self.checkpoint else {
             return Ok(());
@@ -3245,6 +3289,9 @@ impl Walker {
         pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
         pending.insert("step_count".to_string(), json!(step));
         pending.insert("graph_run_id".to_string(), json!(graph_run_id));
+        if let Some(items) = iteration_snapshot {
+            pending.insert("iteration_snapshot".to_string(), json!(items));
+        }
         let mut payload = json!({
             "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
             "graph_run_id": graph_run_id,
