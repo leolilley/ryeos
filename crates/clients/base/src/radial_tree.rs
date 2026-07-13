@@ -48,8 +48,10 @@ pub fn layout_paths_with_options(
     paths: Vec<Vec<String>>,
     options: RadialTreeOptions,
 ) -> Vec<RadialTreeNode> {
-    let mut root = TrieNode::default();
-    root.terminal = true;
+    let mut root = TrieNode {
+        terminal: true,
+        ..TrieNode::default()
+    };
     for path in paths {
         insert_path(&mut root, &path);
     }

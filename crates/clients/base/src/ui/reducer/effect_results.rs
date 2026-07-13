@@ -282,7 +282,7 @@ impl RyeOsCore {
                         .data
                         .source_epoch
                         .get(tile_id)
-                        .map_or(true, |&latest| result_id >= latest);
+                        .is_none_or(|&latest| result_id >= latest);
                     if is_latest {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
@@ -533,8 +533,14 @@ const REFUSED_NOTICE: &str = "Delivery refused.";
 fn effect_success_notice(expected: &RyeOsEffectKind, data: &serde_json::Value) -> String {
     match expected {
         RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
-            let item_ref =
-                json_field_text(data, &["target", "ref"]).unwrap_or_else(|| item_ref.clone());
+            // `data.target.ref` is a path, not key alternatives — reaching
+            // for `json_field_text` here would stringify the whole target.
+            let item_ref = data
+                .get("target")
+                .and_then(|target| target.get("ref"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| item_ref.clone());
             format!("Ran {item_ref}.")
         }
         RyeOsEffectKind::SubmitThreadCommand {
@@ -963,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn refetching_a_sections_view_clears_prior_section_data() {
+    fn refetching_a_sections_view_keeps_prior_data_while_pending() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,
@@ -985,13 +991,15 @@ mod tests {
             .sources
             .insert(k1.clone(), serde_json::json!({ "stale": "B" }));
 
-        // Refetching (the lens reused for a new selection) drops each section's
-        // prior response so the previous selection can't render underneath, and
-        // emits a fresh fetch per section.
+        // Refetching keeps each section's prior response rendering while the
+        // fresh fetches are in flight — hint-driven activity refreshes would
+        // otherwise blank the view every coalesced tick. Staleness is the
+        // epoch guard's job (see the out-of-order straggler test above), not
+        // the emitter's.
         let effects = core.emit_fetch_source_keyed("K".to_string(), "view:test/detail");
-        assert!(core.data.sources.get(&k0).is_none());
-        assert!(core.data.sources.get(&k1).is_none());
-        assert_eq!(effects.len(), 2);
+        assert!(core.data.sources.contains_key(&k0));
+        assert!(core.data.sources.contains_key(&k1));
+        assert_eq!(effects.len(), 2, "one fetch per section");
     }
 
     #[test]

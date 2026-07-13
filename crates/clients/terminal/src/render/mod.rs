@@ -238,11 +238,13 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
             surface,
             rect,
             entries,
-            entry_indents,
+            widgets::timeline::TimelineEntryMeta {
+                indents: entry_indents,
+                expandable: entry_expandable,
+                expanded: entry_expanded,
+                details: entry_details,
+            },
             *selected,
-            entry_expandable,
-            entry_expanded,
-            entry_details,
         );
         return;
     }

@@ -131,6 +131,16 @@ pub(crate) fn seed_service_route(core: &mut RyeOsCore) {
     );
 }
 
+/// Focus a center tile the way `FocusChanged` would: both the workspace
+/// pointer and the explicit UI target move. Tests that poke
+/// `workspace.focused_tile` alone leave the initial dock focus standing.
+pub(crate) fn focus_tile(core: &mut RyeOsCore, tile_id: crate::ids::TileId) {
+    core.workspace.focused_tile = tile_id;
+    core.ui.focus_target = Some(crate::ui::model::RyeOsFocusTarget::WorkspaceTile {
+        tile_id: tile_id.0.to_string(),
+    });
+}
+
 /// Seed a filtered-list view (`feeds` -> source param) into a focused
 /// center tile and return the tile id string (buffer instance id).
 pub(crate) fn seed_filter_tile(core: &mut RyeOsCore) -> String {
@@ -146,6 +156,6 @@ pub(crate) fn seed_filter_tile(core: &mut RyeOsCore) -> String {
     let tile_id = core.workspace.add_tile(ViewSpec {
         view_ref: "view:test/filter".to_string(),
     });
-    core.workspace.focused_tile = tile_id;
+    focus_tile(core, tile_id);
     tile_id.0.to_string()
 }

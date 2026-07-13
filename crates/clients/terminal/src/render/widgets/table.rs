@@ -43,6 +43,13 @@ pub fn draw_table(
     let col_w = width.saturating_sub(GUTTER) / ncols;
     // Each cell truncates one cell short of its column so neighbours don't touch.
     let cell_w = col_w.saturating_sub(1).max(1);
+    let layout = RowLayout {
+        left,
+        width,
+        ncols,
+        col_w,
+        cell_w,
+    };
 
     if !columns.is_empty() && y < bottom {
         for (i, header) in columns.iter().enumerate() {
@@ -73,7 +80,7 @@ pub fn draw_table(
             if y >= bottom {
                 break;
             }
-            draw_row(surface, left, y, width, ncols, col_w, cell_w, row, now_ms);
+            draw_row(surface, layout, y, row, now_ms);
             y += 1;
         }
         return;
@@ -114,7 +121,7 @@ pub fn draw_table(
             break;
         }
         if line_skip == 0 {
-            draw_row(surface, left, y, width, ncols, col_w, cell_w, row, now_ms);
+            draw_row(surface, layout, y, row, now_ms);
             y += 1;
         }
         let detail_start = line_skip.saturating_sub(1);
@@ -129,17 +136,31 @@ pub fn draw_table(
     }
 }
 
-fn draw_row(
-    surface: &mut TextSurface,
+/// Horizontal geometry shared by every row of one table draw: the row
+/// band plus the derived column grid.
+#[derive(Clone, Copy)]
+struct RowLayout {
     left: usize,
-    y: usize,
     width: usize,
     ncols: usize,
     col_w: usize,
     cell_w: usize,
+}
+
+fn draw_row(
+    surface: &mut TextSurface,
+    layout: RowLayout,
+    y: usize,
     row: &RyeOsTableRowVm,
     now_ms: u64,
 ) {
+    let RowLayout {
+        left,
+        width,
+        ncols,
+        col_w,
+        cell_w,
+    } = layout;
     let mut style = if row.selected {
         style_selected()
     } else {

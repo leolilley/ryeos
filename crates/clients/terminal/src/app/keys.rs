@@ -102,12 +102,13 @@ fn focused_fold_section(core: &mut RyeOsCore) -> Option<(String, usize)> {
 
 fn find_fold_section(node: &RyeOsLayoutNodeVm, focused: &str) -> Option<usize> {
     match node {
-        RyeOsLayoutNodeVm::Tile {
-            tile_id,
-            view:
-                RyeOsViewVm::Timeline { fold_section, .. } | RyeOsViewVm::Sections { fold_section, .. },
-            ..
-        } if tile_id == focused => *fold_section,
+        RyeOsLayoutNodeVm::Tile { tile_id, view, .. } if tile_id == focused => {
+            match view.as_ref() {
+                RyeOsViewVm::Timeline { fold_section, .. }
+                | RyeOsViewVm::Sections { fold_section, .. } => *fold_section,
+                _ => None,
+            }
+        }
         RyeOsLayoutNodeVm::Tile { .. } => None,
         RyeOsLayoutNodeVm::Split { first, second, .. } => {
             find_fold_section(first, focused).or_else(|| find_fold_section(second, focused))

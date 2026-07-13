@@ -347,14 +347,14 @@ mod tests {
                         "plane": "ui",
                         "facet": "input.route",
                         "merge": { "thread": "{record.thread_id}", "chain_root": "{record.chain_root_id}" },
-                        "open_view": "view:ryeos/chain/timeline"
+                        "open_view": "view:ryeos/thread/transcript"
                     }
                 }]
             }),
         );
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -386,7 +386,7 @@ mod tests {
             core.workspace
                 .tiles
                 .values()
-                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+                .any(|t| t.view.view_ref == "view:ryeos/thread/transcript"),
             "drill-in opens the braid lens"
         );
 
@@ -459,7 +459,7 @@ mod tests {
             .insert("view:ryeos/threads/list".to_string(), binding);
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -497,7 +497,7 @@ mod tests {
             core.workspace
                 .tiles
                 .values()
-                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+                .any(|t| t.view.view_ref == "view:ryeos/thread/transcript"),
             "watch opens the braid lens"
         );
         assert!(
@@ -582,10 +582,10 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
         core.workspace
-            .add_tile(ViewSpec::bound("view:ryeos/chain/timeline"));
+            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"));
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -606,7 +606,7 @@ mod tests {
             crate::ui::seat::KEY_INPUT_ROUTE.to_string(),
             None,
             Some(serde_json::json!({ "chain_root": "B" })),
-            Some("view:ryeos/chain/timeline".to_string()),
+            Some("view:ryeos/thread/transcript".to_string()),
             true,
         );
 
@@ -655,10 +655,10 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
         core.workspace
-            .add_tile(ViewSpec::bound("view:ryeos/chain/timeline"));
+            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"));
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {

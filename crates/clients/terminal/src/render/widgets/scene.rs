@@ -363,16 +363,16 @@ fn local_clip_allows(object: &RyeOsSceneObjectVm, lx: f32, ly: f32) -> bool {
     let Some(clip) = object.clip else {
         return true;
     };
-    if clip.x_min.map_or(false, |min| lx < min) {
+    if clip.x_min.is_some_and(|min| lx < min) {
         return false;
     }
-    if clip.x_max.map_or(false, |max| lx > max) {
+    if clip.x_max.is_some_and(|max| lx > max) {
         return false;
     }
-    if clip.y_min.map_or(false, |min| ly < min) {
+    if clip.y_min.is_some_and(|min| ly < min) {
         return false;
     }
-    if clip.y_max.map_or(false, |max| ly > max) {
+    if clip.y_max.is_some_and(|max| ly > max) {
         return false;
     }
     true
@@ -426,10 +426,6 @@ fn particle_cell(
         * object.opacity.clamp(0.1, 1.0)
         * reveal
         * (0.55 + 0.45 * depth.clamp(0.0, 1.0));
-    // Quantized so a cell's blended color is byte-stable across frames
-    // the particle doesn't actually move in — the diff renderer can skip
-    // it.
-    let intensity = (intensity * 12.0).round() / 12.0;
 
     // Intensity walks the whole ramp; size biases the walk upward. A big
     // large body diamond breathes `◈` ↔ `◆`, a mid facet edge `⋄` ↔ `◇`,
@@ -449,7 +445,20 @@ fn particle_cell(
     } else {
         ramp[level]
     };
-    (glyph, tone.fg(fg).bg(BG))
+    (glyph, tone.fg(stabilize(fg)).bg(BG))
+}
+
+/// Snap an RGB colour to 32 levels per channel so a cell whose underlying
+/// intensity barely moved this frame emits identical bytes and the diff
+/// renderer can skip it. Quantizing at the colour byte is ~10× finer than
+/// the former 1/12 intensity quantization, which visibly stepped the
+/// breathe and shading curves — colour IS the scene's main motion channel
+/// (see the module contract). Non-RGB colours pass through.
+fn stabilize(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(r & 0xF8, g & 0xF8, b & 0xF8),
+        other => other,
+    }
 }
 
 /// Rasterize a filled solid: for every cell in the rect, inverse-map to
@@ -578,10 +587,6 @@ fn draw_fill(
                 + (noise - 0.5) * noise_amp)
                 .clamp(0.0, 1.0)
                 * opacity;
-            // Quantized so a cell's blended color is byte-stable across
-            // frames the shape doesn't actually move in — the diff
-            // renderer can skip it.
-            let density = (density * 12.0).round() / 12.0;
             if density < 0.04 {
                 continue;
             }
@@ -597,7 +602,7 @@ fn draw_fill(
                 rect.x as usize + col,
                 rect.y as usize + row,
                 glyph,
-                Style::new().fg(fg).bg(BG),
+                Style::new().fg(stabilize(fg)).bg(BG),
             );
         }
     }
@@ -1001,17 +1006,29 @@ mod tests {
         let mut surface = TextSurface::new(40, 10);
         let scene = scene_from_body(&body, 0);
         draw_scene(&mut surface, Rect::new(0, 0, 40, 10), &scene);
-        let filled: usize = (0..surface.width)
+        let filled: Vec<usize> = (0..surface.width)
             .filter(|x| {
                 (0..surface.height).any(|y| {
                     let rune = surface.get(*x, y).rune;
                     rune != '\0' && rune != ' '
                 })
             })
-            .count();
+            .collect();
+        // The width cap (`width_scale`, 58-col baseline) holds a 10-unit
+        // edge at ~21 columns on a 40-cell rect — the invariant is
+        // contiguity, not rect-filling: every column between the projected
+        // endpoints is inked, so line-art reads as a line, not two dots.
+        let lo = *filled.first().expect("edge draws");
+        let hi = *filled.last().expect("edge draws");
         assert!(
-            filled >= 30,
-            "a horizontal edge across a 40-cell rect fills most columns, got {filled}"
+            filled.len() >= 15,
+            "a horizontal edge spans well beyond its endpoints, got {}",
+            filled.len()
+        );
+        assert_eq!(
+            filled.len(),
+            hi - lo + 1,
+            "every column between the endpoints is inked (no gaps)"
         );
     }
 
@@ -1071,8 +1088,10 @@ mod tests {
                 rune != '\0' && rune != ' '
             })
             .count();
+        // ~120 cells at the width-capped scale (`width_scale` holds the
+        // prism at scale 1.0 on a 48-cell rect rather than stretching it).
         assert!(
-            filled > 150,
+            filled > 100,
             "a filled prism covers a solid interior, got {filled} cells"
         );
         assert_ne!(

@@ -21,7 +21,7 @@ pub fn draw_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
 }
 
 fn draw_palette_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
-    let w = surface.width.min(76).max(32);
+    let w = surface.width.clamp(32, 76);
     let max_rows = surface.height.saturating_sub(8).max(3);
     let rows = overlay.items.len().min(max_rows);
     let h = rows + 4;
@@ -46,7 +46,7 @@ fn draw_palette_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
 }
 
 fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
-    let w = surface.width.min(84).max(44);
+    let w = surface.width.clamp(44, 84);
     let max_rows = surface.height.saturating_sub(8).max(4);
     let rows = overlay.items.len().min(max_rows);
     let h = rows + 5;

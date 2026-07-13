@@ -298,7 +298,8 @@ pub enum RyeOsLayoutNodeVm {
         focused: bool,
         title: String,
         intents: Vec<RyeOsTileIntentVm>,
-        view: RyeOsViewVm,
+        /// Boxed: the view VM dominates the enum's size next to `Split`.
+        view: Box<RyeOsViewVm>,
         #[serde(default)]
         chrome_hidden: bool,
         #[serde(default)]
@@ -1053,10 +1054,7 @@ fn dock_tile_vm(
         view: bound_view_vm_keyed(
             core,
             &source_key,
-            cursor,
-            collapsed,
-            expanded_rows,
-            changed_rows,
+            (cursor, collapsed, expanded_rows, changed_rows),
             view_ref,
             &core.ui.atlas,
         ),
@@ -1105,10 +1103,12 @@ fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsView
     bound_view_vm_keyed(
         core,
         &tile_id.0.to_string(),
-        selected_cursor(core, tile_id),
-        selected_collapsed(core, tile_id),
-        expanded_rows,
-        changed_rows,
+        (
+            selected_cursor(core, tile_id),
+            selected_collapsed(core, tile_id),
+            expanded_rows,
+            changed_rows,
+        ),
         view_ref,
         core.tile_atlas_state(tile_id),
     )
@@ -1117,13 +1117,11 @@ fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsView
 fn bound_view_vm_keyed(
     core: &RyeOsCore,
     source_key: &str,
-    cursor: Option<usize>,
-    collapsed: Option<&std::collections::BTreeSet<usize>>,
-    expanded_rows: Option<&std::collections::BTreeSet<String>>,
-    changed_rows: Option<&std::collections::BTreeMap<String, u64>>,
+    local: RowStateRefs<'_>,
     view_ref: &str,
     atlas: &crate::atlas::AtlasUiStateVm,
 ) -> RyeOsViewVm {
+    let (cursor, collapsed, expanded_rows, changed_rows) = local;
     let Some(binding) = core.views.get(view_ref) else {
         return RyeOsViewVm::Placeholder {
             title: view_ref.to_string(),
@@ -1320,9 +1318,7 @@ fn bound_view_vm_keyed(
                     let record = super::content::project_record_for_binding(binding, raw);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
-                    let detail = expanded
-                        .then(|| detail_vm(&record.raw, &expand_fields))
-                        .unwrap_or_default();
+                    let detail = if expanded { detail_vm(&record.raw, &expand_fields) } else { Default::default() };
                     RyeOsRowVm {
                         id: format!("{view_ref}#{index}"),
                         primary: record.primary,
@@ -1390,11 +1386,13 @@ fn bound_view_vm_keyed(
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
             let windowed = super::timeline::fold_timeline_window(
-                full.as_ref(),
-                full_indents.as_ref(),
-                full_sources.as_ref(),
-                full_sections.as_ref(),
-                collapsible.as_ref(),
+                super::timeline::TimelineWindowInput {
+                    entries: full.as_ref(),
+                    indents: full_indents.as_ref(),
+                    sources: full_sources.as_ref(),
+                    sections: full_sections.as_ref(),
+                    collapsible: collapsible.as_ref(),
+                },
                 super::timeline::live_delta_entry(core),
                 collapsed.unwrap_or(&empty),
                 cursor.unwrap_or(0),
@@ -1476,9 +1474,7 @@ fn bound_view_vm_keyed(
                     let record = super::content::project_table_record(binding, raw, &columns);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
-                    let detail = expanded
-                        .then(|| detail_vm(&record.raw, &expand_fields))
-                        .unwrap_or_default();
+                    let detail = if expanded { detail_vm(&record.raw, &expand_fields) } else { Default::default() };
                     RyeOsTableRowVm {
                         id: format!("{view_ref}#{index}"),
                         cells: record.cells,
@@ -1962,7 +1958,7 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 focused: *tile_id == core.workspace.focused_tile,
                 title,
                 intents: tile_intents(core, *tile_id),
-                view,
+                view: Box::new(view),
                 chrome_hidden,
                 background_transparent,
                 input,
@@ -2154,7 +2150,7 @@ pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> {
                 },
                 enabled,
                 intent: enabled.then(|| RyeOsUiIntent::OpenView { view: view.clone() }),
-                secondary_intent: enabled.then(|| RyeOsUiIntent::OpenNewView { view }),
+                secondary_intent: enabled.then_some(RyeOsUiIntent::OpenNewView { view }),
                 depth: 1,
                 ..Default::default()
             });
@@ -2699,7 +2695,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         entry(
             "Move",
             "← / →",
-            "Expand row/feed details, fold sections, or move focus",
+            "Expand row/feed details, fold sections or launcher groups, or move focus",
         ),
         entry(
             "Act",
@@ -3354,7 +3350,9 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "status", "source", "follow", "created"]
+            [
+                "thread", "kind", "item", "project", "status", "source", "follow", "created"
+            ]
         );
         let rows = project_table(
             &binding,
@@ -3371,6 +3369,7 @@ mod tests {
                 "T-ab",
                 "directive",
                 "directive:ops/base",
+                "",
                 "running",
                 "fp:claude",
                 "",
@@ -3578,7 +3577,7 @@ mod tests {
 
         fn find_tile_view(node: &RyeOsLayoutNodeVm) -> Option<&RyeOsViewVm> {
             match node {
-                RyeOsLayoutNodeVm::Tile { view, .. } => Some(view),
+                RyeOsLayoutNodeVm::Tile { view, .. } => Some(view.as_ref()),
                 RyeOsLayoutNodeVm::Split { first, second, .. } => {
                     find_tile_view(first).or_else(|| find_tile_view(second))
                 }

@@ -290,6 +290,7 @@ fn clamped_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f3
 /// toggle); a closed slot keeps its content but frees its space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct SlotsSpec {
     #[serde(default)]
     pub top: Option<SlotSpec>,
@@ -301,19 +302,6 @@ pub struct SlotsSpec {
     pub right: Option<SlotSpec>,
 }
 
-impl Default for SlotsSpec {
-    fn default() -> Self {
-        // No default slots: the engine never names product views. Surfaces
-        // declare their own slots; a slots-less surface simply has none. The
-        // builtin fallback surface declares its own minimal slot explicitly.
-        Self {
-            top: None,
-            bottom: None,
-            left: None,
-            right: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -605,7 +593,8 @@ pub enum LoadedSurface {
     /// Not yet implemented — stub returning builtin with diagnostics.
     RyeResolved {
         requested_ref: String,
-        spec: SurfaceSpec,
+        /// Boxed: the composed spec dwarfs the other variants' payloads.
+        spec: Box<SurfaceSpec>,
         trusted: bool,
         provenance: SurfaceProvenance,
         item_diagnostics: Vec<SurfaceDiagnostic>,
@@ -619,7 +608,7 @@ impl LoadedSurface {
         match self {
             LoadedSurface::Builtin { spec } => spec,
             LoadedSurface::LocalPreview { spec, .. } => spec,
-            LoadedSurface::RyeResolved { spec, .. } => spec,
+            LoadedSurface::RyeResolved { spec, .. } => spec.as_ref(),
         }
     }
 
@@ -652,7 +641,7 @@ impl LoadedSurface {
         let spec = match self {
             LoadedSurface::Builtin { spec } => spec,
             LoadedSurface::LocalPreview { spec, .. } => spec,
-            LoadedSurface::RyeResolved { spec, .. } => spec,
+            LoadedSurface::RyeResolved { spec, .. } => spec.as_mut(),
         };
         spec.views = Some(views);
     }
@@ -737,7 +726,7 @@ impl LoadedSurface {
 
         Ok(LoadedSurface::RyeResolved {
             requested_ref: requested_ref.to_string(),
-            spec,
+            spec: Box::new(spec),
             trusted,
             provenance,
             item_diagnostics,
@@ -855,7 +844,7 @@ pub fn load_surface(opts: &SurfaceLoadOptions) -> LoadedSurface {
         // For now, return a diagnostic that daemon resolution is not yet available
         return LoadedSurface::RyeResolved {
             requested_ref: name.clone(),
-            spec: builtin_default(),
+            spec: Box::new(builtin_default()),
             trusted: false,
             provenance: empty_provenance(name),
             item_diagnostics: vec![SurfaceDiagnostic::Info {
@@ -1327,7 +1316,7 @@ tiles = ["view:ryeos/threads/list"]
 
         let resolved = LoadedSurface::RyeResolved {
             requested_ref: "surface:ryeos/ui/graph".into(),
-            spec: builtin_default(),
+            spec: Box::new(builtin_default()),
             trusted: true,
             provenance: empty_provenance("surface:ryeos/ui/graph"),
             item_diagnostics: Vec::new(),
@@ -1432,7 +1421,7 @@ tiles = ["view:ryeos/threads/list"]
             spec.tiles
                 .iter()
                 .any(|tile| matches!(tile, ViewKindSpec(view_ref)
-                    if view_ref == "view:ryeos/threads/list")),
+                    if view_ref == "view:ryeos/threads/history")),
             "workbench must bind the threads view by ref"
         );
     }

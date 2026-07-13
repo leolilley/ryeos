@@ -154,7 +154,7 @@ impl DaemonClient {
 
     fn ui_cookie(&self, path: &str) -> Option<String> {
         path.starts_with("/ui/")
-            .then(|| self.ui_session_id.as_ref())
+            .then_some(self.ui_session_id.as_ref())
             .flatten()
             .map(|session_id| format!("ryeos_session={session_id}"))
     }
