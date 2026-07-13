@@ -67,6 +67,23 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let bundles_root = state.config.app_root.join(".ai").join("bundles");
     let target = bundles_root.join(&req.name);
+    let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
+        &state.config.app_root,
+        &req.name,
+    )?;
+    let recovered = transaction.reconcile(state.identity.signing_key())?;
+    if matches!(
+        recovered,
+        Some(ryeos_app::bundle_transaction::DesiredBundleState::Present { .. })
+    ) && transaction.target().is_dir()
+        && !req.replace
+    {
+        return Ok(serde_json::json!({
+            "name": req.name,
+            "path": transaction.target(),
+            "recovered": true,
+        }));
+    }
 
     let replaced = target.exists();
     if replaced && !req.replace {
@@ -101,25 +118,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     )
     .context("preflight verification refused install")?;
 
-    let node_dir = state.config.app_root.join(".ai").join("node");
-    // Replacement keeps the same canonical path. Publish/repair its signed
-    // registration before exchanging trees, so either the old or new complete
-    // generation is always registered.
-    let existing_registration = if replaced {
-        Some(ryeos_app::node_config::writer::write_signed_node_item(
-            &node_dir,
-            "bundles",
-            &req.name,
-            &serde_json::json!({ "path": target.canonicalize()? }),
-            &state.identity,
-        )?)
-    } else {
-        None
-    };
-
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
+    let registration = serde_json::json!({ "path": target });
+    transaction.begin(
+        ryeos_app::bundle_transaction::DesiredBundleState::Present {
+            registration: registration.clone(),
+        },
+    )?;
     if replaced {
         replace_dir_atomic(&req.source_path, &target, req.preserve_runtime_artifacts)
             .with_context(|| {
@@ -144,29 +151,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .context("failed to canonicalize installed bundle path")?;
 
     // Write signed kind: node bundle registration
-    let config_item_path = match existing_registration {
-        Some(path) => path,
-        None => match ryeos_app::node_config::writer::write_signed_node_item(
-            &node_dir,
-            "bundles",
-            &req.name,
-            &serde_json::json!({ "path": canonical_target }),
-            &state.identity,
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                lillux::with_exclusive_file_lock(&target, || {
-                    if target.exists() {
-                        fs::remove_dir_all(&target).with_context(|| {
-                            format!("remove unregistered bundle {}", target.display())
-                        })?;
-                    }
-                    Ok(())
-                })?;
-                return Err(error).context("write bundle registration");
-            }
-        },
-    };
+    let registration = serde_json::json!({ "path": canonical_target });
+    let config_item_path = transaction
+        .commit_present(&registration, state.identity.signing_key())
+        .context("commit bundle registration")?;
 
     // Bump the engine cache generation so any cached per-request
     // engines (built against the previous bundle set) are invalidated.
@@ -198,7 +186,7 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
         .and_then(|name| name.to_str())
         .context("installed bundle target has no valid directory name")?;
     let staging = parent.join(format!(".{name}.staging"));
-    lillux::with_exclusive_file_lock(target, || {
+    (|| {
         if target.exists() {
             bail!(
                 "bundle target appeared during install: {}",
@@ -225,7 +213,7 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
                 target.display()
             )
         })
-    })
+    })()
 }
 
 fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: bool) -> Result<()> {
@@ -260,7 +248,7 @@ fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: boo
         );
     }
 
-    lillux::with_exclusive_file_lock(target, || {
+    (|| {
         if staging.exists() {
             fs::remove_dir_all(&staging)
                 .with_context(|| format!("remove stale staging dir {}", staging.display()))?;
@@ -292,7 +280,7 @@ fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: boo
             );
         }
         Ok(())
-    })
+    })()
 }
 
 fn preserve_runtime_artifact_dirs(existing: &Path, staging: &Path) -> Result<()> {

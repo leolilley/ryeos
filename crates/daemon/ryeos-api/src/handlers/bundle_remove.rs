@@ -39,6 +39,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
+    let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
+        &state.config.app_root,
+        &req.name,
+    )?;
+    transaction.reconcile(state.identity.signing_key())?;
+
     // Delete the signed node-config item
     let config_item_path = state
         .config
@@ -48,21 +54,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join("bundles")
         .join(format!("{}.yaml", req.name));
 
-    if !config_item_path.exists() {
-        bail!(
-            "bundle '{}' is not installed (config item not found at {})",
-            req.name,
-            config_item_path.display()
-        );
-    }
-
-    lillux::remove_file_durable(&config_item_path).with_context(|| {
-        format!(
-            "failed to remove config item {}",
-            config_item_path.display()
-        )
-    })?;
-
     // Delete the bundle directory
     let bundle_dir = state
         .config
@@ -71,14 +62,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join("bundles")
         .join(&req.name);
 
-    let removed_dir = if bundle_dir.exists() {
-        lillux::remove_dir_all_durable(&bundle_dir).with_context(|| {
-            format!("failed to remove bundle directory {}", bundle_dir.display())
-        })?;
-        true
-    } else {
-        false
-    };
+    let removed_config_item = config_item_path.exists();
+    let removed_dir = bundle_dir.exists();
+    transaction.begin(ryeos_app::bundle_transaction::DesiredBundleState::Absent)?;
+    transaction.commit_absent()?;
 
     // Bump the engine cache generation so any cached per-request
     // engines (built against the previous bundle set) are invalidated.
@@ -91,7 +78,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     Ok(serde_json::json!({
         "name": req.name,
-        "removed_config_item": true,
+        "removed_config_item": removed_config_item,
         "removed_dir": removed_dir,
     }))
 }

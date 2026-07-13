@@ -42,6 +42,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join(ryeos_engine::AI_DIR)
         .join("bundles");
     let local_target = bundles_root.join(&req.bundle_name);
+    let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
+        &state.config.app_root,
+        &req.bundle_name,
+    )?;
+    let recovered = transaction.reconcile(state.identity.signing_key())?;
+    if matches!(
+        recovered,
+        Some(ryeos_app::bundle_transaction::DesiredBundleState::Present { .. })
+    ) && transaction.target().is_dir()
+    {
+        return Ok(serde_json::json!({
+            "bundle_name": req.bundle_name,
+            "path": transaction.target(),
+            "recovered": true,
+        }));
+    }
     if local_target.exists() {
         bail!(
             "bundle '{}' already installed locally at {}",
@@ -109,8 +125,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     std::fs::create_dir_all(&bundles_root)
         .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
     let staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
-    let ((files_installed, total_bytes), canonical_target) =
-        lillux::with_exclusive_file_lock(&local_target, || {
+    let ((files_installed, total_bytes), canonical_target) = (|| {
             if local_target.exists() {
                 bail!(
                     "bundle '{}' appeared during remote install at {}",
@@ -140,36 +155,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             }
             lillux::sync_tree_durable(&staging)
                 .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+            let registration = serde_json::json!({ "path": local_target });
+            transaction.begin(
+                ryeos_app::bundle_transaction::DesiredBundleState::Present { registration },
+            )?;
             lillux::rename_path_durable(&staging, &local_target)?;
             let canonical = local_target
                 .canonicalize()
                 .context("canonicalize installed bundle path")?;
             Ok((counts, canonical))
-        })?;
+        })()?;
 
     // 5. Write signed node-config bundle registration.
 
-    if let Err(error) = ryeos_app::node_config::writer::write_signed_node_item(
-        &state
-            .config
-            .app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node"),
-        "bundles",
-        &req.bundle_name,
-        &serde_json::json!({ "path": canonical_target }),
-        &state.identity,
-    ) {
-        lillux::with_exclusive_file_lock(&local_target, || {
-            if local_target.exists() {
-                std::fs::remove_dir_all(&local_target).with_context(|| {
-                    format!("remove unregistered bundle {}", local_target.display())
-                })?;
-            }
-            Ok(())
-        })?;
-        return Err(error).context("write remote bundle registration");
-    }
+    transaction
+        .commit_present(
+            &serde_json::json!({ "path": canonical_target }),
+            state.identity.signing_key(),
+        )
+        .context("commit remote bundle registration")?;
 
     // Bump the engine cache generation — same as local bundle_install.
     let new_gen = state.engine_cache.bump_system_install_generation();

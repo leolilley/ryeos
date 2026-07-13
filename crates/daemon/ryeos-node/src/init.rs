@@ -316,26 +316,27 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
+        let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
+            &opts.app_root,
+            name,
+        )?;
+        transaction.reconcile(&node_key)?;
+        let grants = command_registration_grants
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let registration = bundle_registration_value(&target, &grants);
 
         if target.exists() {
             // Bundle already installed. Registration continues to name the
             // same canonical path, so publish it before the atomic tree
             // exchange; every observable generation remains registered.
             verify_bundle_structure(&target)?;
-            let node_dir = opts.app_root.join(ryeos_engine::AI_DIR).join("node");
-            let grants = command_registration_grants
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
-            write_node_bundle_registration(
-                &node_dir,
-                name,
-                &target.canonicalize()?,
-                &grants,
-                &node_key,
-            )
-            .with_context(|| format!("rewrite node/bundles/{}.yaml", name))?;
-
+            transaction.begin(
+                ryeos_app::bundle_transaction::DesiredBundleState::Present {
+                    registration: registration.clone(),
+                },
+            )?;
             replace_bundle(source_path, &target).with_context(|| {
                 format!(
                     "atomic replace {}: {} -> {}",
@@ -345,12 +346,14 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 )
             })?;
         } else {
-            let grants = command_registration_grants
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
-            install_bundle(&opts.app_root, name, source_path, &grants, &node_key, true)?;
+            transaction.begin(
+                ryeos_app::bundle_transaction::DesiredBundleState::Present {
+                    registration: registration.clone(),
+                },
+            )?;
+            install_bundle(&opts.app_root, name, source_path, true)?;
         }
+        transaction.commit_present(&registration, &node_key)?;
 
         bundles_installed.push(name.clone());
     }
@@ -936,7 +939,7 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
         .to_string_lossy();
 
     let staging = parent.join(format!(".{name}.staging"));
-    lillux::with_exclusive_file_lock(target, || {
+    (|| {
         if staging.exists() {
             fs::remove_dir_all(&staging)
                 .with_context(|| format!("clean up stale staging {}", staging.display()))?;
@@ -960,7 +963,7 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
             );
         }
         Ok(())
-    })
+    })()
 }
 
 /// Install a bundle by copy + signed `kind: node` registration.
@@ -974,8 +977,6 @@ fn install_bundle(
     app_root: &Path,
     name: &str,
     source: &Path,
-    command_registration_caps: &[String],
-    node_key: &SigningKey,
     skip_preflight: bool,
 ) -> Result<PathBuf> {
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
@@ -1012,7 +1013,7 @@ fn install_bundle(
     fs::create_dir_all(parent)
         .with_context(|| format!("create bundles parent for {}", target.display()))?;
     let staging = parent.join(format!(".{name}.staging"));
-    lillux::with_exclusive_file_lock(&target, || {
+    (|| {
         if target.exists() {
             bail!(
                 "bundle target appeared during install: {}",
@@ -1029,61 +1030,23 @@ fn install_bundle(
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         lillux::rename_path_durable(&staging, &target)
             .with_context(|| format!("activate {} at {}", name, target.display()))
-    })?;
+    })()?;
     let canonical = target
         .canonicalize()
         .with_context(|| format!("canonicalize {} install path", name))?;
 
-    // Write signed kind: node bundle registration record.
-    let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
-    if let Err(error) = write_node_bundle_registration(
-        &node_dir,
-        name,
-        &canonical,
-        command_registration_caps,
-        node_key,
-    ) {
-        lillux::with_exclusive_file_lock(&target, || {
-            if target.exists() {
-                fs::remove_dir_all(&target)
-                    .with_context(|| format!("remove unregistered bundle {}", target.display()))?;
-            }
-            Ok(())
-        })?;
-        return Err(error).context("write installed bundle registration");
-    }
-
     Ok(canonical)
 }
 
-/// Write a signed `kind: node` bundle registration record.
-///
-/// Mirrors what `bundle.install` does in the daemon, but uses the local
-/// node signing key rather than the daemon's identity (they're the same
-/// key when both paths run on the same node).
-fn write_node_bundle_registration(
-    node_dir: &Path,
-    name: &str,
-    path: &Path,
-    command_registration_caps: &[String],
-    node_key: &SigningKey,
-) -> Result<()> {
-    let bundles_dir = node_dir.join("bundles");
-    fs::create_dir_all(&bundles_dir)
-        .with_context(|| format!("create node bundles dir {}", bundles_dir.display()))?;
-    let mut body = format!("kind: node\npath: {}\n", path.display());
+fn bundle_registration_value(path: &Path, command_registration_caps: &[String]) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "kind": "node",
+        "path": path,
+    });
     if !command_registration_caps.is_empty() {
-        body.push_str("command_registration_caps:\n");
-        for cap in command_registration_caps {
-            body.push_str("  - ");
-            body.push_str(cap);
-            body.push('\n');
-        }
+        value["command_registration_caps"] = serde_json::json!(command_registration_caps);
     }
-    let signed = lillux::signature::sign_content(&body, node_key, "#", None);
-    let target = bundles_dir.join(format!("{name}.yaml"));
-    lillux::atomic_write_private(&target, signed.as_bytes())
-        .with_context(|| format!("write signed bundle registration {}", target.display()))
+    value
 }
 
 /// Recursive directory copy with symlink preservation (Unix only).
