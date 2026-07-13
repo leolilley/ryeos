@@ -390,7 +390,6 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         let default_policy = r#"version: 1
 backend_path: /usr/bin/bwrap
 allow_network: true
-allow_host_read: true
 writable_paths:
   - "{project}"
 allowed_env:

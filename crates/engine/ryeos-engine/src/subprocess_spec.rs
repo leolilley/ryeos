@@ -62,7 +62,6 @@ pub struct NodeSandboxPolicy {
     pub version: u32,
     pub backend_path: PathBuf,
     pub allow_network: bool,
-    pub allow_host_read: bool,
     #[serde(default)]
     pub writable_paths: Vec<String>,
     #[serde(default)]
@@ -118,11 +117,38 @@ pub fn sandbox_wrap(
             reason: "backend_path must be absolute".to_string(),
         });
     }
-    if !policy.allow_host_read {
+    let backend_path = std::fs::canonicalize(&policy.backend_path).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "sandbox backend {} cannot be resolved: {error}",
+                policy.backend_path.display()
+            ),
+        }
+    })?;
+    let backend_metadata = std::fs::metadata(&backend_path).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "sandbox backend {} cannot be inspected: {error}",
+                backend_path.display()
+            ),
+        }
+    })?;
+    if !backend_metadata.is_file() {
         return Err(EngineError::SandboxPolicyRefused {
-            reason: "the bubblewrap backend currently requires explicit allow_host_read: true"
-                .to_string(),
+            reason: format!("sandbox backend {} is not a file", backend_path.display()),
         });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if backend_metadata.permissions().mode() & 0o111 == 0 {
+            return Err(EngineError::SandboxPolicyRefused {
+                reason: format!(
+                    "sandbox backend {} is not executable",
+                    backend_path.display()
+                ),
+            });
+        }
     }
     let env_allowed = |name: &str| {
         policy.allowed_env.iter().any(|allowed| {
@@ -139,10 +165,26 @@ pub fn sandbox_wrap(
         });
     }
 
+    let canonical_project = std::fs::canonicalize(&spec.project_path).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "project path {} cannot be resolved: {error}",
+                spec.project_path.display()
+            ),
+        }
+    })?;
+    let canonical_cwd = std::fs::canonicalize(&spec.cwd).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "working directory {} cannot be resolved: {error}",
+                spec.cwd.display()
+            ),
+        }
+    })?;
     let resolve_path = |configured: &str| -> Result<PathBuf, EngineError> {
         let path = match configured {
-            "{project}" => spec.project_path.clone(),
-            "{cwd}" => spec.cwd.clone(),
+            "{project}" => canonical_project.clone(),
+            "{cwd}" => canonical_cwd.clone(),
             other => PathBuf::from(other),
         };
         if !path.is_absolute() {
@@ -150,7 +192,9 @@ pub fn sandbox_wrap(
                 reason: format!("sandbox path `{}` is not absolute", path.display()),
             });
         }
-        Ok(path)
+        std::fs::canonicalize(&path).map_err(|error| EngineError::SandboxPolicyRefused {
+            reason: format!("sandbox path {} cannot be resolved: {error}", path.display()),
+        })
     };
     let mut writable_paths = policy
         .writable_paths
@@ -159,7 +203,10 @@ pub fn sandbox_wrap(
         .collect::<Result<Vec<_>, _>>()?;
     writable_paths.sort();
     writable_paths.dedup();
-    if !writable_paths.iter().any(|root| spec.cwd.starts_with(root)) {
+    if !writable_paths
+        .iter()
+        .any(|root| canonical_cwd.starts_with(root))
+    {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!(
                 "working directory {} is not writable by node policy",
@@ -167,6 +214,12 @@ pub fn sandbox_wrap(
             ),
         });
     }
+
+    let command_path = std::fs::canonicalize(&spec.cmd).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!("command {} cannot be resolved: {error}", spec.cmd.display()),
+        }
+    })?;
 
     let mut args = vec![
         "--die-with-parent".to_string(),
@@ -176,11 +229,61 @@ pub fn sandbox_wrap(
     if policy.allow_network {
         args.push("--share-net".to_string());
     }
-    args.extend(["--ro-bind".to_string(), "/".to_string(), "/".to_string()]);
+    args.extend(["--tmpfs".to_string(), "/".to_string()]);
+    // Only the OS runtime surface and the exact verified executable are
+    // visible. In particular, the app root (vault and signing keys) and the
+    // operator's home are not mounted into the sandbox.
+    for path in ["/usr", "/bin", "/lib", "/lib64"] {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            let source = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let source = source.to_string_lossy().into_owned();
+            args.extend(["--ro-bind".to_string(), source, path.to_string_lossy().into_owned()]);
+        }
+    }
+    args.extend(["--dir".to_string(), "/etc".to_string()]);
+    for path in [
+        "/etc/hosts",
+        "/etc/nsswitch.conf",
+        "/etc/resolv.conf",
+        "/etc/ssl",
+    ] {
+        if Path::new(path).exists() {
+            args.extend(["--ro-bind".to_string(), path.to_string(), path.to_string()]);
+        }
+    }
+    let command_is_on_system_surface = ["/usr", "/bin", "/lib", "/lib64"]
+        .iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .any(|root| command_path.starts_with(root));
+    if !command_is_on_system_surface {
+        let mut command_parents = command_path
+            .ancestors()
+            .skip(1)
+            .filter(|path| *path != Path::new("/"))
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        command_parents.reverse();
+        for parent in command_parents {
+            args.extend(["--dir".to_string(), parent.to_string_lossy().into_owned()]);
+        }
+        let command = command_path.to_string_lossy().into_owned();
+        args.extend(["--ro-bind".to_string(), command.clone(), command]);
+    }
     args.extend(["--dev".to_string(), "/dev".to_string()]);
     args.extend(["--proc".to_string(), "/proc".to_string()]);
     args.extend(["--tmpfs".to_string(), "/tmp".to_string()]);
     for path in &writable_paths {
+        let mut parents = path
+            .ancestors()
+            .skip(1)
+            .filter(|parent| *parent != Path::new("/"))
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        parents.reverse();
+        for parent in parents {
+            args.extend(["--dir".to_string(), parent.to_string_lossy().into_owned()]);
+        }
         let path = path.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), path.clone(), path]);
     }
@@ -191,16 +294,18 @@ pub fn sandbox_wrap(
         args.extend(["--rlimit-nproc".to_string(), limit.to_string()]);
     }
     args.push("--chdir".to_string());
-    args.push(spec.cwd.to_string_lossy().into_owned());
+    args.push(canonical_cwd.to_string_lossy().into_owned());
     args.push("--".to_string());
-    args.push(spec.cmd.to_string_lossy().into_owned());
+    args.push(command_path.to_string_lossy().into_owned());
     args.append(&mut spec.args);
 
-    spec.cmd = policy.backend_path.clone();
+    spec.cmd = backend_path.clone();
+    spec.cwd = canonical_cwd;
+    spec.project_path = canonical_project;
     spec.args = args;
     spec.sandbox = Some(EffectiveSandbox {
         backend: "bubblewrap".to_string(),
-        backend_path: policy.backend_path.clone(),
+        backend_path,
         allow_network: policy.allow_network,
         writable_paths,
         max_open_files: policy.max_open_files,
@@ -215,10 +320,11 @@ mod tests {
     use crate::protocol_vocabulary::{CallbackChannel, StdoutShape};
 
     fn spec() -> SubprocessSpec {
+        let project = tempfile::tempdir().unwrap().keep();
         SubprocessSpec {
-            cmd: PathBuf::from("/usr/bin/example"),
+            cmd: PathBuf::from("/bin/sh"),
             args: vec!["run".to_string()],
-            cwd: PathBuf::from("/work/project"),
+            cwd: project.clone(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             stdin: Vec::new(),
             timeout: Duration::from_secs(30),
@@ -226,7 +332,7 @@ mod tests {
             callback_channel: CallbackChannel::None,
             item_ref: CanonicalRef::parse("runtime:test").unwrap(),
             thread_id: "T-test".to_string(),
-            project_path: PathBuf::from("/work/project"),
+            project_path: project,
             sandbox: None,
         }
     }
@@ -234,9 +340,10 @@ mod tests {
     fn policy() -> NodeSandboxPolicy {
         NodeSandboxPolicy {
             version: 1,
-            backend_path: PathBuf::from("/usr/bin/bwrap"),
+            // The wrapper is only assembled in these unit tests. A ubiquitous
+            // executable fixture keeps them independent of host bwrap setup.
+            backend_path: PathBuf::from("/bin/sh"),
             allow_network: false,
-            allow_host_read: true,
             writable_paths: vec!["{project}".to_string()],
             allowed_env: vec!["PATH".to_string()],
             max_open_files: Some(128),
@@ -247,15 +354,17 @@ mod tests {
     #[test]
     fn wraps_command_with_effective_node_policy() {
         let wrapped = sandbox_wrap(spec(), &policy()).unwrap();
-        assert_eq!(wrapped.cmd, PathBuf::from("/usr/bin/bwrap"));
+        assert_eq!(wrapped.cmd, std::fs::canonicalize("/bin/sh").unwrap());
+        let project = wrapped.project_path.clone();
+        let project_text = project.to_string_lossy();
         assert!(wrapped
             .args
             .windows(3)
-            .any(|args| args == ["--bind", "/work/project", "/work/project"]));
+            .any(|args| args == ["--bind", project_text.as_ref(), project_text.as_ref()]));
         assert!(!wrapped.args.iter().any(|arg| arg == "--share-net"));
         assert_eq!(
             wrapped.sandbox.unwrap().writable_paths,
-            vec![PathBuf::from("/work/project")]
+            vec![project]
         );
     }
 

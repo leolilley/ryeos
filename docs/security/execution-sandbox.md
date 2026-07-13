@@ -28,7 +28,6 @@ of least privilege:
 version: 1
 backend_path: /usr/bin/bwrap
 allow_network: true
-allow_host_read: true
 writable_paths:
   - "{project}"
 allowed_env:
@@ -46,14 +45,14 @@ without changing signed items.
 
 The sandbox limits filesystem writes, namespace visibility, network access,
 the subprocess environment, and selected resource counts. The initial policy
-still permits reading host files, using the host network, and receiving the
-daemon-constructed environment. Those are explicit operator defaults, not
-permissions requested by an item.
+still permits reading the active project and its exact executable, using the
+host network, and receiving the daemon-constructed environment. The app root,
+vault and signing keys, and operator home are not mounted. These are explicit
+operator defaults, not permissions requested by an item.
 
 This boundary does not make untrusted code harmless. It does not provide a
-virtual machine, defend against kernel vulnerabilities, hide host files under
-the initial policy, or impose CPU and memory quotas. RyeOS currently supports
+virtual machine, defend against kernel vulnerabilities, or impose CPU and
+memory quotas. RyeOS currently supports
 this execution backend on Linux only and fails closed when Bubblewrap is not
 installed. Container images and the Arch package include it as a runtime
 dependency.
-

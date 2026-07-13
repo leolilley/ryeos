@@ -31,8 +31,8 @@ The stage should be able to enforce, or deliberately decline to enforce:
 - Sandbox policy must be node-owned/operator-owned, not item-authored authority.
 - Fail closed when the node sandbox policy or backend is unavailable.
 
-The initial policy written by `ryeos init` explicitly permits host reads,
-runtime networking, and the daemon-constructed environment while restricting
-filesystem writes to the active project. Operators can narrow network and
-environment access in the node policy. These defaults are operator authority,
-not item-authored requirements.
+The initial policy written by `ryeos init` permits runtime networking and the
+daemon-constructed environment while restricting filesystem visibility to the
+runtime system surface, the verified executable, and the active project.
+Operators can narrow network and environment access in the node policy. These
+defaults are operator authority, not item-authored requirements.
