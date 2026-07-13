@@ -2,6 +2,7 @@
 //!
 //! Each record registers one installed bundle:
 //! ```yaml
+//! kind: node
 //! path: <absolute path to bundle root>
 //! ```
 
@@ -19,8 +20,7 @@ pub struct BundleSection;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBundleRecord {
-    #[serde(default)]
-    kind: Option<String>,
+    kind: String,
     path: std::path::PathBuf,
     #[serde(default)]
     command_registration_caps: Vec<String>,
@@ -35,9 +35,9 @@ impl NodeConfigSection for BundleSection {
     fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
         let raw: RawBundleRecord =
             serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
-        if raw.kind.as_deref().is_some_and(|kind| kind != "node") {
+        if raw.kind != "node" {
             bail!(
-                "bundle '{}' declares kind {:?}, expected 'node'",
+                "bundle '{}' declares kind {:?}, expected current ryeos.bundle-registration/v1 kind 'node'",
                 ctx.id,
                 raw.kind
             );

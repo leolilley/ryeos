@@ -13,7 +13,7 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{
-    derive_provides_kinds, materialize_manifest, BundleManifest, BundleManifestSource,
+    derive_provides_kinds, materialize_manifest, parse_current_manifest_body, BundleManifestSource,
 };
 
 const IDENTITY_COMPOSER: &str = "handler:ryeos/core/identity";
@@ -501,8 +501,7 @@ pub fn verify_manifest_signature(
         .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
 
     let body = lillux::signature::strip_signature_lines(&raw);
-    let manifest: BundleManifest = serde_yaml::from_str(&body)
-        .with_context(|| format!("parse manifest body from {}", manifest_path.display()))?;
+    let manifest = parse_current_manifest_body(&body, &manifest_path)?;
     manifest.runtime_authority.validate().map_err(|e| {
         anyhow::anyhow!(
             "invalid `runtime_authority` declaration in {}: {e}",
