@@ -30,6 +30,12 @@ use ryeos_state::UsageSubject;
 /// can name the watch sort without a direct `ryeos-state` dependency.
 pub use ryeos_state::queries::{ThreadListFilter, ThreadSort};
 
+mod validation;
+
+use validation::{
+    normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
+};
+
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
     kind_profiles: Arc<KindProfileRegistry>,
@@ -1908,13 +1914,6 @@ impl ThreadLifecycleService {
     }
 }
 
-fn normalize_terminal_status(status: &str) -> Result<&str> {
-    match status {
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued" => Ok(status),
-        other => bail!("invalid terminal status: {other}"),
-    }
-}
-
 /// Build the native managed-dispatch envelope shape
 /// (`{success, status, result, outputs, warnings, cost}`) from a runtime's RAW
 /// terminal fields, so a stored follow result classifies byte-for-byte like a live
@@ -1980,21 +1979,6 @@ fn degraded_follow_envelope(
     })
 }
 
-fn validate_kind(kind: &str, profiles: &KindProfileRegistry) -> Result<()> {
-    if profiles.is_valid(kind) {
-        Ok(())
-    } else {
-        bail!("invalid thread kind: {kind}")
-    }
-}
-
-fn validate_launch_mode(launch_mode: &str) -> Result<()> {
-    match launch_mode {
-        "inline" | "detached" => Ok(()),
-        other => bail!("invalid launch mode: {other}"),
-    }
-}
-
 fn artifact_to_record(artifact: &ExecutionArtifact) -> NewArtifactRecord {
     NewArtifactRecord {
         artifact_type: artifact.artifact_type.clone(),
@@ -2002,26 +1986,6 @@ fn artifact_to_record(artifact: &ExecutionArtifact) -> NewArtifactRecord {
         content_hash: artifact.content_hash.clone(),
         metadata: artifact.metadata.clone(),
     }
-}
-
-fn validate_thread_id_format(id: &str) -> Result<()> {
-    if !id.starts_with("T-") {
-        bail!("thread_id must start with `T-`: got `{id}`");
-    }
-    let suffix = &id[2..];
-    let segments: Vec<&str> = suffix.split('-').collect();
-    if segments.len() != 5 {
-        bail!("thread_id suffix must have 5 dash-separated hex groups: got `{suffix}`");
-    }
-    let expected_lengths: &[usize] = &[8, 4, 4, 4, 12];
-    for (seg, &expected) in segments.iter().zip(expected_lengths.iter()) {
-        if seg.len() != expected || !seg.chars().all(|c| c.is_ascii_hexdigit()) {
-            bail!(
-                "thread_id suffix hex groups must have lengths {expected_lengths:?}: got `{suffix}`"
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Mints a fresh `T-{uuid}` thread id. 16 random bytes from `OsRng`.
@@ -2686,38 +2650,4 @@ mod tests {
         assert_eq!(v2["pending"], json!(2));
     }
 
-    #[test]
-    fn validate_thread_id_accepts_valid_format() {
-        assert!(validate_thread_id_format("T-01234567-abcd-ef01-2345-6789abcdef01").is_ok());
-        let id = new_thread_id();
-        assert!(validate_thread_id_format(&id).is_ok());
-    }
-
-    #[test]
-    fn validate_thread_id_rejects_missing_prefix() {
-        let err = validate_thread_id_format("foo-123").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("must start with `T-`"), "got: {msg}");
-    }
-
-    #[test]
-    fn validate_thread_id_rejects_non_uuid_suffix() {
-        let err = validate_thread_id_format("T-not-a-uuid").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("hex groups"), "got: {msg}");
-    }
-
-    #[test]
-    fn validate_thread_id_rejects_wrong_segment_lengths() {
-        let err = validate_thread_id_format("T-01234567-ab-cdef-0123-456789abcdef01").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("hex groups"), "got: {msg}");
-    }
-
-    #[test]
-    fn validate_thread_id_rejects_non_hex_chars() {
-        let err = validate_thread_id_format("T-ghijklmn-abcd-ef01-2345-6789abcdef01").unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("hex groups"), "got: {msg}");
-    }
 }
