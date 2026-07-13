@@ -59,14 +59,24 @@ async fn reattach_seat_thread(
         "parameters": { "surface_ref": surface_ref },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
-    let thread_id = envelope
+    let seats: Vec<String> = envelope
         .get("result")
         .and_then(|result| result.get("seats"))
         .and_then(serde_json::Value::as_array)?
-        .first()
-        .and_then(|seat| seat.get("thread_id"))
-        .and_then(serde_json::Value::as_str)?
-        .to_string();
+        .iter()
+        .filter_map(|seat| seat.get("thread_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let thread_id = seats.first()?.clone();
+
+    // Supersede the stragglers: parallel clients share the newest seat by
+    // construction (this same freshest-first pick), so a SECOND running
+    // seat for the surface is always an orphan — a close that was skipped
+    // by a crash, a kill, or a pre-settle exit. Settle them now or they
+    // sit "running" in every thread listing forever.
+    for orphan in seats.iter().skip(1) {
+        close_seat_thread(client, orphan).await;
+    }
 
     let replayed = replay_seat_thread(client, &thread_id).await;
     Some((thread_id, replayed))
