@@ -26,7 +26,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/dev-tui.sh [SURFACE_REF] [options]
 
-Build ryeos-ui-terminal from this checkout and run it directly,
+Build ryeos-client-terminal from this checkout and run it directly,
 bypassing the packaged client:ryeos/tui bundle-binary dispatch.
 
 Arguments:
@@ -84,9 +84,9 @@ cd "$REPO_ROOT"
 
 if [[ "$BUILD" -eq 1 ]]; then
     if [[ "$PROFILE" == "release" ]]; then
-        cargo build --release -p ryeos-ui-terminal
+        cargo build --release -p ryeos-client-terminal
     else
-        cargo build -p ryeos-ui-terminal
+        cargo build -p ryeos-client-terminal
     fi
 fi
 
