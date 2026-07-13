@@ -7,6 +7,7 @@ pub fn evaluate_next(
     state: &Value,
     inputs: &Value,
     execution: Option<&Value>,
+    graph_run_id: Option<&str>,
 ) -> Option<String> {
     match &node.next {
         Some(EdgeSpec::Unconditional { to: target }) => Some(target.clone()),
@@ -16,7 +17,7 @@ pub fn evaluate_next(
                 inputs: inputs.clone(),
                 result: None,
                 execution: execution.cloned(),
-                graph_run_id: None,
+                graph_run_id: graph_run_id.map(str::to_owned),
             };
             evaluate_conditional_edges(edges, &ctx.as_context())
         }
@@ -30,6 +31,7 @@ pub fn evaluate_next_with_result(
     inputs: &Value,
     result: &Value,
     execution: Option<&Value>,
+    graph_run_id: Option<&str>,
 ) -> Option<String> {
     match &node.next {
         Some(EdgeSpec::Unconditional { to: target }) => Some(target.clone()),
@@ -39,7 +41,7 @@ pub fn evaluate_next_with_result(
                 inputs: inputs.clone(),
                 result: Some(result.clone()),
                 execution: execution.cloned(),
-                graph_run_id: None,
+                graph_run_id: graph_run_id.map(str::to_owned),
             };
             evaluate_conditional_edges(edges, &ctx.as_context())
         }

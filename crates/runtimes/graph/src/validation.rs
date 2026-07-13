@@ -242,8 +242,8 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
     // authoring error rather than let a mistagged cohort pass unnoticed.
     if node.facets.is_some() && !(node.detach || (node.follow && node.over.is_some())) {
         result.errors.push(format!(
-            "node '{name}' declares 'facets' without 'detach' — cohort facets are only stamped \
-             on a detached child launch"
+            "node '{name}' declares 'facets' without 'detach' or follow fanout — cohort facets are only stamped \
+             on a detached child launch or follow fanout child launch"
         ));
     }
 

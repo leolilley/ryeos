@@ -1106,7 +1106,7 @@ impl Walker {
 
             NodeType::Gate => {
                 // Gate: evaluate conditions and pick a branch target.
-                let target = edges::evaluate_next(node, state, inputs, Some(&execution));
+                let target = edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
                 StepOutcome::GateTaken { target }
             }
 
@@ -1265,7 +1265,7 @@ impl Walker {
                     }
                 }
 
-                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
+                let next = edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
                 StepOutcome::ForeachDone {
                     results,
                     collect_key: node.collect.clone(),
@@ -1330,7 +1330,7 @@ impl Walker {
             Some(a) => a.clone(),
             None => {
                 // Action node with no action — treat as terminal.
-                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
+                let next = edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
                 return match next {
                     Some(n) => StepOutcome::ActionOk {
                         item_id: String::new(),
@@ -1667,7 +1667,7 @@ impl Walker {
                     None => None,
                 };
                 let next =
-                    edges::evaluate_next_with_result(node, state, inputs, &val, Some(&execution));
+                    edges::evaluate_next_with_result(node, state, inputs, &val, Some(&execution), Some(graph_run_id));
                 StepOutcome::ActionOk {
                     item_id: dispatched_item_id,
                     result: val,
@@ -1799,7 +1799,7 @@ impl Walker {
                 }
             }
             let next = if errors.is_empty() {
-                edges::evaluate_next_with_result(node, state, inputs, &Value::Array(results.clone()), Some(execution))
+                edges::evaluate_next_with_result(node, state, inputs, &Value::Array(results.clone()), Some(execution), Some(graph_run_id))
             } else { None };
             return StepOutcome::FollowFanoutDone {
                 results, statuses, errors, assign_delta: delta,
@@ -1814,7 +1814,7 @@ impl Walker {
                 results: vec![], statuses: vec![], errors: vec![],
                 assign_delta: Value::Object(serde_json::Map::new()), collect_key: node.collect.clone(),
                 var_name: var, item_id: raw_item_id,
-                next: edges::evaluate_next_with_result(node, state, inputs, &Value::Array(vec![]), Some(execution)),
+                next: edges::evaluate_next_with_result(node, state, inputs, &Value::Array(vec![]), Some(execution), Some(graph_run_id)),
                 next_on_error: resolve_next_on_error(node, cfg), cost: None,
                 elapsed_ms: start.elapsed().as_millis() as u64,
             };
@@ -2072,6 +2072,7 @@ impl Walker {
                     elapsed_ms,
                     error: Some(error.clone()),
                     cost: cost.clone(),
+                    fanout: None,
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
                     .await;
@@ -2295,6 +2296,8 @@ impl Walker {
                 merge_into(state, &assign_delta);
                 if let Some(obj) = state.as_object_mut() { obj.remove(&var_name); }
                 if let Some(c) = &cost {
+                    // Match classic follow resume: the detached children's
+                    // aggregate cost is attributed once to the parent node.
                     self.accounting.lock().unwrap().record(current, step, &item_id, c.clone());
                 }
                 let diagnostic = (!errors.is_empty()).then(|| errors.iter()
@@ -2305,10 +2308,17 @@ impl Walker {
                     definition_hash: self.graph.definition_hash.clone(),
                     result_hash: Some(hash_json_value(&json!({"results": results, "statuses": statuses}))),
                     cache_hit: false, elapsed_ms, error: diagnostic.clone(), cost: cost.clone(),
+                    fanout: Some(crate::model::FanoutReceiptSummary {
+                        statuses: statuses.clone(),
+                        failed: statuses.iter().filter(|status| status.as_str() == "failed").count(),
+                        expected: statuses.len(),
+                        // Results remain represented by result_hash; receipts do not have
+                        // an explicit local-content policy permitting raw result persistence.
+                        results: None,
+                    }),
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap()).await;
                 let status = if errors.is_empty() { "ok" } else { "error" };
-                self.emit_graph_branch_taken(graph_run_id, step, current, next.as_deref()).await;
                 self.emit_graph_step_completed(graph_run_id, step, current, status, diagnostic.as_deref()).await;
                 self.fire_graph_hooks("graph_step_completed",
                     self.step_hook_context(graph_run_id, current, step, status, diagnostic.as_deref(), state)).await;
@@ -2318,7 +2328,10 @@ impl Walker {
                         NextOnError::Redirect(target) => Some(target),
                         NextOnError::PolicyContinue => {
                             suppressed_errors.extend(errors);
-                            edges::evaluate_next(self.graph.config.nodes.get(current).unwrap(), state, inputs, Some(execution))
+                            edges::evaluate_next_with_result(
+                                self.graph.config.nodes.get(current).unwrap(), state, inputs,
+                                &Value::Array(results.clone()), Some(execution), Some(graph_run_id),
+                            )
                         }
                         NextOnError::PolicyFail => {
                             return self.commit_terminal(CommitTerminalInput {
@@ -2329,6 +2342,7 @@ impl Walker {
                         }
                     }
                 };
+                self.emit_graph_branch_taken(graph_run_id, step, current, target.as_deref()).await;
                 match target {
                     Some(target) => self.write_checkpoint_or_error(
                         graph_run_id, &target, step + 1, state, suppressed_errors, guard, 0,
@@ -2389,6 +2403,7 @@ impl Walker {
                     elapsed_ms,
                     error: None,
                     cost: cost.clone(),
+                    fanout: None,
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
                     .await;
@@ -2469,6 +2484,7 @@ impl Walker {
                     elapsed_ms,
                     error: Some(error.clone()),
                     cost: cost.clone(),
+                    fanout: None,
                 });
 
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
@@ -2514,6 +2530,7 @@ impl Walker {
                             state,
                             inputs,
                             Some(execution),
+                            Some(graph_run_id),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -2609,6 +2626,7 @@ impl Walker {
                     elapsed_ms,
                     error: Some(error.clone()),
                     cost: cost.clone(),
+                    fanout: None,
                 });
 
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
@@ -2654,6 +2672,7 @@ impl Walker {
                             state,
                             inputs,
                             Some(execution),
+                            Some(graph_run_id),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;

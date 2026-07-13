@@ -408,6 +408,18 @@ pub struct NodeReceipt {
     /// Cost reported by this node's native child, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<RuntimeCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout: Option<FanoutReceiptSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FanoutReceiptSummary {
+    pub statuses: Vec<String>,
+    pub failed: usize,
+    pub expected: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<Value>>,
 }
 
 pub struct WalkContext {
