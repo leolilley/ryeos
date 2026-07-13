@@ -36,7 +36,8 @@ pub fn shard_path(root: &Path, namespace: &str, hash: &str, ext: &str) -> PathBu
 /// references them yet.
 pub fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     if let [(target, data)] = writes {
-        return atomic_write(target, data);
+        atomic_write(target, data)?;
+        return Ok(());
     }
     for (target, data) in writes {
         if let Some(parent) = target.parent() {
