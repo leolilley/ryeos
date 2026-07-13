@@ -748,10 +748,9 @@ fn waiting_follow_action(
     if resume {
         if let Some(reloaded) = state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
             if matches!(reloaded.phase.as_str(), ryeos_app::runtime_db::follow_phase::READY | ryeos_app::runtime_db::follow_phase::RESUMING) {
-                return Ok(vec![FollowReconcileAction::Resume { follow_key: w.follow_key.clone() }]);
+                actions.push(FollowReconcileAction::Resume { follow_key: w.follow_key.clone() });
             }
         }
-        actions.push(FollowReconcileAction::Resume { follow_key: w.follow_key.clone() });
     }
     Ok(actions)
 }
