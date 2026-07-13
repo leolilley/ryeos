@@ -5,7 +5,6 @@
 //!
 //! OfflineOnly: the daemon must be stopped (engine reload not implemented).
 
-use std::fs;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -57,7 +56,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    fs::remove_file(&config_item_path).with_context(|| {
+    lillux::remove_file_durable(&config_item_path).with_context(|| {
         format!(
             "failed to remove config item {}",
             config_item_path.display()
@@ -73,7 +72,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join(&req.name);
 
     let removed_dir = if bundle_dir.exists() {
-        fs::remove_dir_all(&bundle_dir).with_context(|| {
+        lillux::remove_dir_all_durable(&bundle_dir).with_context(|| {
             format!("failed to remove bundle directory {}", bundle_dir.display())
         })?;
         true

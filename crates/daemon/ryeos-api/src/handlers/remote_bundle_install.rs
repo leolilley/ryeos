@@ -104,43 +104,50 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    // 4. Materialize to local bundle directory.
-    std::fs::create_dir_all(&local_target)
-        .with_context(|| format!("create bundle dir {}", local_target.display()))?;
+    // 4. Materialize and verify a hidden generation, then expose the complete
+    // tree with one durable rename.
+    std::fs::create_dir_all(&bundles_root)
+        .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
+    let staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
+    let ((files_installed, total_bytes), canonical_target) =
+        lillux::with_exclusive_file_lock(&local_target, || {
+            if local_target.exists() {
+                bail!(
+                    "bundle '{}' appeared during remote install at {}",
+                    req.bundle_name,
+                    local_target.display()
+                );
+            }
+            if staging.exists() {
+                std::fs::remove_dir_all(&staging)
+                    .with_context(|| format!("remove stale staging {}", staging.display()))?;
+            }
+            std::fs::create_dir(&staging)
+                .with_context(|| format!("create staging dir {}", staging.display()))?;
+            let counts = materialize_files(&entries, &blob_data, &staging).map_err(|error| {
+                let _ = std::fs::remove_dir_all(&staging);
+                error
+            })?;
+            if let Err(error) =
+                ryeos_bundle::preflight::preflight_verify_bundle(&staging, &state.config.app_root)
+            {
+                let _ = std::fs::remove_dir_all(&staging);
+                bail!(
+                    "preflight verification failed for bundle '{}': {}",
+                    req.bundle_name,
+                    error
+                );
+            }
+            lillux::rename_path_durable(&staging, &local_target)?;
+            let canonical = local_target
+                .canonicalize()
+                .context("canonicalize installed bundle path")?;
+            Ok((counts, canonical))
+        })?;
 
-    // If materialization failed, clean up partial directory.
-    let (files_installed, total_bytes) = match materialize_files(
-        &entries,
-        &blob_data,
-        &local_target,
-    ) {
-        Ok(counts) => counts,
-        Err(e) => {
-            tracing::error!(error = %e, "bundle materialization failed, cleaning up partial dir");
-            let _ = std::fs::remove_dir_all(&local_target);
-            return Err(e);
-        }
-    };
+    // 5. Write signed node-config bundle registration.
 
-    // 5. Preflight verification — fail closed if bundle integrity is bad.
-    if let Err(e) =
-        ryeos_bundle::preflight::preflight_verify_bundle(&local_target, &state.config.app_root)
-    {
-        tracing::error!(error = %e, "preflight verification failed, cleaning up");
-        let _ = std::fs::remove_dir_all(&local_target);
-        bail!(
-            "preflight verification failed for bundle '{}': {}",
-            req.bundle_name,
-            e
-        );
-    }
-
-    // 6. Write signed node-config bundle registration.
-    let canonical_target = local_target
-        .canonicalize()
-        .context("canonicalize installed bundle path")?;
-
-    ryeos_app::node_config::writer::write_signed_node_item(
+    if let Err(error) = ryeos_app::node_config::writer::write_signed_node_item(
         &state
             .config
             .app_root
@@ -150,7 +157,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &req.bundle_name,
         &serde_json::json!({ "path": canonical_target }),
         &state.identity,
-    )?;
+    ) {
+        lillux::with_exclusive_file_lock(&local_target, || {
+            if local_target.exists() {
+                std::fs::remove_dir_all(&local_target).with_context(|| {
+                    format!("remove unregistered bundle {}", local_target.display())
+                })?;
+            }
+            Ok(())
+        })?;
+        return Err(error).context("write remote bundle registration");
+    }
 
     // Bump the engine cache generation — same as local bundle_install.
     let new_gen = state.engine_cache.bump_system_install_generation();

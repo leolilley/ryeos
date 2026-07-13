@@ -94,6 +94,66 @@ pub fn remove_file_durable(path: &Path) -> Result<()> {
     }
 }
 
+/// Recursively remove a directory and durably record its disappearance.
+pub fn remove_dir_all_durable(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => {
+            sync_parent_dir(path)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Atomically exchange two existing sibling filesystem entries.
+///
+/// RyeOS uses this for live bundle generations: the installed path always
+/// names either the complete old tree or the complete staged tree. Platforms
+/// without an atomic exchange primitive are rejected rather than using a
+/// remove-then-rename compatibility path.
+#[cfg(target_os = "linux")]
+pub fn atomic_exchange_paths(left: &Path, right: &Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    if left.parent() != right.parent() {
+        anyhow::bail!("atomic exchange paths must share a parent directory");
+    }
+    let left_c = CString::new(left.as_os_str().as_bytes())?;
+    let right_c = CString::new(right.as_os_str().as_bytes())?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            left_c.as_ptr(),
+            libc::AT_FDCWD,
+            right_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    sync_parent_dir(left)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn atomic_exchange_paths(_left: &Path, _right: &Path) -> Result<()> {
+    anyhow::bail!("atomic filesystem exchange is unavailable on this platform")
+}
+
+/// Rename a staged entry into place and durably flush its parent directory.
+pub fn rename_path_durable(source: &Path, target: &Path) -> Result<()> {
+    if source.parent() != target.parent() {
+        anyhow::bail!("durable rename paths must share a parent directory");
+    }
+    fs::rename(source, target)?;
+    sync_parent_dir(target)?;
+    Ok(())
+}
+
 fn atomic_write_portable(target: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
     #[cfg(not(unix))]
     let _ = mode;

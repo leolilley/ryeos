@@ -6,8 +6,6 @@
 //! Used by `node_config::writer` for daemon-issued mutations to
 //! `kind: node` items.
 
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -20,47 +18,8 @@ use anyhow::{Context, Result};
 /// 4. `rename` tmp → target (atomic on same filesystem).
 /// 5. `fsync` the parent directory (directory entry durability).
 pub fn atomic_write(target_path: &Path, content: &[u8]) -> Result<()> {
-    if let Some(parent) = target_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
-    }
-
-    let file_name = target_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("atomic-write");
-    let tmp_path = target_path.with_file_name(format!(
-        ".{file_name}.{}.tmp~",
-        uuid::Uuid::new_v4().simple()
-    ));
-    {
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .with_context(|| format!("failed to create tmp file {}", tmp_path.display()))?;
-        file.write_all(content)
-            .with_context(|| format!("failed to write tmp file {}", tmp_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("failed to fsync tmp file {}", tmp_path.display()))?;
-    }
-
-    std::fs::rename(&tmp_path, target_path).with_context(|| {
-        format!(
-            "failed to rename {} → {}",
-            tmp_path.display(),
-            target_path.display()
-        )
-    })?;
-
-    // Fsync the parent directory to ensure the rename entry is durable.
-    if let Some(parent) = target_path.parent() {
-        if let Ok(dir_file) = File::open(parent) {
-            let _ = dir_file.sync_all();
-        }
-    }
-
-    Ok(())
+    lillux::atomic_write(target_path, content)
+        .with_context(|| format!("failed to atomically write {}", target_path.display()))
 }
 
 #[cfg(test)]
