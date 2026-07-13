@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
-# ryeosd-full — daemon + bundles composed image (Tier 1 distribution).
-# Published to ghcr.io/leolilley/ryeosd-full:<version> by .github/workflows/publish-ryeosd.yml.
+# Local full daemon + bundles composition image. Release publication uses the
+# explicitly scoped Dockerfile.standard and Dockerfile.central-host images.
 
 # ── Stage 1: Build all binaries + publish bundles ──
 FROM rust:1.95-slim AS builder

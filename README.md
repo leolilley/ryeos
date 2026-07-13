@@ -182,7 +182,25 @@ docker pull ghcr.io/leolilley/ryeos-standard:latest
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
-so keys, trust, and runtime state survive redeploys.
+so keys, trust, and runtime state survive redeploys. Bubblewrap needs namespace
+operations that Docker's default profile blocks. Run the image with the
+documented capability and seccomp settings, and keep `/data` on a named volume:
+
+```bash
+docker volume create ryeos-data
+docker run -d --name ryeos \
+  --cap-add SYS_ADMIN \
+  --security-opt seccomp=unconfined \
+  -p 8000:8000 \
+  -v ryeos-data:/data \
+  ghcr.io/leolilley/ryeos-standard:latest
+docker exec ryeos ryeos node status
+```
+
+The release gate exercises init, daemon readiness, an actual sandboxed signed
+tool, and restart recovery with this deployment profile. Back up the
+`ryeos-data` volume before upgrades; it contains node identity, trust, vault,
+and durable execution state.
 
 ### From source
 

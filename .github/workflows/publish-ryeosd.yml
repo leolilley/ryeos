@@ -269,6 +269,47 @@ jobs:
             exit 1
           fi
 
+      - name: Smoke standard image lifecycle and sandbox
+        env:
+          IMG: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
+        run: |
+          VOLUME="ryeos-release-${{ github.run_id }}"
+          CONTAINER="ryeos-release-${{ github.run_id }}"
+          cleanup() {
+            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+            docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$VOLUME"
+          docker run -d --name "$CONTAINER" \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$VOLUME:/data" \
+            "$IMG"
+          for attempt in $(seq 1 60); do
+            if docker exec "$CONTAINER" ryeos node status >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs "$CONTAINER"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec --workdir /tmp "$CONTAINER" \
+            ryeos execute tool:ryeos/core/identity/public_key
+          docker restart "$CONTAINER"
+          for attempt in $(seq 1 60); do
+            if docker exec "$CONTAINER" ryeos node status >/dev/null 2>&1; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs "$CONTAINER"
+              exit 1
+            fi
+            sleep 1
+          done
+
       # Registry credentials are deliberately unavailable until every release
       # image has been built and its embedded provenance has been verified.
       - name: Log in to GHCR
@@ -277,6 +318,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse overwrite of immutable version tags
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          for image in ryeos-standard ryeos-central-host; do
+            tag="ghcr.io/leolilley/${image}:${VERSION}"
+            if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
+              echo "::error::Immutable release tag already exists: $tag"
+              exit 1
+            fi
+          done
 
       - name: Push immutable standard version
         id: push-standard
