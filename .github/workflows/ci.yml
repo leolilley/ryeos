@@ -48,6 +48,23 @@ env:
   GATE_TEST_THREADS: 2
 
 jobs:
+  static-policy:
+    name: Static repository policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Check release input validation
+        run: ./scripts/release/test-resolve-version.sh
+
+      - name: Check canonical naming
+        run: ./scripts/lint-naming.sh
+
+      - name: Check removed compatibility vocabulary
+        run: ./scripts/lint-no-content-wrap.sh
+
   test:
     name: Workspace tests
     runs-on: ubuntu-latest
@@ -55,7 +72,7 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install system dependencies
         run: |
@@ -63,15 +80,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Show tool versions
         run: |
@@ -92,7 +109,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_bundles }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install system dependencies
         run: |
@@ -100,12 +117,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Show tool versions
         run: |
@@ -114,4 +131,6 @@ jobs:
           openssl version
 
       - name: Refresh bundle sources
-        run: ./scripts/gate.sh --refresh-bundles --no-tests --bundle-set "${{ inputs.bundle_set }}"
+        env:
+          BUNDLE_SET: ${{ inputs.bundle_set }}
+        run: ./scripts/gate.sh --refresh-bundles --no-tests --bundle-set "$BUNDLE_SET"
