@@ -8,6 +8,12 @@ import init, {
 } from "/ui/assets/ryeos_web.js";
 import { renderDom } from "/ui/assets/ryeos_dom_adapter.js";
 import { failedResultFor, runEffect } from "/ui/assets/ryeos_effects.js";
+import {
+  hasModifiers,
+  isNativeActivationTarget,
+  isTypingTarget,
+  ryeosKeyEvent,
+} from "/ui/assets/ryeos_keyboard.js";
 
 let root = null;
 let committing = false;
@@ -315,53 +321,6 @@ function attachBrowserEvents() {
       }).catch(() => {});
     }
   });
-}
-
-// Translate a DOM KeyboardEvent into the neutral RyeOsKeyEvent the shared
-// keymap consumes (`{ key, modifiers }`). Named keys map to their RyeOsKey
-// variant; a single printable character maps to `Char(ch)` (serialized as
-// `{ char }`). Keys with no shared binding (F-keys, Home, PageUp, dead keys)
-// return null so the browser keeps them native.
-function ryeosKeyEvent(event) {
-  const key = ryeosKeyName(event.key);
-  if (!key) return null;
-  return {
-    key,
-    modifiers: {
-      ctrl: event.ctrlKey,
-      alt: event.altKey,
-      shift: event.shiftKey,
-      meta: event.metaKey,
-    },
-  };
-}
-
-function ryeosKeyName(domKey) {
-  switch (domKey) {
-    case "ArrowUp": return "arrow_up";
-    case "ArrowDown": return "arrow_down";
-    case "ArrowLeft": return "arrow_left";
-    case "ArrowRight": return "arrow_right";
-    case "Enter": return "enter";
-    case "Escape": return "escape";
-    case "Backspace": return "backspace";
-    case "Tab": return "tab";
-    default:
-      return domKey.length === 1 ? { char: domKey } : null;
-  }
-}
-
-function hasModifiers(key) {
-  const m = key.modifiers || {};
-  return !!(m.ctrl || m.alt || m.shift || m.meta);
-}
-
-function isTypingTarget(target) {
-  return !!target?.closest?.("input, textarea, select, [contenteditable='true']");
-}
-
-function isNativeActivationTarget(target) {
-  return !!target?.closest?.("button, a, summary");
 }
 
 function viewport() {

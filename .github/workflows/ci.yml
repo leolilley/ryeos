@@ -68,6 +68,10 @@ jobs:
       - name: Check workspace dependency direction
         run: ./scripts/lint-dependency-layers.py
 
+      - name: Check browser key adapter
+        working-directory: crates/clients/web
+        run: npm test
+
   rust-policy:
     name: Rust formatting, lint, and dependency policy
     runs-on: ubuntu-latest

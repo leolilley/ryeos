@@ -127,13 +127,20 @@ web arrow-folding, the unification point is the shared keymap plus a
    close-focused on web), plain-Enter submit when the foot input has text, and
    row-cursor movement across table/timeline/sections lenses (was rows-only).
 
+## Automated browser-adapter checks
+
+The pure DOM-key translation and native-target deferral layer is covered by the
+Node test harness in `tests/keyboard.test.js`. It imports no WASM or browser
+globals and verifies that JavaScript remains an adapter into the shared Rust
+keymap rather than a second binding table.
+
+Run it with `npm test` from `crates/clients/web`.
+
 ## Notes for the next sweep
 
 - No bundle YAML or signatures were touched by this branch; nothing here rides
   the Wave 3 republish.
-- There is no JavaScript test harness in the web crate and `wasm.rs` compiles
-  only for `wasm32`, so the shared-keymap route and the two new components are
-  verified by mirroring the terminal reference, not by an automated test. If a
-  JS/wasm test harness is added later, the highest-value targets are: the
-  DOM-key → `RyeOsKeyEvent` translation (`ryeosKeyName`) and the
-  table/sections DOM structure against `RyeOsTableRowVm` / `RyeOsSectionVm`.
+- DOM structure and focus behavior still need a real-browser harness. The
+  highest-value next cases are table/sections rendering against
+  `RyeOsTableRowVm` / `RyeOsSectionVm`, overlay focus trapping/restoration, and
+  an automated accessibility scan.
