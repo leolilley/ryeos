@@ -3347,9 +3347,8 @@ fn load_node_sandbox_policy(
             path.display()
         )
     })?;
-    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy =
-        serde_yaml::from_str(&raw)
-            .with_context(|| format!("parse node sandbox policy {}", path.display()))?;
+    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse node sandbox policy {}", path.display()))?;
     if !policy.backend_path.is_file() {
         anyhow::bail!(
             "sandbox backend {} is unavailable; execution refused",

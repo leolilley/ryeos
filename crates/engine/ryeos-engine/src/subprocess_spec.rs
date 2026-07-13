@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::Value;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 use crate::error::EngineError;
@@ -161,7 +161,10 @@ pub fn sandbox_wrap(
     writable_paths.dedup();
     if !writable_paths.iter().any(|root| spec.cwd.starts_with(root)) {
         return Err(EngineError::SandboxPolicyRefused {
-            reason: format!("working directory {} is not writable by node policy", spec.cwd.display()),
+            reason: format!(
+                "working directory {} is not writable by node policy",
+                spec.cwd.display()
+            ),
         });
     }
 
@@ -245,9 +248,15 @@ mod tests {
     fn wraps_command_with_effective_node_policy() {
         let wrapped = sandbox_wrap(spec(), &policy()).unwrap();
         assert_eq!(wrapped.cmd, PathBuf::from("/usr/bin/bwrap"));
-        assert!(wrapped.args.windows(3).any(|args| args == ["--bind", "/work/project", "/work/project"]));
+        assert!(wrapped
+            .args
+            .windows(3)
+            .any(|args| args == ["--bind", "/work/project", "/work/project"]));
         assert!(!wrapped.args.iter().any(|arg| arg == "--share-net"));
-        assert_eq!(wrapped.sandbox.unwrap().writable_paths, vec![PathBuf::from("/work/project")]);
+        assert_eq!(
+            wrapped.sandbox.unwrap().writable_paths,
+            vec![PathBuf::from("/work/project")]
+        );
     }
 
     #[test]
