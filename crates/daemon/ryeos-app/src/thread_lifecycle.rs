@@ -225,7 +225,10 @@ pub struct FollowFact {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct FollowCohortProgress { pub done: u32, pub expected: u32 }
+pub struct FollowCohortProgress {
+    pub done: u32,
+    pub expected: u32,
+}
 
 impl FollowFact {
     /// A suspended parent (found by its own thread id in the live waiter).
@@ -240,7 +243,14 @@ impl FollowFact {
             child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
             child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: w.fanout.then(|| FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
+            cohort: w.fanout.then(|| FollowCohortProgress {
+                done: w
+                    .children
+                    .iter()
+                    .filter(|c| c.terminal_status.is_some())
+                    .count() as u32,
+                expected: w.expected_children,
+            }),
         }
     }
 
@@ -260,7 +270,14 @@ impl FollowFact {
             child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
             child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: w.fanout.then(|| FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
+            cohort: w.fanout.then(|| FollowCohortProgress {
+                done: w
+                    .children
+                    .iter()
+                    .filter(|c| c.terminal_status.is_some())
+                    .count() as u32,
+                expected: w.expected_children,
+            }),
         }
     }
 
@@ -2272,6 +2289,11 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         original_pushed_head_ref,
         state_root,
     } = params;
+    let app_root = roots
+        .app_root
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .context("spawn roots missing RYEOS_APP_ROOT")?;
     // vault_bindings: user-provided secret/capability env vars.
     // daemon_callback_env: daemon infrastructure env (socket path, callback
     // token, thread id, project path). Sourced from AppState by the caller
@@ -2414,7 +2436,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     }
 
     let engine_ctx = EngineContext {
-        app_root: state.config.app_root.clone(),
+        app_root,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),
@@ -2668,5 +2690,4 @@ mod tests {
         let v2 = serde_json::to_value(&steered).unwrap();
         assert_eq!(v2["pending"], json!(2));
     }
-
 }

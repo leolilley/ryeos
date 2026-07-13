@@ -14,18 +14,17 @@ mod dialogs;
 mod execution;
 mod navigation;
 pub use dialogs::{
-    RyeOsOverlayChoice, RyeOsOverlayItemVm, RyeOsOverlayVm, RyeOsShortcutEntryVm,
-    RyeOsTileIntentVm,
+    RyeOsOverlayChoice, RyeOsOverlayItemVm, RyeOsOverlayVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm,
 };
+#[cfg(test)]
+use execution::status_tone;
+pub(crate) use execution::timeline_summary_entry;
+pub use execution::RyeOsTimelineEntryVm;
+use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
 pub use navigation::{
     RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
     RyeOsSessionVm,
 };
-pub use execution::RyeOsTimelineEntryVm;
-pub(crate) use execution::timeline_summary_entry;
-use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-#[cfg(test)]
-use execution::status_tone;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -454,7 +453,6 @@ pub struct RyeOsSectionVm {
     pub header_selected: bool,
     pub rows: Vec<RyeOsRowVm>,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsRowVm {
@@ -1229,7 +1227,11 @@ fn bound_view_vm_keyed(
                     let record = super::content::project_record_for_binding(binding, raw);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
-                    let detail = if expanded { detail_vm(&record.raw, &expand_fields) } else { Default::default() };
+                    let detail = if expanded {
+                        detail_vm(&record.raw, &expand_fields)
+                    } else {
+                        Default::default()
+                    };
                     RyeOsRowVm {
                         id: format!("{view_ref}#{index}"),
                         primary: record.primary,
@@ -1385,7 +1387,11 @@ fn bound_view_vm_keyed(
                     let record = super::content::project_table_record(binding, raw, &columns);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
-                    let detail = if expanded { detail_vm(&record.raw, &expand_fields) } else { Default::default() };
+                    let detail = if expanded {
+                        detail_vm(&record.raw, &expand_fields)
+                    } else {
+                        Default::default()
+                    };
                     RyeOsTableRowVm {
                         id: format!("{view_ref}#{index}"),
                         cells: record.cells,
@@ -3175,9 +3181,7 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            [
-                "thread", "kind", "item", "project", "status", "source", "follow", "created"
-            ]
+            ["thread", "kind", "item", "project", "status", "source", "follow", "created"]
         );
         let rows = project_table(
             &binding,

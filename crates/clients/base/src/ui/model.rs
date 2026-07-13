@@ -758,9 +758,9 @@ impl RyeOsCore {
                         "thread_failed" | "thread_killed" | "thread_timed_out"
                     )
                 })
-            {
-                self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
-            }
+        {
+            self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
+        }
         self.effects_for_hint(kind)
     }
 

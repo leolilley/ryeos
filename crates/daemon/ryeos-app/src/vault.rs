@@ -478,10 +478,7 @@ impl SealedEnvelopeVault {
             let secret_key = if let Some((secret_path, public_path)) = &self.key_paths {
                 recover_rewrap(secret_path, public_path, &self.store_path)?;
                 lillux::vault::read_secret_key(secret_path).map_err(|e| {
-                    anyhow!(
-                        "vault: reload secret key {}: {e:#}",
-                        secret_path.display()
-                    )
+                    anyhow!("vault: reload secret key {}: {e:#}", secret_path.display())
                 })?
             } else {
                 self.secret_key.clone()

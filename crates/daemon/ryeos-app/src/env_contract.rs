@@ -400,7 +400,10 @@ fn validate_protocol_injection_name(
             | (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID")
             | (EnvInjectionSource::ProjectPath, "RYEOSD_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
-            | (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN")
+            | (
+                EnvInjectionSource::ThreadAuthToken,
+                "RYEOSD_THREAD_AUTH_TOKEN"
+            )
             | (EnvInjectionSource::AppRoot, "RYEOS_APP_ROOT")
     );
     if allowed {

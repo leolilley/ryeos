@@ -386,9 +386,8 @@ mod tests {
         let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
         fs::write(dir.join("core.yaml"), signed).unwrap();
 
-        let error =
-            load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
-                .unwrap_err();
+        let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+            .unwrap_err();
         assert!(format!("{error:?}").contains("missing field `kind`"));
     }
 

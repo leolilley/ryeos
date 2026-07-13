@@ -692,75 +692,101 @@ fn waiting_follow_action(
     w: &ryeos_app::runtime_db::FollowWaiter,
 ) -> Result<Vec<FollowReconcileAction>> {
     if w.children.is_empty() {
-            tracing::warn!(follow_key = %w.follow_key, "waiting follow waiter has no child thread recorded");
-            return Ok(Vec::new());
+        tracing::warn!(follow_key = %w.follow_key, "waiting follow waiter has no child thread recorded");
+        return Ok(Vec::new());
     }
     let mut actions = Vec::new();
     let mut resume = false;
     for slot in &w.children {
-      if slot.terminal_status.is_some() { continue; }
-      let child_id = &slot.child_thread_id;
-      match state.state_store.get_thread(child_id)? {
-        // Pre-launch window: the child provably never launched.
-        Some(child) if is_pending_follow_child(state, &child)
-            && state.state_store.launch_window_is_queued(&slot.child_chain_root_id)? => {}
-        Some(child) if is_pending_follow_child(state, &child) => {
-            if state.state_store.launch_window_is_cancelled(&slot.child_chain_root_id)? {
-                continue;
-            }
-            if state.state_store.launch_window_is_member(&slot.child_chain_root_id)? {
-                // A row that is not queued has already been admitted, but no
-                // process attached: re-drive its claim-guarded launch.
-                actions.push(FollowReconcileAction::RelaunchChild { child_thread_id: child_id.clone() });
-                continue;
-            }
-            if let Some(window) = state.state_store.get_launch_metadata(child_id)?
-                .and_then(|m| m.follow_launch_window)
-            {
-                let inserted = state.state_store.launch_window_insert_only(
-                    &slot.child_chain_root_id, &window.key, window.width,
-                    lillux::time::timestamp_millis(),
-                )?;
-                if inserted {
-                    tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id,
+        if slot.terminal_status.is_some() {
+            continue;
+        }
+        let child_id = &slot.child_thread_id;
+        match state.state_store.get_thread(child_id)? {
+            // Pre-launch window: the child provably never launched.
+            Some(child)
+                if is_pending_follow_child(state, &child)
+                    && state
+                        .state_store
+                        .launch_window_is_queued(&slot.child_chain_root_id)? => {}
+            Some(child) if is_pending_follow_child(state, &child) => {
+                if state
+                    .state_store
+                    .launch_window_is_cancelled(&slot.child_chain_root_id)?
+                {
+                    continue;
+                }
+                if state
+                    .state_store
+                    .launch_window_is_member(&slot.child_chain_root_id)?
+                {
+                    // A row that is not queued has already been admitted, but no
+                    // process attached: re-drive its claim-guarded launch.
+                    actions.push(FollowReconcileAction::RelaunchChild {
+                        child_thread_id: child_id.clone(),
+                    });
+                    continue;
+                }
+                if let Some(window) = state
+                    .state_store
+                    .get_launch_metadata(child_id)?
+                    .and_then(|m| m.follow_launch_window)
+                {
+                    let inserted = state.state_store.launch_window_insert_only(
+                        &slot.child_chain_root_id,
+                        &window.key,
+                        window.width,
+                        lillux::time::timestamp_millis(),
+                    )?;
+                    if inserted {
+                        tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id,
                         "repaired missing follow launch-window membership");
+                    }
+                    continue;
                 }
-                continue;
+                tracing::info!(
+                    follow_key = %w.follow_key,
+                    child_thread_id = %child_id,
+                    "follow child stranded pre-launch — collecting relaunch"
+                );
+                actions.push(FollowReconcileAction::RelaunchChild {
+                    child_thread_id: child_id.to_string(),
+                });
             }
-            tracing::info!(
-                follow_key = %w.follow_key,
-                child_thread_id = %child_id,
-                "follow child stranded pre-launch — collecting relaunch"
-            );
-            actions.push(FollowReconcileAction::RelaunchChild {
-                child_thread_id: child_id.to_string(),
-            });
-        }
-        // Launching / running are owned by native resume + the finalize kick. But a
-        // NON-continued terminal never recorded (the crash window between finalize-
-        // persist and record_follow_child_terminal, which reconcile skips) would hang
-        // the parent forever — recover it.
-        Some(_) => {
-            match state.threads.recover_terminal_follow_child(&slot.child_chain_root_id)? {
-                Some(follow_key) => {
-                    tracing::info!(
-                        follow_key = %follow_key,
-                        "follow child chain terminal but unrecorded — recovered, collecting parent-resume"
-                    );
-                    resume = true;
+            // Launching / running are owned by native resume + the finalize kick. But a
+            // NON-continued terminal never recorded (the crash window between finalize-
+            // persist and record_follow_child_terminal, which reconcile skips) would hang
+            // the parent forever — recover it.
+            Some(_) => {
+                match state
+                    .threads
+                    .recover_terminal_follow_child(&slot.child_chain_root_id)?
+                {
+                    Some(follow_key) => {
+                        tracing::info!(
+                            follow_key = %follow_key,
+                            "follow child chain terminal but unrecorded — recovered, collecting parent-resume"
+                        );
+                        resume = true;
+                    }
+                    None => {}
                 }
-                None => {}
+            }
+            None => {
+                tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id, "waiting follow waiter's child row is missing");
             }
         }
-        None => {
-            tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id, "waiting follow waiter's child row is missing");
-        }
-      }
     }
     if resume {
         if let Some(reloaded) = state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
-            if matches!(reloaded.phase.as_str(), ryeos_app::runtime_db::follow_phase::READY | ryeos_app::runtime_db::follow_phase::RESUMING) {
-                actions.push(FollowReconcileAction::Resume { follow_key: w.follow_key.clone() });
+            if matches!(
+                reloaded.phase.as_str(),
+                ryeos_app::runtime_db::follow_phase::READY
+                    | ryeos_app::runtime_db::follow_phase::RESUMING
+            ) {
+                actions.push(FollowReconcileAction::Resume {
+                    follow_key: w.follow_key.clone(),
+                });
             }
         }
     }
@@ -789,7 +815,11 @@ fn converge_reserved_follow(
         return Ok(Vec::new());
     }
     if w.children.len() != w.expected_children as usize
-        || w.children.iter().enumerate().any(|(i, c)| c.item_index != i as u32) {
+        || w.children
+            .iter()
+            .enumerate()
+            .any(|(i, c)| c.item_index != i as u32)
+    {
         tracing::warn!(follow_key = %w.follow_key, "reserved waiter: parent continued but no child recorded — clearing orphan");
         let _ = state.state_store.clear_follow_waiter(&w.follow_key);
         return Ok(Vec::new());

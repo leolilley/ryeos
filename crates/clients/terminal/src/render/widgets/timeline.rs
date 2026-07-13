@@ -87,7 +87,13 @@ pub fn draw_timeline(
     };
 
     let mut lines = Vec::new();
-    push_timeline_lines(&mut lines, &entries[entry_start..entry_end], meta, width, entry_start);
+    push_timeline_lines(
+        &mut lines,
+        &entries[entry_start..entry_end],
+        meta,
+        width,
+        entry_start,
+    );
 
     let visible = lines.len().min(height);
     // Default bottom-anchored (the tail). Once the point is on an entry, use

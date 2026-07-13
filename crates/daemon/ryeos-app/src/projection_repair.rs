@@ -6,10 +6,7 @@ use anyhow::Result;
 
 use crate::state_store::StateStore;
 
-pub async fn run(
-    state_store: Arc<StateStore>,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
+pub async fn run(state_store: Arc<StateStore>, shutdown: impl Future<Output = ()>) -> Result<()> {
     tokio::pin!(shutdown);
     let health = state_store.projection_health();
     let mut retry_delay = Duration::from_secs(1);

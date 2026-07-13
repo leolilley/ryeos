@@ -182,13 +182,10 @@ mod tests {
     fn runtime_cap_policy_allows_wildcard_and_rejects_missing_scope() {
         let auth = ryeos_runtime::authorizer::Authorizer::new();
         let required = vec!["runtime.execute".to_string()];
-        assert!(enforce_runtime_caps(
-            &auth,
-            "runtime:test",
-            &required,
-            &["runtime.*".to_string()]
-        )
-        .is_ok());
+        assert!(
+            enforce_runtime_caps(&auth, "runtime:test", &required, &["runtime.*".to_string()])
+                .is_ok()
+        );
         assert!(enforce_runtime_caps(&auth, "runtime:test", &required, &[]).is_err());
     }
 }

@@ -133,15 +133,21 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
         )
-            .with_context(|| {
-                format!(
-                    "failed to replace bundle from {} to {}",
-                    req.source_path.display(),
-                    target.display()
-                )
-            })?;
+        .with_context(|| {
+            format!(
+                "failed to replace bundle from {} to {}",
+                req.source_path.display(),
+                target.display()
+            )
+        })?;
     } else {
-        install_dir_atomic(&req.source_path, &target, &transaction, registration.clone()).with_context(|| {
+        install_dir_atomic(
+            &req.source_path,
+            &target,
+            &transaction,
+            registration.clone(),
+        )
+        .with_context(|| {
             format!(
                 "failed to install bundle from {} to {}",
                 req.source_path.display(),

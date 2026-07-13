@@ -36,8 +36,7 @@ struct FetchParams {
     block_private_networks: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Default)]
 struct FetchConfig {
     #[serde(default)]
     allow_private_networks: bool,

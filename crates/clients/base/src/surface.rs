@@ -302,7 +302,6 @@ pub struct SlotsSpec {
     pub right: Option<SlotSpec>,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlotSpec {

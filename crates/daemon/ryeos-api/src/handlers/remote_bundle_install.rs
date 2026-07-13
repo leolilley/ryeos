@@ -129,48 +129,48 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
     let staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
     let ((files_installed, total_bytes), canonical_target) = (|| {
-            if local_target.exists() {
-                bail!(
-                    "bundle '{}' appeared during remote install at {}",
-                    req.bundle_name,
-                    local_target.display()
-                );
-            }
-            if staging.exists() {
-                std::fs::remove_dir_all(&staging)
-                    .with_context(|| format!("remove stale staging {}", staging.display()))?;
-            }
-            std::fs::create_dir(&staging)
-                .with_context(|| format!("create staging dir {}", staging.display()))?;
-            let counts = materialize_files(&entries, &blob_data, &staging).map_err(|error| {
-                let _ = std::fs::remove_dir_all(&staging);
+        if local_target.exists() {
+            bail!(
+                "bundle '{}' appeared during remote install at {}",
+                req.bundle_name,
+                local_target.display()
+            );
+        }
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)
+                .with_context(|| format!("remove stale staging {}", staging.display()))?;
+        }
+        std::fs::create_dir(&staging)
+            .with_context(|| format!("create staging dir {}", staging.display()))?;
+        let counts = materialize_files(&entries, &blob_data, &staging).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&staging);
+            error
+        })?;
+        if let Err(error) =
+            ryeos_bundle::preflight::preflight_verify_bundle(&staging, &state.config.app_root)
+        {
+            let _ = std::fs::remove_dir_all(&staging);
+            bail!(
+                "preflight verification failed for bundle '{}': {}",
+                req.bundle_name,
                 error
-            })?;
-            if let Err(error) =
-                ryeos_bundle::preflight::preflight_verify_bundle(&staging, &state.config.app_root)
-            {
-                let _ = std::fs::remove_dir_all(&staging);
-                bail!(
-                    "preflight verification failed for bundle '{}': {}",
-                    req.bundle_name,
-                    error
-                );
-            }
-            lillux::sync_tree_durable(&staging)
-                .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-            let registration = serde_json::json!({ "path": local_target });
-            transaction.begin_present(
-                ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
-                &staging,
-                registration,
-            )?;
-            lillux::rename_path_durable(&staging, &local_target)?;
-            transaction.mark_activated()?;
-            let canonical = local_target
-                .canonicalize()
-                .context("canonicalize installed bundle path")?;
-            Ok((counts, canonical))
-        })()?;
+            );
+        }
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        let registration = serde_json::json!({ "path": local_target });
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
+            &staging,
+            registration,
+        )?;
+        lillux::rename_path_durable(&staging, &local_target)?;
+        transaction.mark_activated()?;
+        let canonical = local_target
+            .canonicalize()
+            .context("canonicalize installed bundle path")?;
+        Ok((counts, canonical))
+    })()?;
 
     // 5. Write signed node-config bundle registration.
 

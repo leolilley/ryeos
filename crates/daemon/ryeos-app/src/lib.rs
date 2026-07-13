@@ -4,8 +4,8 @@
 // out of ryeosd. Each move keeps the workspace compiling.
 
 pub mod build_info;
-pub mod bundle_transaction;
 pub mod bundle_event_service;
+pub mod bundle_transaction;
 pub mod callback_token;
 pub mod cascade;
 pub mod command_hub;

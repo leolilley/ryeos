@@ -22,8 +22,8 @@ use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams
 use ryeos_app::vault::VaultReadError;
 use ryeos_runtime::events::RuntimeEventType;
 
-mod terminal;
 mod runtime_request;
+mod terminal;
 
 use runtime_request::{spawn_runtime, SpawnRuntimeParams};
 use terminal::{
@@ -1928,10 +1928,9 @@ async fn run_claimed_thread_row_inner(
             terminal_status = "killed";
         }
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
-        let finalized = state.threads.finalize_thread_with_managed_envelope(
-            &fallback.params,
-            fallback.managed_envelope,
-        )?;
+        let finalized = state
+            .threads
+            .finalize_thread_with_managed_envelope(&fallback.params, fallback.managed_envelope)?;
         // Live parent-resume kick: a followed child finalized on this fallback
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
         // to `ready`, so wake the parent now instead of waiting for a restart.
@@ -2515,11 +2514,14 @@ async fn launch_claimed_follow_child(
         .ok_or_else(|| {
             anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
         })?;
-    let persisted_parent_context = metadata.follow_parent_context.map(|p| crate::dispatch::ParentExecutionContext {
-        parent_thread_id: p.parent_thread_id,
-        hard_limits: p.hard_limits,
-        depth: p.depth,
-    });
+    let persisted_parent_context =
+        metadata
+            .follow_parent_context
+            .map(|p| crate::dispatch::ParentExecutionContext {
+                parent_thread_id: p.parent_thread_id,
+                hard_limits: p.hard_limits,
+                depth: p.depth,
+            });
     let identity = metadata.resume_context.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
     })?;
@@ -2648,15 +2650,28 @@ pub async fn launch_follow_child(
     // Cancellation tombstones are checked after claiming, so admission and an
     // ancestor cancel cannot race into a spawn. Finalize this never-launched row
     // and wake its own follow chain immediately.
-    if state.state_store.launch_window_is_cancelled(&thread.chain_root_id)? {
+    if state
+        .state_store
+        .launch_window_is_cancelled(&thread.chain_root_id)?
+    {
         let chain_root = thread.chain_root_id.clone();
-        let cancelled = state.threads.finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-            thread_id: thread.thread_id.clone(), status: "cancelled".into(),
-            outcome_code: Some("cancelled".into()), result: None,
-            error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
-            metadata: None, artifacts: Vec::new(), final_cost: None, summary_json: None,
-        });
-        let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+        let cancelled =
+            state
+                .threads
+                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                    thread_id: thread.thread_id.clone(),
+                    status: "cancelled".into(),
+                    outcome_code: Some("cancelled".into()),
+                    result: None,
+                    error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+                    metadata: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    summary_json: None,
+                });
+        let _ = state
+            .state_store
+            .release_thread_launch_claim(child_id, &claim_id);
         cancelled?;
         state.state_store.discard_window_member(&chain_root)?;
         kick_follow_resume_if_ready(&state, &chain_root);
@@ -3105,14 +3120,20 @@ fn follow_resume_payload(fanout: bool, envelopes: Vec<Value>) -> Value {
     if !fanout {
         return envelopes.into_iter().next().unwrap_or(Value::Null);
     }
-    let statuses: Vec<String> = envelopes.iter().map(|envelope| {
-        if ryeos_runtime::envelope::envelope_succeeded(envelope) {
-            "completed".to_string()
-        } else {
-            "failed".to_string()
-        }
-    }).collect();
-    let failed = statuses.iter().filter(|status| status.as_str() == "failed").count();
+    let statuses: Vec<String> = envelopes
+        .iter()
+        .map(|envelope| {
+            if ryeos_runtime::envelope::envelope_succeeded(envelope) {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            }
+        })
+        .collect();
+    let failed = statuses
+        .iter()
+        .filter(|status| status.as_str() == "failed")
+        .count();
     let expected = envelopes.len();
     json!({
         "fanout": true,
@@ -3156,9 +3177,19 @@ async fn launch_follow_resume_claimed(
 
     let mut envelopes = Vec::with_capacity(waiter.expected_children as usize);
     for index in 0..waiter.expected_children {
-        let child = state.state_store.get_follow_child(&waiter.follow_key, index)?
-            .ok_or_else(|| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume: missing child index {index}")))?;
-        envelopes.push(child.terminal_envelope.ok_or_else(|| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume: child index {index} has no terminal envelope")))?);
+        let child = state
+            .state_store
+            .get_follow_child(&waiter.follow_key, index)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "follow-resume: missing child index {index}"
+                ))
+            })?;
+        envelopes.push(child.terminal_envelope.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: child index {index} has no terminal envelope"
+            ))
+        })?);
     }
     let terminal_envelope = follow_resume_payload(waiter.fanout, envelopes);
 

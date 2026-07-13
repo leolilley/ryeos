@@ -149,8 +149,10 @@ mod tests {
             NativeResumeSpec::parse_declaration(&Value::Bool(false)).unwrap_err(),
             "`native_resume: false` is not supported — omit the block to disable"
         );
-        assert!(NativeResumeSpec::parse_declaration(&serde_json::json!({ "unknown": true }))
-            .unwrap_err()
-            .starts_with("invalid native_resume block:"));
+        assert!(
+            NativeResumeSpec::parse_declaration(&serde_json::json!({ "unknown": true }))
+                .unwrap_err()
+                .starts_with("invalid native_resume block:")
+        );
     }
 }

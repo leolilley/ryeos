@@ -9,10 +9,7 @@ use ryeos_app::state::AppState;
 
 const MAX_FRAME_SIZE: u32 = 10 * 1024 * 1024;
 
-pub(super) async fn handle_connection(
-    mut stream: UnixStream,
-    state: Arc<AppState>,
-) -> Result<()> {
+pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
     loop {
         let Some(frame) = read_frame(&mut stream).await? else {
             return Ok(());

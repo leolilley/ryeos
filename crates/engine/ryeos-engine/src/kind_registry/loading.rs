@@ -83,15 +83,11 @@ mod tests {
 
     #[test]
     fn schema_filename_filter_accepts_only_public_kind_schema_files() {
-        assert!(is_loadable_schema_file(Path::new(
-            "tool.kind-schema.yaml"
-        )));
+        assert!(is_loadable_schema_file(Path::new("tool.kind-schema.yaml")));
         assert!(!is_loadable_schema_file(Path::new(
             "_tool.kind-schema.yaml"
         )));
         assert!(!is_loadable_schema_file(Path::new("tool.yaml")));
-        assert!(!is_loadable_schema_file(Path::new(
-            "tool.kind-schema.yml"
-        )));
+        assert!(!is_loadable_schema_file(Path::new("tool.kind-schema.yml")));
     }
 }

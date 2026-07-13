@@ -55,7 +55,10 @@ pub struct ActionDispatchError {
 
 impl From<anyhow::Error> for ActionDispatchError {
     fn from(error: anyhow::Error) -> Self {
-        Self { diagnostic: format!("{error:#}"), retryable: false }
+        Self {
+            diagnostic: format!("{error:#}"),
+            retryable: false,
+        }
     }
 }
 

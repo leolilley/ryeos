@@ -82,11 +82,7 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> AtomicMutationResult<()> {
 
 /// Atomically replace `target`, applying `mode` before the temp file is
 /// published into the namespace.
-pub fn atomic_write_with_mode(
-    target: &Path,
-    data: &[u8],
-    mode: u32,
-) -> AtomicMutationResult<()> {
+pub fn atomic_write_with_mode(target: &Path, data: &[u8], mode: u32) -> AtomicMutationResult<()> {
     #[cfg(unix)]
     {
         atomic_write_unix(target, data, mode)
@@ -162,7 +158,10 @@ pub fn sync_tree_durable(root: &Path) -> Result<()> {
 
     let metadata = fs::symlink_metadata(root)?;
     if metadata.file_type().is_symlink() {
-        anyhow::bail!("durable tree root must not be a symlink: {}", root.display());
+        anyhow::bail!(
+            "durable tree root must not be a symlink: {}",
+            root.display()
+        );
     }
     if metadata.is_file() {
         fs::File::open(root)?.sync_all()?;
@@ -236,9 +235,7 @@ pub fn atomic_exchange_paths(left: &Path, right: &Path) -> AtomicMutationResult<
         )
     };
     if result != 0 {
-        return Err(AtomicMutationError::before(
-            std::io::Error::last_os_error(),
-        ));
+        return Err(AtomicMutationError::before(std::io::Error::last_os_error()));
     }
     sync_open_parent(&parent).map_err(AtomicMutationError::durability)
 }
@@ -278,9 +275,7 @@ pub fn rename_path_durable(source: &Path, target: &Path) -> AtomicMutationResult
             )
         };
         if renamed != 0 {
-            return Err(AtomicMutationError::before(
-                std::io::Error::last_os_error(),
-            ));
+            return Err(AtomicMutationError::before(std::io::Error::last_os_error()));
         }
         sync_open_parent(&parent).map_err(AtomicMutationError::durability)
     }
@@ -303,7 +298,9 @@ fn atomic_write_unix(target: &Path, data: &[u8], mode: u32) -> AtomicMutationRes
     use std::os::fd::{AsRawFd, FromRawFd};
 
     let (parent_file, target_name) = open_parent_and_name(target)?;
-    let file_name = target.file_name().expect("open_parent_and_name validated name");
+    let file_name = target
+        .file_name()
+        .expect("open_parent_and_name validated name");
     let mut last_collision = None;
 
     for _ in 0..128 {
@@ -376,7 +373,8 @@ fn open_parent_and_name(target: &Path) -> AtomicMutationResult<(fs::File, std::f
 
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(AtomicMutationError::before)?;
-    let parent_c = CString::new(parent.as_os_str().as_bytes()).map_err(AtomicMutationError::before)?;
+    let parent_c =
+        CString::new(parent.as_os_str().as_bytes()).map_err(AtomicMutationError::before)?;
     let parent_fd = unsafe {
         libc::open(
             parent_c.as_ptr(),
@@ -384,9 +382,7 @@ fn open_parent_and_name(target: &Path) -> AtomicMutationResult<(fs::File, std::f
         )
     };
     if parent_fd < 0 {
-        return Err(AtomicMutationError::before(
-            std::io::Error::last_os_error(),
-        ));
+        return Err(AtomicMutationError::before(std::io::Error::last_os_error()));
     }
     let parent_file = unsafe { fs::File::from_raw_fd(parent_fd) };
     let file_name = target.file_name().ok_or_else(|| {
@@ -513,10 +509,7 @@ mod tests {
 
         let error = rename_path_durable(&source, &target).unwrap_err();
 
-        assert!(matches!(
-            error,
-            AtomicMutationError::DurabilityUncertain(_)
-        ));
+        assert!(matches!(error, AtomicMutationError::DurabilityUncertain(_)));
         assert!(!source.exists());
         assert_eq!(fs::read(target).unwrap(), b"value");
     }
@@ -535,10 +528,7 @@ mod tests {
 
         let error = atomic_exchange_paths(&left, &right).unwrap_err();
 
-        assert!(matches!(
-            error,
-            AtomicMutationError::DurabilityUncertain(_)
-        ));
+        assert!(matches!(error, AtomicMutationError::DurabilityUncertain(_)));
         assert_eq!(fs::read(left.join("value")).unwrap(), b"right");
         assert_eq!(fs::read(right.join("value")).unwrap(), b"left");
     }

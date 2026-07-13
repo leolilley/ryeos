@@ -45,8 +45,10 @@ pub(super) fn fallback_finalization(
             "result": runtime_result.result.clone(),
         }))
     };
-    let final_cost = runtime_result.cost.as_ref().map(|cost| {
-        ryeos_engine::contracts::FinalCost {
+    let final_cost = runtime_result
+        .cost
+        .as_ref()
+        .map(|cost| ryeos_engine::contracts::FinalCost {
             turns: 0,
             input_tokens: cost.input_tokens as i64,
             output_tokens: cost.output_tokens as i64,
@@ -54,8 +56,7 @@ pub(super) fn fallback_finalization(
             provider: None,
             basis: cost.basis.clone(),
             metadata: None,
-        }
-    });
+        });
     let raw_cost = runtime_result
         .cost
         .as_ref()
@@ -145,7 +146,10 @@ mod tests {
             fallback.params.error.as_ref().unwrap()["reason"],
             "runtime_exited_without_callback_finalization"
         );
-        assert_eq!(fallback.params.error.as_ref().unwrap()["runtime_status"], "errored");
+        assert_eq!(
+            fallback.params.error.as_ref().unwrap()["runtime_status"],
+            "errored"
+        );
         assert_eq!(fallback.managed_envelope["success"], false);
         assert_eq!(fallback.managed_envelope["result"], "payload");
     }

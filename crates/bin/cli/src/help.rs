@@ -38,11 +38,7 @@ pub fn print_help(
         "  {:<30} Bootstrap local node state and packaged bundles",
         "init"
     )?;
-    writeln!(
-        out,
-        "  {:<30} Bring the local node runtime online",
-        "start"
-    )?;
+    writeln!(out, "  {:<30} Bring the local node runtime online", "start")?;
     writeln!(
         out,
         "  {:<30} Gracefully stop the local node runtime",

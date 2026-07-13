@@ -524,17 +524,72 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "follow_waiter_child",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "follow_key", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "item_index", col_type: "INTEGER", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "item_ref", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "spec_hash", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "child_chain_root_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "terminal_thread_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "terminal_status", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "terminal_envelope", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "follow_key",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "item_index",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "item_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spec_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_status",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_envelope",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -671,19 +726,21 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let columns = {
         let mut stmt = tx.prepare("PRAGMA table_info(follow_waiter)")?;
-        stmt.query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     if !columns.iter().any(|c| c == "fanout") {
         tx.execute_batch("ALTER TABLE follow_waiter ADD COLUMN fanout INTEGER NOT NULL DEFAULT 0")?;
     }
     if !columns.iter().any(|c| c == "expected_children") {
-        tx.execute_batch("ALTER TABLE follow_waiter ADD COLUMN expected_children INTEGER NOT NULL DEFAULT 1")?;
+        tx.execute_batch(
+            "ALTER TABLE follow_waiter ADD COLUMN expected_children INTEGER NOT NULL DEFAULT 1",
+        )?;
     }
     let launch_columns = {
         let mut stmt = tx.prepare("PRAGMA table_info(launch_window)")?;
-        stmt.query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     if !launch_columns.iter().any(|c| c == "cancelled_at_ms") {
         tx.execute_batch("ALTER TABLE launch_window ADD COLUMN cancelled_at_ms INTEGER")?;
@@ -695,42 +752,84 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
                     created_at_ms, updated_at_ms
                FROM follow_waiter WHERE child_thread_id IS NOT NULL",
         )?;
-        stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?,
-            r.get::<_, Option<String>>(5)?, r.get::<_, i64>(6)?, r.get::<_, i64>(7)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (key, thread_id, chain_id, terminal_id, status, envelope, created, updated) in legacy {
-        let metadata: Option<String> = tx.query_row(
-            "SELECT launch_metadata FROM thread_runtime WHERE thread_id = ?1",
-            params![thread_id], |r| r.get(0),
-        ).with_context(|| format!("legacy follow {key} child thread {thread_id} is missing from thread_runtime"))?;
+        let metadata: Option<String> = tx
+            .query_row(
+                "SELECT launch_metadata FROM thread_runtime WHERE thread_id = ?1",
+                params![thread_id],
+                |r| r.get(0),
+            )
+            .with_context(|| {
+                format!(
+                    "legacy follow {key} child thread {thread_id} is missing from thread_runtime"
+                )
+            })?;
         let metadata = metadata.with_context(|| {
             format!("legacy follow {key} child thread {thread_id} has NULL launch_metadata")
         })?;
         let metadata: RuntimeLaunchMetadata = serde_json::from_str(&metadata)
             .with_context(|| format!("legacy follow {key} child launch metadata is corrupt"))?;
-        let context = metadata.resume_context
+        let context = metadata
+            .resume_context
             .with_context(|| format!("legacy follow {key} child has no persisted ResumeContext"))?;
         let spec_hash = follow_child_spec_hash(&context.item_ref, &context.parameters, None);
-        let existing = tx.query_row(
-            "SELECT item_ref, spec_hash, child_thread_id, child_chain_root_id,
+        let existing = tx
+            .query_row(
+                "SELECT item_ref, spec_hash, child_thread_id, child_chain_root_id,
                     terminal_thread_id, terminal_status, terminal_envelope
                FROM follow_waiter_child WHERE follow_key = ?1 AND item_index = 0",
-            params![key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?,
-                r.get::<_, Option<String>>(6)?)),
-        ).optional()?;
-        let expected = (context.item_ref, spec_hash, thread_id, chain_id, terminal_id, status, envelope);
+                params![key],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let expected = (
+            context.item_ref,
+            spec_hash,
+            thread_id,
+            chain_id,
+            terminal_id,
+            status,
+            envelope,
+        );
         if let Some(existing) = existing {
-            if existing != expected { bail!("legacy follow {key} child backfill conflicts with existing cohort row"); }
+            if existing != expected {
+                bail!("legacy follow {key} child backfill conflicts with existing cohort row");
+            }
         } else {
-            tx.execute("INSERT INTO follow_waiter_child
+            tx.execute(
+                "INSERT INTO follow_waiter_child
                 (follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
                  terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms)
                  VALUES (?1,0,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![key, expected.0, expected.1, expected.2, expected.3, expected.4,
-                    expected.5, expected.6, created, updated])?;
+                params![
+                    key, expected.0, expected.1, expected.2, expected.3, expected.4, expected.5,
+                    expected.6, created, updated
+                ],
+            )?;
         }
     }
     tx.commit()?;
@@ -1268,7 +1367,10 @@ impl RuntimeDb {
     /// start in phase `reserved`.
     pub fn reserve_follow(&self, seed: &NewFollowWaiter) -> Result<FollowWaiter> {
         if seed.expected_children == 0 {
-            bail!("follow reservation {} must expect at least one child", seed.follow_key);
+            bail!(
+                "follow reservation {} must expect at least one child",
+                seed.follow_key
+            );
         }
         let now = lillux::time::timestamp_millis();
         self.conn.execute(
@@ -1322,23 +1424,49 @@ impl RuntimeDb {
         child_chain_root_id: &str,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let expected_children = tx.query_row(
-            "SELECT expected_children FROM follow_waiter WHERE follow_key = ?1",
-            params![follow_key],
-            |r| r.get::<_, u32>(0),
-        ).optional()?.ok_or_else(|| anyhow::anyhow!("follow waiter row missing for follow_key: {follow_key}"))?;
-        if item_index >= expected_children { bail!("follow waiter {follow_key} child index {item_index} is out of range"); }
+        let expected_children = tx
+            .query_row(
+                "SELECT expected_children FROM follow_waiter WHERE follow_key = ?1",
+                params![follow_key],
+                |r| r.get::<_, u32>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow waiter row missing for follow_key: {follow_key}")
+            })?;
+        if item_index >= expected_children {
+            bail!("follow waiter {follow_key} child index {item_index} is out of range");
+        }
         let now = lillux::time::timestamp_millis();
         tx.execute("INSERT INTO follow_waiter_child
             (follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,created_at_ms,updated_at_ms)
             VALUES (?1,?2,?3,?4,?5,?6,?7,?7) ON CONFLICT(follow_key,item_index) DO NOTHING",
             params![follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,now])?;
-        let child = tx.query_row("SELECT item_ref,spec_hash,child_thread_id,child_chain_root_id
+        let child = tx
+            .query_row(
+                "SELECT item_ref,spec_hash,child_thread_id,child_chain_root_id
             FROM follow_waiter_child WHERE follow_key=?1 AND item_index=?2",
-            params![follow_key,item_index], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))
-            .optional()?.ok_or_else(|| anyhow::anyhow!("follow waiter {follow_key} child index {item_index} was not persisted"))?;
-        if child.0 != item_ref || child.1 != spec_hash || child.2 != child_thread_id
-            || child.3 != child_chain_root_id {
+                params![follow_key, item_index],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "follow waiter {follow_key} child index {item_index} was not persisted"
+                )
+            })?;
+        if child.0 != item_ref
+            || child.1 != spec_hash
+            || child.2 != child_thread_id
+            || child.3 != child_chain_root_id
+        {
             bail!("follow waiter {follow_key} child index {item_index} conflicts with persisted child/spec");
         }
         tx.commit()?;
@@ -1389,17 +1517,31 @@ impl RuntimeDb {
                 w.phase
             );
         }
-        if w.parent_successor_thread_id.is_none() || w.children.len() != w.expected_children as usize
-            || w.children.iter().enumerate().any(|(i, c)| c.item_index as usize != i) {
+        if w.parent_successor_thread_id.is_none()
+            || w.children.len() != w.expected_children as usize
+            || w.children
+                .iter()
+                .enumerate()
+                .any(|(i, c)| c.item_index as usize != i)
+        {
             bail!(
                 "follow waiter {follow_key} cannot mark waiting before child + successor are recorded"
             );
         }
         let complete = validate_terminal_completeness(&w)?;
-        let target = if complete { follow_phase::READY } else { follow_phase::WAITING };
-        let changed = tx.execute("UPDATE follow_waiter SET phase=?2, updated_at_ms=?3
-            WHERE follow_key=?1 AND phase='reserved'", params![follow_key,target,lillux::time::timestamp_millis()])?;
-        if changed != 1 { bail!("follow waiter {follow_key} reserved transition raced"); }
+        let target = if complete {
+            follow_phase::READY
+        } else {
+            follow_phase::WAITING
+        };
+        let changed = tx.execute(
+            "UPDATE follow_waiter SET phase=?2, updated_at_ms=?3
+            WHERE follow_key=?1 AND phase='reserved'",
+            params![follow_key, target, lillux::time::timestamp_millis()],
+        )?;
+        if changed != 1 {
+            bail!("follow waiter {follow_key} reserved transition raced");
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1420,9 +1562,14 @@ impl RuntimeDb {
         if w.parent_successor_thread_id.is_none() || !validate_terminal_completeness(&w)? {
             bail!("follow waiter {follow_key} cannot resume without terminal envelope + successor");
         }
-        let changed = self.conn.execute("UPDATE follow_waiter SET phase='resuming', updated_at_ms=?2
-            WHERE follow_key=?1 AND phase='ready'", params![follow_key,lillux::time::timestamp_millis()])?;
-        if changed != 1 { bail!("follow waiter {follow_key} ready transition raced"); }
+        let changed = self.conn.execute(
+            "UPDATE follow_waiter SET phase='resuming', updated_at_ms=?2
+            WHERE follow_key=?1 AND phase='ready'",
+            params![follow_key, lillux::time::timestamp_millis()],
+        )?;
+        if changed != 1 {
+            bail!("follow waiter {follow_key} ready transition raced");
+        }
         Ok(())
     }
 
@@ -1469,13 +1616,24 @@ impl RuntimeDb {
                 },
             )
             .optional()?;
-        let Some((follow_key, item_index, _phase, terminal_thread_id, terminal_status, stored_envelope)) = child else {
+        let Some((
+            follow_key,
+            item_index,
+            _phase,
+            terminal_thread_id,
+            terminal_status,
+            stored_envelope,
+        )) = child
+        else {
             tx.commit()?;
             return Ok(false);
         };
 
         if terminal_thread_id.is_some() || terminal_status.is_some() || stored_envelope.is_some() {
-            if terminal_thread_id.is_none() || terminal_status.is_none() || stored_envelope.is_none() {
+            if terminal_thread_id.is_none()
+                || terminal_status.is_none()
+                || stored_envelope.is_none()
+            {
                 bail!("follow child chain {child_chain_root_id} has a partial persisted terminal tuple");
             }
             let same_envelope = stored_envelope
@@ -1529,7 +1687,8 @@ impl RuntimeDb {
     }
 
     pub fn get_follow_waiter_by_key(&self, follow_key: &str) -> Result<Option<FollowWaiter>> {
-        let waiter = self.conn
+        let waiter = self
+            .conn
             .query_row(
                 &format!("SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter WHERE follow_key = ?1"),
                 params![follow_key],
@@ -1552,7 +1711,9 @@ impl RuntimeDb {
                 params![child_chain_root_id],
                 read_follow_waiter_row,
             )
-            .optional()?.map(|w| self.with_follow_children(w)).transpose()
+            .optional()?
+            .map(|w| self.with_follow_children(w))
+            .transpose()
     }
 
     /// The follow waiter for which `parent_thread_id` is the SUSPENDED PARENT —
@@ -1574,7 +1735,9 @@ impl RuntimeDb {
                 params![parent_thread_id],
                 read_follow_waiter_row,
             )
-            .optional()?.map(|w| self.with_follow_children(w)).transpose()
+            .optional()?
+            .map(|w| self.with_follow_children(w))
+            .transpose()
     }
 
     /// The follow waiter whose recorded resume successor is `successor_thread_id`
@@ -1595,7 +1758,9 @@ impl RuntimeDb {
                 params![successor_thread_id],
                 read_follow_waiter_row,
             )
-            .optional()?.map(|w| self.with_follow_children(w)).transpose()
+            .optional()?
+            .map(|w| self.with_follow_children(w))
+            .transpose()
     }
 
     /// All active follow waiters. The table holds only non-cleared rows, so
@@ -1605,22 +1770,37 @@ impl RuntimeDb {
             "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter ORDER BY created_at_ms ASC"
         ))?;
         let rows = stmt.query_map([], read_follow_waiter_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter()
-            .map(|w| self.with_follow_children(w)).collect()
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|w| self.with_follow_children(w))
+            .collect()
     }
 
-    pub fn get_follow_child(&self, follow_key: &str, item_index: u32) -> Result<Option<FollowWaiterChild>> {
-        self.conn.query_row("SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
+    pub fn get_follow_child(
+        &self,
+        follow_key: &str,
+        item_index: u32,
+    ) -> Result<Option<FollowWaiterChild>> {
+        self.conn
+            .query_row(
+                "SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
             terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms
             FROM follow_waiter_child WHERE follow_key=?1 AND item_index=?2",
-            params![follow_key,item_index], read_follow_child_row).optional().map_err(Into::into)
+                params![follow_key, item_index],
+                read_follow_child_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn with_follow_children(&self, mut waiter: FollowWaiter) -> Result<FollowWaiter> {
-        let mut stmt=self.conn.prepare("SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
+        let mut stmt = self.conn.prepare(
+            "SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
             terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms
-            FROM follow_waiter_child WHERE follow_key=?1 ORDER BY item_index")?;
-        waiter.children=stmt.query_map(params![waiter.follow_key],read_follow_child_row)?
+            FROM follow_waiter_child WHERE follow_key=?1 ORDER BY item_index",
+        )?;
+        waiter.children = stmt
+            .query_map(params![waiter.follow_key], read_follow_child_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(waiter)
     }
@@ -1629,9 +1809,15 @@ impl RuntimeDb {
     /// recoverable (checkpoint copied with the result + launch claimed, or the
     /// successor reached terminal).
     pub fn clear_follow_waiter(&self, follow_key: &str) -> Result<()> {
-        let tx=self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM follow_waiter_child WHERE follow_key=?1",params![follow_key])?;
-        tx.execute("DELETE FROM follow_waiter WHERE follow_key = ?1", params![follow_key])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM follow_waiter_child WHERE follow_key=?1",
+            params![follow_key],
+        )?;
+        tx.execute(
+            "DELETE FROM follow_waiter WHERE follow_key = ?1",
+            params![follow_key],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1763,7 +1949,11 @@ impl RuntimeDb {
 
     /// Remove exactly the requested members that are still queued. This is used
     /// by cancellation and intentionally does not admit replacements.
-    pub fn launch_window_cancel_queued(&mut self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+    pub fn launch_window_cancel_queued(
+        &mut self,
+        chain_roots: &[String],
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
         let tx = self.conn.transaction()?;
         let mut removed = Vec::new();
         for root in chain_roots {
@@ -1782,7 +1972,11 @@ impl RuntimeDb {
 
     /// Tombstone selected members regardless of admission marker. Callers must
     /// first prove from the authoritative thread row that no process is live.
-    pub fn launch_window_cancel_members(&mut self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+    pub fn launch_window_cancel_members(
+        &mut self,
+        chain_roots: &[String],
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
         let tx = self.conn.transaction()?;
         let mut cancelled = Vec::new();
         for root in chain_roots {
@@ -1790,7 +1984,10 @@ impl RuntimeDb {
                 "UPDATE launch_window SET cancelled_at_ms = ?2
                  WHERE child_chain_root_id = ?1 AND cancelled_at_ms IS NULL",
                 params![root, now_ms],
-            )? != 0 { cancelled.push(root.clone()); }
+            )? != 0
+            {
+                cancelled.push(root.clone());
+            }
         }
         tx.commit()?;
         Ok(cancelled)
@@ -1806,11 +2003,15 @@ impl RuntimeDb {
     pub fn launch_window_cancelled_members(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT child_chain_root_id FROM launch_window WHERE cancelled_at_ms IS NOT NULL ORDER BY rowid")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn launch_window_discard_member(&self, chain_root: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM launch_window WHERE child_chain_root_id = ?1", params![chain_root])?;
+        self.conn.execute(
+            "DELETE FROM launch_window WHERE child_chain_root_id = ?1",
+            params![chain_root],
+        )?;
         Ok(())
     }
 
@@ -1897,12 +2098,30 @@ fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWai
 }
 
 fn read_follow_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiterChild> {
-    let raw: Option<String>=row.get(7)?;
-    let terminal_envelope=raw.map(|s| serde_json::from_str(&s).map_err(|e|
-        rusqlite::Error::FromSqlConversionFailure(7,rusqlite::types::Type::Text,Box::new(e)))).transpose()?;
-    Ok(FollowWaiterChild { item_index:row.get(0)?, item_ref:row.get(1)?, spec_hash:row.get(2)?,
-        child_thread_id:row.get(3)?, child_chain_root_id:row.get(4)?, terminal_thread_id:row.get(5)?,
-        terminal_status:row.get(6)?, terminal_envelope, created_at_ms:row.get(8)?, updated_at_ms:row.get(9)? })
+    let raw: Option<String> = row.get(7)?;
+    let terminal_envelope = raw
+        .map(|s| {
+            serde_json::from_str(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })
+        .transpose()?;
+    Ok(FollowWaiterChild {
+        item_index: row.get(0)?,
+        item_ref: row.get(1)?,
+        spec_hash: row.get(2)?,
+        child_thread_id: row.get(3)?,
+        child_chain_root_id: row.get(4)?,
+        terminal_thread_id: row.get(5)?,
+        terminal_status: row.get(6)?,
+        terminal_envelope,
+        created_at_ms: row.get(8)?,
+        updated_at_ms: row.get(9)?,
+    })
 }
 
 fn validate_terminal_completeness(waiter: &FollowWaiter) -> Result<bool> {
@@ -2241,13 +2460,20 @@ mod tests {
         let (_tmp, mut db) = fresh_db();
         db.launch_window_insert("admitted", "K", 1, 1).unwrap();
         db.launch_window_insert("queued", "K", 1, 2).unwrap();
-        assert_eq!(db.launch_window_admit("K", None, 3).unwrap(), vec!["admitted"]);
         assert_eq!(
-            db.launch_window_cancel_members(&["queued".into(), "admitted".into()], 4).unwrap(),
+            db.launch_window_admit("K", None, 3).unwrap(),
+            vec!["admitted"]
+        );
+        assert_eq!(
+            db.launch_window_cancel_members(&["queued".into(), "admitted".into()], 4)
+                .unwrap(),
             vec!["queued", "admitted"]
         );
         assert!(db.launch_window_admit("K", None, 5).unwrap().is_empty());
-        assert_eq!(db.launch_window_cancelled_members().unwrap(), vec!["admitted", "queued"]);
+        assert_eq!(
+            db.launch_window_cancelled_members().unwrap(),
+            vec!["admitted", "queued"]
+        );
         db.launch_window_discard_member("admitted").unwrap();
         db.launch_window_discard_member("queued").unwrap();
         assert!(db.launch_window_cancelled_members().unwrap().is_empty());
@@ -2326,7 +2552,9 @@ mod tests {
             item_ref: "directive:example/child".into(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({"subject": "one"}),
-            project_context: ProjectContext::LocalPath { path: "/tmp/example".into() },
+            project_context: ProjectContext::LocalPath {
+                path: "/tmp/example".into(),
+            },
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -2388,17 +2616,21 @@ mod tests {
                   child_chain_root_id,child_terminal_thread_id,child_terminal_status,
                   terminal_envelope,phase,created_at_ms,updated_at_ms)
                  VALUES (?1,?2,?3,NULL,?4,?5,?6,NULL,?7,?8,NULL,NULL,NULL,'waiting',10,11)",
-                params!["follow-1", "parent-1", "parent-chain", "review", "run-1", 4,
-                    "child-1", "child-chain"],
+                params![
+                    "follow-1",
+                    "parent-1",
+                    "parent-chain",
+                    "review",
+                    "run-1",
+                    4,
+                    "child-1",
+                    "child-chain"
+                ],
             )
             .unwrap();
         }
 
-        let expected_hash = follow_child_spec_hash(
-            &context.item_ref,
-            &context.parameters,
-            None,
-        );
+        let expected_hash = follow_child_spec_hash(&context.item_ref, &context.parameters, None);
         for _ in 0..2 {
             let db = RuntimeDb::open(&path).unwrap();
             let waiter = db.get_follow_waiter_by_key("follow-1").unwrap().unwrap();
@@ -2644,7 +2876,10 @@ mod tests {
         assert!(matched);
         let ready = db.get_follow_waiter_by_key("fk1").unwrap().unwrap();
         assert_eq!(ready.phase, follow_phase::READY);
-        assert_eq!(ready.children[0].terminal_status.as_deref(), Some("completed"));
+        assert_eq!(
+            ready.children[0].terminal_status.as_deref(),
+            Some("completed")
+        );
         assert_eq!(ready.children[0].terminal_envelope, Some(envelope));
 
         db.clear_follow_waiter("fk1").unwrap();
@@ -2703,10 +2938,7 @@ mod tests {
         assert!(db
             .mark_follow_child_terminal("chain-0", "tail-0", "completed", &envelope_0)
             .unwrap());
-        let ready = db
-            .get_follow_waiter_by_key("fk-cohort")
-            .unwrap()
-            .unwrap();
+        let ready = db.get_follow_waiter_by_key("fk-cohort").unwrap().unwrap();
         assert_eq!(ready.phase, follow_phase::READY);
         assert_eq!(ready.children[0].item_index, 0);
         assert_eq!(ready.children[1].item_index, 1);

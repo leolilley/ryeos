@@ -192,8 +192,12 @@ pub struct BundleManifest {
 }
 
 pub(crate) fn parse_current_manifest_body(body: &str, origin: &Path) -> Result<BundleManifest> {
-    let value: serde_yaml::Value = serde_yaml::from_str(body)
-        .with_context(|| format!("parse {CURRENT_BUNDLE_MANIFEST_FORMAT} at {}", origin.display()))?;
+    let value: serde_yaml::Value = serde_yaml::from_str(body).with_context(|| {
+        format!(
+            "parse {CURRENT_BUNDLE_MANIFEST_FORMAT} at {}",
+            origin.display()
+        )
+    })?;
     let mapping = value.as_mapping().ok_or_else(|| {
         anyhow::anyhow!(
             "{} must contain a YAML mapping in format {CURRENT_BUNDLE_MANIFEST_FORMAT}",
@@ -866,12 +870,12 @@ typo_field: oops
     #[test]
     fn current_signed_manifest_format_requires_complete_v1_shape() {
         let origin = Path::new("manifest.yaml");
-        let error = parse_current_manifest_body(
-            "name: demo\nversion: 1.0.0\nprovides_kinds: []\n",
-            origin,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("missing required field 'requires_kinds'"));
+        let error =
+            parse_current_manifest_body("name: demo\nversion: 1.0.0\nprovides_kinds: []\n", origin)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("missing required field 'requires_kinds'"));
     }
 
     #[test]

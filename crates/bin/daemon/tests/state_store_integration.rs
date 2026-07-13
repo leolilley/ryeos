@@ -76,11 +76,8 @@ mod integration_tests {
 
     fn set_follow_child(store: &StateStore, follow_key: &str, child: &str, root: &str) {
         let item_ref = "test/item";
-        let spec_hash = ryeos_app::runtime_db::follow_child_spec_hash(
-            item_ref,
-            &serde_json::json!({}),
-            None,
-        );
+        let spec_hash =
+            ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &serde_json::json!({}), None);
         store
             .set_follow_child(follow_key, 0, item_ref, &spec_hash, child, root)
             .unwrap();
@@ -133,7 +130,9 @@ mod integration_tests {
             &serde_json::json!({}),
             None,
         );
-        assert!(store.set_follow_child("k1", 0, "test/item", &hash, "C2", "C2").is_err());
+        assert!(store
+            .set_follow_child("k1", 0, "test/item", &hash, "C2", "C2")
+            .is_err());
         let w = store.get_follow_waiter_by_key("k1").unwrap().unwrap();
         assert_eq!(w.children.len(), 1);
         assert_eq!(w.children[0].child_thread_id, "C");

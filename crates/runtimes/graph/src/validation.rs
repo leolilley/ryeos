@@ -864,15 +864,34 @@ config:
         assert!(validate_graph(&make_graph(base)).errors.is_empty());
         let cases = [
             ("      as: item\n", "", "must declare 'as'"),
-            ("      parallel: true\n", "      parallel: false\n", "parallel: true"),
-            ("      collect: results\n", "      collect: item\n", "both 'collect' and 'as'"),
-            ("      max_concurrency: 3\n", "      max_concurrency: 0\n", "greater than zero"),
-            ("      action: {item_id: \"directive:child\", params: {value: \"${item}\"}}\n", "      retry: {attempts: 2}\n      action: {item_id: \"directive:child\"}\n", "cannot combine 'retry' and 'follow'"),
+            (
+                "      parallel: true\n",
+                "      parallel: false\n",
+                "parallel: true",
+            ),
+            (
+                "      collect: results\n",
+                "      collect: item\n",
+                "both 'collect' and 'as'",
+            ),
+            (
+                "      max_concurrency: 3\n",
+                "      max_concurrency: 0\n",
+                "greater than zero",
+            ),
+            (
+                "      action: {item_id: \"directive:child\", params: {value: \"${item}\"}}\n",
+                "      retry: {attempts: 2}\n      action: {item_id: \"directive:child\"}\n",
+                "cannot combine 'retry' and 'follow'",
+            ),
         ];
         for (from, to, expected) in cases {
             let graph = make_graph(&base.replacen(from, to, 1));
             let errors = validate_graph(&graph).errors;
-            assert!(errors.iter().any(|e| e.contains(expected)), "missing {expected:?} in {errors:?}");
+            assert!(
+                errors.iter().any(|e| e.contains(expected)),
+                "missing {expected:?} in {errors:?}"
+            );
         }
     }
 

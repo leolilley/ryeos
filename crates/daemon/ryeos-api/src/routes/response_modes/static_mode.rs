@@ -39,7 +39,6 @@ pub struct StaticMode {
     providers: HashMap<String, Arc<dyn StaticAssetProvider>>,
 }
 
-
 impl StaticMode {
     /// Register a static asset provider under the given source name.
     pub fn register_provider(
@@ -250,9 +249,7 @@ impl CompiledResponseMode for CompiledStaticMode {
                     }
                 };
 
-                let asset = provider
-                    .get(&path)
-                    .ok_or(RouteDispatchError::NotFound)?;
+                let asset = provider.get(&path).ok_or(RouteDispatchError::NotFound)?;
 
                 // ETag / If-None-Match → 304.
                 if let Some(inm) = ctx.request_parts.headers.get(header::IF_NONE_MATCH) {

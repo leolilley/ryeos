@@ -671,7 +671,13 @@ mod tests {
         assert_eq!(f.child_chain_root_id.as_deref(), Some("T-child"));
         assert!(f.child_terminal_status.is_none());
         assert_eq!(f.parent_successor_thread_id.as_deref(), Some("T-succ"));
-        assert_eq!(f.cohort, Some(FollowCohortProgress { done: 1, expected: 3 }));
+        assert_eq!(
+            f.cohort,
+            Some(FollowCohortProgress {
+                done: 1,
+                expected: 3
+            })
+        );
     }
 
     #[test]

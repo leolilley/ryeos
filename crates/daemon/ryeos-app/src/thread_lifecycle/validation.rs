@@ -61,7 +61,9 @@ mod tests {
             assert_eq!(normalize_terminal_status(status).unwrap(), status);
         }
         assert_eq!(
-            normalize_terminal_status("running").unwrap_err().to_string(),
+            normalize_terminal_status("running")
+                .unwrap_err()
+                .to_string(),
             "invalid terminal status: running"
         );
     }
@@ -85,7 +87,9 @@ mod tests {
     #[test]
     fn thread_id_rejects_missing_prefix() {
         assert_eq!(
-            validate_thread_id_format("foo-123").unwrap_err().to_string(),
+            validate_thread_id_format("foo-123")
+                .unwrap_err()
+                .to_string(),
             "thread_id must start with `T-`: got `foo-123`"
         );
     }

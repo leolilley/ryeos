@@ -19,8 +19,7 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let thread_projection = state.state_store.projection_health_snapshot();
     let status = if state.catalog_health.missing_services.is_empty()
-        && thread_projection.status
-            == ryeos_app::projection_health::ThreadProjectionState::Current
+        && thread_projection.status == ryeos_app::projection_health::ThreadProjectionState::Current
     {
         "healthy"
     } else {

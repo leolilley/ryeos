@@ -123,10 +123,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &RyeOsViewModel) ->
 /// 1-cell gap; left/right are bounded so the center keeps ≥ 8 cells wide,
 /// top/bottom so it keeps ≥ 6 tall. This encodes the CURRENT terminal
 /// policy verbatim.
-fn carve_docks(
-    body: Rect,
-    docks: &RyeOsDockPlaneVm,
-) -> (Vec<(&RyeOsDockTileVm, Rect)>, Rect) {
+fn carve_docks(body: Rect, docks: &RyeOsDockPlaneVm) -> (Vec<(&RyeOsDockTileVm, Rect)>, Rect) {
     let mut center = body;
     let mut out = Vec::new();
 

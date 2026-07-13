@@ -39,10 +39,7 @@ pub(crate) fn timeline_summary_entry(response: &serde_json::Value) -> Option<Rye
 /// resolved through the shared `@facet:` grammar (so a dotted path like
 /// `selection.summary` reads the field within the `selection` facet). `None`
 /// when the facet is unset — the view then falls back to its `source` fetch.
-pub(super) fn facet_backed_response(
-    core: &RyeOsCore,
-    facet: &str,
-) -> Option<serde_json::Value> {
+pub(super) fn facet_backed_response(core: &RyeOsCore, facet: &str) -> Option<serde_json::Value> {
     let fold = core.seat.fold();
     let resolved = super::super::content::resolve_params(
         &serde_json::Value::String(format!("@facet:{facet}")),

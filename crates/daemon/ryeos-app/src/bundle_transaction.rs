@@ -234,7 +234,10 @@ impl BundleTransaction {
     }
 
     fn staging_path(&self, operation: BundleOperation) -> Result<PathBuf> {
-        let parent = self.target.parent().context("bundle target has no parent")?;
+        let parent = self
+            .target
+            .parent()
+            .context("bundle target has no parent")?;
         match operation {
             BundleOperation::Install | BundleOperation::Replace => {
                 Ok(parent.join(format!(".{}.staging", self.name)))
@@ -258,7 +261,7 @@ impl BundleTransaction {
     }
 
     fn remove_registration(&self) -> Result<()> {
-        lillux::remove_file_durable(&self.registration_path())
+        Ok(lillux::remove_file_durable(&self.registration_path())?)
     }
 
     fn registration_path(&self) -> PathBuf {
@@ -268,7 +271,7 @@ impl BundleTransaction {
     }
 
     fn finish(&self) -> Result<()> {
-        lillux::remove_file_durable(&self.journal)
+        Ok(lillux::remove_file_durable(&self.journal)?)
     }
 }
 
@@ -330,14 +333,18 @@ fn validate_journal(app_root: &Path, name: &str, journal: &Journal) -> Result<()
         anyhow::bail!("bundle transaction name mismatch");
     }
     let transaction_target = app_root.join(".ai/bundles").join(name);
-    let registration = app_root.join(".ai/node/bundles").join(format!("{name}.yaml"));
+    let registration = app_root
+        .join(".ai/node/bundles")
+        .join(format!("{name}.yaml"));
     if journal.target_path != transaction_target || journal.registration_path != registration {
         anyhow::bail!("bundle transaction contains non-derived paths");
     }
     let expected_staging = match journal.operation {
-        BundleOperation::Install | BundleOperation::Replace => {
-            Some(app_root.join(".ai/bundles").join(format!(".{name}.staging")))
-        }
+        BundleOperation::Install | BundleOperation::Replace => Some(
+            app_root
+                .join(".ai/bundles")
+                .join(format!(".{name}.staging")),
+        ),
         BundleOperation::RemoteInstall => Some(
             app_root
                 .join(".ai/bundles")
@@ -396,11 +403,7 @@ fn hash_tree_entry(path: &Path, relative: &Path, hasher: &mut Sha256) -> Result<
         let mut entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            hash_tree_entry(
-                &entry.path(),
-                &relative.join(entry.file_name()),
-                hasher,
-            )?;
+            hash_tree_entry(&entry.path(), &relative.join(entry.file_name()), hasher)?;
         }
     } else if metadata.is_file() {
         hasher.update(b"f");
@@ -422,10 +425,7 @@ fn valid_bundle_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || byte == b'_'
-                || byte == b'-'
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
         })
 }
 

@@ -299,7 +299,8 @@ fn handle_attach_process(
             if params.pgid > 0 {
                 let _ = ryeos_app::process::hard_kill_process_group(params.pgid);
             }
-            return Err(error).context("runtime.attach_process refused; spawned process group killed");
+            return Err(error)
+                .context("runtime.attach_process refused; spawned process group killed");
         }
     };
     if state
@@ -317,8 +318,7 @@ fn handle_attach_process(
             "late follow-child process attachment observed cancellation tombstone"
         );
     }
-    serde_json::to_value(attached)
-        .context("failed to encode runtime.attach_process result")
+    serde_json::to_value(attached).context("failed to encode runtime.attach_process result")
 }
 
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
@@ -762,8 +762,7 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode)
-        {
+        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode) {
             Ok((report, cancelled_roots)) => {
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
@@ -1360,7 +1359,10 @@ mod tests {
     fn set_test_follow_child(state: &AppState, follow_key: &str, child: &str) {
         let item_ref = "graph:test";
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &json!(null), None);
-        state.state_store.set_follow_child(follow_key, 0, item_ref, &hash, child, child).unwrap();
+        state
+            .state_store
+            .set_follow_child(follow_key, 0, item_ref, &hash, child, child)
+            .unwrap();
     }
 
     fn finalize_child(
@@ -2041,7 +2043,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.children[0].terminal_envelope.expect("degraded envelope stored");
+        let env = w.children[0]
+            .terminal_envelope
+            .expect("degraded envelope stored");
         assert_eq!(env["success"], json!(false));
         assert_eq!(env["status"], json!("failed"));
         assert_eq!(
@@ -2095,7 +2099,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.children[0].terminal_envelope.expect("canonical envelope stored");
+        let env = w.children[0]
+            .terminal_envelope
+            .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
         assert_eq!(env["warnings"], json!(["w1"]));
@@ -2170,7 +2176,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.children[0].terminal_envelope.expect("canonical envelope stored");
+        let env = w.children[0]
+            .terminal_envelope
+            .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["result"], json!("directive_return"));
         assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));

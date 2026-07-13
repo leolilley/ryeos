@@ -12,11 +12,11 @@ use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
-use ryeos_state::UsageSubject;
 use ryeos_state::StateDb;
+use ryeos_state::UsageSubject;
 
-use crate::runtime_db;
 use crate::projection_health::ThreadProjectionHealth;
+use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
 
@@ -1962,7 +1962,9 @@ impl StateStore {
                     thread.status
                 );
             }
-            if g.runtime_db.launch_window_is_cancelled(&thread.chain_root_id)? {
+            if g.runtime_db
+                .launch_window_is_cancelled(&thread.chain_root_id)?
+            {
                 anyhow::bail!(
                     "refusing to attach process {pid}/{pgid} to cancelled launch-window member {thread_id}"
                 );
@@ -2212,10 +2214,7 @@ impl StateStore {
     /// has no events yet.
     pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
         let g = self.lock()?;
-        queries::chain_head_thread(
-            g.state_db.projection(),
-            chain_root_id,
-        )
+        queries::chain_head_thread(g.state_db.projection(), chain_root_id)
     }
 
     pub fn replay_events(
@@ -2397,8 +2396,16 @@ impl StateStore {
 
     /// Repair membership without admitting it; used when launch metadata proves
     /// the child was originally windowed but the membership write was lost.
-    pub fn launch_window_insert_only(&self, child_chain_root_id: &str, window_key: &str, width: u32, now_ms: i64) -> Result<bool> {
-        self.lock()?.runtime_db.launch_window_insert(child_chain_root_id, window_key, width, now_ms)
+    pub fn launch_window_insert_only(
+        &self,
+        child_chain_root_id: &str,
+        window_key: &str,
+        width: u32,
+        now_ms: i64,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .launch_window_insert(child_chain_root_id, window_key, width, now_ms)
     }
 
     /// Release a window slot for a chain that reached a hard terminal and
@@ -2419,17 +2426,30 @@ impl StateStore {
         g.runtime_db.launch_window_is_queued(child_chain_root_id)
     }
 
-    pub fn launch_window_cancel_queued(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+    pub fn launch_window_cancel_queued(
+        &self,
+        chain_roots: &[String],
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
         let mut g = self.lock()?;
-        g.runtime_db.launch_window_cancel_queued(chain_roots, now_ms)
+        g.runtime_db
+            .launch_window_cancel_queued(chain_roots, now_ms)
     }
 
-    pub fn launch_window_cancel_members(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
-        self.lock()?.runtime_db.launch_window_cancel_members(chain_roots, now_ms)
+    pub fn launch_window_cancel_members(
+        &self,
+        chain_roots: &[String],
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .launch_window_cancel_members(chain_roots, now_ms)
     }
 
     pub fn launch_window_is_cancelled(&self, chain_root: &str) -> Result<bool> {
-        self.lock()?.runtime_db.launch_window_is_cancelled(chain_root)
+        self.lock()?
+            .runtime_db
+            .launch_window_is_cancelled(chain_root)
     }
 
     pub fn list_cancelled_window_members(&self) -> Result<Vec<String>> {
@@ -2437,7 +2457,9 @@ impl StateStore {
     }
 
     pub fn discard_window_member(&self, chain_root: &str) -> Result<()> {
-        self.lock()?.runtime_db.launch_window_discard_member(chain_root)
+        self.lock()?
+            .runtime_db
+            .launch_window_discard_member(chain_root)
     }
 
     pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {

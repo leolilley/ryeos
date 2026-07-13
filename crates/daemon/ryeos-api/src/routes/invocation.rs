@@ -248,7 +248,10 @@ pub async fn invoke_checked(
     let result_matches = matches!(
         (&result, contract.output),
         (RouteInvocationResult::Json(_), RouteInvocationOutput::Json)
-            | (RouteInvocationResult::Stream(_), RouteInvocationOutput::Stream)
+            | (
+                RouteInvocationResult::Stream(_),
+                RouteInvocationOutput::Stream
+            )
             | (
                 RouteInvocationResult::Principal(_),
                 RouteInvocationOutput::Principal

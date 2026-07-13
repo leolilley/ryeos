@@ -37,7 +37,13 @@ impl RpcResponse {
     }
 
     pub fn err(request_id: u64, code: &str, message: impl Into<String>) -> Self {
-        Self::classified_err(request_id, code, message, false, Value::Object(Default::default()))
+        Self::classified_err(
+            request_id,
+            code,
+            message,
+            false,
+            Value::Object(Default::default()),
+        )
     }
 
     pub fn classified_err(

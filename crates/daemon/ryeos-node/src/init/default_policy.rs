@@ -44,16 +44,13 @@ pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
     let paths = NodeDefaultPaths::under(app_root);
 
     if !paths.sandbox_policy.exists() {
-        lillux::atomic_write_private(
-            &paths.sandbox_policy,
-            DEFAULT_SANDBOX_POLICY.as_bytes(),
-        )
-        .with_context(|| {
-            format!(
-                "write default sandbox policy {}",
-                paths.sandbox_policy.display()
-            )
-        })?;
+        lillux::atomic_write_private(&paths.sandbox_policy, DEFAULT_SANDBOX_POLICY.as_bytes())
+            .with_context(|| {
+                format!(
+                    "write default sandbox policy {}",
+                    paths.sandbox_policy.display()
+                )
+            })?;
     }
 
     if !paths.ignore_config.exists() {
@@ -65,9 +62,8 @@ pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
             .collect::<Vec<_>>()
             .join("\n");
         let content = format!("patterns:\n{}\n", patterns_yaml);
-        fs::write(&paths.ignore_config, content).with_context(|| {
-            format!("write ignore config {}", paths.ignore_config.display())
-        })?;
+        fs::write(&paths.ignore_config, content)
+            .with_context(|| format!("write ignore config {}", paths.ignore_config.display()))?;
     }
 
     fs::create_dir_all(&paths.sync_dir)

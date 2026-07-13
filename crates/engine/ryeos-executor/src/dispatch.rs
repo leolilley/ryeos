@@ -67,8 +67,8 @@ use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 
 mod subprocess_policy;
-pub use subprocess_policy::PreparedManagedLaunch;
 pub(crate) use subprocess_policy::strip_binary_ref_prefix;
+pub use subprocess_policy::PreparedManagedLaunch;
 use subprocess_policy::{
     enforce_runtime_caps, prepare_managed_launch, require_terminal_executor_id,
     service_params_with_project_path,
@@ -1304,8 +1304,8 @@ pub(crate) async fn dispatch_method(
         )
         .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
         let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
-        .await
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+            .await
+            .map_err(|e| DispatchError::Internal(e.into()))?;
 
         // Process the runtime result. On failure, return `Err` and let the
         // cleanup below finalize the thread; on success the runtime already
@@ -2036,8 +2036,8 @@ async fn dispatch_streaming_subprocess(
     )
     .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
     let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
-    .await
-    .map_err(|e| DispatchError::Internal(e.into()))?;
+        .await
+        .map_err(|e| DispatchError::Internal(e.into()))?;
 
     if !result.success {
         return Err(DispatchError::SubprocessRunFailed {

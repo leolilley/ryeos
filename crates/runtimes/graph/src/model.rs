@@ -442,7 +442,10 @@ impl WalkContext {
             ctx.insert("_execution".into(), execution.clone());
         }
         if let Some(ref graph_run_id) = self.graph_run_id {
-            ctx.insert("_run".into(), serde_json::json!({"graph_run_id": graph_run_id}));
+            ctx.insert(
+                "_run".into(),
+                serde_json::json!({"graph_run_id": graph_run_id}),
+            );
         }
         ctx.insert("_now".into(), Value::String(lillux::time::iso8601_now()));
         ctx.insert(

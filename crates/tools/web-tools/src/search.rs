@@ -31,7 +31,6 @@ enum SearchProvider {
     BingNewsRss,
 }
 
-
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
     title: String,

@@ -117,7 +117,10 @@ pub struct RuntimeLaunchMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FollowLaunchWindow { pub key: String, pub width: u32 }
+pub struct FollowLaunchWindow {
+    pub key: String,
+    pub width: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

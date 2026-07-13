@@ -435,7 +435,10 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     // is unavailable. Diagnose that boundary offline instead of making the
     // operator infer it from a failed launch.
     if initialized {
-        let policy_path = config.app_root.join(ryeos_engine::AI_DIR).join("node/sandbox.yaml");
+        let policy_path = config
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node/sandbox.yaml");
         match inspect_sandbox_policy(&policy_path) {
             Ok(detail) => checks.push(check("sandbox", OK, detail)),
             Err(error) => checks.push(check(
@@ -994,14 +997,21 @@ mod tests {
         let policy = temp.path().join("sandbox.yaml");
         std::fs::write(
             &policy,
-            format!("{}unexpected: true\n", sandbox_policy(std::path::Path::new("relative/bwrap"), 2)),
+            format!(
+                "{}unexpected: true\n",
+                sandbox_policy(std::path::Path::new("relative/bwrap"), 2)
+            ),
         )
         .unwrap();
 
         let error = inspect_sandbox_policy(&policy).unwrap_err().to_string();
         assert!(error.contains("strictly parse"));
 
-        std::fs::write(&policy, sandbox_policy(std::path::Path::new("relative/bwrap"), 1)).unwrap();
+        std::fs::write(
+            &policy,
+            sandbox_policy(std::path::Path::new("relative/bwrap"), 1),
+        )
+        .unwrap();
         assert!(inspect_sandbox_policy(&policy)
             .unwrap_err()
             .to_string()

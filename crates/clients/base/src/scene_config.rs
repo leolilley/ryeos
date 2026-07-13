@@ -5,8 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SceneConfig {
     #[serde(default)]
     pub animation: AnimationConfig,
@@ -518,7 +517,6 @@ fn default_ring_speed() -> f32 {
 fn default_ring_bob() -> f32 {
     1.0
 }
-
 
 impl SceneConfig {
     /// Load from a TOML file. Returns defaults if file missing or invalid.

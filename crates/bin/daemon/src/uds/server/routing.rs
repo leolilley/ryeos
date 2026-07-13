@@ -32,10 +32,13 @@ fn system_health(request_id: u64, state: &AppState) -> RpcResponse {
     } else {
         "degraded"
     };
-    RpcResponse::ok(request_id, json!({
-        "status": status,
-        "thread_projection": thread_projection,
-    }))
+    RpcResponse::ok(
+        request_id,
+        json!({
+            "status": status,
+            "thread_projection": thread_projection,
+        }),
+    )
 }
 
 fn lifecycle_status(request_id: u64, state: &AppState) -> RpcResponse {

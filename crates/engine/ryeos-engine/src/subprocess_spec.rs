@@ -17,11 +17,17 @@ use crate::error::EngineError;
 use crate::protocol_vocabulary::{CallbackChannel, StdoutShape};
 use crate::resolution::ResolutionOutput;
 
-pub fn load_node_sandbox_policy(app_root: &std::path::Path) -> Result<NodeSandboxPolicy, EngineError> {
+pub fn load_node_sandbox_policy(
+    app_root: &std::path::Path,
+) -> Result<NodeSandboxPolicy, EngineError> {
     let path = app_root.join(crate::AI_DIR).join("node/sandbox.yaml");
-    let raw = std::fs::read_to_string(&path).map_err(|error| EngineError::SandboxPolicyRefused {
-        reason: format!("node sandbox policy is required at {}: {error}", path.display()),
-    })?;
+    let raw =
+        std::fs::read_to_string(&path).map_err(|error| EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "node sandbox policy is required at {}: {error}",
+                path.display()
+            ),
+        })?;
     serde_yaml::from_str(&raw).map_err(|error| EngineError::SandboxPolicyRefused {
         reason: format!("invalid node sandbox policy {}: {error}", path.display()),
     })
@@ -47,11 +53,10 @@ pub fn sandbox_lillux_request(
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| project_path.to_path_buf());
-    let item_ref = CanonicalRef::parse(item_ref).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
+    let item_ref =
+        CanonicalRef::parse(item_ref).map_err(|error| EngineError::SandboxPolicyRefused {
             reason: format!("invalid sandbox item reference `{item_ref}`: {error}"),
-        }
-    })?;
+        })?;
     let spec = SubprocessSpec {
         cmd: PathBuf::from(request.cmd),
         args: request.args,
@@ -185,14 +190,13 @@ pub fn sandbox_wrap(
             ),
         }
     })?;
-    let backend_metadata = std::fs::metadata(&backend_path).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
+    let backend_metadata =
+        std::fs::metadata(&backend_path).map_err(|error| EngineError::SandboxPolicyRefused {
             reason: format!(
                 "sandbox backend {} cannot be inspected: {error}",
                 backend_path.display()
             ),
-        }
-    })?;
+        })?;
     if !backend_metadata.is_file() {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!("sandbox backend {} is not a file", backend_path.display()),
@@ -233,14 +237,13 @@ pub fn sandbox_wrap(
             ),
         }
     })?;
-    let canonical_cwd = std::fs::canonicalize(&spec.cwd).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
+    let canonical_cwd =
+        std::fs::canonicalize(&spec.cwd).map_err(|error| EngineError::SandboxPolicyRefused {
             reason: format!(
                 "working directory {} cannot be resolved: {error}",
                 spec.cwd.display()
             ),
-        }
-    })?;
+        })?;
     let resolve_path = |configured: &str| -> Result<PathBuf, EngineError> {
         let path = match configured {
             "{project}" => canonical_project.clone(),
@@ -253,7 +256,10 @@ pub fn sandbox_wrap(
             });
         }
         std::fs::canonicalize(&path).map_err(|error| EngineError::SandboxPolicyRefused {
-            reason: format!("sandbox path {} cannot be resolved: {error}", path.display()),
+            reason: format!(
+                "sandbox path {} cannot be resolved: {error}",
+                path.display()
+            ),
         })
     };
     let mut writable_paths = policy
@@ -275,11 +281,10 @@ pub fn sandbox_wrap(
         });
     }
 
-    let command_path = std::fs::canonicalize(&spec.cmd).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
+    let command_path =
+        std::fs::canonicalize(&spec.cmd).map_err(|error| EngineError::SandboxPolicyRefused {
             reason: format!("command {} cannot be resolved: {error}", spec.cmd.display()),
-        }
-    })?;
+        })?;
 
     let mut args = vec![
         "--die-with-parent".to_string(),
@@ -298,7 +303,11 @@ pub fn sandbox_wrap(
         if path.exists() {
             let source = std::fs::canonicalize(&path).unwrap_or(path.clone());
             let source = source.to_string_lossy().into_owned();
-            args.extend(["--ro-bind".to_string(), source, path.to_string_lossy().into_owned()]);
+            args.extend([
+                "--ro-bind".to_string(),
+                source,
+                path.to_string_lossy().into_owned(),
+            ]);
         }
     }
     args.extend(["--dir".to_string(), "/etc".to_string()]);
@@ -422,10 +431,7 @@ mod tests {
             .windows(3)
             .any(|args| args == ["--bind", project_text.as_ref(), project_text.as_ref()]));
         assert!(!wrapped.args.iter().any(|arg| arg == "--share-net"));
-        assert_eq!(
-            wrapped.sandbox.unwrap().writable_paths,
-            vec![project]
-        );
+        assert_eq!(wrapped.sandbox.unwrap().writable_paths, vec![project]);
     }
 
     #[test]
@@ -487,7 +493,13 @@ mod tests {
             "T-test",
         )
         .unwrap();
-        assert_eq!(wrapped.cmd, std::fs::canonicalize("/bin/sh").unwrap().display().to_string());
+        assert_eq!(
+            wrapped.cmd,
+            std::fs::canonicalize("/bin/sh")
+                .unwrap()
+                .display()
+                .to_string()
+        );
         assert!(wrapped.args.iter().any(|arg| arg == "--unshare-all"));
     }
 }

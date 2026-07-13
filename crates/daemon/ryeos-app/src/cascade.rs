@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 use ryeos_engine::contracts::CancellationMode;
 
 use crate::process::signal_process_group;
-use crate::state_store::StateStore;
 use crate::state::AppState;
+use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadFinalizeParams;
 
 /// How hard to stop a thread.
@@ -77,7 +77,10 @@ pub fn cascade_descendants(
 /// Cancel durable descendants that have not yet been admitted. Membership is
 /// tombstoned as one store operation before lifecycle finalization, preventing
 /// admission across crashes (and deliberately admitting no replacements).
-pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyhow::Result<Vec<String>> {
+pub fn cancel_queued_descendants(
+    state: &AppState,
+    root_thread_id: &str,
+) -> anyhow::Result<Vec<String>> {
     let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
     // Admission is only a durable marker, not proof of a spawn. Include admitted
     // members only while the authoritative row is still created with no live pgid.
@@ -92,7 +95,9 @@ pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyh
             cancellable.push(root);
         }
     }
-    let removed = state.state_store.launch_window_cancel_members(&cancellable, lillux::time::timestamp_millis())?;
+    let removed = state
+        .state_store
+        .launch_window_cancel_members(&cancellable, lillux::time::timestamp_millis())?;
     for chain_root in &removed {
         let Some(thread) = state.state_store.get_thread(chain_root)? else {
             state.state_store.discard_window_member(chain_root)?;
@@ -110,12 +115,15 @@ pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyh
         }
         if !crate::state_store::is_terminal_status(&thread.status) {
             state.threads.finalize_thread(&ThreadFinalizeParams {
-            thread_id: thread.thread_id,
-            status: "cancelled".to_string(),
-            outcome_code: Some("cancelled".to_string()),
-            result: None,
-            error: Some(json!({"reason": "ancestor_cancelled_before_launch"})),
-            metadata: None, artifacts: Vec::new(), final_cost: None, summary_json: None,
+                thread_id: thread.thread_id,
+                status: "cancelled".to_string(),
+                outcome_code: Some("cancelled".to_string()),
+                result: None,
+                error: Some(json!({"reason": "ancestor_cancelled_before_launch"})),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
             })?;
         }
         state.state_store.discard_window_member(chain_root)?;
@@ -136,9 +144,15 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
             && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
         {
             state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: thread.thread_id.clone(), status: "cancelled".into(), outcome_code: Some("cancelled".into()),
-                result: None, error: Some(json!({"reason":"ancestor_cancelled_before_launch"})), metadata: None,
-                artifacts: Vec::new(), final_cost: None, summary_json: None,
+                thread_id: thread.thread_id.clone(),
+                status: "cancelled".into(),
+                outcome_code: Some("cancelled".into()),
+                result: None,
+                error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
             })?;
         }
         if crate::state_store::is_terminal_status(&thread.status) || thread.status == "created" {
@@ -203,7 +217,10 @@ pub fn stop_thread_and_descendants(
     let queued = cancel_queued_descendants(state, thread_id)?;
     let target = signal_thread(&state.state_store, thread_id, mode);
     let descendants = cascade_descendants(&state.state_store, thread_id, mode)?;
-    Ok((json!({ "target": target, "descendants": descendants, "queued": queued }), queued))
+    Ok((
+        json!({ "target": target, "descendants": descendants, "queued": queued }),
+        queued,
+    ))
 }
 
 #[cfg(test)]

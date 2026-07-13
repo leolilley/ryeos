@@ -75,11 +75,9 @@ fn enforce_callback_caps(
     effective_caps: &[String],
     authorizer: &ryeos_runtime::authorizer::Authorizer,
 ) -> std::result::Result<(), crate::dispatch_error::DispatchError> {
-    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_id)
-        .map_err(|error| crate::dispatch_error::DispatchError::InvalidRef(
-            item_id.to_string(),
-            error.to_string(),
-        ))?;
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_id).map_err(|error| {
+        crate::dispatch_error::DispatchError::InvalidRef(item_id.to_string(), error.to_string())
+    })?;
     let required = format!("ryeos.execute.{}.{}", canonical.kind, canonical.bare_id);
 
     if effective_caps.is_empty() {

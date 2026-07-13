@@ -70,7 +70,6 @@ impl LaunchMode {
     }
 }
 
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLaunchSourceConfig {

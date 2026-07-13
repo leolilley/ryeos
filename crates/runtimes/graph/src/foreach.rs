@@ -118,7 +118,7 @@ async fn dispatch_item_with_retry(
     retry: Option<&RetryConfig>,
     ev: &RetryEventCtx,
     item_id: &str,
-) -> anyhow::Result<crate::dispatch::ActionOutcome> {
+) -> Result<crate::dispatch::ActionOutcome, crate::dispatch::ActionDispatchError> {
     let total = retry.map(|r| r.attempts).unwrap_or(1);
     let mut attempt = 0u32;
     loop {

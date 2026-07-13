@@ -953,12 +953,7 @@ impl KindRegistry {
             if !root.exists() {
                 continue;
             }
-            loading::load_schemas_from_dir(
-                root,
-                &mut schemas,
-                &mut fingerprint_data,
-                trust_store,
-            )?;
+            loading::load_schemas_from_dir(root, &mut schemas, &mut fingerprint_data, trust_store)?;
         }
 
         let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);

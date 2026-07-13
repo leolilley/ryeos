@@ -16,7 +16,6 @@ pub struct LimitsConfig {
     pub caps: LimitCaps,
 }
 
-
 impl LimitsConfig {
     fn validate(&self) -> anyhow::Result<()> {
         self.defaults.validate("limits.defaults")?;

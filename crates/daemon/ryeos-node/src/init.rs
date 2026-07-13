@@ -320,10 +320,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
-        let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
-            &opts.app_root,
-            name,
-        )?;
+        let transaction =
+            ryeos_app::bundle_transaction::BundleTransaction::acquire(&opts.app_root, name)?;
         transaction.reconcile(&node_key)?;
         let grants = command_registration_grants
             .get(name)
@@ -336,14 +334,16 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             // same canonical path, so publish it before the atomic tree
             // exchange; every observable generation remains registered.
             verify_bundle_structure(&target)?;
-            replace_bundle(source_path, &target, &transaction, registration.clone()).with_context(|| {
-                format!(
-                    "atomic replace {}: {} -> {}",
-                    name,
-                    source_path.display(),
-                    target.display()
-                )
-            })?;
+            replace_bundle(source_path, &target, &transaction, registration.clone()).with_context(
+                || {
+                    format!(
+                        "atomic replace {}: {} -> {}",
+                        name,
+                        source_path.display(),
+                        target.display()
+                    )
+                },
+            )?;
         } else {
             install_bundle(
                 &opts.app_root,
@@ -997,7 +997,10 @@ fn install_bundle(
     Ok(canonical)
 }
 
-fn bundle_registration_value(path: &Path, command_registration_caps: &[String]) -> serde_json::Value {
+fn bundle_registration_value(
+    path: &Path,
+    command_registration_caps: &[String],
+) -> serde_json::Value {
     let mut value = serde_json::json!({
         "kind": "node",
         "path": path,
