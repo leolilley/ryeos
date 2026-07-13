@@ -13,25 +13,16 @@ use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
 use ryeos_state::UsageSubject;
-use ryeos_state::{CommittedWrite, ProjectionStatus, StateDb};
+use ryeos_state::StateDb;
 
 use crate::runtime_db;
-use crate::projection_health::{ThreadProjectionHealth, ThreadProjectionHealthSnapshot};
+use crate::projection_health::ThreadProjectionHealth;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
 
-fn committed_value<T>(write: CommittedWrite<T>) -> T {
-    if let ProjectionStatus::RepairRequired(request) = &write.projection {
-        tracing::warn!(
-            operation = request.operation,
-            chain_root_id = %request.chain_root_id,
-            committed_head_hash = %request.committed_head_hash,
-            error = %request.error,
-            "authoritative state committed; projection will be repaired"
-        );
-    }
-    write.value
-}
+mod projection_access;
+
+use projection_access::committed_value;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -442,20 +433,6 @@ impl StateStore {
         })
     }
 
-    pub fn projection_health(&self) -> Arc<ThreadProjectionHealth> {
-        self.projection_health.clone()
-    }
-
-    pub fn projection_health_snapshot(&self) -> ThreadProjectionHealthSnapshot {
-        self.projection_health.snapshot()
-    }
-
-    pub fn repair_thread_projection(&self) -> Result<()> {
-        let g = self.lock()?;
-        g.state_db.catch_up_projection()?;
-        Ok(())
-    }
-
     /// Get the CAS root path for raw CAS access.
     pub fn cas_root(&self) -> Result<std::path::PathBuf> {
         let g = self.lock()?;
@@ -475,18 +452,6 @@ impl StateStore {
     {
         let g = self.lock()?;
         f(&g.state_db)
-    }
-
-    /// Run a closure with access to the projection database.
-    pub fn with_projection<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&ryeos_state::ProjectionDb) -> Result<T>,
-    {
-        let g = self.lock()?;
-        if !self.projection_health.is_current() {
-            anyhow::bail!("thread projection is not current; retry after repair");
-        }
-        f(g.state_db.projection())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
