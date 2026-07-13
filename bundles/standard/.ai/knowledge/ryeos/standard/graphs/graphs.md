@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-13T03:53:03Z:b2e9fe83b34ad4b18dee3683afa674885956248402c18028a576d1d76f66c1f2:ZErfwMvke0l8E2XtKHyN3K5iCc7nPTuSuHpgPfGuuTdwSC8NrP14u/ipANCc45T5foKn9IFjgPICOozDP3IEDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-13T04:02:46Z:d999e51f149b70ac5945c85051d60cb99da38c4e982ecb6c668783993d20fd2e:jhwsFPcZgA0VJNYQm4cMbqKCZ5xEN6t0stULprMgBaf/BOP1cdr3JKfxjeVU9eXdXCcJtRE+1XRgYNpZ4K7BCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -163,7 +163,7 @@ nodes:
     max_concurrency: 4
     follow: true
     action:
-      item_id: "directive:arc/review"
+      item_id: "directive:example/review"
       params:
         subject: "${subject}"
         run_id: "${_run.graph_run_id}"

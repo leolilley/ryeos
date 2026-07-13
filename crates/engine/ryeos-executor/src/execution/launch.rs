@@ -244,7 +244,16 @@ impl BuildAndLaunchError {
     /// deterministic until proven otherwise.
     fn retryable_launch_interruption(&self) -> bool {
         match self {
-            Self::Internal(error) => error.chain().any(|cause| cause.is::<std::io::Error>()),
+            Self::Internal(error) => error.chain().any(|cause| {
+                cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                    )
+                })
+            }),
             Self::Materialization(_)
             | Self::MissingSecrets { .. }
             | Self::CapabilityRejected { .. } => false,

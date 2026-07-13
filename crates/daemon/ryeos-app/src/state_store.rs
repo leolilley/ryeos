@@ -1936,7 +1936,15 @@ impl StateStore {
                     pgid,
                     "skipping attach_process — thread already terminal"
                 );
-                return Ok(());
+                anyhow::bail!(
+                    "refusing to attach process {pid}/{pgid} to terminal thread {thread_id} ({})",
+                    thread.status
+                );
+            }
+            if g.runtime_db.launch_window_is_cancelled(&thread.chain_root_id)? {
+                anyhow::bail!(
+                    "refusing to attach process {pid}/{pgid} to cancelled launch-window member {thread_id}"
+                );
             }
         }
         g.runtime_db

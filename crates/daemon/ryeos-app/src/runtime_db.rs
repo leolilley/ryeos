@@ -1981,8 +1981,10 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_metadata::RuntimeLaunchMetadata;
-    use ryeos_engine::contracts::CancellationMode;
+    use crate::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+    use ryeos_engine::contracts::{
+        CancellationMode, EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+    };
     use tempfile::TempDir;
 
     fn fresh_db() -> (TempDir, RuntimeDb) {
@@ -2313,6 +2315,102 @@ mod tests {
         );
         // …and pre-existing runtime state survived the migration.
         assert!(db.get_runtime_info("t-old").unwrap().is_some());
+    }
+
+    #[test]
+    fn open_migrates_legacy_single_follow_to_cohort_idempotently() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let context = ResumeContext {
+            kind: "directive".into(),
+            item_ref: "directive:example/child".into(),
+            launch_mode: "inline".into(),
+            parameters: serde_json::json!({"subject": "one"}),
+            project_context: ProjectContext::LocalPath { path: "/tmp/example".into() },
+            original_snapshot_hash: None,
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".into(),
+                scopes: vec!["execute".into()],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: vec!["ryeos.execute.directive.example/child".into()],
+            executor_ref: Some("native:directive-runtime".into()),
+            runtime_ref: Some("runtime:directive".into()),
+        };
+        let metadata = serde_json::to_string(
+            &RuntimeLaunchMetadata::default().with_resume_context(context.clone()),
+        )
+        .unwrap();
+
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE thread_runtime (
+                    thread_id TEXT PRIMARY KEY, chain_root_id TEXT NOT NULL,
+                    pid INTEGER, pgid INTEGER, metadata BLOB, launch_metadata TEXT,
+                    resume_attempts INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE follow_waiter (
+                    follow_key TEXT PRIMARY KEY, parent_thread_id TEXT NOT NULL,
+                    parent_chain_root_id TEXT NOT NULL, parent_successor_thread_id TEXT,
+                    follow_node TEXT NOT NULL, graph_run_id TEXT NOT NULL,
+                    step_count INTEGER NOT NULL, frontier_id TEXT,
+                    child_thread_id TEXT, child_chain_root_id TEXT,
+                    child_terminal_thread_id TEXT, child_terminal_status TEXT,
+                    terminal_envelope TEXT,
+                    phase TEXT NOT NULL CHECK (phase IN ('reserved','waiting','ready','resuming')),
+                    created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+                );
+                CREATE TABLE launch_window (
+                    child_chain_root_id TEXT PRIMARY KEY, window_key TEXT NOT NULL,
+                    width INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+                    launched_at_ms INTEGER
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO thread_runtime (thread_id,chain_root_id,launch_metadata) VALUES (?1,?2,?3)",
+                params!["child-1", "child-chain", metadata],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO follow_waiter
+                 (follow_key,parent_thread_id,parent_chain_root_id,parent_successor_thread_id,
+                  follow_node,graph_run_id,step_count,frontier_id,child_thread_id,
+                  child_chain_root_id,child_terminal_thread_id,child_terminal_status,
+                  terminal_envelope,phase,created_at_ms,updated_at_ms)
+                 VALUES (?1,?2,?3,NULL,?4,?5,?6,NULL,?7,?8,NULL,NULL,NULL,'waiting',10,11)",
+                params!["follow-1", "parent-1", "parent-chain", "review", "run-1", 4,
+                    "child-1", "child-chain"],
+            )
+            .unwrap();
+        }
+
+        let expected_hash = follow_child_spec_hash(
+            &context.item_ref,
+            &context.parameters,
+            None,
+        );
+        for _ in 0..2 {
+            let db = RuntimeDb::open(&path).unwrap();
+            let waiter = db.get_follow_waiter_by_key("follow-1").unwrap().unwrap();
+            assert!(!waiter.fanout);
+            assert_eq!(waiter.expected_children, 1);
+            assert_eq!(waiter.children.len(), 1);
+            let child = &waiter.children[0];
+            assert_eq!(child.item_ref, "directive:example/child");
+            assert_eq!(child.spec_hash, expected_hash);
+            assert_eq!(child.child_thread_id, "child-1");
+            assert_eq!(child.child_chain_root_id, "child-chain");
+        }
     }
 
     #[test]

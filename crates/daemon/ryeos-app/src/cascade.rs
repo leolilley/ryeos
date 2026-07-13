@@ -98,6 +98,16 @@ pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyh
             state.state_store.discard_window_member(chain_root)?;
             continue;
         };
+        let launch_in_flight = state
+            .state_store
+            .get_launch_claim(&thread.thread_id)?
+            .is_some_and(|claim| claim.lease_expires_at_ms > lillux::time::timestamp_millis());
+        if launch_in_flight {
+            // The launcher owns the sole spawn authorization. Keep the tombstone
+            // durable and let attach_process observe it; never finalize a row
+            // while that launcher may be between spawn and ledger attachment.
+            continue;
+        }
         if !crate::state_store::is_terminal_status(&thread.status) {
             state.threads.finalize_thread(&ThreadFinalizeParams {
             thread_id: thread.thread_id,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-13T03:53:03Z:98488b8d80380511020f5917b34e91f78141e7235029ad6cefbbc253bec69dfd:QrokCTcH2UnU2cLpzuCl/B1fzmLhUWYD/armFAiy9GnkC3MMEtZoKIG5BfFltKWuVVRfMusjfH3UGh60VOK9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-13T04:02:46Z:852d7f75a2fdc3003b5f0eb8723088178faf534a1f1833334c2df91a56b7a35f:9tMF/SV8L9YQWxuHB2+mIrOTakQswSf9g8qD4NhP6lQxaNKq0/mqwVLtBg/4Kwt7KbTa/+jMBX5rQbE4FVzhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -25,7 +25,7 @@ Classic follow launches one managed-runtime child from one action:
 review:
   type: action
   action:
-    item_id: "directive:arc/review"
+    item_id: "directive:example/review"
     params: {subject: "${state.subject}"}
   follow: true
   on_error: failed
@@ -65,9 +65,10 @@ normal success routing is evaluated.
 ## Complete cohort example
 
 The parent must declare authority for every item a template may select. Namespace
-wildcards use a literal slash before `*`: `ryeos.execute.tool.arc/*` covers
-`tool:arc/explore` and deeper descendants but not `tool:arc` or `tool:arcane`;
-the equivalent knowledge grant is `ryeos.execute.knowledge.arc/*`.
+wildcards use a literal slash before `*`: `ryeos.execute.tool.example/*` covers
+`tool:example/explore` and deeper descendants but not `tool:example` or
+`tool:example-other`; the equivalent knowledge grant is
+`ryeos.execute.knowledge.example/*`.
 
 ```yaml
 name: parallel-review
@@ -75,8 +76,9 @@ version: "1.0.0"
 requires:
   capabilities:
     declared:
-      - ryeos.execute.tool.arc/*
-      - ryeos.execute.knowledge.arc/*
+      - ryeos.execute.directive.example/review
+      - ryeos.execute.tool.example/*
+      - ryeos.execute.knowledge.example/*
 
 nodes:
   review:
@@ -87,10 +89,10 @@ nodes:
     max_concurrency: 4
     follow: true
     action:
-      item_id: "${job.action}"
+      item_id: "directive:example/review"
       params:
         subject: "${job.subject}"
-        context_ref: "knowledge:arc/${job.context}"
+        context_ref: "knowledge:example/${job.context}"
         cohort_run: "${_run.graph_run_id}"
     facets:
       cohort: "${_run.graph_run_id}"
@@ -104,7 +106,7 @@ nodes:
   report_partial:
     type: action
     action:
-      item_id: "tool:arc/report-partial"
+      item_id: "tool:example/report-partial"
       params: {reviews: "${state.reviews}"}
     next: {type: unconditional, to: done}
 

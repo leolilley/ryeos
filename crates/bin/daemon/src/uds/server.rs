@@ -357,7 +357,31 @@ fn handle_attach_process(
     // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
     // probe instead of treating the thread as dead.
     params.pgid = ryeos_app::process::pgid_of(params.pid);
-    serde_json::to_value(state.threads.attach_process(&params)?)
+    let attached = match state.threads.attach_process(&params) {
+        Ok(thread) => thread,
+        Err(error) => {
+            if params.pgid > 0 {
+                let _ = ryeos_app::process::hard_kill_process_group(params.pgid);
+            }
+            return Err(error).context("runtime.attach_process refused; spawned process group killed");
+        }
+    };
+    if state
+        .state_store
+        .launch_window_is_cancelled(&attached.chain_root_id)?
+    {
+        let report = ryeos_app::cascade::signal_thread(
+            &state.state_store,
+            &attached.thread_id,
+            ryeos_app::cascade::CascadeMode::Graceful,
+        );
+        tracing::info!(
+            thread_id = %attached.thread_id,
+            report = %report,
+            "late follow-child process attachment observed cancellation tombstone"
+        );
+    }
+    serde_json::to_value(attached)
         .context("failed to encode runtime.attach_process result")
 }
 

@@ -42,14 +42,11 @@ impl CallbackError {
     pub fn retryable(&self) -> bool {
         match self {
             Self::ActionFailed { retryable, .. } => *retryable,
-            Self::Transport(error) => error
-                .downcast_ref::<crate::daemon_rpc::RpcError>()
-                .is_some_and(|rpc| matches!(
-                    rpc,
-                    crate::daemon_rpc::RpcError::Timeout { .. }
-                        | crate::daemon_rpc::RpcError::ConnectionClosed
-                        | crate::daemon_rpc::RpcError::Io(_)
-                )),
+            // A transport failure after sending has an unknown outcome: the
+            // daemon may have applied a non-idempotent action and only its reply
+            // was lost. Until the RPC layer exposes a proven-before-delivery
+            // failure, reissuing is unsafe.
+            Self::Transport(_) => false,
         }
     }
 }
