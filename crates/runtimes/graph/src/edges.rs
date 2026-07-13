@@ -16,6 +16,7 @@ pub fn evaluate_next(
                 inputs: inputs.clone(),
                 result: None,
                 execution: execution.cloned(),
+                graph_run_id: None,
             };
             evaluate_conditional_edges(edges, &ctx.as_context())
         }
@@ -38,6 +39,7 @@ pub fn evaluate_next_with_result(
                 inputs: inputs.clone(),
                 result: Some(result.clone()),
                 execution: execution.cloned(),
+                graph_run_id: None,
             };
             evaluate_conditional_edges(edges, &ctx.as_context())
         }
