@@ -2,7 +2,7 @@ use std::env;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
