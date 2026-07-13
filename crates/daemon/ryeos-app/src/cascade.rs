@@ -79,7 +79,15 @@ pub fn cascade_descendants(
 /// admission across crashes (and deliberately admitting no replacements).
 pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyhow::Result<Vec<String>> {
     let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
-    let removed = state.state_store.launch_window_cancel_queued(&descendants, lillux::time::timestamp_millis())?;
+    // Admission is only a durable marker, not proof of a spawn. Include admitted
+    // members only while the authoritative row is still created with no live pgid.
+    let cancellable = descendants.into_iter().filter_map(|root| {
+        let thread = state.state_store.get_thread(&root).ok().flatten()?;
+        (thread.status == "created"
+            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive))
+            .then_some(root)
+    }).collect::<Vec<_>>();
+    let removed = state.state_store.launch_window_cancel_members(&cancellable, lillux::time::timestamp_millis())?;
     for chain_root in &removed {
         let Some(thread) = state.state_store.get_thread(chain_root)? else {
             state.state_store.discard_window_member(chain_root)?;
@@ -106,14 +114,21 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
             state.state_store.discard_window_member(&root)?;
             continue;
         };
-        if !crate::state_store::is_terminal_status(&thread.status) {
+        // Never settle a process-bearing descendant here: it must remain on the
+        // normal signal cascade and let its launcher observe process termination.
+        if !crate::state_store::is_terminal_status(&thread.status)
+            && thread.status == "created"
+            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
+        {
             state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: thread.thread_id, status: "cancelled".into(), outcome_code: Some("cancelled".into()),
+                thread_id: thread.thread_id.clone(), status: "cancelled".into(), outcome_code: Some("cancelled".into()),
                 result: None, error: Some(json!({"reason":"ancestor_cancelled_before_launch"})), metadata: None,
                 artifacts: Vec::new(), final_cost: None, summary_json: None,
             })?;
         }
-        state.state_store.discard_window_member(&root)?;
+        if crate::state_store::is_terminal_status(&thread.status) || thread.status == "created" {
+            state.state_store.discard_window_member(&root)?;
+        }
     }
     Ok(())
 }
@@ -169,11 +184,11 @@ pub fn stop_thread_and_descendants(
     state: &AppState,
     thread_id: &str,
     mode: CascadeMode,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<(Value, Vec<String>)> {
     let queued = cancel_queued_descendants(state, thread_id)?;
     let target = signal_thread(&state.state_store, thread_id, mode);
     let descendants = cascade_descendants(&state.state_store, thread_id, mode)?;
-    Ok(json!({ "target": target, "descendants": descendants, "queued": queued }))
+    Ok((json!({ "target": target, "descendants": descendants, "queued": queued }), queued))
 }
 
 #[cfg(test)]

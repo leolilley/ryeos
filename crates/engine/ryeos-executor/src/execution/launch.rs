@@ -2606,8 +2606,8 @@ async fn launch_claimed_follow_child(
             // Fresh launch, not a checkpoint resume.
             checkpoint_resume_mode: CheckpointResumeMode::None,
             // Clamp the child to the parent's hard limits + launch at parent depth
-            // + 1 on the hot path; `None` on reconcile (root behavior), exactly like
-            // a normal callback-dispatched native-resume child.
+            // + 1 on the hot path; reconcile reconstructs the persisted parent
+            // execution context below rather than silently granting root limits.
             parent_execution_context: parent_context.as_ref(),
         },
         thread,
@@ -2664,6 +2664,23 @@ pub async fn launch_follow_child(
             return Err(e.into());
         }
     };
+
+    // Cancellation tombstones are checked after claiming, so admission and an
+    // ancestor cancel cannot race into a spawn. Finalize this never-launched row
+    // and wake its own follow chain immediately.
+    if state.state_store.launch_window_is_cancelled(&thread.chain_root_id)? {
+        let chain_root = thread.chain_root_id.clone();
+        let _ = state.threads.finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread.thread_id.clone(), status: "cancelled".into(),
+            outcome_code: Some("cancelled".into()), result: None,
+            error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+            metadata: None, artifacts: Vec::new(), final_cost: None, summary_json: None,
+        });
+        let _ = state.state_store.discard_window_member(&chain_root);
+        let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+        kick_follow_resume_if_ready(&state, &chain_root);
+        return Ok(SuccessorLaunchOutcome::Skipped("cancelled"));
+    }
 
     // A terminal row is already done (a duplicate trigger or a stale-lease reclaim
     // of a settled child) — release and skip without finalizing.

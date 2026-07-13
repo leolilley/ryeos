@@ -2368,7 +2368,7 @@ impl StateStore {
 
     /// Repair membership without admitting it; used when launch metadata proves
     /// the child was originally windowed but the membership write was lost.
-    pub fn launch_window_insert_only(&self, child_chain_root_id: &str, window_key: &str, width: u32, now_ms: i64) -> Result<()> {
+    pub fn launch_window_insert_only(&self, child_chain_root_id: &str, window_key: &str, width: u32, now_ms: i64) -> Result<bool> {
         self.lock()?.runtime_db.launch_window_insert(child_chain_root_id, window_key, width, now_ms)
     }
 
@@ -2393,6 +2393,14 @@ impl StateStore {
     pub fn launch_window_cancel_queued(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
         let mut g = self.lock()?;
         g.runtime_db.launch_window_cancel_queued(chain_roots, now_ms)
+    }
+
+    pub fn launch_window_cancel_members(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+        self.lock()?.runtime_db.launch_window_cancel_members(chain_roots, now_ms)
+    }
+
+    pub fn launch_window_is_cancelled(&self, chain_root: &str) -> Result<bool> {
+        self.lock()?.runtime_db.launch_window_is_cancelled(chain_root)
     }
 
     pub fn list_cancelled_window_members(&self) -> Result<Vec<String>> {

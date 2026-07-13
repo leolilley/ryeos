@@ -234,7 +234,7 @@ impl FollowFact {
             child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
             child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: Some(FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
+            cohort: w.fanout.then(|| FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
         }
     }
 
@@ -254,7 +254,7 @@ impl FollowFact {
             child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
             child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: Some(FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
+            cohort: w.fanout.then(|| FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
         }
     }
 

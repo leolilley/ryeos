@@ -136,8 +136,11 @@ pub async fn handle(
     // blocked on an inline child would leave that child running — and authoring —
     // past the parent's cancel. Graceful, honouring each child's declared mode. A
     // walk failure is logged, not raised: the primary is already settled.
-    let _queued_cancelled = cancel_queued_descendants(&state, &req.thread_id)
+    let queued_cancelled = cancel_queued_descendants(&state, &req.thread_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    for root in &queued_cancelled {
+        ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, root);
+    }
     let cascade =
         match cascade_descendants(&state.state_store, &req.thread_id, CascadeMode::Graceful) {
             Ok(report) => report,

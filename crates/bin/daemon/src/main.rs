@@ -532,6 +532,8 @@ async fn main() -> Result<()> {
     // Follow reconcile actions collected here, dispatched post-listener too: a
     // resumed parent's (or relaunched child's) first callback must not precede a
     // bound listener.
+    // LOAD-BEARING ORDER: settle cancellation tombstones before follow
+    // reconciliation can classify an admitted-but-unlaunched child for relaunch.
     ryeos_app::cascade::repair_cancelled_window_members(&app_state)?;
     let follow_actions = reconcile::reconcile_follow(&app_state)?;
 

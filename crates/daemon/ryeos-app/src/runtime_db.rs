@@ -1666,14 +1666,13 @@ impl RuntimeDb {
         window_key: &str,
         width: u32,
         now_ms: i64,
-    ) -> Result<()> {
-        self.conn.execute(
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
             "INSERT OR IGNORE INTO launch_window
                  (child_chain_root_id, window_key, width, created_at_ms)
              VALUES (?1, ?2, ?3, ?4)",
             params![child_chain_root_id, window_key, width, now_ms],
-        )?;
-        Ok(())
+        )? != 0)
     }
 
     fn launch_window_live_count(&self, window_key: &str) -> Result<u32> {
@@ -1779,6 +1778,29 @@ impl RuntimeDb {
         }
         tx.commit()?;
         Ok(removed)
+    }
+
+    /// Tombstone selected members regardless of admission marker. Callers must
+    /// first prove from the authoritative thread row that no process is live.
+    pub fn launch_window_cancel_members(&mut self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let mut cancelled = Vec::new();
+        for root in chain_roots {
+            if tx.execute(
+                "UPDATE launch_window SET cancelled_at_ms = ?2
+                 WHERE child_chain_root_id = ?1 AND cancelled_at_ms IS NULL",
+                params![root, now_ms],
+            )? != 0 { cancelled.push(root.clone()); }
+        }
+        tx.commit()?;
+        Ok(cancelled)
+    }
+
+    pub fn launch_window_is_cancelled(&self, child_chain_root_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT 1 FROM launch_window WHERE child_chain_root_id = ?1 AND cancelled_at_ms IS NOT NULL",
+            params![child_chain_root_id], |_| Ok(()),
+        ).optional()?.is_some())
     }
 
     pub fn launch_window_cancelled_members(&self) -> Result<Vec<String>> {
@@ -2210,6 +2232,23 @@ mod tests {
         db.launch_window_admit("K", None, 3).unwrap();
         assert_eq!(db.launch_window_launched_members().unwrap(), vec!["c1"]);
         assert_eq!(db.launch_window_keys_with_queue().unwrap(), vec!["K"]);
+    }
+
+    #[test]
+    fn cancellation_tombstones_queued_and_admitted_members_without_replacement() {
+        let (_tmp, mut db) = fresh_db();
+        db.launch_window_insert("admitted", "K", 1, 1).unwrap();
+        db.launch_window_insert("queued", "K", 1, 2).unwrap();
+        assert_eq!(db.launch_window_admit("K", None, 3).unwrap(), vec!["admitted"]);
+        assert_eq!(
+            db.launch_window_cancel_members(&["queued".into(), "admitted".into()], 4).unwrap(),
+            vec!["queued", "admitted"]
+        );
+        assert!(db.launch_window_admit("K", None, 5).unwrap().is_empty());
+        assert_eq!(db.launch_window_cancelled_members().unwrap(), vec!["admitted", "queued"]);
+        db.launch_window_discard_member("admitted").unwrap();
+        db.launch_window_discard_member("queued").unwrap();
+        assert!(db.launch_window_cancelled_members().unwrap().is_empty());
     }
 
     /// An owned runtime.db stamped by an earlier daemon that predates the
