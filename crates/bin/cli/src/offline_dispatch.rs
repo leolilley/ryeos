@@ -476,7 +476,7 @@ fn exec_tool(
 
     let cwd = match config.get("cwd").and_then(|v| v.as_str()) {
         Some(cwd) => Some(expand_template(cwd, &params_json, project_path)?),
-        None => Some(std::env::current_dir()?.to_string_lossy().into_owned()),
+        None => Some(project_path.to_string()),
     };
 
     let inherit_stdio = config
@@ -1047,12 +1047,9 @@ mod tests {
             std::fs::create_dir_all(&node_identity_dir).unwrap();
             std::fs::write(
                 node_identity_dir.parent().unwrap().join("sandbox.yaml"),
-                format!(
-                    "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\n\
-                     writable_paths:\n  - {}\nallowed_env:\n  - \"*\"\n\
-                     max_open_files: 128\nmax_processes: 32\n",
-                    project.display()
-                ),
+                "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\n\
+                 writable_paths:\n  - \"{project}\"\nallowed_env:\n  - \"*\"\n\
+                 max_open_files: 128\nmax_processes: 32\n",
             )
             .unwrap();
             let pem = key.to_pkcs8_pem(Default::default()).unwrap();

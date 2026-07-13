@@ -130,6 +130,7 @@ impl FastFixture {
 ///
 /// ```text
 /// <state>/.ai/node/identity/private_key.pem            (deterministic node Ed25519)
+/// <state>/.ai/node/sandbox.yaml                        (node sandbox policy)
 /// <state>/.ai/node/command_registration/default.yaml   (deterministic node-signed seed)
 /// <state>/.ai/node/vault/private_key.pem               (deterministic vault X25519)
 /// <state>/.ai/node/vault/public_key.pem
@@ -178,6 +179,14 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
     ] {
         fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
     }
+
+    fs::write(
+        state_path.join(AI_DIR).join("node").join("sandbox.yaml"),
+        "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: true\n\
+         writable_paths:\n  - \"{project}\"\nallowed_env:\n  - \"*\"\n\
+         max_open_files: 1024\nmax_processes: 256\n",
+    )
+    .context("write node sandbox policy")?;
 
     // ── Node Ed25519 identity ──
     let node_identity_dir = state_path.join(AI_DIR).join("node").join("identity");
