@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:20Z:918526a52323f118d02ae47cf17f3c3a86ab20e4b5a4af020d0a1fe19df0a571:GqWBIe2PM/x0i9ZOHtvuHhltJhQ/XgSYuIy6rYxAjqUGvX4wrl7fcuVmsuI1q0JQU37ODIytXlTmqCsfCmclDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T09:28:49Z:2abf49e3a42f71c65b6258d3907d115249f3a390a7382cfc8d5c215cfcdf812c:qKIZbZ231Rt9tyGY9tad4wx6VKEzevUYctihBE0VYjsGcsjuVG6Zpc8+OfcACkD+3AoppPUVnOqp2GFCx7vPDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the ryeos-ui threads source
@@ -12,6 +12,11 @@ source:
   params:
     limit: 200
     sort: watch
+    # Substrate plumbing (threads/get polls, status strips, chain
+    # replays) records a service_run per invocation and drowns the
+    # execution signal ~9:1. The watch views exclude them wholesale;
+    # tool/graph/directive/knowledge runs and seats are the content.
+    exclude_item_prefixes: ["service:"]
   collection: threads
 projections:
   columns:

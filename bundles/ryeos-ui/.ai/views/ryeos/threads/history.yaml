@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:20Z:5b627351dc449a5ace4a8590a9028f8a5f8b347b1bc1678f22791312892a25ed:wEP8SCbTLkC1LKXHByoP0j2pfxKtH4PQyK1CIv8LjxTUGwFI3T6t2oe+uyBa8cIjuyg53p2gsV2hugRu5cZbAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T09:28:49Z:67dc45dc4f746a73db1d9948b092ba639ad5ce256bd881d10c5e3e7dff426a21:EYtjGk6Zd68NJXQT2iWWxGJZPiFeLZkRhplcu/fZaTuJneN0D/zRxCEhih71e0lrETTciJ6XralCzzBr/o5tBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Project Threads
 version: "1.0.0"
@@ -16,6 +16,11 @@ source:
     project_path: ""
     limit: 200
     sort: watch
+    # Substrate plumbing (threads/get polls, status strips, chain
+    # replays) records a service_run per invocation and drowns the
+    # execution signal ~9:1. The watch views exclude them wholesale;
+    # tool/graph/directive/knowledge runs and seats are the content.
+    exclude_item_prefixes: ["service:"]
   collection: threads
 projections:
   columns:

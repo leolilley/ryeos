@@ -462,17 +462,27 @@ impl super::model::RyeOsCore {
 
     fn move_focused_row(&mut self, delta: i32) -> (bool, Vec<super::RyeOsEffect>) {
         let vm = self.envelope(Vec::new()).view_model;
-        let target = match self.focus_target() {
+        // A focused dock with selectable rows owns the point. A focused
+        // dock WITHOUT rows — the chat line — falls through to the
+        // focused center tile: the chat convention is that arrows walk
+        // the content behind the input while you type, and sessions now
+        // START with the input focused.
+        let dock_target = match self.focus_target() {
             super::model::RyeOsFocusTarget::Dock { edge } => {
-                let Some(dock) = dock_vm_for_edge(&vm.workspace.docks, edge) else {
-                    return (false, Vec::new());
-                };
-                FocusedRowsTarget {
-                    source_key: super::model::dock_source_key(edge),
-                    count_and_feed: selectable_of(&dock.view),
-                }
+                dock_vm_for_edge(&vm.workspace.docks, edge)
+                    .map(|dock| FocusedRowsTarget {
+                        source_key: super::model::dock_source_key(edge),
+                        count_and_feed: selectable_of(&dock.view),
+                    })
+                    .filter(|target| target.count_and_feed.0 > 0)
             }
-            super::model::RyeOsFocusTarget::WorkspaceTile { .. } => {
+            super::model::RyeOsFocusTarget::WorkspaceTile { .. } => None,
+        };
+        let target = match self.focus_target() {
+            super::model::RyeOsFocusTarget::Dock { .. } if dock_target.is_some() => {
+                dock_target.unwrap()
+            }
+            _ => {
                 let focused = vm.workspace.focused_tile;
                 let Some(root) = vm.workspace.root.as_ref() else {
                     return (false, Vec::new());
