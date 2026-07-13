@@ -7,8 +7,6 @@ use lillux::crypto::SigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const JOURNAL_VERSION: u32 = 2;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BundleOperation {
@@ -28,7 +26,6 @@ pub enum BundlePhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
-    version: u32,
     bundle_name: String,
     operation: BundleOperation,
     phase: BundlePhase,
@@ -98,7 +95,6 @@ impl BundleTransaction {
         let generation_digest = tree_digest(staging)?;
         let registration_digest = registration_digest(&registration);
         self.write_journal(&Journal {
-            version: JOURNAL_VERSION,
             bundle_name: self.name.clone(),
             operation,
             phase: BundlePhase::Prepared,
@@ -113,7 +109,6 @@ impl BundleTransaction {
 
     pub fn begin_remove(&self) -> Result<()> {
         self.write_journal(&Journal {
-            version: JOURNAL_VERSION,
             bundle_name: self.name.clone(),
             operation: BundleOperation::Remove,
             phase: BundlePhase::Prepared,
@@ -331,9 +326,6 @@ pub fn reconcile_all_bundle_transactions(
 }
 
 fn validate_journal(app_root: &Path, name: &str, journal: &Journal) -> Result<()> {
-    if journal.version != JOURNAL_VERSION {
-        anyhow::bail!("unsupported bundle transaction version {}", journal.version);
-    }
     if journal.bundle_name != name || !valid_bundle_name(&journal.bundle_name) {
         anyhow::bail!("bundle transaction name mismatch");
     }
@@ -464,11 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn v1_and_non_derived_paths_are_invalid() {
+    fn malformed_and_non_derived_journals_are_invalid() {
         let root = tempfile::tempdir().unwrap();
         let directory = journal_directory(root.path());
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("old.json"), br#"{"version":1}"#).unwrap();
+        std::fs::write(directory.join("old.json"), br#"{"obsolete":true}"#).unwrap();
         assert_eq!(
             inspect_bundle_transactions(root.path()).unwrap().invalid,
             vec!["old.json"]
