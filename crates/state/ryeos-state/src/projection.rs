@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context};
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::sqlite_schema;
+
 mod chain_commit;
 mod cursor;
 mod events;
