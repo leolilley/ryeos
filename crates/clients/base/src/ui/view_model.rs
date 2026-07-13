@@ -23,9 +23,9 @@ pub use navigation::{
 };
 pub use execution::RyeOsTimelineEntryVm;
 pub(crate) use execution::timeline_summary_entry;
-use execution::{
-    facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row, status_tone,
-};
+use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
+#[cfg(test)]
+use execution::status_tone;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
