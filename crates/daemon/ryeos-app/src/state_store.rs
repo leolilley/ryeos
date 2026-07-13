@@ -1997,12 +1997,30 @@ impl StateStore {
     pub fn set_follow_child(
         &self,
         follow_key: &str,
+        item_index: u32,
+        item_ref: &str,
+        spec_hash: &str,
         child_thread_id: &str,
         child_chain_root_id: &str,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db
-            .set_follow_child(follow_key, child_thread_id, child_chain_root_id)
+        g.runtime_db.set_follow_child(
+            follow_key,
+            item_index,
+            item_ref,
+            spec_hash,
+            child_thread_id,
+            child_chain_root_id,
+        )
+    }
+
+    pub fn get_follow_child(
+        &self,
+        follow_key: &str,
+        item_index: u32,
+    ) -> Result<Option<runtime_db::FollowWaiterChild>> {
+        let g = self.lock()?;
+        g.runtime_db.get_follow_child(follow_key, item_index)
     }
 
     pub fn set_follow_parent_successor(
