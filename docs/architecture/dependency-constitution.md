@@ -40,3 +40,8 @@ Rules:
 
 `scripts/lint-dependency-layers.py` enforces the cycle and forbidden-edge
 portions directly from workspace manifests without invoking Cargo.
+
+“Durable I/O” is defined by the platform-specific
+[filesystem durability matrix](filesystem-durability.md). Higher layers own
+multi-file reachability and crash recovery; a low-level atomic write does not
+make a workflow a filesystem transaction.
