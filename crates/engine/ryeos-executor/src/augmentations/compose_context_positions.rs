@@ -258,16 +258,23 @@ pub async fn run(
             roots,
         )
         .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
-        let result = tokio::task::spawn_blocking(move || {
-            lillux::run(lillux::SubprocessRequest {
+        let subprocess_request = lillux::SubprocessRequest {
                 cmd: executor_path_str,
                 args: vec![],
-                cwd: None,
+                cwd: Some(project_path.to_string_lossy().into_owned()),
                 envs,
                 stdin_data: Some(stdin_data),
                 timeout: 60.0,
-            })
-        })
+            };
+        let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+            subprocess_request,
+            &state.config.app_root,
+            project_path,
+            &format!("runtime:{target_kind}"),
+            &child_thread_id,
+        )
+        .map_err(|error| LaunchAugmentationError::Threads(format!("sandbox: {error}")))?;
+        let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
         .await
         .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
 

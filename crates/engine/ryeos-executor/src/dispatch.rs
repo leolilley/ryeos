@@ -1276,16 +1276,23 @@ pub(crate) async fn dispatch_method(
             roots,
         )
         .map_err(|e| DispatchError::Internal(e.into()))?;
-        let result = tokio::task::spawn_blocking(move || {
-            lillux::run(lillux::SubprocessRequest {
+        let subprocess_request = lillux::SubprocessRequest {
                 cmd: executor_path_str,
                 args: vec![],
-                cwd: None,
+                cwd: Some(request.project_path.to_string_lossy().into_owned()),
                 envs,
                 stdin_data: Some(stdin_data),
                 timeout: 120.0,
-            })
-        })
+            };
+        let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+            subprocess_request,
+            &state.config.app_root,
+            request.project_path,
+            &canonical_ref.to_string(),
+            &thread_id,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
         .await
         .map_err(|e| DispatchError::Internal(e.into()))?;
 
@@ -2180,16 +2187,23 @@ async fn dispatch_streaming_subprocess(
         roots,
     )
     .map_err(|e| DispatchError::Internal(e.into()))?;
-    let result = tokio::task::spawn_blocking(move || {
-        lillux::run(lillux::SubprocessRequest {
+    let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
-            cwd: None,
+            cwd: Some(request.project_path.to_string_lossy().into_owned()),
             envs,
             stdin_data: Some(stdin_data),
             timeout: 120.0,
-        })
-    })
+        };
+    let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+        subprocess_request,
+        &state.config.app_root,
+        request.project_path,
+        &item_ref_str,
+        "streaming-tool",
+    )
+    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
     .await
     .map_err(|e| DispatchError::Internal(e.into()))?;
 

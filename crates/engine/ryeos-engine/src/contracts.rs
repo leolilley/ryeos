@@ -3049,6 +3049,7 @@ pub struct PlanContext {
 /// daemon-allocated thread identity and runtime bindings.
 #[derive(Debug, Clone)]
 pub struct EngineContext {
+    pub app_root: PathBuf,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,

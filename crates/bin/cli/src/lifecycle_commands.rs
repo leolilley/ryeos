@@ -913,7 +913,7 @@ mod tests {
 
     fn sandbox_policy(backend: &std::path::Path, version: u32) -> String {
         format!(
-            "version: {version}\nbackend_path: {}\nallow_network: false\nallow_host_read: true\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
+            "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
             backend.display()
         )
     }

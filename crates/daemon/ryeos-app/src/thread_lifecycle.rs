@@ -2440,6 +2440,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     }
 
     let engine_ctx = EngineContext {
+        app_root: state.config.app_root.clone(),
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),

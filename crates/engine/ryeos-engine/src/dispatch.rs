@@ -71,9 +71,9 @@ pub fn execute_plan(
 fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
-    _ctx: &EngineContext,
+    ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let request = spec_to_request(spec)?;
+    let request = sandbox_plan_request(spec, ctx)?;
     let capture = debug_raw.then(|| DebugCapture::from_spec(spec));
     let result = lillux::run(request);
     let debug = capture.map(|c| c.into_block(&result));
@@ -344,9 +344,9 @@ pub fn spawn_plan(
 fn spawn_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
-    _ctx: &EngineContext,
+    ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    let request = spec_to_request(spec)?;
+    let request = sandbox_plan_request(spec, ctx)?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
     match lillux::spawn(request) {
@@ -364,6 +364,26 @@ fn spawn_subprocess(
             reason: format!("subprocess spawn failed: {}", err_result.stderr),
         }),
     }
+}
+
+fn sandbox_plan_request(
+    spec: &PlanSubprocessSpec,
+    ctx: &EngineContext,
+) -> Result<lillux::SubprocessRequest, EngineError> {
+    let request = spec_to_request(spec)?;
+    let project_path = spec
+        .cwd
+        .as_deref()
+        .ok_or_else(|| EngineError::SandboxPolicyRefused {
+            reason: "executable plan requires an explicit working directory".to_string(),
+        })?;
+    crate::subprocess_spec::sandbox_lillux_request(
+        request,
+        &ctx.app_root,
+        project_path,
+        "tool:ryeos/internal/plan-subprocess",
+        &ctx.thread_id,
+    )
 }
 
 #[cfg(test)]
@@ -390,7 +410,16 @@ mod tests {
     }
 
     fn test_engine_context() -> EngineContext {
+        let app_root = tempdir();
+        let policy_dir = app_root.join(".ai/node");
+        fs::create_dir_all(&policy_dir).unwrap();
+        fs::write(
+            policy_dir.join("sandbox.yaml"),
+            "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\nwritable_paths: [\"{project}\"]\nallowed_env: [\"*\"]\nmax_open_files: 128\nmax_processes: 32\n",
+        )
+        .unwrap();
         EngineContext {
+            app_root,
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),

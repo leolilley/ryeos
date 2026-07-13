@@ -29,6 +29,14 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 use serde_json::Value;
 
+fn sandbox_app_root() -> PathBuf {
+    let root = tempfile::tempdir().unwrap().keep();
+    let node = root.join(".ai/node");
+    fs::create_dir_all(&node).unwrap();
+    fs::write(node.join("sandbox.yaml"), "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\nwritable_paths: [\"{project}\"]\nallowed_env: [\"*\"]\nmax_open_files: 128\nmax_processes: 32\n").unwrap();
+    root
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -137,6 +145,7 @@ fn run_tool_with_hints(
         .expect("build_plan walks to subprocess terminal");
 
     let engine_ctx = EngineContext {
+        app_root: sandbox_app_root(),
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

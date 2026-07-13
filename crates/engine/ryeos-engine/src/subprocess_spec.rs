@@ -17,6 +17,66 @@ use crate::error::EngineError;
 use crate::protocol_vocabulary::{CallbackChannel, StdoutShape};
 use crate::resolution::ResolutionOutput;
 
+pub fn load_node_sandbox_policy(app_root: &std::path::Path) -> Result<NodeSandboxPolicy, EngineError> {
+    let path = app_root.join(crate::AI_DIR).join("node/sandbox.yaml");
+    let raw = std::fs::read_to_string(&path).map_err(|error| EngineError::SandboxPolicyRefused {
+        reason: format!("node sandbox policy is required at {}: {error}", path.display()),
+    })?;
+    serde_yaml::from_str(&raw).map_err(|error| EngineError::SandboxPolicyRefused {
+        reason: format!("invalid node sandbox policy {}: {error}", path.display()),
+    })
+}
+
+/// The single executable-item boundary from a planned Lillux request to a
+/// node-policy-wrapped request. Diagnostic probes intentionally do not use it.
+pub fn sandbox_lillux_request(
+    request: lillux::SubprocessRequest,
+    app_root: &std::path::Path,
+    project_path: &std::path::Path,
+    item_ref: &str,
+    thread_id: &str,
+) -> Result<lillux::SubprocessRequest, EngineError> {
+    let policy = load_node_sandbox_policy(app_root)?;
+    if !request.timeout.is_finite() || request.timeout < 0.0 {
+        return Err(EngineError::SandboxPolicyRefused {
+            reason: format!("invalid subprocess timeout {}", request.timeout),
+        });
+    }
+    let cwd = request
+        .cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_path.to_path_buf());
+    let item_ref = CanonicalRef::parse(item_ref).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!("invalid sandbox item reference `{item_ref}`: {error}"),
+        }
+    })?;
+    let spec = SubprocessSpec {
+        cmd: PathBuf::from(request.cmd),
+        args: request.args,
+        cwd,
+        env: request.envs,
+        stdin: request.stdin_data.unwrap_or_default().into_bytes(),
+        timeout: Duration::from_secs_f64(request.timeout),
+        stdout_shape: StdoutShape::OpaqueBytes,
+        callback_channel: CallbackChannel::None,
+        item_ref,
+        thread_id: thread_id.to_string(),
+        project_path: project_path.to_path_buf(),
+        sandbox: None,
+    };
+    let wrapped = sandbox_wrap(spec, &policy)?;
+    Ok(lillux::SubprocessRequest {
+        cmd: wrapped.cmd.to_string_lossy().into_owned(),
+        args: wrapped.args,
+        cwd: Some(wrapped.cwd.to_string_lossy().into_owned()),
+        envs: wrapped.env,
+        stdin_data: Some(String::from_utf8_lossy(&wrapped.stdin).into_owned()),
+        timeout: wrapped.timeout.as_secs_f64(),
+    })
+}
+
 /// The unified subprocess invocation boundary. Both the tool-style
 /// subprocess path and the runtime-style spawn path build this SAME
 /// struct. Translated into a `lillux::SubprocessRequest` at the
@@ -374,5 +434,60 @@ mod tests {
         spec.env.push(("SECRET".to_string(), "value".to_string()));
         let error = sandbox_wrap(spec, &policy()).unwrap_err();
         assert!(error.to_string().contains("SECRET"));
+    }
+
+    #[test]
+    fn executable_boundary_requires_node_policy() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec![],
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: vec![],
+            stdin_data: None,
+            timeout: 1.0,
+        };
+        let error = match sandbox_lillux_request(
+            request,
+            app_root.path(),
+            project.path(),
+            "tool:test/probe",
+            "T-test",
+        ) {
+            Ok(_) => panic!("missing policy must refuse execution"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("policy is required"));
+    }
+
+    #[test]
+    fn executable_boundary_routes_through_configured_backend() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(app_root.path().join(".ai/node")).unwrap();
+        std::fs::write(
+            app_root.path().join(".ai/node/sandbox.yaml"),
+            "version: 1\nbackend_path: /bin/sh\nallow_network: false\nwritable_paths: [\"{project}\"]\nallowed_env: [\"*\"]\nmax_open_files: 128\nmax_processes: 32\n",
+        )
+        .unwrap();
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "true".to_string()],
+            cwd: Some(project.path().to_string_lossy().into_owned()),
+            envs: vec![],
+            stdin_data: None,
+            timeout: 1.0,
+        };
+        let wrapped = sandbox_lillux_request(
+            request,
+            app_root.path(),
+            project.path(),
+            "tool:test/probe",
+            "T-test",
+        )
+        .unwrap();
+        assert_eq!(wrapped.cmd, std::fs::canonicalize("/bin/sh").unwrap().display().to_string());
+        assert!(wrapped.args.iter().any(|arg| arg == "--unshare-all"));
     }
 }
