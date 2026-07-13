@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-15T04:48:21Z:bb641fa1aa49a59893ec595c3d32da62738c75d454ebc1586504d251d9032fb0:pA8C29BLPnJ5NiL6LAmCwSR/5uGIxqrU9SsauAQJ3aLiQDcg3d2tcBPsko+6X7sI8cPlTRwNz1KHgvbPVHHaAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-13T07:43:47Z:4d61a42e541c6686aee56eef149c47ee3d3bd82055b40a1533b7166953f0d8f3:/C+ORQuvjz+yX6eMIs21j0zjH8c7zJ0AUvKJEZS4J7t7WdgOhSQqSt7qSlVwu24gcwmuATDeTvewrqFaB5KwBw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -21,7 +21,7 @@ test, refresh bundles, or install this checkout locally.
 | Rebuild/sign bundles only | `./scripts/gate.sh --no-tests` |
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | `./scripts/dev-up.sh` |
-| Fast packaged-layout install | `./scripts/pkg/install-local-direct.sh` |
+| Fast packaged-layout install | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 | Verify source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
 
 Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
@@ -113,7 +113,7 @@ Use this to install the current checkout into the same layout as a package,
 without running `makepkg`/`yay`:
 
 ```bash
-./scripts/pkg/install-local-direct.sh
+./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 It populates bundles, stops a running daemon before replacing files, installs

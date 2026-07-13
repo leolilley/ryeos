@@ -194,7 +194,9 @@ docker pull ghcr.io/leolilley/ryeos-standard:latest
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
-so keys, trust, and runtime state survive redeploys. Bubblewrap needs namespace
+so keys, trust, and runtime state survive redeploys. Release containers rely
+only on the official publisher key compiled into `ryeos`; the entrypoint does
+not infer trust from files baked into the image. Bubblewrap needs namespace
 operations that Docker's default profile blocks. Run the image with the
 documented capability and seccomp settings, and keep `/data` on a named volume:
 
@@ -208,6 +210,18 @@ docker run -d --name ryeos \
   ghcr.io/leolilley/ryeos-standard:latest
 docker exec ryeos ryeos node status
 ```
+
+A locally built image signed by a development or custom publisher requires an
+explicit trust acknowledgement at startup:
+
+```bash
+docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
+```
+
+That switch pins the image's `PUBLISHER_TRUST.toml` files before preflight. Do
+not use it for release images. See the
+[publisher trust boundary](docs/security/publisher-trust.md) for the complete
+operator contract.
 
 The release gate exercises init, daemon readiness, an actual sandboxed signed
 tool, and restart recovery with this deployment profile. Back up the
@@ -226,14 +240,19 @@ before building or changing the installed node.
 git clone https://github.com/leolilley/ryeos.git
 cd ryeos
 cargo build
-./scripts/pkg/install-local-direct.sh
+./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 `scripts/pkg/install-local-direct.sh` installs the current built artifacts into
 the local packaged layout and initializes the user system space. It does not
-refresh bundle artifacts by default. Use
-`scripts/pkg/install-local-direct.sh --populate` only when bundle-owned binaries,
-CAS manifests, or signed bundle outputs actually need to be regenerated.
+refresh bundle artifacts by default. Checkout bundles are normally signed by
+the development publisher, so the example makes that trust decision explicit.
+Without `--trust-source-publishers`, the installer accepts only the official
+publisher compiled into `ryeos` and rejects any source-supplied publisher
+document whose decoded key is non-official before changing the installed node. Use
+`scripts/pkg/install-local-direct.sh --populate --trust-source-publishers` only
+when bundle-owned binaries, CAS manifests, or signed bundle outputs actually
+need to be regenerated.
 
 ## Five-minute first run
 
@@ -379,8 +398,8 @@ Use the repository scripts rather than hand-editing derived bundle state.
 ```bash
 ./scripts/gate.sh                         # run workspace tests without refreshing bundles
 ./scripts/gate.sh --refresh-bundles       # explicit expensive bundle refresh, then tests
-./scripts/pkg/install-local-direct.sh      # install current built artifacts into packaged layout
-./scripts/pkg/install-local-direct.sh --populate  # expensive: refresh bundles first
+./scripts/pkg/install-local-direct.sh --trust-source-publishers  # install dev-signed artifacts
+./scripts/pkg/install-local-direct.sh --populate --trust-source-publishers  # refresh, then install
 ```
 
 Common loops:
@@ -391,8 +410,8 @@ Common loops:
 | Rust affecting bundled binaries            | Targeted `cargo build --release -p <owner>`, then explicit bundle refresh only if needed.             |
 | Bundle YAML, schemas, tools, or runtimes   | Targeted signing/publish flow; use `./scripts/gate.sh --refresh-bundles` only for release validation. |
 | Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh.                                  |
-| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh` after building touched user-facing binaries.                  |
-| Packaged layout repair                     | `./scripts/pkg/install-local-direct.sh --populate` only when artifacts must be regenerated.           |
+| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` after building touched binaries.    |
+| Packaged layout repair                     | Add `--populate --trust-source-publishers` only when artifacts must be regenerated.                   |
 
 Hard rules for contributors and agents:
 

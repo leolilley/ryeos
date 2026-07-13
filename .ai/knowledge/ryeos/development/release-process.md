@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-04T08:48:16Z:14bbf2e57c05819a1614191599ec53c75b4340c23c03d66cf8141180cecb6b9e:l0vX/danV2O4V/QJl/MxpWJnNfawXMSudEO5OrMRMEOimh+WH2kpqZzSxzr1w81UFdxp+Kd605mm5YEn1zp9Bg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-13T07:43:47Z:5e0ada05163877634ccf78c498ff63d2f670f6a67892021584767829e8c7c5d6:wL2JRvXdbAtfWe+20+WHv05qs+RuEc4/kh3Ex3+SK0GEkSjbx+9G1rYpapPeCt3TW5FShHVsujunLLUZC2x+Bw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -360,7 +360,7 @@ runtime layout:
 Default behavior:
 
 ```bash
-./scripts/pkg/install-local-direct.sh
+./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 The script will:
@@ -512,7 +512,7 @@ Before tagging:
 
 After local install validation:
 
-- [ ] `./scripts/pkg/install-local-direct.sh` completes.
+- [ ] `./scripts/pkg/install-local-direct.sh --trust-source-publishers` completes.
 - [ ] `ryeos node status` checked explicitly.
 - [ ] If daemon was not running before install, `ryeos start` run manually if
   startup validation is needed.

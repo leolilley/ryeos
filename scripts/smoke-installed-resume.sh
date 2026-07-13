@@ -11,6 +11,7 @@ READY_TIMEOUT="${RYEOS_SMOKE_READY_TIMEOUT:-60}"
 STATE_TIMEOUT="${RYEOS_SMOKE_STATE_TIMEOUT:-30}"
 COMMAND_TIMEOUT="${RYEOS_SMOKE_COMMAND_TIMEOUT:-45}"
 KEEP="${RYEOS_SMOKE_KEEP:-0}"
+TRUST_FILE="${RYEOS_SMOKE_TRUST_FILE:-}"
 
 for command in ryeos python3 timeout; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -129,7 +130,15 @@ wait_thread_active() {
 }
 
 echo "[smoke] initializing isolated app root"
-bounded ryeos init --source "$BUNDLE_SOURCE"
+init_args=(init --source "$BUNDLE_SOURCE")
+if [[ -n "$TRUST_FILE" ]]; then
+  [[ -f "$TRUST_FILE" ]] || {
+    echo "smoke-installed-resume: RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE" >&2
+    exit 2
+  }
+  init_args+=(--trust-file "$TRUST_FILE")
+fi
+bounded ryeos "${init_args[@]}"
 bounded ryeos start
 wait_ready
 
