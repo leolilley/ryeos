@@ -11,6 +11,7 @@ use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
 use crate::workspace::{TileState, ViewLocalState, ViewSpec};
 
 mod dialogs;
+mod execution;
 mod navigation;
 pub use dialogs::{
     RyeOsOverlayChoice, RyeOsOverlayItemVm, RyeOsOverlayVm, RyeOsShortcutEntryVm,
@@ -19,6 +20,11 @@ pub use dialogs::{
 pub use navigation::{
     RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
     RyeOsSessionVm,
+};
+pub use execution::RyeOsTimelineEntryVm;
+pub(crate) use execution::timeline_summary_entry;
+use execution::{
+    facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row, status_tone,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -447,10 +453,6 @@ pub struct RyeOsSectionVm {
     pub header_selected: bool,
     pub rows: Vec<RyeOsRowVm>,
 }
-
-// The timeline entry shapes live in `super::timeline`; re-exported here so
-// the established `ui::view_model::RyeOsTimelineEntryVm` path is stable.
-pub use super::timeline::RyeOsTimelineEntryVm;
 
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1002,7 +1004,7 @@ fn instance_input_vm(core: &RyeOsCore, instance_id: &str, view_ref: &str) -> Opt
 
 /// Render a content-bound view: binding + source response -> widget VM.
 /// Pure projection; unknown widgets and missing data degrade honestly.
-fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
+pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
     let (expanded_rows, changed_rows) = selected_row_state(core, tile_id);
     bound_view_vm_keyed(
         core,
@@ -1646,64 +1648,6 @@ fn input_vm(
         completion,
         live_filter,
         text,
-    }
-}
-
-/// The deep-watch header for a braid: one summary line built from the source's
-/// `summary` (chain status + chain-wide usage totals, from chain_replay).
-/// Returns `None` when the source carries no `summary` — any non-chain timeline —
-/// so the header only appears where it means something.
-pub(crate) fn timeline_summary_entry(response: &serde_json::Value) -> Option<RyeOsTimelineEntryVm> {
-    let summary = response.get("summary")?;
-    let status = summary.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let input = summary
-        .get("input_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let output = summary
-        .get("output_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let cost = summary
-        .get("spend_usd")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let turns = summary.get("turns").and_then(|v| v.as_i64()).unwrap_or(0);
-    let primary = format!("{status} · ↑{input} ↓{output} · ${cost:.4} · {turns} turns");
-    Some(RyeOsTimelineEntryVm::Line {
-        primary,
-        meta: None,
-        tone: status_tone(status),
-        intent: None,
-        secondary_intent: None,
-    })
-}
-
-/// The response a facet-backed view renders: the seat-fold value at `facet`,
-/// resolved through the shared `@facet:` grammar (so a dotted path like
-/// `selection.summary` reads the field within the `selection` facet). `None`
-/// when the facet is unset — the view then falls back to its `source` fetch.
-fn facet_backed_response(core: &RyeOsCore, facet: &str) -> Option<serde_json::Value> {
-    let fold = core.seat.fold();
-    let resolved = super::content::resolve_params(
-        &serde_json::Value::String(format!("@facet:{facet}")),
-        |key| fold.get(key).cloned(),
-    );
-    (!resolved.is_null()).then_some(resolved)
-}
-
-/// Map a thread/chain status to a tone (the same status→tone vocabulary the
-/// list/detail tone blocks declare, in code here for the summary header). Matches
-/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
-/// not a silently-neutral string.
-fn status_tone(status: &str) -> RyeOsTone {
-    use super::dto::ThreadStatus;
-    match ThreadStatus::from_wire(status) {
-        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
-        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
-        ThreadStatus::Cancelled => RyeOsTone::Warn,
-        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
-        ThreadStatus::Unknown => RyeOsTone::Neutral,
     }
 }
 
@@ -2680,35 +2624,6 @@ pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> 
     }
     // Table lens: rows carry the same activation affordance, on a distinct VM.
     focused_selected_table_row(core).and_then(|row| row.intent)
-}
-
-/// The timeline entry under the point in the focused feed lens, if the focused
-/// view is a timeline with a point on an entry. The single home for reading the
-/// focused feed entry — both the Enter intent and command-overlay secondary
-/// intents derive from it.
-fn focused_timeline_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
-    if let RyeOsViewVm::Timeline {
-        entries, selected, ..
-    } = bound_view_vm(core, tile_id, &view.view_ref)
-    {
-        return selected.and_then(|i| entries.into_iter().nth(i));
-    }
-    None
-}
-
-/// The focused feed entry's secondary affordance — the retry a recoverable
-/// failed terminal carries. Surfaced through the commands overlay (its Shift+Enter
-/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
-/// so Enter stays inspect.
-fn retry_intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
-    match focused_timeline_entry(core)? {
-        RyeOsTimelineEntryVm::Line {
-            secondary_intent, ..
-        } => secondary_intent,
-        _ => None,
-    }
 }
 
 /// The row under the point in the focused tile, if the point is on a row. The
