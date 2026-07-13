@@ -411,15 +411,16 @@ impl NodeVault for EmptyVault {
 ///     TOML file containing the [`lillux::vault::SealedEnvelope`].
 ///     The decrypted plaintext is a TOML map of `KEY = "VALUE"`.
 ///
-/// Trust boundary: the daemon process holds the vault secret key in
-/// memory for the lifetime of the daemon. Subprocesses inherit
-/// secrets via env, NOT the key itself. Vault-key rotation is an
-/// explicit `ryeos vault rewrap` operation; the daemon refuses to read
-/// envelopes whose `vault_pubkey_fingerprint` doesn't match.
+/// Trust boundary: the daemon process holds the vault secret key in memory,
+/// but a filesystem-backed vault reloads it under the sealed-store lock before
+/// every operation so `ryeos vault rewrap` can rotate a live daemon safely.
+/// Subprocesses inherit secrets via env, NOT the key itself. The daemon refuses
+/// to read envelopes whose `vault_pubkey_fingerprint` doesn't match.
 #[derive(Debug, Clone)]
 pub struct SealedEnvelopeVault {
     store_path: PathBuf,
     secret_key: lillux::vault::VaultSecretKey,
+    key_paths: Option<(PathBuf, PathBuf)>,
     io_lock: Arc<Mutex<()>>,
 }
 
@@ -429,6 +430,7 @@ impl SealedEnvelopeVault {
         Self {
             store_path,
             secret_key,
+            key_paths: None,
             io_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -444,7 +446,12 @@ impl SealedEnvelopeVault {
         })?;
         let secret_key = lillux::vault::read_secret_key(&secret_path)
             .map_err(|e| anyhow!("vault: load secret key {}: {e:#}", secret_path.display()))?;
-        Ok(Self::new(store_path, secret_key))
+        Ok(Self {
+            store_path,
+            secret_key,
+            key_paths: Some((secret_path, public_path)),
+            io_lock: Arc::new(Mutex::new(())),
+        })
     }
 
     pub fn store_path(&self) -> &Path {
@@ -452,11 +459,42 @@ impl SealedEnvelopeVault {
     }
 
     pub fn public_key(&self) -> lillux::vault::VaultPublicKey {
-        self.secret_key.public_key()
+        self.key_paths
+            .as_ref()
+            .and_then(|(secret_path, _)| lillux::vault::read_secret_key(secret_path).ok())
+            .unwrap_or_else(|| self.secret_key.clone())
+            .public_key()
+    }
+
+    fn with_current_generation<T>(
+        &self,
+        operation: impl FnOnce(&lillux::vault::VaultSecretKey) -> Result<T>,
+    ) -> Result<T> {
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| anyhow!("vault: sealed store lock poisoned"))?;
+        with_store_lock(&self.store_path, || {
+            let secret_key = if let Some((secret_path, public_path)) = &self.key_paths {
+                recover_rewrap(secret_path, public_path, &self.store_path)?;
+                lillux::vault::read_secret_key(secret_path).map_err(|e| {
+                    anyhow!(
+                        "vault: reload secret key {}: {e:#}",
+                        secret_path.display()
+                    )
+                })?
+            } else {
+                self.secret_key.clone()
+            };
+            operation(&secret_key)
+        })
     }
 
     /// Internal read-all without the trait dispatch.
-    fn read_all_internal(&self) -> Result<HashMap<String, String>> {
+    fn read_all_with_key(
+        &self,
+        secret_key: &lillux::vault::VaultSecretKey,
+    ) -> Result<HashMap<String, String>> {
         if !self.store_path.exists() {
             return Ok(HashMap::new());
         }
@@ -472,7 +510,7 @@ impl SealedEnvelopeVault {
                 self.store_path.display()
             )
         })?;
-        let plaintext = lillux::vault::open(&self.secret_key, &envelope)
+        let plaintext = lillux::vault::open(secret_key, &envelope)
             .map_err(|e| anyhow!("vault: open envelope: {e:#}"))?;
         let plaintext_str = std::str::from_utf8(&plaintext)
             .map_err(|e| anyhow!("vault: decrypted plaintext is not UTF-8: {e}"))?;
@@ -480,6 +518,10 @@ impl SealedEnvelopeVault {
             .map_err(|e| anyhow!("vault: decrypted plaintext is not a valid TOML map: {e}"))?;
         validate_decrypted_keys(&map, &self.store_path)?;
         Ok(map)
+    }
+
+    fn read_all_internal(&self) -> Result<HashMap<String, String>> {
+        self.with_current_generation(|secret_key| self.read_all_with_key(secret_key))
     }
 
     /// Atomic read-modify-write on the sealed store.
@@ -491,19 +533,15 @@ impl SealedEnvelopeVault {
         &self,
         modify: impl FnOnce(&mut HashMap<String, String>) -> Result<T>,
     ) -> Result<T> {
-        let _guard = self
-            .io_lock
-            .lock()
-            .map_err(|_| anyhow!("vault: sealed store lock poisoned"))?;
-        with_store_lock(&self.store_path, || {
+        self.with_current_generation(|secret_key| {
             let mut map = if self.store_path.exists() {
-                self.read_all_internal()?
+                self.read_all_with_key(secret_key)?
             } else {
                 HashMap::new()
             };
             let result = modify(&mut map)?;
             validate_decrypted_keys(&map, &self.store_path)?;
-            let pk = self.secret_key.public_key();
+            let pk = secret_key.public_key();
             write_sealed_secrets(&self.store_path, &pk, &map)?;
             Ok(result)
         })
@@ -1086,6 +1124,47 @@ mod tests {
         let v = SealedEnvelopeVault::load(state).unwrap();
         assert_eq!(v.public_key().fingerprint(), sk.public_key().fingerprint());
         assert_eq!(v.store_path(), default_sealed_store_path(state));
+    }
+
+    #[test]
+    fn loaded_sealed_vault_reloads_key_after_external_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        let key_path = ryeos_vault::paths::default_vault_secret_key_path(state);
+        let public_path = ryeos_vault::paths::default_vault_public_key_path(state);
+        let store_path = default_sealed_store_path(state);
+        let old_key = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&key_path, &old_key).unwrap();
+        lillux::vault::write_public_key(&public_path, &old_key.public_key()).unwrap();
+        let mut initial = HashMap::new();
+        initial.insert("TOKEN".to_string(), "old".to_string());
+        write_sealed_secrets(&store_path, &old_key.public_key(), &initial).unwrap();
+
+        let vault = SealedEnvelopeVault::load(state).unwrap();
+        assert_eq!(vault.read_all("op").unwrap(), initial);
+
+        let new_key = lillux::vault::VaultSecretKey::generate();
+        let mut rotated = HashMap::new();
+        rotated.insert("TOKEN".to_string(), "rotated".to_string());
+        with_store_lock(&store_path, || {
+            write_sealed_secrets(&store_path, &new_key.public_key(), &rotated)?;
+            lillux::vault::write_public_key(&public_path, &new_key.public_key())?;
+            lillux::vault::write_secret_key(&key_path, &new_key)
+        })
+        .unwrap();
+
+        assert_eq!(vault.read_all("op").unwrap(), rotated);
+        vault.set_secret("op", "ADDED", "after-rotation").unwrap();
+        let persisted = ryeos_vault::sealed::read_sealed_secrets(&store_path, &new_key).unwrap();
+        assert_eq!(persisted.get("TOKEN").map(String::as_str), Some("rotated"));
+        assert_eq!(
+            persisted.get("ADDED").map(String::as_str),
+            Some("after-rotation")
+        );
+        assert_eq!(
+            vault.public_key().fingerprint(),
+            new_key.public_key().fingerprint()
+        );
     }
 
     #[test]
