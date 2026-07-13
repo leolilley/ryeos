@@ -1793,7 +1793,7 @@ pub struct FinishSyncJobAttempt {
 }
 
 impl ProjectionDb {
-    fn immediate_transaction<T>(
+    pub(crate) fn immediate_transaction<T>(
         &self,
         label: &'static str,
         f: impl FnOnce() -> anyhow::Result<T>,
@@ -2943,16 +2943,25 @@ pub fn project_thread_snapshot_with_events(
     events: &[crate::ThreadEvent],
 ) -> anyhow::Result<()> {
     db.immediate_transaction("thread snapshot with events projection", || {
-        project_thread_snapshot(db, snapshot, chain_root_id)?;
-        for event in events {
-            if event.durability.is_projection_indexed() {
-                project_event(db, event).with_context(|| {
-                    format!("projection failed for event chain_seq={}", event.chain_seq)
-                })?;
-            }
-        }
-        Ok(())
+        project_thread_snapshot_with_events_in_transaction(db, snapshot, chain_root_id, events)
     })
+}
+
+pub(crate) fn project_thread_snapshot_with_events_in_transaction(
+    db: &ProjectionDb,
+    snapshot: &crate::ThreadSnapshot,
+    chain_root_id: &str,
+    events: &[crate::ThreadEvent],
+) -> anyhow::Result<()> {
+    project_thread_snapshot(db, snapshot, chain_root_id)?;
+    for event in events {
+        if event.durability.is_projection_indexed() {
+            project_event(db, event).with_context(|| {
+                format!("projection failed for event chain_seq={}", event.chain_seq)
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Project all thread snapshots from a chain state into the projection database.

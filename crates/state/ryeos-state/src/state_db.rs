@@ -164,16 +164,16 @@ impl StateDb {
             signer,
             &mut cache,
         )?;
-        let projected = (|| {
-            projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
-                .context("projecting created thread snapshot")?;
-            project_cached_chain_head(
-                &self.projection,
-                &cache,
-                chain_root_id,
-                &result.chain_state_hash,
-            )
-        })();
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
+                    .context("projecting created thread snapshot")
+            },
+        );
         Ok(CommittedWrite::new(result, "create_chain", projected))
     }
 
@@ -196,16 +196,16 @@ impl StateDb {
             signer,
             &mut cache,
         )?;
-        let projected = (|| {
-            projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
-                .context("projecting added thread snapshot")?;
-            project_cached_chain_head(
-                &self.projection,
-                &cache,
-                chain_root_id,
-                &result.chain_state_hash,
-            )
-        })();
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
+                    .context("projecting added thread snapshot")
+            },
+        );
         Ok(CommittedWrite::new(result, "add_thread", projected))
     }
 
@@ -239,36 +239,37 @@ impl StateDb {
             &mut cache,
         )?;
 
-        let projected = (|| {
-            for event in &result.events {
-                if event.durability.is_projection_indexed() {
-                    projection::project_event(&self.projection, event).with_context(|| {
-                        format!("projection failed for event chain_seq={}", event.chain_seq)
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                for event in &result.events {
+                    if event.durability.is_projection_indexed() {
+                        projection::project_event(&self.projection, event).with_context(|| {
+                            format!("projection failed for event chain_seq={}", event.chain_seq)
+                        })?;
+                    }
+                }
+
+                for update in &snapshot_updates {
+                    projection::project_thread_snapshot(
+                        &self.projection,
+                        &update.new_snapshot,
+                        chain_root_id,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "projection failed for snapshot update thread_id={}",
+                            update.thread_id
+                        )
                     })?;
                 }
-            }
 
-            for update in &snapshot_updates {
-                projection::project_thread_snapshot(
-                    &self.projection,
-                    &update.new_snapshot,
-                    chain_root_id,
-                )
-                .with_context(|| {
-                    format!(
-                        "projection failed for snapshot update thread_id={}",
-                        update.thread_id
-                    )
-                })?;
-            }
-
-            project_cached_chain_head(
-                &self.projection,
-                &cache,
-                chain_root_id,
-                &result.chain_state_hash,
-            )
-        })();
+                Ok(())
+            },
+        );
 
         Ok(CommittedWrite::new(result, "append_events", projected))
     }
@@ -299,21 +300,19 @@ impl StateDb {
             &mut cache,
         )?;
 
-        let projected = (|| {
-            projection::project_thread_snapshot_with_events(
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || projection::project_thread_snapshot_with_events_in_transaction(
                 &self.projection,
                 &snapshot,
                 chain_root_id,
                 &result.events,
             )
-            .context("projecting thread and initial events")?;
-            project_cached_chain_head(
-                &self.projection,
-                &cache,
-                chain_root_id,
-                &result.chain_state_hash,
-            )
-        })();
+            .context("projecting thread and initial events"),
+        );
 
         Ok(CommittedWrite::new(
             result,
@@ -595,11 +594,12 @@ impl StateDb {
     }
 }
 
-fn project_cached_chain_head(
+fn project_committed_chain(
     projection_db: &ProjectionDb,
     cache: &HeadCache,
     chain_root_id: &str,
     committed_hash: &str,
+    project_rows: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let cached = cache
         .get(chain_root_id)
@@ -610,8 +610,26 @@ fn project_cached_chain_head(
             cached.chain_state_hash
         );
     }
-    projection::project_chain_state(projection_db, &cached.chain_state, committed_hash)
-        .context("advancing projection cursor")
+    projection_db.immediate_transaction("authoritative chain projection", || {
+        let current = projection_db.get_projection_meta(chain_root_id)?;
+        let current_hash = current
+            .as_ref()
+            .map(|meta| meta.indexed_chain_state_hash.as_str());
+        if current_hash == Some(committed_hash) {
+            return Ok(());
+        }
+        let expected = cached.chain_state.prev_chain_state_hash.as_deref();
+        if current_hash != expected {
+            anyhow::bail!(
+                "projection cursor conflict for chain {chain_root_id}: current={:?}, expected predecessor={:?}, committed={committed_hash}",
+                current_hash,
+                expected,
+            );
+        }
+        project_rows()?;
+        projection::project_chain_state(projection_db, &cached.chain_state, committed_hash)
+            .context("advancing projection cursor")
+    })
 }
 
 #[cfg(test)]
@@ -675,6 +693,85 @@ mod tests {
     }
 
     #[test]
+    fn projection_commit_is_idempotent_at_committed_cursor() {
+        let (_dir, db) = open_temp();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        let committed = db.create_chain("T-root", snapshot, &signer).unwrap();
+        let cache = db.head_cache.lock().unwrap();
+
+        project_committed_chain(
+            db.projection(),
+            &cache,
+            "T-root",
+            &committed.value.chain_state_hash,
+            || anyhow::bail!("idempotent projection must not replay rows"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn projection_cursor_conflict_rolls_back_without_projecting_rows() {
+        let (_dir, db) = open_temp();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+        let conflicting_hash = "f".repeat(64);
+        db.projection()
+            .update_projection_meta(&crate::projection::ProjectionMeta {
+                chain_root_id: "T-root".to_string(),
+                indexed_chain_state_hash: conflicting_hash.clone(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .unwrap();
+        let before: i64 = db
+            .projection()
+            .connection()
+            .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let event = crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            "T-root",
+            "cursor_conflict_test",
+        )
+        .build();
+
+        let committed = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap();
+
+        assert!(matches!(committed.projection, ProjectionStatus::Stale { .. }));
+        let after: i64 = db
+            .projection()
+            .connection()
+            .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .unwrap()
+                .indexed_chain_state_hash,
+            conflicting_hash
+        );
+    }
+
+    #[test]
     fn committed_write_reports_stale_projection_without_losing_cas_result() {
         let (dir, db) = open_temp();
         let signer = TestSigner::default();
@@ -686,7 +783,7 @@ mod tests {
             "directive-runtime",
         )
         .build();
-        db.create_chain("T-root", snapshot, &signer).unwrap();
+        let initial = db.create_chain("T-root", snapshot, &signer).unwrap();
         db.projection()
             .connection()
             .execute_batch("DROP TABLE events")
@@ -711,6 +808,15 @@ mod tests {
         let head = crate::refs::read_signed_ref(&db.refs_root().join("generic/chains/T-root/head"))
             .unwrap();
         assert_eq!(head.target_hash, committed.value.chain_state_hash);
+        assert_eq!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .unwrap()
+                .indexed_chain_state_hash,
+            initial.value.chain_state_hash,
+            "failed row projection must roll back the cursor advance"
+        );
 
         drop(db);
         let reopened = StateDb::open(dir.path()).unwrap();
