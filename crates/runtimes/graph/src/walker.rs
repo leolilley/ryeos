@@ -1530,7 +1530,7 @@ impl Walker {
                     }
                 }
             } else {
-                match dispatch::dispatch_action(
+                dispatch::dispatch_action(
                     &self.client,
                     &stripped_action,
                     &self.thread_id,
@@ -1538,10 +1538,6 @@ impl Walker {
                     Some(exec_ctx),
                 )
                 .await
-                {
-                    Ok(o) => Ok(o),
-                    Err(e) => Err(e),
-                }
             };
 
         let elapsed = start.elapsed().as_millis() as u64;

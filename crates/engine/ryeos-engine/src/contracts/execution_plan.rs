@@ -114,7 +114,7 @@ pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
         /// The fully resolved subprocess specification.
-        spec: PlanSubprocessSpec,
+        spec: Box<PlanSubprocessSpec>,
         /// Audit: the root item's source path.
         #[serde(default)]
         tool_path: Option<PathBuf>,

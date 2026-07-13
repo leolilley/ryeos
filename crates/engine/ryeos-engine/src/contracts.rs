@@ -71,18 +71,13 @@ struct ValueShapeRaw {
 /// How unknown fields in descriptor values are handled during instance
 /// validation. Only `Warn` is implemented in v1; `None` (omitted) means
 /// unknown fields are silently ignored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StrictFieldsPolicy {
     /// Unknown fields produce validation warnings but do not block
     /// resolution. Opt-in via `strict_fields: warn` on the kind schema.
+    #[default]
     Warn,
-}
-
-impl Default for StrictFieldsPolicy {
-    fn default() -> Self {
-        StrictFieldsPolicy::Warn
-    }
 }
 
 impl<'de> Deserialize<'de> for ValueShape {
@@ -740,7 +735,6 @@ fn validate_value(
                     expected: "array".to_string(),
                     found: json_type_name(value).to_string(),
                 });
-                return;
             }
             // If all elements should be validated, check each one.
             // This is handled per-field via `validate_field` with

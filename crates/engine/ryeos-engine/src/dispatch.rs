@@ -502,7 +502,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello world".into()],
                     cwd: Some(tempdir()),
@@ -511,7 +511,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -543,7 +543,7 @@ mod tests {
         let mut plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello debug".into()],
                     cwd: Some(tempdir()),
@@ -552,7 +552,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -592,7 +592,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -601,7 +601,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -622,7 +622,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/false".into(),
                     args: Vec::new(),
                     cwd: Some(tempdir()),
@@ -631,7 +631,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -666,7 +666,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -675,7 +675,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -723,7 +723,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -732,7 +732,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -811,7 +811,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -820,7 +820,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -842,7 +842,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/nonexistent/binary".into(),
                     args: Vec::new(),
                     cwd: Some(tempdir()),
@@ -851,7 +851,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },

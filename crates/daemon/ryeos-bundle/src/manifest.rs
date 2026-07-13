@@ -205,7 +205,7 @@ pub(crate) fn parse_current_manifest_body(body: &str, origin: &Path) -> Result<B
         )
     })?;
     for required in ["name", "version", "provides_kinds", "requires_kinds"] {
-        if !mapping.contains_key(&serde_yaml::Value::String(required.to_string())) {
+        if !mapping.contains_key(serde_yaml::Value::String(required.to_string())) {
             bail!(
                 "{} is not {CURRENT_BUNDLE_MANIFEST_FORMAT}: missing required field '{required}'",
                 origin.display()

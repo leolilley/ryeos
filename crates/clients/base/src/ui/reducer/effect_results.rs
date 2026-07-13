@@ -1037,10 +1037,10 @@ mod tests {
         let effects = core.effects_for_facet("selection");
 
         assert!(
-            core.data.sources.get(&k0).is_none(),
+            !core.data.sources.contains_key(&k0),
             "old subject's section payload must not survive a facet write"
         );
-        assert!(core.data.sources.get(&k1).is_none());
+        assert!(!core.data.sources.contains_key(&k1));
         assert_eq!(effects.len(), 2, "one fresh fetch per section");
     }
 

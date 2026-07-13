@@ -161,7 +161,7 @@ fn build_and_extract_cancellation(
         .nodes
         .iter()
         .find_map(|n| match n {
-            PlanNode::DispatchSubprocess { spec, .. } => Some(spec.clone()),
+            PlanNode::DispatchSubprocess { spec, .. } => Some(spec.as_ref().clone()),
             _ => None,
         })
         .ok_or_else(|| "no DispatchSubprocess node in plan".to_string())?;

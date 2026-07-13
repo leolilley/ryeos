@@ -1286,7 +1286,7 @@ pub(crate) async fn dispatch_method(
             &per_spawn,
             roots,
         )
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+        .map_err(DispatchError::Internal)?;
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
@@ -2019,7 +2019,7 @@ async fn dispatch_streaming_subprocess(
         &[],
         roots,
     )
-    .map_err(|e| DispatchError::Internal(e.into()))?;
+    .map_err(DispatchError::Internal)?;
     let subprocess_request = lillux::SubprocessRequest {
         cmd: executor_path_str,
         args: vec![],

@@ -142,9 +142,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
         std::fs::create_dir(&staging)
             .with_context(|| format!("create staging dir {}", staging.display()))?;
-        let counts = materialize_files(&entries, &blob_data, &staging).map_err(|error| {
+        let counts = materialize_files(&entries, &blob_data, &staging).inspect_err(|_| {
             let _ = std::fs::remove_dir_all(&staging);
-            error
         })?;
         if let Err(error) =
             ryeos_bundle::preflight::preflight_verify_bundle(&staging, &state.config.app_root)

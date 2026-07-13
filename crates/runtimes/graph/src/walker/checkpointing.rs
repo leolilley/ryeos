@@ -5,17 +5,29 @@ use ryeos_runtime::checkpoint::CheckpointWriter;
 
 use super::{follow_keys, Walker, GRAPH_CHECKPOINT_SCHEMA_VERSION};
 
-/// Build the versioned cursor payload persisted after an advancing step.
-fn checkpoint_payload(
-    graph_run_id: &str,
-    next_node: &str,
+struct CheckpointCursor<'a> {
+    graph_run_id: &'a str,
+    next_node: &'a str,
     next_step: u32,
-    state: &Value,
+    state: &'a Value,
     accounting: Value,
-    suppressed_errors: &[ErrorRecord],
+    suppressed_errors: &'a [ErrorRecord],
     retry_attempt: u32,
-    written_at: &str,
-) -> Value {
+    written_at: &'a str,
+}
+
+/// Build the versioned cursor payload persisted after an advancing step.
+fn checkpoint_payload(cursor: CheckpointCursor<'_>) -> Value {
+    let CheckpointCursor {
+        graph_run_id,
+        next_node,
+        next_step,
+        state,
+        accounting,
+        suppressed_errors,
+        retry_attempt,
+        written_at,
+    } = cursor;
     json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
         "graph_run_id": graph_run_id,
@@ -33,25 +45,13 @@ fn checkpoint_payload(
 /// Add the local pending-follow marker to a regular cursor payload. The marker
 /// deliberately contains no child identity: daemon handoff owns that mapping.
 fn follow_checkpoint_payload(
-    graph_run_id: &str,
-    follow_node: &str,
-    step: u32,
-    state: &Value,
-    accounting: Value,
-    suppressed_errors: &[ErrorRecord],
+    cursor: CheckpointCursor<'_>,
     iteration_snapshot: Option<&[Value]>,
-    written_at: &str,
 ) -> Value {
-    let mut payload = checkpoint_payload(
-        graph_run_id,
-        follow_node,
-        step,
-        state,
-        accounting,
-        suppressed_errors,
-        0,
-        written_at,
-    );
+    let graph_run_id = cursor.graph_run_id;
+    let follow_node = cursor.next_node;
+    let step = cursor.next_step;
+    let mut payload = checkpoint_payload(cursor);
     let mut pending = serde_json::Map::new();
     pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
     pending.insert("step_count".to_string(), json!(step));
@@ -83,14 +83,17 @@ impl Walker {
             serde_json::to_value(&*acc).unwrap_or(Value::Null)
         };
         writer.write(&follow_checkpoint_payload(
-            graph_run_id,
-            follow_node,
-            step,
-            state,
-            accounting,
-            suppressed_errors,
+            CheckpointCursor {
+                graph_run_id,
+                next_node: follow_node,
+                next_step: step,
+                state,
+                accounting,
+                suppressed_errors,
+                retry_attempt: 0,
+                written_at: &lillux::time::iso8601_now(),
+            },
             iteration_snapshot,
-            &lillux::time::iso8601_now(),
         ))?;
         Ok(())
     }
@@ -113,7 +116,7 @@ impl Walker {
             let acc = self.accounting.lock().unwrap();
             serde_json::to_value(&*acc).unwrap_or(Value::Null)
         };
-        writer.write(&checkpoint_payload(
+        writer.write(&checkpoint_payload(CheckpointCursor {
             graph_run_id,
             next_node,
             next_step,
@@ -121,8 +124,8 @@ impl Walker {
             accounting,
             suppressed_errors,
             retry_attempt,
-            &lillux::time::iso8601_now(),
-        ))?;
+            written_at: &lillux::time::iso8601_now(),
+        }))?;
 
         // Production-inert crash injection used by the graph recovery e2e.
         if !CheckpointWriter::is_resume()
@@ -149,16 +152,17 @@ mod tests {
             error: "suppressed".to_string(),
         }];
 
-        let payload = checkpoint_payload(
-            "run-1",
-            "retrying",
-            4,
-            &json!({"answer": 42}),
-            json!({"total": null, "nodes": []}),
-            &errors,
-            2,
-            "2026-01-02T03:04:05Z",
-        );
+        let state = json!({"answer": 42});
+        let payload = checkpoint_payload(CheckpointCursor {
+            graph_run_id: "run-1",
+            next_node: "retrying",
+            next_step: 4,
+            state: &state,
+            accounting: json!({"total": null, "nodes": []}),
+            suppressed_errors: &errors,
+            retry_attempt: 2,
+            written_at: "2026-01-02T03:04:05Z",
+        });
 
         assert_eq!(payload["schema_version"], GRAPH_CHECKPOINT_SCHEMA_VERSION);
         assert_eq!(payload["current_node"], "retrying");
@@ -170,15 +174,19 @@ mod tests {
 
     #[test]
     fn follow_payload_repoints_cursor_without_child_identity() {
+        let state = json!({});
         let payload = follow_checkpoint_payload(
-            "run-2",
-            "wait-for-child",
-            7,
-            &json!({}),
-            Value::Null,
-            &[],
+            CheckpointCursor {
+                graph_run_id: "run-2",
+                next_node: "wait-for-child",
+                next_step: 7,
+                state: &state,
+                accounting: Value::Null,
+                suppressed_errors: &[],
+                retry_attempt: 0,
+                written_at: "2026-01-02T03:04:05Z",
+            },
             None,
-            "2026-01-02T03:04:05Z",
         );
 
         assert_eq!(payload["current_node"], "wait-for-child");

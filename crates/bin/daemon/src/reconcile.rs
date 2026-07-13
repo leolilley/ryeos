@@ -758,18 +758,15 @@ fn waiting_follow_action(
             // persist and record_follow_child_terminal, which reconcile skips) would hang
             // the parent forever — recover it.
             Some(_) => {
-                match state
+                if let Some(follow_key) = state
                     .threads
                     .recover_terminal_follow_child(&slot.child_chain_root_id)?
                 {
-                    Some(follow_key) => {
-                        tracing::info!(
-                            follow_key = %follow_key,
-                            "follow child chain terminal but unrecorded — recovered, collecting parent-resume"
-                        );
-                        resume = true;
-                    }
-                    None => {}
+                    tracing::info!(
+                        follow_key = %follow_key,
+                        "follow child chain terminal but unrecorded — recovered, collecting parent-resume"
+                    );
+                    resume = true;
                 }
             }
             None => {
