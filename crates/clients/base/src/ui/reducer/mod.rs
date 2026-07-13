@@ -25,7 +25,7 @@ mod test_support;
 mod tiles;
 
 use super::effect::{RyeOsEffect, RyeOsEffectKind};
-use super::event::{RyeOsUiIntent, RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent};
+use super::event::{RyeOsEvent, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
 use super::model::RyeOsCore;
 use super::view_model::{intent_for_focused_row, RyeOsMotionEventVm, RyeOsTone};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
@@ -114,9 +114,11 @@ impl RyeOsCore {
                 self.dispatch_ui(RyeOsUiEvent::SetOverlayQuery { query })
             }
             AppliedUiIntent::FocusInput => self.dispatch_ui(RyeOsUiEvent::FocusInput),
-            AppliedUiIntent::FocusView { tile_id } => self.dispatch_ui(RyeOsUiEvent::FocusChanged {
-                target: Some(tile_id),
-            }),
+            AppliedUiIntent::FocusView { tile_id } => {
+                self.dispatch_ui(RyeOsUiEvent::FocusChanged {
+                    target: Some(tile_id),
+                })
+            }
         }
     }
 
@@ -1025,11 +1027,9 @@ fn decode_ui_intent_applied(payload: serde_json::Value) -> UiIntentDecode {
             let Ok(payload) = serde_json::from_value::<OpenViewPayload>(applied.payload) else {
                 return UiIntentDecode::Unsupported;
             };
-            let view = payload.view.or_else(|| {
-                payload
-                    .view_ref
-                    .map(|view_ref| ViewSpec { view_ref })
-            });
+            let view = payload
+                .view
+                .or_else(|| payload.view_ref.map(|view_ref| ViewSpec { view_ref }));
             match view {
                 Some(view) => UiIntentDecode::Known(AppliedUiIntent::OpenView { view }),
                 None => UiIntentDecode::Unsupported,

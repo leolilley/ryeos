@@ -245,11 +245,7 @@ fn atomic_write_private_unix(target: &Path, data: &[u8]) -> Result<()> {
             libc::openat(
                 parent_file.as_raw_fd(),
                 tmp_name.as_ptr(),
-                libc::O_WRONLY
-                    | libc::O_CREAT
-                    | libc::O_EXCL
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0o600,
             )
         };
@@ -479,7 +475,10 @@ mod atomic_write_tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("secret.pem");
         atomic_write_private(&target, b"secret").unwrap();
-        assert_eq!(fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[cfg(unix)]

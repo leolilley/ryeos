@@ -12,8 +12,8 @@ use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
-use ryeos_state::{CommittedWrite, ProjectionStatus, StateDb};
 use ryeos_state::UsageSubject;
+use ryeos_state::{CommittedWrite, ProjectionStatus, StateDb};
 
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
@@ -378,10 +378,13 @@ fn append_events_locked(
 
     if !durable_events.is_empty() {
         let te = convert_events(&durable_events, chain_root_id, thread_id);
-        let result = committed_value(
-            g.state_db
-                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?,
-        );
+        let result = committed_value(g.state_db.append_events(
+            chain_root_id,
+            thread_id,
+            te,
+            vec![],
+            g.signer.as_ref(),
+        )?);
         for (idx, record) in durable_indices
             .into_iter()
             .zip(persisted_from_append(&result, &durable_events))

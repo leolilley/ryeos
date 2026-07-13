@@ -50,7 +50,10 @@ fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
     ctx.fingerprint.strip_prefix("session:").map(String::from)
 }
 
-fn invocation_context_for_session(ctx: &HandlerContext, session: &BrowserSession) -> HandlerContext {
+fn invocation_context_for_session(
+    ctx: &HandlerContext,
+    session: &BrowserSession,
+) -> HandlerContext {
     if let Some(user_principal_id) = session.user_principal_id.clone() {
         HandlerContext::new(user_principal_id, session.granted_caps.clone(), true)
     } else {
@@ -103,8 +106,9 @@ fn read_only_invocation_allowed(state: &AppState, item_ref: &str) -> bool {
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let req: Request = serde_json::from_value(input)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid ui.invocations.dispatch request: {e}")))?;
+    let req: Request = serde_json::from_value(input).map_err(|e| {
+        HandlerError::BadRequest(format!("invalid ui.invocations.dispatch request: {e}"))
+    })?;
     let item_ref = req.item_ref().to_string();
 
     // Require browser session.
@@ -120,19 +124,17 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
     if session.read_only && !read_only_invocation_allowed(&state, &item_ref) {
-        return Err(
-            HandlerError::Forbidden(
-                "read-only session cannot dispatch protected invocations".into(),
-            )
-            .into(),
-        );
+        return Err(HandlerError::Forbidden(
+            "read-only session cannot dispatch protected invocations".into(),
+        )
+        .into());
     }
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
 
     if is_session_local_invocation(&item_ref) {
-        let descriptor = service_descriptor_for(&state, &item_ref)
-            .ok_or_else(|| HandlerError::NotFound)?;
+        let descriptor =
+            service_descriptor_for(&state, &item_ref).ok_or_else(|| HandlerError::NotFound)?;
         let result = (descriptor.handler)(req.params.clone(), ctx.clone(), state.clone()).await?;
 
         ui.session_bus.publish(
@@ -292,7 +294,9 @@ mod tests {
     #[test]
     fn read_only_allowlist_is_limited_to_declared_sources() {
         assert!(is_declared_read_source_ref("service:node/status"));
-        assert!(is_declared_read_source_ref("service:ui/ryeos-ui/threads/list"));
+        assert!(is_declared_read_source_ref(
+            "service:ui/ryeos-ui/threads/list"
+        ));
         assert!(!is_declared_read_source_ref("service:commands/submit"));
         assert!(!is_declared_read_source_ref("tool:demo/run"));
     }

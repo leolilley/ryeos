@@ -972,13 +972,18 @@ fn install_bundle(
         .join(ryeos_engine::AI_DIR)
         .join("bundles")
         .join(name);
-    let parent = target.parent().context("bundle install target has no parent")?;
+    let parent = target
+        .parent()
+        .context("bundle install target has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("create bundles parent for {}", target.display()))?;
     let staging = parent.join(format!(".{name}.staging"));
     lillux::with_exclusive_file_lock(&target, || {
         if target.exists() {
-            bail!("bundle target appeared during install: {}", target.display());
+            bail!(
+                "bundle target appeared during install: {}",
+                target.display()
+            );
         }
         if staging.exists() {
             fs::remove_dir_all(&staging)

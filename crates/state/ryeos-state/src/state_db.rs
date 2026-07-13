@@ -57,7 +57,6 @@ impl<T> CommittedWrite<T> {
         };
         Self { value, projection }
     }
-
 }
 
 /// High-level state database.
@@ -158,17 +157,22 @@ impl StateDb {
     ) -> anyhow::Result<CommittedWrite<CreateResult>> {
         let mut cache = self.head_cache.lock().expect("head_cache lock");
         let result = chain::create_chain(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                snapshot.clone(),
-                signer,
-                &mut cache,
-            )?;
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            signer,
+            &mut cache,
+        )?;
         let projected = (|| {
             projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
                 .context("projecting created thread snapshot")?;
-            project_cached_chain_head(&self.projection, &cache, chain_root_id, &result.chain_state_hash)
+            project_cached_chain_head(
+                &self.projection,
+                &cache,
+                chain_root_id,
+                &result.chain_state_hash,
+            )
         })();
         Ok(CommittedWrite::new(result, "create_chain", projected))
     }
@@ -185,17 +189,22 @@ impl StateDb {
     ) -> anyhow::Result<CommittedWrite<CreateResult>> {
         let mut cache = self.head_cache.lock().expect("head_cache lock");
         let result = chain::add_thread_to_chain(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                snapshot.clone(),
-                signer,
-                &mut cache,
-            )?;
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            signer,
+            &mut cache,
+        )?;
         let projected = (|| {
             projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
                 .context("projecting added thread snapshot")?;
-            project_cached_chain_head(&self.projection, &cache, chain_root_id, &result.chain_state_hash)
+            project_cached_chain_head(
+                &self.projection,
+                &cache,
+                chain_root_id,
+                &result.chain_state_hash,
+            )
         })();
         Ok(CommittedWrite::new(result, "add_thread", projected))
     }
@@ -218,17 +227,17 @@ impl StateDb {
 
         let mut cache = self.head_cache.lock().expect("head_cache lock");
         let result = chain::append_events(
-                chain::AppendEventsInput {
-                    cas_root: &self.cas_root,
-                    refs_root: &self.refs_root,
-                    chain_root_id,
-                    thread_id,
-                    events,
-                    snapshot_updates: snapshot_updates.clone(),
-                    signer,
-                },
-                &mut cache,
-            )?;
+            chain::AppendEventsInput {
+                cas_root: &self.cas_root,
+                refs_root: &self.refs_root,
+                chain_root_id,
+                thread_id,
+                events,
+                snapshot_updates: snapshot_updates.clone(),
+                signer,
+            },
+            &mut cache,
+        )?;
 
         let projected = (|| {
             for event in &result.events {
@@ -281,14 +290,14 @@ impl StateDb {
 
         let mut cache = self.head_cache.lock().expect("head_cache lock");
         let result = chain::add_thread_to_chain_with_events(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                snapshot.clone(),
-                events,
-                signer,
-                &mut cache,
-            )?;
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            events,
+            signer,
+            &mut cache,
+        )?;
 
         let projected = (|| {
             projection::project_thread_snapshot_with_events(
@@ -699,10 +708,8 @@ mod tests {
                 ..
             }
         ));
-        let head = crate::refs::read_signed_ref(
-            &db.refs_root().join("generic/chains/T-root/head"),
-        )
-        .unwrap();
+        let head = crate::refs::read_signed_ref(&db.refs_root().join("generic/chains/T-root/head"))
+            .unwrap();
         assert_eq!(head.target_hash, committed.value.chain_state_hash);
 
         drop(db);
@@ -849,12 +856,20 @@ mod tests {
 
         let result = db.create_chain("T-root", snapshot, &signer).unwrap();
 
-        let snapshot_path =
-            lillux::shard_path(db.cas_root(), "objects", &result.value.snapshot_hash, ".json");
+        let snapshot_path = lillux::shard_path(
+            db.cas_root(),
+            "objects",
+            &result.value.snapshot_hash,
+            ".json",
+        );
         assert!(snapshot_path.exists());
 
-        let chain_state_path =
-            lillux::shard_path(db.cas_root(), "objects", &result.value.chain_state_hash, ".json");
+        let chain_state_path = lillux::shard_path(
+            db.cas_root(),
+            "objects",
+            &result.value.chain_state_hash,
+            ".json",
+        );
         assert!(chain_state_path.exists());
     }
 

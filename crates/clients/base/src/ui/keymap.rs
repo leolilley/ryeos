@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::event::{RyeOsUiIntent, RyeOsStackMoveDirection, RyeOsUiEvent};
+use super::event::{RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
 use super::model::RyeOsDockEdge;
 use crate::workspace::FocusDirection;
 

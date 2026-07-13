@@ -83,7 +83,10 @@ async fn read_only_session_rejects_nonlocal_invocation() {
     )
     .await;
 
-    assert!(result.is_err(), "read-only should reject nonlocal invocations");
+    assert!(
+        result.is_err(),
+        "read-only should reject nonlocal invocations"
+    );
     let msg = format!("{:#}", result.unwrap_err());
     assert!(
         msg.contains("read-only"),

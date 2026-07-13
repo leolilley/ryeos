@@ -90,7 +90,13 @@ fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
         } else {
             MUTED
         };
-        fill_line(surface, x + 1, ry, w.saturating_sub(2), Style::new().fg(fg).bg(bg));
+        fill_line(
+            surface,
+            x + 1,
+            ry,
+            w.saturating_sub(2),
+            Style::new().fg(fg).bg(bg),
+        );
         if item.header {
             // A group header: fold glyph + title across the row; its
             // Enter intent folds the group, so it reads as a control.

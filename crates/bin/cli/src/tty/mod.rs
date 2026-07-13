@@ -7,11 +7,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv};
-use ryeos_state::event_types::{outcome_code_is_failure, thread_terminal_outcome, ThreadOutcomeKind};
+use ryeos_state::event_types::{
+    outcome_code_is_failure, thread_terminal_outcome, ThreadOutcomeKind,
+};
 use serde_json::Value;
 
-use crate::exec_stream::StreamOutcome;
 use crate::error::{CliError, CliTransportError};
+use crate::exec_stream::StreamOutcome;
 use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
@@ -273,7 +275,9 @@ async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
             status: "busy".to_string(),
             detail: Some(diagnostics.message),
         },
-        Ok(LifecycleStatus::Starting { pid, started_at, .. }) => TtyNodeSummary {
+        Ok(LifecycleStatus::Starting {
+            pid, started_at, ..
+        }) => TtyNodeSummary {
             status: "starting".to_string(),
             detail: Some(format!("pid {pid} · since {started_at}")),
         },
@@ -296,7 +300,10 @@ fn screen_items(
     if has_tui_command {
         items.insert(
             0,
-            command_item(vec!["tui".to_string()], "open terminal workspace".to_string()),
+            command_item(
+                vec!["tui".to_string()],
+                "open terminal workspace".to_string(),
+            ),
         );
     }
     items
@@ -324,7 +331,11 @@ fn help_items(verified_items: Vec<TtyItem>) -> Vec<TtyItem> {
         .iter()
         .map(|command| {
             command_item(
-                command.tokens.iter().map(|token| (*token).to_string()).collect(),
+                command
+                    .tokens
+                    .iter()
+                    .map(|token| (*token).to_string())
+                    .collect(),
                 command.summary.to_string(),
             )
         })
@@ -804,11 +815,7 @@ fn render_help_items(items: &[TtyItem], lines: &mut Vec<String>) {
     }
 }
 
-fn write_frame(
-    out: &mut impl Write,
-    lines: &[String],
-    previous_lines: usize,
-) -> io::Result<()> {
+fn write_frame(out: &mut impl Write, lines: &[String], previous_lines: usize) -> io::Result<()> {
     if previous_lines == 0 {
         for line in lines {
             writeln!(out, "{line}")?;

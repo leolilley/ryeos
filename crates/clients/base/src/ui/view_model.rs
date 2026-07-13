@@ -2190,9 +2190,10 @@ pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec
     refs.dedup();
     let fold = core.seat.fold();
     refs.retain(|spec| {
-        super::content::resolve_params(&serde_json::Value::String(format!("@facet:{spec}")), |key| {
-            fold.get(key).cloned()
-        })
+        super::content::resolve_params(
+            &serde_json::Value::String(format!("@facet:{spec}")),
+            |key| fold.get(key).cloned(),
+        )
         .is_null()
     });
     refs

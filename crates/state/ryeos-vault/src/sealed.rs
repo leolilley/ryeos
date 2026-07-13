@@ -37,11 +37,7 @@ pub fn with_store_lock<T>(store_path: &Path, operation: impl FnOnce() -> Result<
 /// Recover an interrupted key/store rotation while the caller holds the store
 /// lock. A readable current key/store pair is committed; otherwise the complete
 /// previous generation is restored from durable backups.
-pub fn recover_rewrap(
-    key_path: &Path,
-    public_key_path: &Path,
-    store_path: &Path,
-) -> Result<()> {
+pub fn recover_rewrap(key_path: &Path, public_key_path: &Path, store_path: &Path) -> Result<()> {
     let journal_path = rewrap_journal_path(store_path);
     if !journal_path.exists() {
         return Ok(());
@@ -51,7 +47,10 @@ pub fn recover_rewrap(
     let journal: RewrapJournal = toml::from_str(&journal_raw)
         .with_context(|| format!("parse rewrap journal {}", journal_path.display()))?;
     if journal.version != 1 {
-        return Err(anyhow!("unsupported vault rewrap journal version {}", journal.version));
+        return Err(anyhow!(
+            "unsupported vault rewrap journal version {}",
+            journal.version
+        ));
     }
 
     let current_valid = lillux::vault::read_secret_key(key_path)
@@ -83,8 +82,8 @@ pub fn recover_rewrap(
         lillux::atomic_write_private(store_path, &store_bytes)
             .context("restore sealed store after interrupted rewrap")?;
     }
-    let key_bytes = std::fs::read(&key_backup)
-        .with_context(|| format!("read {}", key_backup.display()))?;
+    let key_bytes =
+        std::fs::read(&key_backup).with_context(|| format!("read {}", key_backup.display()))?;
     lillux::atomic_write_private(key_path, &key_bytes)
         .context("restore secret key after interrupted rewrap")?;
     lillux::vault::write_public_key(public_key_path, &old_key.public_key())
@@ -93,11 +92,7 @@ pub fn recover_rewrap(
 }
 
 /// Persist rollback material and a journal before rotating live vault files.
-pub fn prepare_rewrap(
-    key_path: &Path,
-    public_key_path: &Path,
-    store_path: &Path,
-) -> Result<()> {
+pub fn prepare_rewrap(key_path: &Path, public_key_path: &Path, store_path: &Path) -> Result<()> {
     let key_backup = rewrap_backup_path(key_path);
     let public_backup = rewrap_backup_path(public_key_path);
     let store_backup = rewrap_backup_path(store_path);
@@ -118,11 +113,7 @@ pub fn prepare_rewrap(
         .context("write durable vault rewrap journal")
 }
 
-fn cleanup_rewrap_files(
-    key_path: &Path,
-    public_key_path: &Path,
-    store_path: &Path,
-) -> Result<()> {
+fn cleanup_rewrap_files(key_path: &Path, public_key_path: &Path, store_path: &Path) -> Result<()> {
     // Journal removal is the commit marker. Flush it before removing rollback
     // material so a crash cannot expose a journal whose backups are gone.
     lillux::remove_file_durable(&rewrap_journal_path(store_path))?;
@@ -131,8 +122,7 @@ fn cleanup_rewrap_files(
         rewrap_backup_path(public_key_path),
         rewrap_backup_path(store_path),
     ] {
-        lillux::remove_file_durable(&path)
-            .with_context(|| format!("remove {}", path.display()))?;
+        lillux::remove_file_durable(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }
@@ -299,8 +289,14 @@ mod tests {
         recover_rewrap(&key_path, &public_path, &store_path).unwrap();
 
         let restored = lillux::vault::read_secret_key(&key_path).unwrap();
-        assert_eq!(restored.public_key().fingerprint(), old_key.public_key().fingerprint());
-        assert_eq!(read_sealed_secrets(&store_path, &restored).unwrap(), sample_secrets());
+        assert_eq!(
+            restored.public_key().fingerprint(),
+            old_key.public_key().fingerprint()
+        );
+        assert_eq!(
+            read_sealed_secrets(&store_path, &restored).unwrap(),
+            sample_secrets()
+        );
     }
 
     #[test]
@@ -321,8 +317,14 @@ mod tests {
         recover_rewrap(&key_path, &public_path, &store_path).unwrap();
 
         let committed = lillux::vault::read_secret_key(&key_path).unwrap();
-        assert_eq!(committed.public_key().fingerprint(), new_key.public_key().fingerprint());
-        assert_eq!(read_sealed_secrets(&store_path, &committed).unwrap(), sample_secrets());
+        assert_eq!(
+            committed.public_key().fingerprint(),
+            new_key.public_key().fingerprint()
+        );
+        assert_eq!(
+            read_sealed_secrets(&store_path, &committed).unwrap(),
+            sample_secrets()
+        );
         let public = lillux::vault::read_public_key(&public_path).unwrap();
         assert_eq!(public.fingerprint(), new_key.public_key().fingerprint());
     }

@@ -115,15 +115,11 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
             Ok(true)
         }
         ("start", _) => {
-            run_start_command(&argv[1..])
-                .await
-                .map_err(map_local_err)?;
+            run_start_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
         ("stop", _) => {
-            run_stop_command(&argv[1..])
-                .await
-                .map_err(map_local_err)?;
+            run_stop_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
         _ => Ok(false),

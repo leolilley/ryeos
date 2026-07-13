@@ -41,11 +41,7 @@ impl Presenter {
         }
     }
 
-    pub fn stream_with_previous(
-        &mut self,
-        command: &str,
-        previous_lines: usize,
-    ) -> io::Result<()> {
+    pub fn stream_with_previous(&mut self, command: &str, previous_lines: usize) -> io::Result<()> {
         if let Self::Tty(tty) = self {
             tty.stream_with_previous(command, previous_lines)?;
         }

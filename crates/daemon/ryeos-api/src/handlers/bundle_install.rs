@@ -200,7 +200,10 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
     let staging = parent.join(format!(".{name}.staging"));
     lillux::with_exclusive_file_lock(target, || {
         if target.exists() {
-            bail!("bundle target appeared during install: {}", target.display());
+            bail!(
+                "bundle target appeared during install: {}",
+                target.display()
+            );
         }
         if staging.exists() {
             fs::remove_dir_all(&staging)
@@ -223,11 +226,7 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
     })
 }
 
-fn replace_dir_atomic(
-    src: &Path,
-    target: &Path,
-    preserve_runtime_artifacts: bool,
-) -> Result<()> {
+fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: bool) -> Result<()> {
     let source = src
         .canonicalize()
         .with_context(|| format!("canonicalize source path {}", src.display()))?;

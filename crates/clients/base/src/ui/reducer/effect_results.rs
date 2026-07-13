@@ -1309,7 +1309,8 @@ mod tests {
                 kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: None,
                 error: Some(
-                    "/ui/api/invocations/dispatch: 500 {\"message\":\"capability denied\"}".to_string(),
+                    "/ui/api/invocations/dispatch: 500 {\"message\":\"capability denied\"}"
+                        .to_string(),
                 ),
             },
         });

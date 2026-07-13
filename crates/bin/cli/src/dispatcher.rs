@@ -218,9 +218,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
                 .into(),
         });
     }
-    let want_stream = resolved
-        .stream
-        .unwrap_or_else(stdout_supports_tty);
+    let want_stream = resolved.stream.unwrap_or_else(stdout_supports_tty);
     let stream_live = resolved.direct_execute
         && !resolved.async_launch
         && resolved.project_path.is_some()

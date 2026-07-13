@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use ryeos_client_base::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
+use ryeos_client_base::ui::{
+    RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind,
+};
 
 use crate::transport::daemon::{ClientError, DaemonClient};
 
