@@ -512,25 +512,44 @@ fn exec_tool(
 
     envs.push(("RYEOS_APP_ROOT".to_string(), app_root.display().to_string()));
 
+    if inherit_env {
+        for (key, value) in std::env::vars() {
+            if !envs.iter().any(|(configured, _)| configured == &key) {
+                envs.push((key, value));
+            }
+        }
+    }
+
+    let request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+        lillux::SubprocessRequest {
+            cmd: resolved.absolute_path.to_string_lossy().into_owned(),
+            args,
+            cwd,
+            envs,
+            stdin_data,
+            timeout: timeout as f64,
+        },
+        app_root,
+        Path::new(project_path),
+        tool_ref_str,
+        "offline-cli",
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("offline tool sandbox refused execution: {error}"),
+    })?;
+
     if inherit_stdio {
         return exec_inherited(
             tool_ref_str,
-            &resolved.absolute_path,
-            &args,
-            cwd.as_deref(),
-            &envs,
-            inherit_env,
+            Path::new(&request.cmd),
+            &request.args,
+            request.cwd.as_deref(),
+            &request.envs,
+            false,
         );
     }
 
-    let result = lillux::run(lillux::SubprocessRequest {
-        cmd: resolved.absolute_path.to_string_lossy().into_owned(),
-        args,
-        cwd,
-        envs,
-        stdin_data,
-        timeout: timeout as f64,
-    });
+    let result = lillux::run(request);
 
     if !result.success {
         return Err(CliError::Local {
@@ -1027,6 +1046,16 @@ mod tests {
                 .join("node")
                 .join("identity");
             std::fs::create_dir_all(&node_identity_dir).unwrap();
+            std::fs::write(
+                node_identity_dir.parent().unwrap().join("sandbox.yaml"),
+                format!(
+                    "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\n\
+                     writable_paths:\n  - {}\nallowed_env:\n  - \"*\"\n\
+                     max_open_files: 128\nmax_processes: 32\n",
+                    project.display()
+                ),
+            )
+            .unwrap();
             let pem = key.to_pkcs8_pem(Default::default()).unwrap();
             std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
             let dev_trust = std::fs::read_to_string(
