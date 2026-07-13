@@ -301,6 +301,7 @@ impl RuntimeLaunchMetadata {
             checkpoint_dir: None,
             resume_context: None,
             follow_parent_context: None,
+            follow_launch_window: None,
         }
     }
 
@@ -314,6 +315,7 @@ impl RuntimeLaunchMetadata {
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
             && self.follow_parent_context.is_none()
+            && self.follow_launch_window.is_none()
     }
 
     /// Set the daemon-allocated checkpoint directory.
@@ -418,6 +420,7 @@ mod tests {
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
             follow_parent_context: None,
+            follow_launch_window: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
