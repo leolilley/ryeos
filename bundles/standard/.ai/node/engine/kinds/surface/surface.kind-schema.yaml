@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T03:01:09Z:597c4d6e0a1d2edf2e9c4ff04c5c78a7e874634f6c9bc3f9724366139321d35c:IvpwsStDwfNnBY0z55y2V+luk4+Kcq/Aw8xu3xG2xDwDwCR1z2MV7FEZlORmWAGhlxY5i+gNNOI4NE7Oe4iJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T08:27:54Z:15f7d3f3fd87dc6d3cc6e7bb00de741e58057a11cc1fca67554fee3b7915246b:8D4TEUb+WkL0poIfuD5HvPg6EDVnIKl+Ma7Y0p2UorQyX5iPb95QoOzHUSB5x4kFoINWTZ8mESlnROm/mgELCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -49,6 +49,16 @@ composer_config:
     - name: capabilities
       strategy: narrow_against_parent_effective
       expect_value_type: mapping
+    - name: library
+      strategy: keyed_seq_merge_root_last
+      key: group
+      expect_value_type: array
+    - name: backdrop
+      strategy: replace_root_last
+      expect_value_type: string
+    - name: overlays
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
 
 composed_value_contract:
   root_type: mapping
@@ -94,6 +104,24 @@ composed_value_contract:
       type: single
       prim: sequence
     capabilities:
+      type: single
+      prim: mapping
+    library:
+      type: single
+      prim: sequence
+      elements:
+        type: single
+        prim: mapping
+        contract:
+          root_type: mapping
+          required:
+            group: { type: single, prim: string }
+          optional:
+            views: { type: single, prim: sequence, elements: { type: single, prim: string } }
+    backdrop:
+      type: single
+      prim: string
+    overlays:
       type: single
       prim: mapping
 
