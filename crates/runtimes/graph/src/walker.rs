@@ -5955,10 +5955,7 @@ config:
         assert_eq!(reqs[0].graph_run_id, "gr-follow");
         assert_eq!(reqs[0].follow_node, "fetch");
         assert_eq!(reqs[0].step_count, 0);
-        assert_eq!(
-            reqs[0].child_item_ref.as_deref(),
-            Some("directive:child")
-        );
+        assert_eq!(reqs[0].child_item_ref.as_deref(), Some("directive:child"));
     }
 
     #[tokio::test]
