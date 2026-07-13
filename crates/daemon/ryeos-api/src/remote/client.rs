@@ -909,7 +909,7 @@ fn canonicalize_path(path_and_query: &str) -> String {
         let mut params: Vec<(&str, &str)> = query
             .split('&')
             .filter_map(|pair| {
-                pair.split_once('=').or_else(|| {
+                pair.split_once('=').or({
                     if pair.is_empty() {
                         None
                     } else {

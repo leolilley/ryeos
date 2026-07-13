@@ -493,6 +493,10 @@ impl SessionLock {
         let path = lock_dir.join(format!("{session_id}.lock"));
         let mut file = OpenOptions::new()
             .create(true)
+            // No truncate here: clobbering the current holder's PID before
+            // we win the flock would corrupt the lock; `set_len(0)` below
+            // truncates only once the lock is ours.
+            .truncate(false)
             .write(true)
             .read(true)
             .open(&path)?;

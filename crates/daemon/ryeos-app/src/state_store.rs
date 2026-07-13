@@ -2165,10 +2165,10 @@ impl StateStore {
     /// has no events yet.
     pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
         let g = self.lock()?;
-        Ok(queries::chain_head_thread(
+        queries::chain_head_thread(
             g.state_db.projection(),
             chain_root_id,
-        )?)
+        )
     }
 
     pub fn replay_events(

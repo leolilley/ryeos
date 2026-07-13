@@ -462,7 +462,7 @@ mod tests {
 
         let result = compose(&payload, &default_runtime_config()).unwrap();
         // The root might fit but the big reference won't
-        assert!(result.composition.items_omitted.len() >= 1);
+        assert!(!result.composition.items_omitted.is_empty());
     }
 
     #[test]

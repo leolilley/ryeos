@@ -68,7 +68,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
 /// the requested item ref. Uses the unified `Authorizer` for wildcard
-/// + implication expansion. An empty cap-set is deny-all — the
+/// and implication expansion. An empty cap-set is deny-all — the
 /// trust-boundary default for tokens minted without a composition step.
 fn enforce_callback_caps(
     item_id: &str,

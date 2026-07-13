@@ -169,7 +169,7 @@ mod tests {
         let asset = provider
             .get("index.html")
             .expect("index.html must be embedded");
-        assert!(asset.bytes.len() > 0);
+        assert!(!asset.bytes.is_empty());
         assert!(asset.content_type.contains("text/html"));
         assert!(asset.etag.starts_with('"'));
         assert!(asset.etag.ends_with('"'));
@@ -181,7 +181,7 @@ mod tests {
         let asset = provider
             .get("bootstrap.js")
             .expect("bootstrap.js must be embedded");
-        assert!(asset.bytes.len() > 0);
+        assert!(!asset.bytes.is_empty());
         assert!(asset.content_type.contains("javascript"));
     }
 
@@ -191,31 +191,31 @@ mod tests {
         let css = provider
             .get("web-shell.css")
             .expect("web-shell.css must be embedded");
-        assert!(css.bytes.len() > 0);
+        assert!(!css.bytes.is_empty());
         assert!(css.content_type.contains("css"));
 
         let js = provider
             .get("ui/assets/ryeos_web.js")
             .expect("ryeos_web.js must be embedded");
-        assert!(js.bytes.len() > 0);
+        assert!(!js.bytes.is_empty());
         assert!(js.content_type.contains("javascript"));
 
         let ryeos_ui = provider
             .get("ui/assets/ryeos_shell.js")
             .expect("ryeos_shell.js must be embedded");
-        assert!(ryeos_ui.bytes.len() > 0);
+        assert!(!ryeos_ui.bytes.is_empty());
         assert!(ryeos_ui.content_type.contains("javascript"));
 
         let ambient = provider
             .get("ui/assets/ryeos_ambient_scene.js")
             .expect("ryeos_ambient_scene.js must be embedded");
-        assert!(ambient.bytes.len() > 0);
+        assert!(!ambient.bytes.is_empty());
         assert!(ambient.content_type.contains("javascript"));
 
         let wasm = provider
             .get("ui/assets/ryeos_web_bg.wasm")
             .expect("ryeos_web_bg.wasm must be embedded");
-        assert!(wasm.bytes.len() > 0);
+        assert!(!wasm.bytes.is_empty());
         assert!(wasm.content_type.contains("wasm"));
     }
 

@@ -457,11 +457,9 @@ pub fn sort_bundles_by_dependency(bundles: &[(String, PathBuf)]) -> Result<Vec<(
 
     for j in 0..n {
         for req in &bundle_deps[j].1 {
-            for i in 0..n {
-                if i != j && provides[i].contains(req) {
-                    if edges[j].insert(i) {
-                        in_degree[j] += 1;
-                    }
+            for (i, provided) in provides.iter().enumerate() {
+                if i != j && provided.contains(req) && edges[j].insert(i) {
+                    in_degree[j] += 1;
                 }
             }
         }

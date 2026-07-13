@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -339,7 +339,7 @@ fn is_empty_str_map(m: &std::collections::BTreeMap<String, String>) -> bool {
     m.is_empty()
 }
 
-fn project_summary(path: &PathBuf) -> ProjectSummary {
+fn project_summary(path: &Path) -> ProjectSummary {
     ProjectSummary {
         path: path.display().to_string(),
         name: path

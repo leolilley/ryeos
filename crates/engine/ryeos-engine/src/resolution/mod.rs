@@ -112,6 +112,10 @@ pub fn run_effective_item_pipeline(
     )
 }
 
+// The tail is one resolution environment (registries + roots + trust);
+// both entry points thread it verbatim — a context struct would only
+// rename the same nine things.
+#[allow(clippy::too_many_arguments)]
 fn run_item_pipeline_inner(
     item: &CanonicalRef,
     resolution: &[ResolutionStepDecl],

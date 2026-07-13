@@ -61,18 +61,13 @@ struct ValueShapeRaw {
 /// How unknown fields in descriptor values are handled during instance
 /// validation. Only `Warn` is implemented in v1; `None` (omitted) means
 /// unknown fields are silently ignored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StrictFieldsPolicy {
     /// Unknown fields produce validation warnings but do not block
     /// resolution. Opt-in via `strict_fields: warn` on the kind schema.
+    #[default]
     Warn,
-}
-
-impl Default for StrictFieldsPolicy {
-    fn default() -> Self {
-        StrictFieldsPolicy::Warn
-    }
 }
 
 impl<'de> Deserialize<'de> for ValueShape {
@@ -233,7 +228,7 @@ impl TryFrom<FieldTypeRaw> for FieldType {
                 // Recursively validate nested FieldTypeRaw -> FieldType
                 let nested_contract = contract
                     .map(Box::new)
-                    .map(|c| Ok::<Box<ValueShape>, String>(c))
+                    .map(Ok::<Box<ValueShape>, String>)
                     .transpose()?;
                 let element_type = elements
                     .map(|e| FieldType::try_from(*e).map(Box::new))
@@ -733,7 +728,6 @@ fn validate_value(
                     expected: "array".to_string(),
                     found: json_type_name(value).to_string(),
                 });
-                return;
             }
             // If all elements should be validated, check each one.
             // This is handled per-field via `validate_field` with
@@ -3247,8 +3241,9 @@ fn default_timeout_secs() -> u64 {
 pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
-        /// The fully resolved subprocess specification.
-        spec: PlanSubprocessSpec,
+        /// The fully resolved subprocess specification. Boxed: it dwarfs
+        /// the `Complete` variant and plans hold only a couple of nodes.
+        spec: Box<PlanSubprocessSpec>,
         /// Audit: the root item's source path.
         #[serde(default)]
         tool_path: Option<PathBuf>,

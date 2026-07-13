@@ -18,7 +18,7 @@ pub fn strip_markdown_frontmatter(content: &str) -> Result<String, KnowledgeErro
     // Find the closing --- on its own line
     let mut found_close = false;
     let mut body_start = 0;
-    for (_i, line) in rest.lines().enumerate() {
+    for line in rest.lines() {
         if line.trim() == "---" {
             // Found closing ---
             body_start = rest.find(line).unwrap() + line.len();
@@ -103,13 +103,13 @@ fn after_leading_signatures(content: &str) -> &str {
 /// ` ```yaml` block is present. Used by [`parse_frontmatter_result`].
 fn frontmatter_block(content: &str) -> Option<&str> {
     let trimmed = after_leading_signatures(content);
-    if trimmed.starts_with("---") {
-        let rest = trimmed[3..].trim_start_matches(['\r', '\n']);
+    if let Some(after) = trimmed.strip_prefix("---") {
+        let rest = after.trim_start_matches(['\r', '\n']);
         rest.find("\n---")
             .map(|idx| &rest[..idx])
             .or_else(|| rest.strip_suffix("---").map(str::trim_end))
-    } else if trimmed.starts_with("```yaml") {
-        let rest = trimmed[7..].trim_start_matches(['\r', '\n']);
+    } else if let Some(after) = trimmed.strip_prefix("```yaml") {
+        let rest = after.trim_start_matches(['\r', '\n']);
         rest.find("\n```").map(|idx| &rest[..idx])
     } else {
         None

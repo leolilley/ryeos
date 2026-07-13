@@ -154,7 +154,7 @@ fn select_admission_head<'a>(
     let matches = heads
         .iter()
         .filter(|head| match admission_subject_from_head(head, policy) {
-            Ok(subject) => subject_hash.map_or(true, |requested| requested == subject),
+            Ok(subject) => subject_hash.is_none_or(|requested| requested == subject),
             Err(_) => false,
         })
         .collect::<Vec<_>>();

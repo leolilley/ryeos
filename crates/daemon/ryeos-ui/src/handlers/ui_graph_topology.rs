@@ -714,11 +714,10 @@ fn markdown_frontmatter(raw: &str) -> Option<&str> {
 
 fn collect_string_refs(value: &serde_json::Value, prefix: &str, refs: &mut BTreeSet<String>) {
     match value {
-        serde_json::Value::String(s) => {
-            if s.starts_with(prefix) {
+        serde_json::Value::String(s)
+            if s.starts_with(prefix) => {
                 refs.insert(s.clone());
             }
-        }
         serde_json::Value::Array(items) => {
             for item in items {
                 collect_string_refs(item, prefix, refs);

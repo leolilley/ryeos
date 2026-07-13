@@ -26,13 +26,12 @@ use ryeos_engine::trust::TrustStore;
 /// Boot the engine from the same sources the daemon uses.
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
     let operator_config_root = roots::runtime_root().ok().map(|root| root.config());
-    let bundle_roots = discover_bundle_roots();
     // Match daemon boot semantics: content roots are the installed bundle
     // roots only. `RYEOS_APP_ROOT` is the daemon runtime state dir that
     // contains registrations and runtime state; treating it as a content
     // root makes effective items report the state dir as their bundle_root,
     // which breaks bundle-local binary resolution for client launchers.
-    let bundle_roots = bundle_roots;
+    let bundle_roots = discover_bundle_roots();
 
     let trust_store = TrustStore::load(
         project_path,

@@ -366,6 +366,37 @@ fn spawn_subprocess(
     }
 }
 
+/// Truncate a string for inclusion in error payloads.
+/// Returns the original if already short enough; otherwise returns
+/// the first `max_len` chars + "… (truncated, N bytes total)".
+fn truncate_for_error(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_owned()
+    } else {
+        // Walk back to a char boundary so we never slice mid-codepoint.
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}… (truncated, {} bytes total)", &s[..end], s.len())
+    }
+}
+
+/// Retain the LAST `max_len` bytes of `s` (the tail), where a tool's real
+/// error — a Python traceback, a final `logger.error(...)` — usually
+/// lands. Char-boundary safe; prefixes a marker when bytes were dropped.
+fn truncate_tail_for_error(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_owned();
+    }
+    // Walk forward to a char boundary so we never slice mid-codepoint.
+    let mut start = s.len() - max_len;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("… (truncated, {} bytes total)\n{}", s.len(), &s[start..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,7 +460,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello world".into()],
                     cwd: None,
@@ -438,7 +469,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -470,7 +501,7 @@ mod tests {
         let mut plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello debug".into()],
                     cwd: None,
@@ -479,7 +510,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -519,7 +550,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "python3".into(),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -528,7 +559,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -549,7 +580,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/false".into(),
                     args: Vec::new(),
                     cwd: None,
@@ -558,7 +589,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -593,7 +624,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "python3".into(),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -602,7 +633,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -650,7 +681,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "python3".into(),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -659,7 +690,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -738,7 +769,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "python3".into(),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
@@ -747,7 +778,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -769,7 +800,7 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/nonexistent/binary".into(),
                     args: Vec::new(),
                     cwd: None,
@@ -778,7 +809,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -830,35 +861,4 @@ mod tests {
         assert_eq!(env_map.get("RYEOS_THREAD_ID").unwrap(), "thread:test");
         assert_eq!(env_map.get("RYEOS_CHAIN_ROOT_ID").unwrap(), "chain:test");
     }
-}
-
-/// Truncate a string for inclusion in error payloads.
-/// Returns the original if already short enough; otherwise returns
-/// the first `max_len` chars + "… (truncated, N bytes total)".
-fn truncate_for_error(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_owned()
-    } else {
-        // Walk back to a char boundary so we never slice mid-codepoint.
-        let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}… (truncated, {} bytes total)", &s[..end], s.len())
-    }
-}
-
-/// Retain the LAST `max_len` bytes of `s` (the tail), where a tool's real
-/// error — a Python traceback, a final `logger.error(...)` — usually
-/// lands. Char-boundary safe; prefixes a marker when bytes were dropped.
-fn truncate_tail_for_error(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        return s.to_owned();
-    }
-    // Walk forward to a char boundary so we never slice mid-codepoint.
-    let mut start = s.len() - max_len;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("… (truncated, {} bytes total)\n{}", s.len(), &s[start..])
 }

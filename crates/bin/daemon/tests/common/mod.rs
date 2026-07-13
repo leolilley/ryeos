@@ -235,8 +235,8 @@ fn rfc3339_to_systemtime(s: &str) -> Option<std::time::SystemTime> {
     // (handles Gregorian leap years correctly through 9999).
     let y_adj = y - if mo <= 2 { 1 } else { 0 };
     let era = y_adj.div_euclid(400);
-    let yoe = (y_adj - era * 400) as i64;
-    let doy = ((153 * (if mo > 2 { mo - 3 } else { mo + 9 } as i64) + 2) / 5 + d as i64 - 1) as i64;
+    let yoe = y_adj - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 } as i64) + 2) / 5 + d as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days_since_epoch = era * 146097 + doe - 719468;
     let total_secs = days_since_epoch * 86400 + (h as i64) * 3600 + (mi as i64) * 60 + se as i64;

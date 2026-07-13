@@ -37,6 +37,7 @@ fn continuation_shape(thread: &ThreadDetail) -> bool {
 ///   - NO `native_resume` policy — set only once the launch runs (a launched-then-
 ///     crashed child carries it and is recovered by the native-resume path),
 ///   - it is some non-cleared waiter's child chain root.
+///
 /// A row failing any clause is left to the normal `reconcile` / native-resume /
 /// finalize paths — never skipped here and never relaunched.
 fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> bool {

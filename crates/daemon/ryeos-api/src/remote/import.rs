@@ -204,7 +204,7 @@ pub async fn import_admitted_root(
                 && req
                     .expected_attestation_hash
                     .as_deref()
-                    .map_or(true, |expected| record.attestation_hash == expected)
+                    .is_none_or(|expected| record.attestation_hash == expected)
         })
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -224,7 +224,7 @@ pub async fn import_admitted_root(
 
     let closure_options = req.closure_options.clone();
     let closure = client
-        .objects_closure_get(&[req.subject_hash.clone()], req.closure_options)
+        .objects_closure_get(std::slice::from_ref(&req.subject_hash), req.closure_options)
         .await?;
     let mut payload = closure_response_to_payload(&req.subject_hash, &closure.entries)?;
     if !payload

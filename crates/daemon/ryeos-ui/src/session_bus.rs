@@ -84,7 +84,7 @@ impl SessionBus {
         let ring = inner
             .rings
             .entry(session_id.to_string())
-            .or_insert_with(Vec::new);
+            .or_default();
         ring.push(RingEntry {
             id: id.clone(),
             envelope: envelope.clone(),

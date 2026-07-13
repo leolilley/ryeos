@@ -240,7 +240,7 @@ pub async fn handle_list(
         .filter(|thread| {
             req.surface_ref
                 .as_deref()
-                .map_or(true, |surface| thread.item_ref == surface)
+                .is_none_or(|surface| thread.item_ref == surface)
         })
         .collect();
     // Freshest first, so the client reattaches the most recent running seat.

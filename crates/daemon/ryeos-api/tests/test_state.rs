@@ -140,6 +140,8 @@ pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::Te
     (tmpdir, state)
 }
 
+// Test fixture: one argument per AppState component under test.
+#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
     config: ryeos_app::config::Config,

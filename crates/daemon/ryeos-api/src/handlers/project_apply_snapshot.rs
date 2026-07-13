@@ -377,8 +377,10 @@ impl Drop for PreparedRootSwap {
 
 fn replace_managed_roots(project_path: &Path, staging_root: &Path) -> Result<PreparedRootSwap> {
     let mut swaps: Vec<RootSwap> = Vec::new();
-    let mut report = ApplyReport::default();
-    report.files_materialized = count_files(staging_root)?;
+    let mut report = ApplyReport {
+        files_materialized: count_files(staging_root)?,
+        ..ApplyReport::default()
+    };
 
     let result = (|| -> Result<()> {
         for rel_root in ryeos_state::project_sync::materialized_project_ai_surface_roots() {

@@ -298,14 +298,14 @@ mod tests {
 
     #[test]
     fn next_interval_first_fire() {
-        let now = 1000_000;
+        let now = 1_000_000;
         let result = compute_next_fire("interval", "60", "UTC", now, None).unwrap();
         assert_eq!(result, Some(now + 60_000));
     }
 
     #[test]
     fn next_interval_subsequent_fire() {
-        let now = 1000_000;
+        let now = 1_000_000;
         let last = 900_000;
         let result = compute_next_fire("interval", "60", "UTC", now, Some(last)).unwrap();
         assert!(result.unwrap() > now);
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn next_at_future() {
-        let now = 1000_000;
+        let now = 1_000_000;
         let future = now + 600_000;
         let ts = chrono::DateTime::from_timestamp_millis(future)
             .unwrap()

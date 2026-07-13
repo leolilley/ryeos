@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(req.project_path, "/tmp/project");
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
-        assert_eq!(req.validate_only, false);
+        assert!(!req.validate_only);
         assert!(req.call.is_none());
     }
 

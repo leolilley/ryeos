@@ -35,40 +35,40 @@ pub fn print_help(
     writeln!(out, "LIFECYCLE:")?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "init", "Bootstrap local node state and packaged bundles"
+        "  {:<30} Bootstrap local node state and packaged bundles",
+        "init"
     )?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "start", "Bring the local node runtime online"
+        "  {:<30} Bring the local node runtime online",
+        "start"
     )?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "stop", "Gracefully stop the local node runtime"
+        "  {:<30} Gracefully stop the local node runtime",
+        "stop"
     )?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "node status", "Show local node lifecycle status"
+        "  {:<30} Show local node lifecycle status",
+        "node status"
     )?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "node doctor", "Offline checklist answering \"why won't it start\""
+        "  {:<30} Offline checklist answering \"why won't it start\"",
+        "node doctor"
     )?;
     writeln!(out)?;
     writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "execute [--async] <item_ref>", "Execute any canonical item ref directly"
+        "  {:<30} Execute any canonical item ref directly",
+        "execute [--async] <item_ref>"
     )?;
     writeln!(
         out,
-        "  {:<30} {}",
-        "  --input <file>", "  pass JSON parameters from file (or - for stdin)"
+        "  {:<30}   pass JSON parameters from file (or - for stdin)",
+        "  --input <file>"
     )?;
     writeln!(out)?;
 
@@ -270,7 +270,7 @@ fn print_installed_command_help(
         ))
     })?;
     let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
-    let Some(command_descriptor) = crate::node_descriptors::find_command(&snapshot, command_tokens)
+    let Some(command_descriptor) = crate::node_descriptors::find_command(snapshot, command_tokens)
     else {
         return Ok(false);
     };

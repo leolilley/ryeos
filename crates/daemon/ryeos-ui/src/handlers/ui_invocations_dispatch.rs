@@ -132,7 +132,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     if is_session_local_invocation(&item_ref) {
         let descriptor = service_descriptor_for(&state, &item_ref)
-            .ok_or_else(|| HandlerError::NotFound)?;
+            .ok_or(HandlerError::NotFound)?;
         let result = (descriptor.handler)(req.params.clone(), ctx.clone(), state.clone()).await?;
 
         ui.session_bus.publish(

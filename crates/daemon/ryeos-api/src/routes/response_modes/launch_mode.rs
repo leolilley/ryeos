@@ -55,6 +55,7 @@ use crate::routes::invocation::{
 };
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 
+#[derive(Default)]
 pub struct LaunchMode {
     /// Allows the same compile logic to register under a different mode key
     /// (e.g., "accepted" as an alias for "launch").
@@ -69,11 +70,6 @@ impl LaunchMode {
     }
 }
 
-impl Default for LaunchMode {
-    fn default() -> Self {
-        Self { key_override: None }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
