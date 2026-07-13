@@ -138,6 +138,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     error
                 );
             }
+            lillux::sync_tree_durable(&staging)
+                .with_context(|| format!("flush staged bundle {}", staging.display()))?;
             lillux::rename_path_durable(&staging, &local_target)?;
             let canonical = local_target
                 .canonicalize()

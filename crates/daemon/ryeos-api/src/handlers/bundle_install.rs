@@ -216,6 +216,8 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
                 staging.display()
             )
         })?;
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         lillux::rename_path_durable(&staging, target).with_context(|| {
             format!(
                 "activate staged bundle {} at {}",
@@ -273,6 +275,8 @@ fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: boo
         if preserve_runtime_artifacts {
             preserve_runtime_artifact_dirs(&canonical_target, &staging)?;
         }
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         lillux::atomic_exchange_paths(target, &staging).with_context(|| {
             format!(
                 "atomically exchange installed bundle {} with {}",
@@ -280,8 +284,14 @@ fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: boo
                 staging.display()
             )
         })?;
-        fs::remove_dir_all(&staging)
-            .with_context(|| format!("remove previous bundle generation {}", staging.display()))
+        if let Err(error) = lillux::remove_dir_all_durable(&staging) {
+            tracing::warn!(
+                path = %staging.display(),
+                error = %error,
+                "bundle replacement committed but previous generation cleanup failed"
+            );
+        }
+        Ok(())
     })
 }
 

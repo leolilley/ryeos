@@ -944,6 +944,8 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
         }
         copy_dir_recursive(source, &staging)
             .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         lillux::atomic_exchange_paths(target, &staging).with_context(|| {
             format!(
                 "atomically exchange installed bundle {} with {}",
@@ -951,8 +953,14 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
                 staging.display()
             )
         })?;
-        fs::remove_dir_all(&staging)
-            .with_context(|| format!("remove previous bundle generation {}", staging.display()))
+        if let Err(error) = lillux::remove_dir_all_durable(&staging) {
+            tracing::warn!(
+                path = %staging.display(),
+                error = %error,
+                "bundle replacement committed but previous generation cleanup failed"
+            );
+        }
+        Ok(())
     })
 }
 
@@ -1018,6 +1026,8 @@ fn install_bundle(
         }
         copy_dir_recursive(source, &staging)
             .with_context(|| format!("stage {} at {}", name, staging.display()))?;
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         lillux::rename_path_durable(&staging, &target)
             .with_context(|| format!("activate {} at {}", name, target.display()))
     })?;

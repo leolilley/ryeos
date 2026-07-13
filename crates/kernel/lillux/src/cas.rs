@@ -106,6 +106,58 @@ pub fn remove_dir_all_durable(path: &Path) -> Result<()> {
     }
 }
 
+/// Flush every regular file and directory in a materialized tree.
+///
+/// Call this before a staged directory is renamed or exchanged into a live
+/// namespace. Files are synced before their containing directories, so a
+/// successful return establishes a durability barrier for both file contents
+/// and the directory entries that make the tree reachable. Symlinks are not
+/// followed; syncing their parent directory makes the link entry durable.
+pub fn sync_tree_durable(root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("durable tree root must not be a symlink: {}", root.display());
+    }
+    if metadata.is_file() {
+        fs::File::open(root)?.sync_all()?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "durable tree root must be a file or directory: {}",
+            root.display()
+        );
+    }
+    sync_directory_tree(root)
+}
+
+fn sync_directory_tree(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            sync_directory_tree(&path)?;
+        } else if file_type.is_file() {
+            fs::File::open(&path)?.sync_all()?;
+        } else if !file_type.is_symlink() {
+            anyhow::bail!("unsupported entry in durable tree: {}", path.display());
+        }
+    }
+    sync_directory_entry(directory)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory_entry(directory: &Path) -> std::io::Result<()> {
+    fs::File::open(directory)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory_entry(_directory: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Atomically exchange two existing sibling filesystem entries.
 ///
 /// RyeOS uses this for live bundle generations: the installed path always

@@ -11,7 +11,7 @@ pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult}
 pub use cas::{
     atomic_exchange_paths, atomic_write, atomic_write_batch, atomic_write_private, canonical_json,
     remove_dir_all_durable, remove_file_durable, rename_path_durable, sha256_hex, shard_path,
-    valid_hash, with_exclusive_file_lock, CasStore,
+    sync_tree_durable, valid_hash, with_exclusive_file_lock, CasStore,
 };
 
 pub use identity::envelope::{
