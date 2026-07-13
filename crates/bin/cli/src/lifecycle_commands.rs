@@ -456,6 +456,48 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         ));
     }
 
+    if initialized {
+        match ryeos_app::bundle_transaction::inspect_bundle_transactions(&config.app_root) {
+            Ok(diagnostics) if !diagnostics.invalid.is_empty() => checks.push(check(
+                "bundle_transactions",
+                FAIL,
+                serde_json::json!({
+                    "pending": diagnostics.pending,
+                    "invalid": diagnostics.invalid,
+                    "note": "invalid transaction journals block fail-closed startup; inspect or remove them only after verifying bundle tree and registration state",
+                }),
+            )),
+            Ok(diagnostics) if !diagnostics.pending.is_empty() => checks.push(check(
+                "bundle_transactions",
+                WARN,
+                serde_json::json!({
+                    "pending": diagnostics.pending,
+                    "invalid": [],
+                    "fix": "start the node to reconcile interrupted bundle transactions before registry loading",
+                }),
+            )),
+            Ok(diagnostics) => checks.push(check(
+                "bundle_transactions",
+                OK,
+                serde_json::json!({
+                    "pending": diagnostics.pending,
+                    "invalid": diagnostics.invalid,
+                }),
+            )),
+            Err(error) => checks.push(check(
+                "bundle_transactions",
+                FAIL,
+                serde_json::json!({ "error": format!("{error:#}") }),
+            )),
+        }
+    } else {
+        checks.push(check(
+            "bundle_transactions",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and

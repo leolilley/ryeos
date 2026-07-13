@@ -64,7 +64,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let removed_config_item = config_item_path.exists();
     let removed_dir = bundle_dir.exists();
-    transaction.begin(ryeos_app::bundle_transaction::DesiredBundleState::Absent)?;
+    transaction.begin_remove()?;
     transaction.commit_absent()?;
 
     // Bump the engine cache generation so any cached per-request

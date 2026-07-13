@@ -74,7 +74,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let recovered = transaction.reconcile(state.identity.signing_key())?;
     if matches!(
         recovered,
-        Some(ryeos_app::bundle_transaction::DesiredBundleState::Present { .. })
+        Some(
+            ryeos_app::bundle_transaction::BundleOperation::Install
+                | ryeos_app::bundle_transaction::BundleOperation::RemoteInstall
+        )
     ) && transaction.target().is_dir()
         && !req.replace
     {
@@ -122,13 +125,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
     let registration = serde_json::json!({ "path": target });
-    transaction.begin(
-        ryeos_app::bundle_transaction::DesiredBundleState::Present {
-            registration: registration.clone(),
-        },
-    )?;
     if replaced {
-        replace_dir_atomic(&req.source_path, &target, req.preserve_runtime_artifacts)
+        replace_dir_atomic(
+            &req.source_path,
+            &target,
+            req.preserve_runtime_artifacts,
+            &transaction,
+            registration.clone(),
+        )
             .with_context(|| {
                 format!(
                     "failed to replace bundle from {} to {}",
@@ -137,7 +141,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 )
             })?;
     } else {
-        install_dir_atomic(&req.source_path, &target).with_context(|| {
+        install_dir_atomic(&req.source_path, &target, &transaction, registration.clone()).with_context(|| {
             format!(
                 "failed to install bundle from {} to {}",
                 req.source_path.display(),
@@ -151,9 +155,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .context("failed to canonicalize installed bundle path")?;
 
     // Write signed kind: node bundle registration
-    let registration = serde_json::json!({ "path": canonical_target });
     let config_item_path = transaction
-        .commit_present(&registration, state.identity.signing_key())
+        .commit_present(state.identity.signing_key())
         .context("commit bundle registration")?;
 
     // Bump the engine cache generation so any cached per-request
@@ -177,7 +180,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     Ok(report)
 }
 
-fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
+fn install_dir_atomic(
+    src: &Path,
+    target: &Path,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+    registration: serde_json::Value,
+) -> Result<()> {
     let parent = target
         .parent()
         .context("installed bundle target has no parent")?;
@@ -206,17 +214,29 @@ fn install_dir_atomic(src: &Path, target: &Path) -> Result<()> {
         })?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::Install,
+            &staging,
+            registration,
+        )?;
         lillux::rename_path_durable(&staging, target).with_context(|| {
             format!(
                 "activate staged bundle {} at {}",
                 staging.display(),
                 target.display()
             )
-        })
+        })?;
+        transaction.mark_activated()
     })()
 }
 
-fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: bool) -> Result<()> {
+fn replace_dir_atomic(
+    src: &Path,
+    target: &Path,
+    preserve_runtime_artifacts: bool,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+    registration: serde_json::Value,
+) -> Result<()> {
     let source = src
         .canonicalize()
         .with_context(|| format!("canonicalize source path {}", src.display()))?;
@@ -265,6 +285,11 @@ fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: boo
         }
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::Replace,
+            &staging,
+            registration,
+        )?;
         lillux::atomic_exchange_paths(target, &staging).with_context(|| {
             format!(
                 "atomically exchange installed bundle {} with {}",
@@ -272,6 +297,7 @@ fn replace_dir_atomic(src: &Path, target: &Path, preserve_runtime_artifacts: boo
                 staging.display()
             )
         })?;
+        transaction.mark_activated()?;
         if let Err(error) = lillux::remove_dir_all_durable(&staging) {
             tracing::warn!(
                 path = %staging.display(),
@@ -354,6 +380,23 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
 
+    fn replace_for_test(src: &Path, target: &Path, preserve: bool) {
+        let app_root = target.ancestors().nth(3).unwrap();
+        let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
+            app_root,
+            target.file_name().unwrap().to_str().unwrap(),
+        )
+        .unwrap();
+        replace_dir_atomic(
+            src,
+            target,
+            preserve,
+            &transaction,
+            serde_json::json!({ "path": target }),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn validate_name_rejects_empty() {
         assert!(validate_name("").is_err());
@@ -407,14 +450,14 @@ mod tests {
     fn replace_dir_replaces_existing_tree_and_cleans_staging() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
-        let bundles = tmp.path().join("bundles");
+        let bundles = tmp.path().join(".ai/bundles");
         let target = bundles.join("ryeos-ui");
         fs::create_dir_all(src.join("new")).unwrap();
         fs::create_dir_all(target.join("old")).unwrap();
         fs::write(src.join("new/file.txt"), b"new").unwrap();
         fs::write(target.join("old/file.txt"), b"old").unwrap();
 
-        replace_dir_atomic(&src, &target, false).unwrap();
+        replace_for_test(&src, &target, false);
 
         assert_eq!(fs::read(target.join("new/file.txt")).unwrap(), b"new");
         assert!(!target.join("old/file.txt").exists());
@@ -426,7 +469,7 @@ mod tests {
     fn replace_dir_preserves_runtime_artifacts_when_source_is_sparse() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
-        let bundles = tmp.path().join("bundles");
+        let bundles = tmp.path().join(".ai/bundles");
         let target = bundles.join("ryeos-ui");
         fs::create_dir_all(src.join(".ai/node/commands")).unwrap();
         fs::create_dir_all(target.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
@@ -437,7 +480,7 @@ mod tests {
         fs::write(target.join(".ai/objects/blobs/blob"), b"blob").unwrap();
         fs::write(target.join(".ai/refs/bundles/manifest"), b"ref").unwrap();
 
-        replace_dir_atomic(&src, &target, true).unwrap();
+        replace_for_test(&src, &target, true);
 
         assert_eq!(
             fs::read(target.join(".ai/node/commands/web.yaml")).unwrap(),
@@ -461,14 +504,14 @@ mod tests {
     fn replace_dir_does_not_overwrite_source_runtime_artifacts() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
-        let bundles = tmp.path().join("bundles");
+        let bundles = tmp.path().join(".ai/bundles");
         let target = bundles.join("ryeos-ui");
         fs::create_dir_all(src.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
         fs::create_dir_all(target.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
         fs::write(src.join(".ai/bin/x86_64-unknown-linux-gnu/web"), b"new").unwrap();
         fs::write(target.join(".ai/bin/x86_64-unknown-linux-gnu/web"), b"old").unwrap();
 
-        replace_dir_atomic(&src, &target, true).unwrap();
+        replace_for_test(&src, &target, true);
 
         assert_eq!(
             fs::read(target.join(".ai/bin/x86_64-unknown-linux-gnu/web")).unwrap(),

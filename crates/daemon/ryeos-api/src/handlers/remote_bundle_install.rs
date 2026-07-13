@@ -49,7 +49,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let recovered = transaction.reconcile(state.identity.signing_key())?;
     if matches!(
         recovered,
-        Some(ryeos_app::bundle_transaction::DesiredBundleState::Present { .. })
+        Some(
+            ryeos_app::bundle_transaction::BundleOperation::Install
+                | ryeos_app::bundle_transaction::BundleOperation::RemoteInstall
+        )
     ) && transaction.target().is_dir()
     {
         return Ok(serde_json::json!({
@@ -156,10 +159,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             lillux::sync_tree_durable(&staging)
                 .with_context(|| format!("flush staged bundle {}", staging.display()))?;
             let registration = serde_json::json!({ "path": local_target });
-            transaction.begin(
-                ryeos_app::bundle_transaction::DesiredBundleState::Present { registration },
+            transaction.begin_present(
+                ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
+                &staging,
+                registration,
             )?;
             lillux::rename_path_durable(&staging, &local_target)?;
+            transaction.mark_activated()?;
             let canonical = local_target
                 .canonicalize()
                 .context("canonicalize installed bundle path")?;
@@ -169,10 +175,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // 5. Write signed node-config bundle registration.
 
     transaction
-        .commit_present(
-            &serde_json::json!({ "path": canonical_target }),
-            state.identity.signing_key(),
-        )
+        .commit_present(state.identity.signing_key())
         .context("commit remote bundle registration")?;
 
     // Bump the engine cache generation — same as local bundle_install.

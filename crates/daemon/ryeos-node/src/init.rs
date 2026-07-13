@@ -332,12 +332,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             // same canonical path, so publish it before the atomic tree
             // exchange; every observable generation remains registered.
             verify_bundle_structure(&target)?;
-            transaction.begin(
-                ryeos_app::bundle_transaction::DesiredBundleState::Present {
-                    registration: registration.clone(),
-                },
-            )?;
-            replace_bundle(source_path, &target).with_context(|| {
+            replace_bundle(source_path, &target, &transaction, registration.clone()).with_context(|| {
                 format!(
                     "atomic replace {}: {} -> {}",
                     name,
@@ -346,14 +341,16 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 )
             })?;
         } else {
-            transaction.begin(
-                ryeos_app::bundle_transaction::DesiredBundleState::Present {
-                    registration: registration.clone(),
-                },
+            install_bundle(
+                &opts.app_root,
+                name,
+                source_path,
+                true,
+                &transaction,
+                registration.clone(),
             )?;
-            install_bundle(&opts.app_root, name, source_path, true)?;
         }
-        transaction.commit_present(&registration, &node_key)?;
+        transaction.commit_present(&node_key)?;
 
         bundles_installed.push(name.clone());
     }
@@ -929,7 +926,12 @@ fn verify_bundle_structure(target: &Path) -> Result<()> {
 /// 1. Copies source to a staging directory
 /// 2. Atomically exchanges staging with the installed path
 /// 3. Removes the old generation now located at staging
-fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
+fn replace_bundle(
+    source: &Path,
+    target: &Path,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+    registration: serde_json::Value,
+) -> Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| anyhow!("bundle path has no parent"))?;
@@ -948,6 +950,11 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
             .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::Replace,
+            &staging,
+            registration,
+        )?;
         lillux::atomic_exchange_paths(target, &staging).with_context(|| {
             format!(
                 "atomically exchange installed bundle {} with {}",
@@ -955,6 +962,7 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
                 staging.display()
             )
         })?;
+        transaction.mark_activated()?;
         if let Err(error) = lillux::remove_dir_all_durable(&staging) {
             tracing::warn!(
                 path = %staging.display(),
@@ -978,6 +986,8 @@ fn install_bundle(
     name: &str,
     source: &Path,
     skip_preflight: bool,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+    registration: serde_json::Value,
 ) -> Result<PathBuf> {
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     if !skip_preflight {
@@ -1028,8 +1038,14 @@ fn install_bundle(
             .with_context(|| format!("stage {} at {}", name, staging.display()))?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::Install,
+            &staging,
+            registration,
+        )?;
         lillux::rename_path_durable(&staging, &target)
-            .with_context(|| format!("activate {} at {}", name, target.display()))
+            .with_context(|| format!("activate {} at {}", name, target.display()))?;
+        transaction.mark_activated()
     })()?;
     let canonical = target
         .canonicalize()

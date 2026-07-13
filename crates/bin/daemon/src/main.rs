@@ -147,6 +147,20 @@ async fn main() -> Result<()> {
     process::remove_stale_socket(&config.uds_path)?;
     ensure_runtime_paths(&config)?;
 
+    // Resolve every interrupted bundle tree/registration transaction before
+    // the bootstrap loader consumes installed bundle registrations.
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
+    let repaired_bundles = ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
+        &config.app_root,
+        identity.signing_key(),
+    )?;
+    if !repaired_bundles.is_empty() {
+        tracing::warn!(
+            bundles = ?repaired_bundles,
+            "reconciled interrupted bundle transactions before registry loading"
+        );
+    }
+
     // ── Two-phase node-config bootstrap ──
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
 
@@ -301,8 +315,6 @@ async fn main() -> Result<()> {
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
     )));
-    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
     let runtime_state_dir = config.runtime_state_dir();
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
@@ -1058,14 +1070,19 @@ async fn run_service_standalone(
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
             .context("failed to acquire state lock — is the daemon running?")?;
 
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
+    ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
+        &config.app_root,
+        identity.signing_key(),
+    )
+    .context("reconcile interrupted bundle transactions")?;
+
     // Two-phase node-config bootstrap (same as daemon-start path)
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
     )));
-    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
     let services = Arc::new(build_service_registry());
 
     let runtime_state_dir = config.runtime_state_dir();
