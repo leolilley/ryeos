@@ -545,6 +545,25 @@ pub struct TableColumn {
     /// column's cell independently of the row (e.g. a lineage column toned by
     /// `follow.display_state` while the row stays status-toned).
     pub tone: Option<Value>,
+    /// Optional presentation: `tail_first` renders a `/`-pathed value
+    /// leaf-first (`study ‹ directive:arc`), so right-truncation in a
+    /// narrow cell keeps the segment that names the thing instead of the
+    /// namespace boilerplate.
+    pub present: Option<String>,
+}
+
+/// Apply a column's declared presentation to a projected cell.
+/// `tail_first` flips a pathed value so the leaf leads and the namespace
+/// trails — the readable half survives right-truncation. Unknown or
+/// inapplicable presentations pass the cell through untouched.
+fn present_cell(cell: &str, present: Option<&str>) -> String {
+    match present {
+        Some("tail_first") => match cell.rsplit_once('/') {
+            Some((prefix, leaf)) if !leaf.is_empty() => format!("{leaf} ‹ {prefix}"),
+            _ => cell.to_string(),
+        },
+        _ => cell.to_string(),
+    }
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
@@ -565,6 +584,10 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                         label: label.to_string(),
                         field: field.to_string(),
                         tone: col.get("tone").cloned(),
+                        present: col
+                            .get("present")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect()
@@ -664,7 +687,10 @@ pub fn project_table_record(
     ProjectedTableRow {
         cells: columns
             .iter()
-            .map(|col| field_text(record, &col.field).unwrap_or_default())
+            .map(|col| {
+                let cell = field_text(record, &col.field).unwrap_or_default();
+                present_cell(&cell, col.present.as_deref())
+            })
             .collect(),
         cell_tones: columns
             .iter()

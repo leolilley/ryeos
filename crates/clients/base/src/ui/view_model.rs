@@ -3181,7 +3181,7 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "project", "status", "source", "follow", "created"]
+            ["thread", "kind", "item", "id", "project", "status", "source", "follow", "created"]
         );
         let rows = project_table(
             &binding,
@@ -3197,6 +3197,7 @@ mod tests {
             [
                 "T-ab",
                 "directive",
+                "base \u{2039} directive:ops",
                 "directive:ops/base",
                 "",
                 "running",

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T10:40:36Z:95434777efbddac13f4a71190ffcd58ec9d90d5c3a862b643cd83c2e345414b1:rMJcr6v0K8tnX+3bY63X3pH2ZHIOUi5Wb8MP1E7K5AYoCUp5/zVmfcR3tD1Rsunzu8fHWiY1/zEV9olEQBqwDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:47:02Z:eddb53c275634e3339e205c76c80e05723bd78c8bd0a4c4e28ec89da8bfa7c08:7H1hRxWwVLwiDtmsHmY+7/XHud0rMvNK7DOTHf5qnzhpRo0JWWiXP7KwsiEZb3JUB3nKIJWrGHiVQ1kd7vWlDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the ryeos-ui threads source
@@ -24,7 +24,12 @@ projections:
       field: thread_id
     - label: kind
       field: kind
+    # Leaf-first: the segment that names the thing survives a narrow
+    # cell; the raw canonical ref rides beside it as `id`.
     - label: item
+      field: item_ref
+      present: tail_first
+    - label: id
       field: item_ref
     - label: project
       field: project.name

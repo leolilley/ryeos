@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T10:39:54Z:3ebb1be8f30cb024916ba82a14be81cf793694a6f070aca474768336579b89b5:YfzQusph1VlurQIdRubD5/LiWYvbHh8ESnxWXNU/ZClE6HNt5/M+YPjXn1x14DvqcttQDWr+ErD8kmSspULIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:47:02Z:fabc1e43071e66c1c8c90431c31690838ee6fe8d943989d1134776638e030482:1mL1K7KPcLiHefRav5o3cZysBd7sU+naZ2TyL+Hk9Nscfhkn82VzED3rRc4PJ6UAYFAkHegQ4HTocRJI9I6EDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
 title: Node Threads
 version: "1.0.0"
@@ -24,7 +24,12 @@ projections:
       field: thread_id
     - label: kind
       field: kind
+    # Leaf-first: the segment that names the thing survives a narrow
+    # cell; the raw canonical ref rides beside it as `id`.
     - label: item
+      field: item_ref
+      present: tail_first
+    - label: id
       field: item_ref
     - label: project
       field: project.name

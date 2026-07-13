@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T10:39:54Z:3d943fa5d360d0256f5afe4f2477adb0c369ab4c8b46e2fe61d354fe7cb51723:aX8BGKnrjiQFowE7aY9VU+LLaTLZM9VsMHA9WN2QBSx98usqII1DJxpengnl5eCPaVJ9d5qxtQJmul4ToXQQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:47:02Z:f9a537b650dce32cfb4c6571bfc3bae1b3b149f766f1ca51e48ab1d1ec21e54b:j9blvzDb+BmzTe5Htn9hV/udVNNTBUbqpi5o75mV/IaAG1jnSonCRIa1rP31uQ27hmRbtp8h+n7eXCjscQgKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Project Threads
 version: "1.0.0"
@@ -28,7 +28,12 @@ projections:
       field: thread_id
     - label: kind
       field: kind
+    # Leaf-first: the segment that names the thing survives a narrow
+    # cell; the raw canonical ref rides beside it as `id`.
     - label: item
+      field: item_ref
+      present: tail_first
+    - label: id
       field: item_ref
     - label: project
       field: project.name
