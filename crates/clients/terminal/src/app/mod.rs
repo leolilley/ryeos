@@ -280,6 +280,14 @@ pub async fn run(
                         spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                         dirty = true;
                     }
+                    hints::SessionMessage::Resubscribed => {
+                        // The stream was down for a while; every hint from
+                        // the gap is lost. One full refetch instead of
+                        // trusting whatever the screen froze on.
+                        let effects = core.initial_effects();
+                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        dirty = true;
+                    }
                 }
             }
             Some(bootstrap) = seat_rx.recv() => {

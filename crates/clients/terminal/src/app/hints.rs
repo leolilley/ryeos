@@ -18,6 +18,10 @@ pub enum SessionMessage {
     DaemonEvent {
         payload: serde_json::Value,
     },
+    /// The session stream came back after a drop. Hints missed during
+    /// the gap are gone (lossy by design), so the loop refetches
+    /// everything once instead of trusting the stale frame.
+    Resubscribed,
 }
 
 /// Subscribe to the session event bus and forward hints plus typed UI intents.
@@ -26,36 +30,65 @@ pub fn spawn_session_listener(
     tx: tokio::sync::mpsc::UnboundedSender<SessionMessage>,
 ) {
     tokio::spawn(async move {
-        let Ok(mut stream) = client.open_session_events().await else {
-            return;
-        };
-        while let Some(frame) = stream.next_event().await {
-            if frame.event_type == "ui_intent.applied" {
-                let payload = serde_json::from_str::<serde_json::Value>(&frame.data)
-                    .unwrap_or(serde_json::Value::Null);
-                if tx.send(SessionMessage::DaemonEvent { payload }).is_err() {
-                    break;
+        // The stream is the list's only live signal: if it dies without a
+        // reconnect the UI silently freezes at the last flush (classic
+        // "updates for a while, then never again" after a daemon restart
+        // or an overnight idle drop). Resubscribe forever, with backoff.
+        let mut backoff_ms = 500u64;
+        let mut first_attach = true;
+        loop {
+            let Ok(mut stream) = client.open_session_events().await else {
+                if tx.is_closed() {
+                    return;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(15_000);
                 continue;
+            };
+            backoff_ms = 500;
+            if !first_attach && tx.send(SessionMessage::Resubscribed).is_err() {
+                return;
             }
-
-            if frame.event_type == "message" || frame.event_type.ends_with(".hint") {
-                let Some((kind, payload)) = serde_json::from_str::<serde_json::Value>(&frame.data)
-                    .ok()
-                    .and_then(|value| {
-                        let payload = value.get("payload").cloned().unwrap_or(value);
-                        let kind = payload.get("kind")?.as_str()?.to_string();
-                        Some((kind, payload))
-                    })
-                else {
-                    continue;
-                };
-                if tx.send(SessionMessage::Hint { kind, payload }).is_err() {
-                    break;
-                }
+            first_attach = false;
+            run_session_stream(&mut stream, &tx).await;
+            if tx.is_closed() {
+                return;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
         }
     });
+}
+
+async fn run_session_stream(
+    stream: &mut crate::transport::daemon::SseStream,
+    tx: &tokio::sync::mpsc::UnboundedSender<SessionMessage>,
+) {
+    while let Some(frame) = stream.next_event().await {
+        if frame.event_type == "ui_intent.applied" {
+            let payload = serde_json::from_str::<serde_json::Value>(&frame.data)
+                .unwrap_or(serde_json::Value::Null);
+            if tx.send(SessionMessage::DaemonEvent { payload }).is_err() {
+                break;
+            }
+            continue;
+        }
+
+        if frame.event_type == "message" || frame.event_type.ends_with(".hint") {
+            let Some((kind, payload)) = serde_json::from_str::<serde_json::Value>(&frame.data)
+                .ok()
+                .and_then(|value| {
+                    let payload = value.get("payload").cloned().unwrap_or(value);
+                    let kind = payload.get("kind")?.as_str()?.to_string();
+                    Some((kind, payload))
+                })
+            else {
+                continue;
+            };
+            if tx.send(SessionMessage::Hint { kind, payload }).is_err() {
+                break;
+            }
+        }
+    }
 }
 
 /// Tail one chain's event stream, forwarding each frame's
@@ -69,13 +102,24 @@ pub fn spawn_thread_tail(
     tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let Ok(mut stream) = client.open_thread_events(&chain_root_id).await else {
-            return;
-        };
-        while let Some(frame) = stream.next_event().await {
-            if tx.send((frame.event_type, frame.data)).is_err() {
-                break;
+        // Same reconnect contract as the session stream: a braid tail that
+        // dies mid-watch would freeze the timeline. Gap healing rides the
+        // hint-driven refetch; this only keeps the live edge flowing.
+        let mut backoff_ms = 500u64;
+        loop {
+            if let Ok(mut stream) = client.open_thread_events(&chain_root_id).await {
+                backoff_ms = 500;
+                while let Some(frame) = stream.next_event().await {
+                    if tx.send((frame.event_type, frame.data)).is_err() {
+                        return;
+                    }
+                }
             }
+            if tx.is_closed() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(15_000);
         }
     })
 }

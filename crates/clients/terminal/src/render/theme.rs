@@ -80,20 +80,36 @@ pub(crate) fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u6
     style.fg(mix_toward(style.fg, ACCENT, weight))
 }
 
-/// An accent-toned row breathes: its foreground eases toward ACCENT on an
-/// 8-phase wave so an actively-running row reads as alive.
+/// Motion is a vocabulary, one treatment per state:
+/// - ACCENT (running) breathes DEEP and quick — work is happening now;
+/// - WARN (suspended parents, waiting states) swells slow and shallow —
+///   alive but parked, unmistakably not the same motion as running;
+/// - the shimmer above is a third voice: a one-shot flash for "this row
+///   just changed", whatever its state;
+/// - terminal states (good/danger/neutral) hold still.
 pub(crate) fn active_pulse_style(style: Style, tone: RyeOsTone, now_ms: u64) -> Style {
-    if tone != RyeOsTone::Accent {
-        return style;
+    match tone {
+        RyeOsTone::Accent => {
+            let phase = (now_ms / 180) % 8;
+            let wave = match phase {
+                0 | 7 => 0.12,
+                1 | 6 => 0.22,
+                2 | 5 => 0.32,
+                _ => 0.40,
+            };
+            style.fg(mix_toward(style.fg, ACCENT, wave))
+        }
+        RyeOsTone::Warn => {
+            let phase = (now_ms / 320) % 12;
+            let wave = match phase {
+                0 | 11 => 0.04,
+                1..=3 | 8..=10 => 0.08,
+                _ => 0.14,
+            };
+            style.fg(mix_toward(style.fg, WARN, wave))
+        }
+        _ => style,
     }
-    let phase = (now_ms / 180) % 8;
-    let wave = match phase {
-        0 | 7 => 0.08,
-        1 | 6 => 0.14,
-        2 | 5 => 0.20,
-        _ => 0.26,
-    };
-    style.fg(mix_toward(style.fg, ACCENT, wave))
 }
 
 /// The single authority mapping the VM-declared border name to a
