@@ -2,6 +2,7 @@
 name = "ryeos-cli"
 version = "0.5.33"
 edition = "2021"
+license.workspace = true
 description = "CLI for Rye OS"
 
 [[bin]]

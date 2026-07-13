@@ -2,7 +2,7 @@
 name = "ryeos-knowledge-runtime"
 version = "0.2.0"
 edition = "2021"
-license = "MIT"
+license.workspace = true
 description = "Native Rust runtime for the knowledge kind. Spawned via lillux::run by ryeosd. Single-mode op dispatcher over verified knowledge graphs."
 
 [[bin]]

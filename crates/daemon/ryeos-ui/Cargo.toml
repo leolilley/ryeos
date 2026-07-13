@@ -2,6 +2,7 @@
 name = "ryeos-ui"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "RyeOS UI/browser session handlers and session event substrate"
 
 [dependencies]

@@ -2,6 +2,7 @@
 name = "ryeos-core-tools"
 version = "0.5.33"
 edition = "2021"
+license.workspace = true
 
 [lib]
 name = "ryeos_core_tools"
