@@ -282,9 +282,16 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             let child_id = new_thread_id();
             state.state_store.set_follow_child(&follow_key, item_index as u32,
                 &child.item_ref, &spec_hash, &child_id, &child_id)?;
+            child_id
+        }
+    };
+
+    // The slot is the stable identity authority. Every reserved re-drive repairs
+    // the row and all pre-launch materialization before proceeding.
+    if state.threads.get_thread(&child_thread_id)?.is_none() {
             state.threads.create_thread(&ThreadCreateParams {
-                thread_id: child_id.clone(),
-                chain_root_id: child_id.clone(),
+                thread_id: child_thread_id.clone(),
+                chain_root_id: child_thread_id.clone(),
                 kind: child_thread_profile.clone(),
                 item_ref: child.item_ref.clone(),
                 executor_ref: child_executor_ref.clone(),
@@ -296,8 +303,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 usage_subject: None,
                 usage_subject_asserted_by: None,
             })?;
+    }
 
-            // Seed a MINIMAL launch identity: the detached launcher re-resolves the
+            // Build the expected MINIMAL launch identity on every drive. The
+            // detached launcher re-resolves the
             // item + envelope off the callback hot path. `effective_caps` carries
             // the PARENT's caps — the bounding authority the launcher hands to
             // `CapabilityPolicy::FollowChildHybrid`, overwritten with the child's
@@ -341,24 +350,36 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             meta.follow_launch_window = params.launch_window_width.map(|width| FollowLaunchWindow {
                 key: format!("follow:{follow_key}"), width,
             });
-            state.state_store.seed_launch_metadata(&child_id, &meta)?;
+            let persisted_meta = state.state_store.get_launch_metadata(&child_thread_id)?;
+            if let Some(persisted) = persisted_meta.as_ref().filter(|m| m.resume_context.is_some()) {
+                if persisted.resume_context != meta.resume_context
+                    || persisted.follow_parent_context != meta.follow_parent_context
+                    || persisted.follow_launch_window != meta.follow_launch_window
+                {
+                    bail!("follow: launched child metadata conflicts at index {item_index}");
+                }
+            } else {
+            state.state_store.record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
             if let Some(Value::Object(facets)) = child.facets.as_ref() {
+                let current: std::collections::HashMap<_, _> = state.state_store
+                    .get_facets(&child_thread_id)?.into_iter().collect();
                 for (key, value) in facets {
                     if key.trim().is_empty() { continue; }
+                    let value = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+                    if current.get(key) == Some(&value) { continue; }
                     state.events.append(&ryeos_app::event_store_service::EventAppendParams {
-                        thread_id: child_id.clone(),
+                        thread_id: child_thread_id.clone(),
                         event: ryeos_app::event_store_service::EventAppendItem {
                             event_type: ryeos_runtime::events::RuntimeEventType::ThreadFacetSet.as_str().to_string(),
                             storage_class: ryeos_runtime::events::RuntimeEventType::ThreadFacetSet.storage_class().as_str().to_string(),
-                            payload: json!({"key": key, "value": value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())}),
+                            payload: json!({"key": key, "value": value}),
                         },
                     })?;
                 }
             }
-            state.state_store.record_child_link(&parent_thread_id, &child_id, "dispatch")?;
-            child_id
-        }
-    };
+            // resume_context is the commit marker and is written last.
+            state.state_store.seed_launch_metadata(&child_thread_id, &meta)?;
+            }
     child_thread_ids.push(child_thread_id);
     }
 
