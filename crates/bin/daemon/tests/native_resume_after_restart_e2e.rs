@@ -147,7 +147,7 @@ fn build_subprocess_spec(project_dir: &Path) -> PlanSubprocessSpec {
     plan.nodes
         .iter()
         .find_map(|n| match n {
-            PlanNode::DispatchSubprocess { spec, .. } => Some((**spec).clone()),
+            PlanNode::DispatchSubprocess { spec, .. } => Some(spec.clone()),
             _ => None,
         })
         .expect("DispatchSubprocess node present")

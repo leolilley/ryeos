@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -3795,44 +3793,6 @@ mod tests {
         )
     }
 
-    fn make_test_node() -> GraphNode {
-        GraphNode {
-            node_type: NodeType::Action,
-            action: None,
-            assign: None,
-            next: None,
-            on_error: None,
-            cache_result: false,
-            cache: false,
-            follow: false,
-            detach: false,
-            facets: None,
-            over: None,
-            r#as: None,
-            collect: None,
-            parallel: false,
-            max_concurrency: None,
-            output: None,
-            env_requires: Vec::new(),
-            retry: None,
-        }
-    }
-
-    fn make_test_graph_config() -> GraphConfig {
-        GraphConfig {
-            start: "x".to_string(),
-            max_steps: 100,
-            on_error: ErrorMode::Fail,
-            nodes: HashMap::new(),
-            hooks: Vec::new(),
-            config_schema: None,
-            env_requires: Vec::new(),
-            state: None,
-            max_concurrency: None,
-            segment_steps: None,
-        }
-    }
-
     #[tokio::test]
     async fn simple_action_to_return() {
         let yaml = r#"
@@ -5995,7 +5955,10 @@ config:
         assert_eq!(reqs[0].graph_run_id, "gr-follow");
         assert_eq!(reqs[0].follow_node, "fetch");
         assert_eq!(reqs[0].step_count, 0);
-        assert_eq!(reqs[0].child_item_ref, "directive:child");
+        assert_eq!(
+            reqs[0].child_item_ref.as_deref(),
+            Some("directive:child")
+        );
     }
 
     #[tokio::test]

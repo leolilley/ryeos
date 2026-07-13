@@ -2614,7 +2614,6 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "toml",
  "tracing",
@@ -2715,6 +2714,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

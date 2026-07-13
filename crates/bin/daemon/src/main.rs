@@ -924,7 +924,7 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
                 reconcile::FollowReconcileAction::Resume { follow_key } => {
                     let outcome =
                         ryeos_executor::execution::launch::launch_follow_resume_successor(
-                            st,
+                            st.clone(),
                             &follow_key,
                         )
                         .await;
@@ -932,7 +932,8 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
                 }
                 reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
                     // Reconcile parity: a fresh relaunch, no parent clamp/depth.
-                    let outcome = launch_follow_child(st, &child_thread_id, None, None).await;
+                    let outcome =
+                        launch_follow_child(st.clone(), &child_thread_id, None, None).await;
                     (format!("child-relaunch {child_thread_id}"), outcome)
                 }
             };

@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use tokio::net::UnixListener;
 
+#[cfg(test)]
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::bundle_event_service::{
     BundleEventAppendParams, BundleEventReadChainParams, BundleEventScanParams, BundleEventService,
@@ -1667,6 +1668,7 @@ mod tests {
         // persisted child status/result for diagnostics.
         let env = waiter.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("recovered waiter must carry a terminal envelope");
         assert_eq!(
             env["success"],
@@ -1715,6 +1717,7 @@ mod tests {
         );
         let env = waiter.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("cancelled child must store a terminal envelope");
         assert_eq!(
             env["success"],
@@ -2045,6 +2048,7 @@ mod tests {
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
         let env = w.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("degraded envelope stored");
         assert_eq!(env["success"], json!(false));
         assert_eq!(env["status"], json!("failed"));
@@ -2101,6 +2105,7 @@ mod tests {
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
         let env = w.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
@@ -2178,6 +2183,7 @@ mod tests {
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
         let env = w.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["result"], json!("directive_return"));

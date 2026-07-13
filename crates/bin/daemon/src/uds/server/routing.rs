@@ -95,7 +95,6 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context;
 
     #[test]
     fn unknown_method_preserves_code_message_and_request_id() {

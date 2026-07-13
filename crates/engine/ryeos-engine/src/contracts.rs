@@ -2990,7 +2990,7 @@ impl LaunchMode {
 /// Executor-specific hints forwarded verbatim through the pipeline.
 /// The engine does not interpret contents; used only for cache-key
 /// hashing and resume-context persistence.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionHints {
     #[serde(default)]
@@ -2999,14 +2999,14 @@ pub struct ExecutionHints {
 
 // ── Principal ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Principal {
     pub fingerprint: String,
     pub scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DelegatedPrincipal {
     pub protocol_version: String,
@@ -3024,7 +3024,7 @@ pub struct DelegatedPrincipal {
     pub origin_signature: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectivePrincipal {
     Local(Principal),
