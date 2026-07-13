@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T09:28:49Z:70d95c6001b704e0ef1fb64a304b90b4a43f5f07fd6442dbf3228c393f32225c:QsctrGQ2rIIYiVKnWfyR5bTX0hBX1G92V1ZBGic6t2yjtgOfmXkPiq8GuuuBOU22yREs28P/I6AH/4zLfb1QCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:39:54Z:3ebb1be8f30cb024916ba82a14be81cf793694a6f070aca474768336579b89b5:YfzQusph1VlurQIdRubD5/LiWYvbHh8ESnxWXNU/ZClE6HNt5/M+YPjXn1x14DvqcttQDWr+ErD8kmSspULIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
 title: Node Threads
 version: "1.0.0"
@@ -48,8 +48,11 @@ projections:
     field: status
     map:
       running: accent
-      created: accent
-      accepted: accent
+      # A queued (created/accepted) thread sits calm — only genuinely
+      # RUNNING rows breathe, so a fanned-out cohort backlog reads as a
+      # queue, not a wall of live activity.
+      created: neutral
+      accepted: neutral
       failed: danger
       killed: danger
       timed_out: danger

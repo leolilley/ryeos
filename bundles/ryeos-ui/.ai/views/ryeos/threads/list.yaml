@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T09:28:49Z:2abf49e3a42f71c65b6258d3907d115249f3a390a7382cfc8d5c215cfcdf812c:qKIZbZ231Rt9tyGY9tad4wx6VKEzevUYctihBE0VYjsGcsjuVG6Zpc8+OfcACkD+3AoppPUVnOqp2GFCx7vPDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:40:36Z:95434777efbddac13f4a71190ffcd58ec9d90d5c3a862b643cd83c2e345414b1:rMJcr6v0K8tnX+3bY63X3pH2ZHIOUi5Wb8MP1E7K5AYoCUp5/zVmfcR3tD1Rsunzu8fHWiY1/zEV9olEQBqwDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the ryeos-ui threads source
@@ -55,7 +55,8 @@ projections:
     field: status
     map:
       running: accent
-      created: accent
+      # Queued threads sit calm; only RUNNING rows breathe.
+      created: neutral
       failed: danger
       cancelled: warn
       completed: good

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T09:28:49Z:67dc45dc4f746a73db1d9948b092ba639ad5ce256bd881d10c5e3e7dff426a21:EYtjGk6Zd68NJXQT2iWWxGJZPiFeLZkRhplcu/fZaTuJneN0D/zRxCEhih71e0lrETTciJ6XralCzzBr/o5tBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:39:54Z:3d943fa5d360d0256f5afe4f2477adb0c369ab4c8b46e2fe61d354fe7cb51723:aX8BGKnrjiQFowE7aY9VU+LLaTLZM9VsMHA9WN2QBSx98usqII1DJxpengnl5eCPaVJ9d5qxtQJmul4ToXQQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
 title: Project Threads
 version: "1.0.0"
@@ -52,8 +52,11 @@ projections:
     field: status
     map:
       running: accent
-      created: accent
-      accepted: accent
+      # A queued (created/accepted) thread sits calm — only genuinely
+      # RUNNING rows breathe, so a fanned-out cohort backlog reads as a
+      # queue, not a wall of live activity.
+      created: neutral
+      accepted: neutral
       failed: danger
       killed: danger
       timed_out: danger
