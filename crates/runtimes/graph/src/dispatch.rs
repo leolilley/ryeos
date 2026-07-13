@@ -267,22 +267,7 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
         && obj.contains_key("status")
         && (obj.contains_key("outputs") || obj.contains_key("warnings"));
     if is_native {
-        let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        return if ok {
-            ActionOutcome::Success(ActionSuccess {
-                result: native_success_value(obj),
-                cost: parse_native_cost(obj),
-                child_thread_id: None,
-            })
-        } else {
-            // A failed native child (e.g. a directive that burned tokens
-            // then errored) still reports `cost` — preserve it.
-            ActionOutcome::Failure(ActionFailure {
-                diagnostic: describe_native_failure(obj),
-                cost: parse_native_cost(obj),
-                retryable: false,
-            })
-        };
+        return classify_native_runtime_object(obj);
     }
 
     // Subprocess envelope: discriminated by `outcome_code`.
@@ -301,6 +286,42 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
 
     // Has `result` but no envelope markers — bare tool data.
     ActionOutcome::Success(ActionSuccess::bare(value))
+}
+
+/// Classify an envelope received through the daemon-managed follow contract.
+///
+/// Unlike an arbitrary tool result, a follow result is known to be a native
+/// runtime envelope. The daemon's cohort join projection retains the required
+/// `success`, `status`, and `result` fields but may omit empty `outputs` and
+/// `warnings`, so it must not use the conservative bare-value discriminator in
+/// [`classify_envelope`].
+pub(crate) fn classify_follow_envelope(value: Value) -> ActionOutcome {
+    let Some(obj) = value.as_object() else {
+        return ActionOutcome::Success(ActionSuccess::bare(value));
+    };
+    if obj.contains_key("success") && obj.contains_key("status") && obj.contains_key("result") {
+        return classify_native_runtime_object(obj);
+    }
+    classify_envelope(value)
+}
+
+fn classify_native_runtime_object(obj: &serde_json::Map<String, Value>) -> ActionOutcome {
+    let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
+    if ok {
+        ActionOutcome::Success(ActionSuccess {
+            result: native_success_value(obj),
+            cost: parse_native_cost(obj),
+            child_thread_id: None,
+        })
+    } else {
+        // A failed native child (e.g. a directive that burned tokens then
+        // errored) still reports `cost` — preserve it.
+        ActionOutcome::Failure(ActionFailure {
+            diagnostic: describe_native_failure(obj),
+            cost: parse_native_cost(obj),
+            retryable: false,
+        })
+    }
 }
 
 fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {

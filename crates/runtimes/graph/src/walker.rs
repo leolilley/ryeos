@@ -332,7 +332,7 @@ pub struct Walker {
 /// A pending follow result armed at resume, consumed at its follow node.
 struct FollowResumeState {
     follow_node: String,
-    follow_result: Value,
+    follow_result: Option<Value>,
     iteration_snapshot: Option<Vec<Value>>,
 }
 
@@ -435,7 +435,7 @@ impl Walker {
 
     fn take_follow_result(&self, node: &str) -> Option<Value> {
         self.take_follow_state(node)
-            .map(|state| state.follow_result)
+            .and_then(|state| state.follow_result)
     }
 
     /// Drain the accumulated callback-drift warnings. Called by the
@@ -649,22 +649,21 @@ impl Walker {
                     .get("retry_attempt")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
-                // Arm follow resume: if the checkpoint marks a pending follow AND a
-                // child envelope was spliced in, consume it at the follow node
-                // instead of re-suspending. Only when BOTH are present — a bare
-                // pending_follow with no result re-drives the suspend (idempotent).
-                if let (Some(pf), Some(fr)) = (
-                    resume_val
-                        .get(follow_keys::PENDING_FOLLOW)
-                        .filter(|v| !v.is_null()),
-                    resume_val
-                        .get(follow_keys::FOLLOW_RESULT)
-                        .filter(|v| !v.is_null()),
-                ) {
+                // Arm every pending follow. A spliced result is consumed at the
+                // node; a bare marker re-drives the same idempotency key. Fanout
+                // must retain its checkpointed iteration snapshot in both cases so
+                // mutable graph state cannot change cohort membership on re-drive.
+                if let Some(pf) = resume_val
+                    .get(follow_keys::PENDING_FOLLOW)
+                    .filter(|v| !v.is_null())
+                {
                     if let Some(fnode) = pf.get(follow_keys::FOLLOW_NODE).and_then(|v| v.as_str()) {
                         *self.follow_resume.lock().unwrap() = Some(FollowResumeState {
                             follow_node: fnode.to_string(),
-                            follow_result: fr.clone(),
+                            follow_result: resume_val
+                                .get(follow_keys::FOLLOW_RESULT)
+                                .filter(|v| !v.is_null())
+                                .cloned(),
                             iteration_snapshot: pf
                                 .get("iteration_snapshot")
                                 .and_then(Value::as_array)
@@ -1480,7 +1479,7 @@ impl Walker {
         let mut cache_hit = false;
         let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> =
             if let Some(envelope) = resumed_follow_envelope {
-                Ok(dispatch::classify_envelope(envelope))
+                Ok(dispatch::classify_follow_envelope(envelope))
             } else if node.is_cacheable() {
                 let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
                 if let Some(cached) = cache.lookup(&cache_key) {
@@ -1731,7 +1730,7 @@ impl Walker {
         let checkpointed_items = resumed_state
             .as_ref()
             .and_then(|state| state.iteration_snapshot.clone());
-        let resumed = resumed_state.map(|state| state.follow_result);
+        let resumed = resumed_state.and_then(|state| state.follow_result);
         if resumed.is_some() && checkpointed_items.is_none() {
             return StepOutcome::LeafSoftError {
                 item_id: node
@@ -1835,7 +1834,7 @@ impl Walker {
             let mut delta = Value::Object(serde_json::Map::new());
             let mut total_cost: Option<RuntimeCost> = None;
             for (index, envelope) in envelopes.iter().cloned().enumerate() {
-                match dispatch::classify_envelope(envelope) {
+                match dispatch::classify_follow_envelope(envelope) {
                     dispatch::ActionOutcome::Success(success) => {
                         statuses.push("completed".to_string());
                         results[index] = success.result.clone();
@@ -5512,7 +5511,16 @@ config:
             if results.is_empty() {
                 Ok(json!({"thread": {}, "result": {}}))
             } else {
-                Ok(json!({"thread": {}, "result": results.remove(0)}))
+                let result = results.remove(0);
+                if result.get("__retryable_dispatch_error").is_some() {
+                    Err(CallbackError::ActionFailed {
+                        code: "service_unavailable".to_string(),
+                        message: "simulated transient dispatch failure".to_string(),
+                        retryable: true,
+                    })
+                } else {
+                    Ok(json!({"thread": {}, "result": result}))
+                }
             }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -5831,7 +5839,7 @@ config:
         let result = w
             .execute(json!({}), Some("gr-nonretryable".to_string()))
             .await;
-        assert_eq!(result.status, "failed");
+        assert_eq!(result.status, "error");
         assert_eq!(recorder.dispatch_count(), 1);
         assert!(recorder
             .recorded_events()

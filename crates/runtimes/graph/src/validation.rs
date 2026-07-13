@@ -881,7 +881,7 @@ config:
             ),
             (
                 "      action: {item_id: \"directive:child\", params: {value: \"${item}\"}}\n",
-                "      retry: {attempts: 2}\n      action: {item_id: \"directive:child\"}\n",
+                "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\"}\n",
                 "cannot combine 'retry' and 'follow'",
             ),
         ];
