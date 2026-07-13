@@ -16,6 +16,10 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::RuntimeResult;
 use ryeos_runtime::TerminalCompletion;
 
+mod request_context;
+
+use request_context::{initial_messages, visible_provider_tools};
+
 /// Free-form breadcrumb passed to `request_continuation` for logs only.
 /// Continuation is autonomous by construction — this is NOT a typed reason the
 /// substrate keys off; `State::Continued` has exactly one cause (the live
@@ -128,49 +132,6 @@ impl Drop for RunGuard {
         if !self.finalized {
             tracing::warn!("RunGuard dropped without finalization");
         }
-    }
-}
-
-/// Synthesize a `directive_return` ToolSchema from declared outputs.
-///
-/// `directive_return` is a lifecycle signal recognized by name in the
-/// runner — it's never dispatched to a real tool. Advertising it as a
-/// provider tool gives the LLM a first-class way to emit structured
-/// outputs instead of relying on prose conventions. All declared
-/// outputs are marked `required` because the runner's
-/// `ProcessingDirectiveReturn` validator rejects calls missing any of
-/// them (see runner.rs:644-654).
-fn build_directive_return_tool(outputs: &[OutputSpec]) -> ToolSchema {
-    use serde_json::Map;
-    let mut props = Map::new();
-    let mut required: Vec<Value> = Vec::with_capacity(outputs.len());
-    for o in outputs {
-        let mut prop = Map::new();
-        prop.insert(
-            "type".to_string(),
-            json!(o.r#type.clone().unwrap_or_else(|| "string".to_string())),
-        );
-        if let Some(desc) = &o.description {
-            prop.insert("description".to_string(), json!(desc));
-        }
-        props.insert(o.name.clone(), Value::Object(prop));
-        required.push(json!(o.name));
-    }
-    let mut schema = Map::new();
-    schema.insert("type".to_string(), json!("object"));
-    schema.insert("properties".to_string(), Value::Object(props));
-    schema.insert("required".to_string(), Value::Array(required));
-    ToolSchema {
-        name: "directive_return".to_string(),
-        // Synthetic item_id; the dispatcher rejects this name before
-        // any cap/permission lookup so the value is never resolved.
-        item_id: "lifecycle:directive_return".to_string(),
-        description: Some(
-            "Return final structured outputs and finish the directive. \
-             Call this exactly once when you have a complete answer."
-                .to_string(),
-        ),
-        input_schema: Some(Value::Object(schema)),
     }
 }
 
@@ -359,19 +320,7 @@ impl Runner {
             matched_profile,
             config_hash,
         } = config;
-        let mut initial_messages = Vec::new();
-
-        if let Some(ref sys) = system_prompt {
-            initial_messages.push(ProviderMessage {
-                role: "system".to_string(),
-                content: Some(json!(sys)),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-
-        initial_messages.extend(messages);
+        let initial_messages = initial_messages(messages, system_prompt.as_deref());
 
         let effective_caps = harness.effective_caps().to_vec();
         let dispatcher = Dispatcher::new(tools.clone(), effective_caps);
@@ -565,28 +514,11 @@ impl Runner {
                     // Filter tools by effective_caps so the LLM only sees
                     // tools it can actually call (saves context, avoids the
                     // "model names a tool the dispatcher would reject" path).
-                    let visible_tools = crate::provider_adapter::tools::filter_tools_by_caps(
+                    let visible_tools_owned = visible_provider_tools(
                         &self.tools,
                         self.harness.effective_caps(),
+                        self.directive_outputs.as_deref(),
                     );
-                    // Map borrowed refs back to owned slice for the adapter.
-                    let mut visible_tools_owned: Vec<_> =
-                        visible_tools.into_iter().cloned().collect();
-                    // If the directive declared `outputs:`, synthesize a
-                    // `directive_return` tool from them so the LLM has a
-                    // first-class function to call when it has the answer.
-                    // Without this, the model can only mention "directive_return"
-                    // in plain text — which leaves `result.outputs` empty and
-                    // the directive never finalizes via the lifecycle path.
-                    // The runner intercepts calls to `directive_return` by
-                    // name in `DispatchingTools`; the dispatcher rejects it
-                    // as a real tool, so this synthetic schema is purely a
-                    // provider-API hint.
-                    if let Some(ref outputs) = self.directive_outputs {
-                        if !outputs.is_empty() {
-                            visible_tools_owned.push(build_directive_return_tool(outputs));
-                        }
-                    }
                     // §1 retry loop. A retryable provider failure — a configured
                     // HTTP status, a send timeout/transport error, or a stream
                     // that died mid-read — is re-attempted with exponential
