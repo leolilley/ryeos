@@ -160,6 +160,7 @@ fn run_probe(
         envs,
         stdin_data: None,
         timeout: IMPORT_TIMEOUT_SECS,
+        limits: None,
     });
     shape_probe_result(interpreter, result)
 }

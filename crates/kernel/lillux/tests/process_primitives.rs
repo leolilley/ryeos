@@ -10,7 +10,10 @@
 
 #![cfg(unix)]
 
-use lillux::{is_alive, kill, run, spawn, spawn_detached, SubprocessRequest};
+use lillux::{
+    configure_subprocess_limits, is_alive, kill, run, spawn, spawn_detached,
+    validate_subprocess_limits, SubprocessLimits, SubprocessRequest,
+};
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
 /// empty (authoritative) environment.
@@ -22,6 +25,7 @@ fn sh(args: &[&str]) -> SubprocessRequest {
         envs: vec![],
         stdin_data: None,
         timeout: 30.0,
+        limits: None,
     }
 }
 
@@ -56,6 +60,64 @@ fn run_writes_stdin_to_child() {
     let r = run(request);
     assert!(r.success, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "piped-input");
+}
+
+#[test]
+fn run_installs_max_open_files_before_exec() {
+    let mut request = sh(&["-c", "ulimit -n"]);
+    request.limits = Some(SubprocessLimits {
+        max_open_files: Some(64),
+    });
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.stdout.trim(), "64");
+}
+
+#[test]
+fn configure_limits_applies_to_an_arbitrary_command() {
+    let limits = SubprocessLimits {
+        max_open_files: Some(64),
+    };
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", "ulimit -n"]);
+
+    configure_subprocess_limits(&mut command, Some(&limits)).unwrap();
+    let output = command.output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "64");
+}
+
+#[test]
+fn validation_is_side_effect_free_and_rejects_an_unbounded_limit() {
+    let limits = SubprocessLimits {
+        max_open_files: Some(u64::MAX),
+    };
+
+    let error = validate_subprocess_limits(Some(&limits)).unwrap_err();
+
+    assert!(error.contains("max_open_files"), "{error}");
+}
+
+#[test]
+fn spawn_rejects_an_unbounded_open_file_limit_before_fork() {
+    let mut request = sh(&["-c", "true"]);
+    request.limits = Some(SubprocessLimits {
+        max_open_files: Some(u64::MAX),
+    });
+
+    let Err(result) = spawn(request) else {
+        panic!("an invalid resource limit must prevent spawn");
+    };
+
+    assert_eq!(result.pid, 0);
+    assert!(
+        result.stderr.contains("max_open_files"),
+        "{}",
+        result.stderr
+    );
 }
 
 // ── env_clear: the secret-scoping contract ─────────────────────────────

@@ -1294,6 +1294,7 @@ pub(crate) async fn dispatch_method(
             envs,
             stdin_data: Some(stdin_data),
             timeout: 120.0,
+            limits: None,
         };
         let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
             subprocess_request,
@@ -2026,6 +2027,7 @@ async fn dispatch_streaming_subprocess(
         envs,
         stdin_data: Some(stdin_data),
         timeout: 120.0,
+        limits: None,
     };
     let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
         subprocess_request,

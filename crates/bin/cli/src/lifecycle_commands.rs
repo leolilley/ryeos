@@ -440,7 +440,15 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
             .join(ryeos_engine::AI_DIR)
             .join("node/sandbox.yaml");
         match inspect_sandbox_policy(&policy_path) {
-            Ok(detail) => checks.push(check("sandbox", OK, detail)),
+            Ok(inspection) => checks.push(check(
+                "sandbox",
+                if inspection.has_warning {
+                    WARN
+                } else {
+                    OK
+                },
+                inspection.detail,
+            )),
             Err(error) => checks.push(check(
                 "sandbox",
                 FAIL,
@@ -658,7 +666,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 _ => "·",
             };
             println!("  {glyph} {:<24} {}", c.name, c.status);
-            if c.status != OK {
+            if c.status != OK || c.name == "sandbox" {
                 println!("      {}", c.detail);
             }
         }
@@ -684,7 +692,13 @@ fn check(
     }
 }
 
-fn inspect_sandbox_policy(path: &std::path::Path) -> Result<serde_json::Value> {
+#[derive(Debug)]
+struct SandboxPolicyInspection {
+    detail: serde_json::Value,
+    has_warning: bool,
+}
+
+fn inspect_sandbox_policy(path: &std::path::Path) -> Result<SandboxPolicyInspection> {
     use std::os::unix::fs::PermissionsExt;
 
     let raw = std::fs::read_to_string(path)
@@ -717,12 +731,78 @@ fn inspect_sandbox_policy(path: &std::path::Path) -> Result<serde_json::Value> {
         "sandbox backend is not executable: {}",
         policy.backend_path.display()
     );
-    Ok(serde_json::json!({
-        "policy": path,
-        "version": policy.version,
-        "backend": policy.backend_path,
-        "backend_status": "regular executable",
-    }))
+    let open_file_limits = policy
+        .max_open_files
+        .map(|max_open_files| lillux::SubprocessLimits {
+            max_open_files: Some(max_open_files),
+        });
+    let open_file_validation_error =
+        lillux::validate_subprocess_limits(open_file_limits.as_ref()).err();
+    let has_unenforced_process_limit = policy.max_processes.is_some();
+    let max_open_files_status = match (policy.max_open_files, open_file_validation_error.as_ref()) {
+        (None, _) => "not_configured",
+        (Some(_), None) => "enforced_on_spawn",
+        (Some(_), Some(_)) => "doctor_process_rejected",
+    };
+    let max_processes_status = if has_unenforced_process_limit {
+        "configured_but_unenforced"
+    } else {
+        "not_configured"
+    };
+    let environment_mode = if policy.allowed_env.iter().any(|name| name == "*") {
+        "all_constructed"
+    } else {
+        "allowlist"
+    };
+
+    Ok(SandboxPolicyInspection {
+        detail: serde_json::json!({
+            "policy": path,
+            "version": policy.version,
+            "backend": policy.backend_path,
+            "backend_status": "regular executable",
+            "network": {
+                "allow_network": policy.allow_network,
+                "mode": if policy.allow_network { "host_shared" } else { "isolated" },
+            },
+            "environment": {
+                "mode": environment_mode,
+                "allowed_names": policy.allowed_env,
+            },
+            "writable_paths": policy.writable_paths,
+            "limits": {
+                "max_open_files": {
+                    "configured": policy.max_open_files,
+                    "status": max_open_files_status,
+                    "runtime_mechanism": if policy.max_open_files.is_some() {
+                        Some("RLIMIT_NOFILE (installed before exec; spawn fails closed on error)")
+                    } else {
+                        None
+                    },
+                    "doctor_process_validation": if policy.max_open_files.is_some() {
+                        Some(serde_json::json!({
+                            "status": if open_file_validation_error.is_some() {
+                                "rejected"
+                            } else {
+                                "accepted"
+                            },
+                            "error": open_file_validation_error,
+                            "note": "the daemon's service/container hard limit may differ",
+                        }))
+                    } else {
+                        None
+                    },
+                },
+                "max_processes": {
+                    "configured": policy.max_processes,
+                    "status": max_processes_status,
+                    "mechanism": serde_json::Value::Null,
+                    "note": "accepted for policy compatibility but not enforced per sandbox; deferred to delegated cgroup v2 pids.max",
+                },
+            },
+        }),
+        has_warning: has_unenforced_process_limit || open_file_validation_error.is_some(),
+    })
 }
 
 #[derive(Parser, Debug)]
@@ -956,11 +1036,31 @@ fn default_app_root() -> PathBuf {
 mod tests {
     use super::*;
 
-    fn sandbox_policy(backend: &std::path::Path, version: u32) -> String {
+    fn sandbox_policy(
+        backend: &std::path::Path,
+        version: u32,
+        max_open_files: u64,
+        max_processes: Option<u64>,
+    ) -> String {
+        let max_processes = max_processes
+            .map(|limit| format!("max_processes: {limit}\n"))
+            .unwrap_or_default();
         format!(
-            "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
-            backend.display()
+            "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths:\n  - \"{{project}}\"\nallowed_env:\n  - PATH\nmax_open_files: {max_open_files}\n{max_processes}",
+            backend.display(),
         )
+    }
+
+    fn supported_open_file_limit() -> u64 {
+        [128, 64, 32, 16, 8, 4, 2, 1, 0]
+            .into_iter()
+            .find(|max_open_files| {
+                lillux::validate_subprocess_limits(Some(&lillux::SubprocessLimits {
+                    max_open_files: Some(*max_open_files),
+                }))
+                .is_ok()
+            })
+            .expect("the current process should accept at least RLIMIT_NOFILE=0")
     }
 
     #[test]
@@ -986,9 +1086,99 @@ mod tests {
         std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
         let policy = temp.path().join("sandbox.yaml");
-        std::fs::write(&policy, sandbox_policy(&backend, 1)).unwrap();
+        let max_open_files = supported_open_file_limit();
+        std::fs::write(&policy, sandbox_policy(&backend, 1, max_open_files, None)).unwrap();
 
-        assert!(inspect_sandbox_policy(&policy).is_ok());
+        let inspection = inspect_sandbox_policy(&policy).unwrap();
+        assert!(!inspection.has_warning);
+        assert_eq!(
+            inspection.detail["network"],
+            serde_json::json!({ "allow_network": false, "mode": "isolated" })
+        );
+        assert_eq!(
+            inspection.detail["environment"],
+            serde_json::json!({ "mode": "allowlist", "allowed_names": ["PATH"] })
+        );
+        assert_eq!(
+            inspection.detail["writable_paths"],
+            serde_json::json!(["{project}"])
+        );
+        assert_eq!(
+            inspection.detail["limits"]["max_open_files"],
+            serde_json::json!({
+                "configured": max_open_files,
+                "status": "enforced_on_spawn",
+                "runtime_mechanism": "RLIMIT_NOFILE (installed before exec; spawn fails closed on error)",
+                "doctor_process_validation": {
+                    "status": "accepted",
+                    "error": null,
+                    "note": "the daemon's service/container hard limit may differ",
+                },
+            })
+        );
+        assert_eq!(
+            inspection.detail["limits"]["max_processes"]["status"],
+            "not_configured"
+        );
+    }
+
+    #[test]
+    fn sandbox_doctor_warns_for_accepted_but_unenforced_process_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let backend = temp.path().join("bwrap");
+        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = temp.path().join("sandbox.yaml");
+        std::fs::write(
+            &policy,
+            sandbox_policy(&backend, 1, supported_open_file_limit(), Some(32)),
+        )
+        .unwrap();
+
+        let inspection = inspect_sandbox_policy(&policy).unwrap();
+        assert!(inspection.has_warning);
+        assert_eq!(
+            inspection.detail["limits"]["max_processes"]["configured"],
+            32
+        );
+        assert_eq!(
+            inspection.detail["limits"]["max_processes"]["status"],
+            "configured_but_unenforced"
+        );
+    }
+
+    #[test]
+    fn sandbox_doctor_warns_when_its_process_rejects_the_open_file_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let backend = temp.path().join("bwrap");
+        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = temp.path().join("sandbox.yaml");
+        let raw = sandbox_policy(&backend, 1, 128, None).replace(
+            "max_open_files: 128",
+            "max_open_files: 18446744073709551615",
+        );
+        std::fs::write(&policy, raw).unwrap();
+
+        let inspection = inspect_sandbox_policy(&policy).unwrap();
+        assert!(inspection.has_warning);
+        assert_eq!(
+            inspection.detail["limits"]["max_open_files"]["status"],
+            "doctor_process_rejected"
+        );
+        assert_eq!(
+            inspection.detail["limits"]["max_open_files"]["doctor_process_validation"]["status"],
+            "rejected"
+        );
+        assert!(
+            inspection.detail["limits"]["max_open_files"]["doctor_process_validation"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("max_open_files"))
+        );
     }
 
     #[test]
@@ -999,7 +1189,7 @@ mod tests {
             &policy,
             format!(
                 "{}unexpected: true\n",
-                sandbox_policy(std::path::Path::new("relative/bwrap"), 2)
+                sandbox_policy(std::path::Path::new("relative/bwrap"), 2, 128, Some(32))
             ),
         )
         .unwrap();
@@ -1009,7 +1199,7 @@ mod tests {
 
         std::fs::write(
             &policy,
-            sandbox_policy(std::path::Path::new("relative/bwrap"), 1),
+            sandbox_policy(std::path::Path::new("relative/bwrap"), 1, 128, Some(32)),
         )
         .unwrap();
         assert!(inspect_sandbox_policy(&policy)

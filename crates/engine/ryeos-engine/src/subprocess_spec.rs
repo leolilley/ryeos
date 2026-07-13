@@ -72,6 +72,13 @@ pub fn sandbox_lillux_request(
         sandbox: None,
     };
     let wrapped = sandbox_wrap(spec, &policy)?;
+    let limits = wrapped
+        .sandbox
+        .as_ref()
+        .and_then(|sandbox| sandbox.max_open_files)
+        .map(|max_open_files| lillux::SubprocessLimits {
+            max_open_files: Some(max_open_files),
+        });
     Ok(lillux::SubprocessRequest {
         cmd: wrapped.cmd.to_string_lossy().into_owned(),
         args: wrapped.args,
@@ -79,6 +86,7 @@ pub fn sandbox_lillux_request(
         envs: wrapped.env,
         stdin_data: Some(String::from_utf8_lossy(&wrapped.stdin).into_owned()),
         timeout: wrapped.timeout.as_secs_f64(),
+        limits,
     })
 }
 
@@ -356,9 +364,10 @@ pub fn sandbox_wrap(
         let path = path.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), path.clone(), path]);
     }
-    // Bubblewrap has no rlimit options. The requested limits remain visible on
-    // `EffectiveSandbox`; enforcing them requires `setrlimit` at the Lillux spawn
-    // boundary so they are inherited across Bubblewrap's fork/exec.
+    // Bubblewrap has no rlimit options. `max_open_files` remains visible on
+    // `EffectiveSandbox` and is transported to the Lillux spawn boundary, where
+    // it is inherited across Bubblewrap's fork/exec. `max_processes` is not
+    // transported because RLIMIT_NPROC is scoped to the real user, not a sandbox.
     args.push("--chdir".to_string());
     args.push(canonical_cwd.to_string_lossy().into_owned());
     args.push("--".to_string());
@@ -450,6 +459,7 @@ mod tests {
             envs: vec![],
             stdin_data: None,
             timeout: 1.0,
+            limits: None,
         };
         let error = match sandbox_lillux_request(
             request,
@@ -481,6 +491,7 @@ mod tests {
             envs: vec![],
             stdin_data: None,
             timeout: 1.0,
+            limits: None,
         };
         let wrapped = sandbox_lillux_request(
             request,
@@ -498,5 +509,11 @@ mod tests {
                 .to_string()
         );
         assert!(wrapped.args.iter().any(|arg| arg == "--unshare-all"));
+        assert_eq!(
+            wrapped.limits,
+            Some(lillux::SubprocessLimits {
+                max_open_files: Some(128),
+            })
+        );
     }
 }

@@ -62,6 +62,7 @@ pub(crate) fn run_handler_subprocess(
         envs: vec![],
         stdin_data: Some(request_json),
         timeout: timeout.as_secs_f64(),
+        limits: None,
     };
 
     let output = lillux::exec::lib_run(req);

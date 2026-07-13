@@ -153,6 +153,7 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         envs,
         stdin_data: spec.stdin_data.clone(),
         timeout: spec.timeout_secs as f64,
+        limits: None,
     })
 }
 

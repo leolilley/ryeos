@@ -8,7 +8,10 @@ pub mod signature;
 pub mod time;
 pub mod vault;
 
-pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
+pub use exec::{
+    configure_subprocess_limits, validate_subprocess_limits, RunningProcess, SpawnResult,
+    SubprocessLimits, SubprocessRequest, SubprocessResult,
+};
 
 pub use atomic_fs::{
     atomic_exchange_paths, atomic_write, atomic_write_private, atomic_write_with_mode,

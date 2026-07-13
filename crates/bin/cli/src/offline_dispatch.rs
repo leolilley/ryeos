@@ -527,6 +527,7 @@ fn exec_tool(
             envs,
             stdin_data,
             timeout: timeout as f64,
+            limits: None,
         },
         app_root,
         Path::new(project_path),
@@ -544,6 +545,7 @@ fn exec_tool(
             &request.args,
             request.cwd.as_deref(),
             &request.envs,
+            request.limits.as_ref(),
             false,
         );
     }
@@ -966,6 +968,7 @@ fn exec_inherited(
     args: &[String],
     cwd: Option<&str>,
     envs: &[(String, String)],
+    limits: Option<&lillux::SubprocessLimits>,
     inherit_env: bool,
 ) -> Result<Option<Value>, CliError> {
     let mut command = std::process::Command::new(cmd);
@@ -983,6 +986,12 @@ fn exec_inherited(
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+
+    lillux::configure_subprocess_limits(&mut command, limits).map_err(|error| CliError::Local {
+        detail: format!(
+            "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
+        ),
+    })?;
 
     let status = command
         .status()
@@ -1008,6 +1017,26 @@ mod tests {
     use super::*;
     use lillux::crypto::{EncodePrivateKey, SigningKey};
     use rand::rngs::OsRng;
+
+    #[test]
+    fn inherited_exec_rejects_invalid_limits_before_spawn() {
+        let limits = lillux::SubprocessLimits {
+            max_open_files: Some(u64::MAX),
+        };
+
+        let error = exec_inherited(
+            "tool:test/inherited",
+            Path::new("unused"),
+            &[],
+            None,
+            &[],
+            Some(&limits),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("resource limits"));
+    }
 
     fn expect_json(outcome: OfflineDispatchOutcome) -> Value {
         match outcome {

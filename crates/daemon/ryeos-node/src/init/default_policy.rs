@@ -11,7 +11,6 @@ writable_paths:
 allowed_env:
   - "*"
 max_open_files: 1024
-max_processes: 256
 "#;
 
 struct NodeDefaultPaths {
@@ -105,6 +104,6 @@ mod tests {
         assert!(DEFAULT_SANDBOX_POLICY.contains("  - \"{project}\""));
         assert!(DEFAULT_SANDBOX_POLICY.contains("  - \"*\""));
         assert!(DEFAULT_SANDBOX_POLICY.contains("max_open_files: 1024"));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("max_processes: 256"));
+        assert!(!DEFAULT_SANDBOX_POLICY.contains("max_processes:"));
     }
 }

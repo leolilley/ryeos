@@ -24,6 +24,18 @@ pub struct SubprocessRequest {
     pub envs: Vec<(String, String)>,
     pub stdin_data: Option<String>,
     pub timeout: f64,
+    /// Optional limits installed in the child immediately before `exec`.
+    pub limits: Option<SubprocessLimits>,
+}
+
+/// Resource limits applied to a spawned subprocess.
+///
+/// Limits are fail-closed: a configured limit that is unsupported, invalid,
+/// or cannot be installed prevents the subprocess from spawning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubprocessLimits {
+    /// Maximum number of file descriptors the subprocess may open.
+    pub max_open_files: Option<u64>,
 }
 
 /// Result of a synchronous subprocess execution.
@@ -145,6 +157,7 @@ impl RunningProcess {
 pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
     let start = Instant::now();
     let timeout = request.timeout;
+
     let envs_str: Vec<String> = request
         .envs
         .iter()
@@ -176,19 +189,16 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
         }
     }
 
+    if let Err(reason) = configure_subprocess_limits(&mut command, request.limits.as_ref()) {
+        return Err(spawn_failure(
+            start,
+            format!("Failed to spawn: invalid resource limits: {reason}"),
+        ));
+    }
+
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            return Err(SubprocessResult {
-                success: false,
-                stdout: String::new(),
-                stderr: format!("Failed to spawn: {e}"),
-                exit_code: -1,
-                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-                pid: 0,
-                timed_out: false,
-            })
-        }
+        Err(e) => return Err(spawn_failure(start, format!("Failed to spawn: {e}"))),
     };
     let pid = child.id();
 
@@ -226,6 +236,129 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
         start,
         timeout,
     })
+}
+
+fn spawn_failure(start: Instant, reason: impl Into<String>) -> SubprocessResult {
+    SubprocessResult {
+        success: false,
+        stdout: String::new(),
+        stderr: reason.into(),
+        exit_code: -1,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+        pid: 0,
+        timed_out: false,
+    }
+}
+
+/// Validate subprocess resource limits without changing process state.
+///
+/// This checks platform support, finite representation, and the current
+/// process's hard limit. It does not install any limit.
+pub fn validate_subprocess_limits(limits: Option<&SubprocessLimits>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        validated_max_open_files(limits).map(|_| ())
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) {
+            return Err(format!(
+                "max_open_files {max_open_files} is unsupported on this platform"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Validate and attach subprocess resource limits to `command`.
+///
+/// On Unix the limits are installed in a `pre_exec` hook. A failure to install
+/// them aborts the spawn, so callers cannot accidentally run without the
+/// configured cap. Unsupported or invalid limits are rejected immediately.
+pub fn configure_subprocess_limits(
+    command: &mut process::Command,
+    limits: Option<&SubprocessLimits>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let max_open_files = validated_max_open_files(limits)?;
+        if let Some(max_open_files) = max_open_files {
+            unsafe {
+                command.pre_exec(move || {
+                    let limit = libc::rlimit {
+                        rlim_cur: max_open_files,
+                        rlim_max: max_open_files,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        validate_subprocess_limits(limits)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validated_max_open_files(
+    limits: Option<&SubprocessLimits>,
+) -> Result<Option<libc::rlim_t>, String> {
+    let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) else {
+        return Ok(None);
+    };
+    let max_open_files: libc::rlim_t = max_open_files.try_into().map_err(|_| {
+        format!("max_open_files {max_open_files} cannot be represented on this platform")
+    })?;
+    if max_open_files == libc::RLIM_INFINITY {
+        return Err("max_open_files must be finite".to_string());
+    }
+
+    let mut parent_limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut parent_limit) } != 0 {
+        return Err(format!(
+            "failed to inspect parent RLIMIT_NOFILE: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if parent_limit.rlim_max != libc::RLIM_INFINITY && max_open_files > parent_limit.rlim_max {
+        return Err(format!(
+            "max_open_files {max_open_files} exceeds parent hard limit {}",
+            parent_limit.rlim_max
+        ));
+    }
+
+    Ok(Some(max_open_files))
+}
+
+#[cfg(all(test, not(unix)))]
+mod resource_limit_tests {
+    use super::*;
+
+    #[test]
+    fn configured_open_file_limit_is_refused() {
+        let limits = SubprocessLimits {
+            max_open_files: Some(64),
+        };
+
+        let error = validate_subprocess_limits(Some(&limits)).unwrap_err();
+
+        assert!(error.contains("unsupported"), "{error}");
+
+        let mut command = process::Command::new("unused");
+        let error = configure_subprocess_limits(&mut command, Some(&limits)).unwrap_err();
+        assert!(error.contains("unsupported"), "{error}");
+    }
 }
 
 /// Run a subprocess synchronously and return structured results.
@@ -461,6 +594,7 @@ fn do_exec(
             .collect(),
         stdin_data: stdin_data.map(|s| s.to_string()),
         timeout,
+        limits: None,
     });
     serde_json::json!({
         "success": r.success, "stdout": r.stdout, "stderr": r.stderr,
