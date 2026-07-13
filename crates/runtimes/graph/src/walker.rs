@@ -6234,6 +6234,139 @@ config:
         assert!(r3.success);
     }
 
+    const FOLLOW_FANOUT_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fan
+  nodes:
+    fan:
+      follow: true
+      over: "${state.jobs}"
+      as: job
+      parallel: true
+      max_concurrency: 2
+      collect: gathered
+      facets: {lane: "${job.lane}"}
+      action:
+        item_id: "directive:${job.kind}"
+        params: {value: "${job.value}", run: "${_run.graph_run_id}"}
+      assign: {last_success: "${job.value}"}
+      on_error: recover
+      next: {type: unconditional, to: done}
+    recover:
+      node_type: return
+    done:
+      node_type: return
+"#;
+
+    fn fanout_resume(items: Value, wrapper: Option<Value>) -> Value {
+        let pending = json!({
+            "follow_node": "fan", "step_count": 0, "graph_run_id": "gr-fan",
+            "iteration_snapshot": items,
+        });
+        let mut resume = json!({
+            "current_node": "fan", "step_count": 0,
+            "state": {"jobs": [{"kind":"mutated","value":99,"lane":"x"}]},
+            "graph_run_id": "gr-fan", "pending_follow": pending,
+        });
+        if let Some(value) = wrapper { resume["follow_result"] = value; }
+        json!({"resume_state": resume})
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_spawns_one_ordered_interpolated_cohort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], Some(tmp.path()));
+        let jobs = json!([
+            {"kind":"alpha","value":1,"lane":"red"},
+            {"kind":"beta","value":2,"lane":"blue"}
+        ]);
+        let result = w.execute(json!({"inject_state":{"jobs": jobs}}), Some("gr-fan".into())).await;
+        assert_eq!(result.status, "continued");
+        let requests = rec.recorded_follow_requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.graph_run_id, "gr-fan");
+        assert_eq!(request.follow_node, "fan");
+        assert_eq!(request.launch_window_width, Some(2));
+        let children = request.children.as_ref().expect("cohort children");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].item_ref, "directive:alpha");
+        assert_eq!(children[0].parameters, json!({"value":1,"run":"gr-fan"}));
+        assert_eq!(children[0].facets, Some(json!({"lane":"red"})));
+        assert_eq!(children[1].item_ref, "directive:beta");
+        let checkpoint: Value = serde_json::from_str(&std::fs::read_to_string(tmp.path().join("latest.json")).unwrap()).unwrap();
+        assert_eq!(checkpoint["pending_follow"]["iteration_snapshot"], jobs);
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_binds_item_before_interpolating_action() {
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w.execute(json!({"inject_state":{"jobs":[{"kind":"bound","value":7,"lane":"z"}]}}), Some("gr-fan".into())).await;
+        assert_eq!(result.status, "continued", "per-item templates must not fail before binding: {result:?}");
+        assert_eq!(rec.recorded_follow_requests()[0].children.as_ref().unwrap()[0].item_ref, "directive:bound");
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_empty_completes_without_spawn() {
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w.execute(json!({"inject_state":{"jobs":[]}}), Some("gr-fan".into())).await;
+        assert!(result.success);
+        assert_eq!(result.state["gathered"], json!([]));
+        assert!(rec.recorded_follow_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_bare_marker_redrives_same_key_from_snapshot() {
+        let snapshot = json!([{"kind":"original","value":1,"lane":"a"}]);
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w.execute(fanout_resume(snapshot, None), Some("outer-other".into())).await;
+        assert_eq!(result.status, "continued");
+        let request = &rec.recorded_follow_requests()[0];
+        assert_eq!(request.graph_run_id, "gr-fan");
+        assert_eq!(request.follow_node, "fan");
+        assert_eq!(request.children.as_ref().unwrap()[0].item_ref, "directive:original");
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_resume_collects_ordered_results_and_routes_errors() {
+        let snapshot = json!([
+            {"kind":"a","value":1,"lane":"a"},
+            {"kind":"b","value":2,"lane":"b"}
+        ]);
+        let wrapper = json!({
+            "fanout":true, "expected":2, "statuses":["completed","failed"],
+            "items":[
+                {"success":true,"status":"completed","result":{"ok":1},"cost":{"input_tokens":3,"output_tokens":1,"total_usd":0.1}},
+                {"success":false,"status":"error","result":{"error":"boom"},"cost":{"input_tokens":4,"output_tokens":0,"total_usd":0.2}}
+            ]
+        });
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w.execute(fanout_resume(snapshot, Some(wrapper)), Some("gr-fan".into())).await;
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.state["gathered"], json!([{"ok":1}, null]));
+        assert_eq!(result.state["last_success"], 1, "successful assign commits before on_error");
+        assert_eq!(result.cost.unwrap().input_tokens, 7);
+        assert!(rec.recorded_follow_requests().is_empty());
+        assert_eq!(rec.dispatch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_assign_failure_demotes_only_its_slot_and_malformed_wrapper_fails() {
+        let yaml = FOLLOW_FANOUT_YAML.replace("${job.value}", "${job.missing}");
+        let snapshot = json!([{"kind":"a","value":1,"lane":"a"}]);
+        let good = json!({"fanout":true,"expected":1,"statuses":["completed"],"items":[{"result":{"ok":1}}]});
+        let (w, _) = make_recording_walker(make_graph(&yaml), vec![], None);
+        let result = w.execute(fanout_resume(snapshot.clone(), Some(good)), Some("gr-fan".into())).await;
+        assert_eq!(result.state["gathered"], json!([null]));
+        let bad = json!({"fanout":true,"expected":2,"statuses":["completed"],"items":[{"result":1}]});
+        let strict_yaml = FOLLOW_FANOUT_YAML.replace("      on_error: recover\n", "");
+        let (w, _) = make_recording_walker(make_graph(&strict_yaml), vec![], None);
+        let result = w.execute(fanout_resume(snapshot, Some(bad)), Some("gr-fan".into())).await;
+        assert!(result.error.as_deref().unwrap_or_default().contains("cardinality"));
+    }
+
     /// Assert the R3 fence order for an action-success step:
     /// graph_step_started → tool_call_start → tool_call_result → graph_step_completed
     /// followed (on advance) by checkpoint, and finally GraphCompleted on terminal.
