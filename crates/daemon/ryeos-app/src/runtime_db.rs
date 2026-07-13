@@ -241,7 +241,8 @@ CREATE TABLE IF NOT EXISTS launch_window (
     window_key TEXT NOT NULL,
     width INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL,
-    launched_at_ms INTEGER
+    launched_at_ms INTEGER,
+    cancelled_at_ms INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_launch_window_key
@@ -598,6 +599,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: false,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "cancelled_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],
@@ -672,6 +679,14 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
     }
     if !columns.iter().any(|c| c == "expected_children") {
         tx.execute_batch("ALTER TABLE follow_waiter ADD COLUMN expected_children INTEGER NOT NULL DEFAULT 1")?;
+    }
+    let launch_columns = {
+        let mut stmt = tx.prepare("PRAGMA table_info(launch_window)")?;
+        stmt.query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !launch_columns.iter().any(|c| c == "cancelled_at_ms") {
+        tx.execute_batch("ALTER TABLE launch_window ADD COLUMN cancelled_at_ms INTEGER")?;
     }
     let legacy = {
         let mut stmt = tx.prepare(
@@ -1694,7 +1709,7 @@ impl RuntimeDb {
                 .conn
                 .query_row(
                     "SELECT child_chain_root_id, width FROM launch_window
-                     WHERE window_key = ?1 AND launched_at_ms IS NULL
+                     WHERE window_key = ?1 AND launched_at_ms IS NULL AND cancelled_at_ms IS NULL
                      ORDER BY rowid ASC LIMIT 1",
                     params![window_key],
                     |r| Ok((r.get(0)?, r.get(1)?)),
@@ -1749,13 +1764,14 @@ impl RuntimeDb {
 
     /// Remove exactly the requested members that are still queued. This is used
     /// by cancellation and intentionally does not admit replacements.
-    pub fn launch_window_remove_queued(&mut self, chain_roots: &[String]) -> Result<Vec<String>> {
+    pub fn launch_window_cancel_queued(&mut self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
         let tx = self.conn.transaction()?;
         let mut removed = Vec::new();
         for root in chain_roots {
             if tx.execute(
-                "DELETE FROM launch_window WHERE child_chain_root_id = ?1 AND launched_at_ms IS NULL",
-                params![root],
+                "UPDATE launch_window SET cancelled_at_ms = ?2
+                 WHERE child_chain_root_id = ?1 AND launched_at_ms IS NULL AND cancelled_at_ms IS NULL",
+                params![root, now_ms],
             )? != 0
             {
                 removed.push(root.clone());
@@ -1763,6 +1779,17 @@ impl RuntimeDb {
         }
         tx.commit()?;
         Ok(removed)
+    }
+
+    pub fn launch_window_cancelled_members(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT child_chain_root_id FROM launch_window WHERE cancelled_at_ms IS NOT NULL ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    pub fn launch_window_discard_member(&self, chain_root: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM launch_window WHERE child_chain_root_id = ?1", params![chain_root])?;
+        Ok(())
     }
 
     /// Whether this chain is a window member deliberately awaiting admission
@@ -1813,7 +1840,7 @@ impl RuntimeDb {
     /// Every window key with queued members — sweep admission input.
     pub fn launch_window_keys_with_queue(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT window_key FROM launch_window WHERE launched_at_ms IS NULL",
+            "SELECT DISTINCT window_key FROM launch_window WHERE launched_at_ms IS NULL AND cancelled_at_ms IS NULL",
         )?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         let mut out = Vec::new();

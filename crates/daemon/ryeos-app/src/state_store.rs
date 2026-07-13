@@ -2366,6 +2366,12 @@ impl StateStore {
             .launch_window_admit(window_key, global_live_limit, now_ms)
     }
 
+    /// Repair membership without admitting it; used when launch metadata proves
+    /// the child was originally windowed but the membership write was lost.
+    pub fn launch_window_insert_only(&self, child_chain_root_id: &str, window_key: &str, width: u32, now_ms: i64) -> Result<()> {
+        self.lock()?.runtime_db.launch_window_insert(child_chain_root_id, window_key, width, now_ms)
+    }
+
     /// Release a window slot for a chain that reached a hard terminal and
     /// admit the window's next queued members (returned for launching).
     pub fn launch_window_release(
@@ -2384,9 +2390,17 @@ impl StateStore {
         g.runtime_db.launch_window_is_queued(child_chain_root_id)
     }
 
-    pub fn launch_window_remove_queued(&self, chain_roots: &[String]) -> Result<Vec<String>> {
+    pub fn launch_window_cancel_queued(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
         let mut g = self.lock()?;
-        g.runtime_db.launch_window_remove_queued(chain_roots)
+        g.runtime_db.launch_window_cancel_queued(chain_roots, now_ms)
+    }
+
+    pub fn list_cancelled_window_members(&self) -> Result<Vec<String>> {
+        self.lock()?.runtime_db.launch_window_cancelled_members()
+    }
+
+    pub fn discard_window_member(&self, chain_root: &str) -> Result<()> {
+        self.lock()?.runtime_db.launch_window_discard_member(chain_root)
     }
 
     pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {

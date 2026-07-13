@@ -702,7 +702,19 @@ fn waiting_follow_action(
       match state.state_store.get_thread(child_id)? {
         // Pre-launch window: the child provably never launched.
         Some(child) if is_pending_follow_child(state, &child)
-            && !state.state_store.launch_window_is_queued(&slot.child_chain_root_id)? => {
+            && state.state_store.launch_window_is_queued(&slot.child_chain_root_id)? => {}
+        Some(child) if is_pending_follow_child(state, &child) => {
+            if let Some(window) = state.state_store.get_launch_metadata(child_id)?
+                .and_then(|m| m.follow_launch_window)
+            {
+                state.state_store.launch_window_insert_only(
+                    &slot.child_chain_root_id, &window.key, window.width,
+                    lillux::time::timestamp_millis(),
+                )?;
+                tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id,
+                    "repaired missing follow launch-window membership");
+                continue;
+            }
             tracing::info!(
                 follow_key = %w.follow_key,
                 child_thread_id = %child_id,
@@ -733,7 +745,14 @@ fn waiting_follow_action(
         }
       }
     }
-    if resume { actions.push(FollowReconcileAction::Resume { follow_key: w.follow_key.clone() }); }
+    if resume {
+        if let Some(reloaded) = state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
+            if matches!(reloaded.phase.as_str(), ryeos_app::runtime_db::follow_phase::READY | ryeos_app::runtime_db::follow_phase::RESUMING) {
+                return Ok(vec![FollowReconcileAction::Resume { follow_key: w.follow_key.clone() }]);
+            }
+        }
+        actions.push(FollowReconcileAction::Resume { follow_key: w.follow_key.clone() });
+    }
     Ok(actions)
 }
 

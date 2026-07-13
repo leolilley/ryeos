@@ -532,6 +532,7 @@ async fn main() -> Result<()> {
     // Follow reconcile actions collected here, dispatched post-listener too: a
     // resumed parent's (or relaunched child's) first callback must not precede a
     // bound listener.
+    ryeos_app::cascade::repair_cancelled_window_members(&app_state)?;
     let follow_actions = reconcile::reconcile_follow(&app_state)?;
 
     // Scheduler reload channel — must be created BEFORE the router is built
@@ -764,6 +765,9 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
+                if let Err(err) = ryeos_app::cascade::repair_cancelled_window_members(&st) {
+                    tracing::warn!(error = %err, "cancelled launch-window repair failed");
+                }
                 match reconcile::reconcile_follow(&st) {
                     Ok(actions) => dispatch_follow_actions(&st, actions),
                     Err(err) => {

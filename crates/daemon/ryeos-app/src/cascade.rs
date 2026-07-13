@@ -75,24 +75,47 @@ pub fn cascade_descendants(
 }
 
 /// Cancel durable descendants that have not yet been admitted. Membership is
-/// removed as one store operation before lifecycle finalization, preventing any
-/// of them from being launched (and deliberately admitting no replacements).
+/// tombstoned as one store operation before lifecycle finalization, preventing
+/// admission across crashes (and deliberately admitting no replacements).
 pub fn cancel_queued_descendants(state: &AppState, root_thread_id: &str) -> anyhow::Result<Vec<String>> {
     let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
-    let removed = state.state_store.launch_window_remove_queued(&descendants)?;
+    let removed = state.state_store.launch_window_cancel_queued(&descendants, lillux::time::timestamp_millis())?;
     for chain_root in &removed {
-        let Some(thread) = state.state_store.get_thread(chain_root)? else { continue };
-        if crate::state_store::is_terminal_status(&thread.status) { continue; }
-        state.threads.finalize_thread(&ThreadFinalizeParams {
+        let Some(thread) = state.state_store.get_thread(chain_root)? else {
+            state.state_store.discard_window_member(chain_root)?;
+            continue;
+        };
+        if !crate::state_store::is_terminal_status(&thread.status) {
+            state.threads.finalize_thread(&ThreadFinalizeParams {
             thread_id: thread.thread_id,
             status: "cancelled".to_string(),
             outcome_code: Some("cancelled".to_string()),
             result: None,
             error: Some(json!({"reason": "ancestor_cancelled_before_launch"})),
             metadata: None, artifacts: Vec::new(), final_cost: None, summary_json: None,
-        })?;
+            })?;
+        }
+        state.state_store.discard_window_member(chain_root)?;
     }
     Ok(removed)
+}
+
+pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
+    for root in state.state_store.list_cancelled_window_members()? {
+        let Some(thread) = state.state_store.get_thread(&root)? else {
+            state.state_store.discard_window_member(&root)?;
+            continue;
+        };
+        if !crate::state_store::is_terminal_status(&thread.status) {
+            state.threads.finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread.thread_id, status: "cancelled".into(), outcome_code: Some("cancelled".into()),
+                result: None, error: Some(json!({"reason":"ancestor_cancelled_before_launch"})), metadata: None,
+                artifacts: Vec::new(), final_cost: None, summary_json: None,
+            })?;
+        }
+        state.state_store.discard_window_member(&root)?;
+    }
+    Ok(())
 }
 
 /// Signal one thread's process group per `mode`, resolving its CURRENT pgid at
