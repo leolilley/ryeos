@@ -59,5 +59,5 @@ pub use projection::{
 };
 pub use refs::{verify_signed_ref, GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;
-pub use state_db::StateDb;
+pub use state_db::{CommittedWrite, ProjectionStatus, StateDb};
 pub use sync::ImportAttribution;

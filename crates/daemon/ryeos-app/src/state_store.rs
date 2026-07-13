@@ -12,12 +12,23 @@ use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
-use ryeos_state::StateDb;
+use ryeos_state::{CommittedWrite, ProjectionStatus, StateDb};
 use ryeos_state::UsageSubject;
 
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
+
+fn committed_value<T>(write: CommittedWrite<T>) -> T {
+    if let ProjectionStatus::Stale { operation, error } = &write.projection {
+        tracing::warn!(
+            operation,
+            error,
+            "authoritative state committed; projection will be repaired"
+        );
+    }
+    write.value
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -367,9 +378,10 @@ fn append_events_locked(
 
     if !durable_events.is_empty() {
         let te = convert_events(&durable_events, chain_root_id, thread_id);
-        let result =
+        let result = committed_value(
             g.state_db
-                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?;
+                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?,
+        );
         for (idx, record) in durable_indices
             .into_iter()
             .zip(persisted_from_append(&result, &durable_events))
@@ -479,11 +491,17 @@ impl StateStore {
         let snapshot = build_snapshot(thread);
 
         if thread.thread_id == thread.chain_root_id {
-            g.state_db
-                .create_chain(&thread.thread_id, snapshot, g.signer.as_ref())?;
+            committed_value(g.state_db.create_chain(
+                &thread.thread_id,
+                snapshot,
+                g.signer.as_ref(),
+            )?);
         } else {
-            g.state_db
-                .add_thread(&thread.chain_root_id, snapshot, g.signer.as_ref())?;
+            committed_value(g.state_db.add_thread(
+                &thread.chain_root_id,
+                snapshot,
+                g.signer.as_ref(),
+            )?);
         }
 
         g.runtime_db
@@ -518,13 +536,13 @@ impl StateStore {
             &thread.chain_root_id,
             &thread.thread_id,
         );
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread.chain_root_id,
             &thread.thread_id,
             te,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         Ok(persisted_from_append(&result, &[create_event]))
     }
@@ -574,12 +592,12 @@ impl StateStore {
         };
         let events_to_append = vec![create_event, branch_event];
         let te = convert_events(&events_to_append, &thread.chain_root_id, &thread.thread_id);
-        let result = g.state_db.add_thread_with_events(
+        let result = committed_value(g.state_db.add_thread_with_events(
             &thread.chain_root_id,
             build_snapshot(thread),
             te,
             g.signer.as_ref(),
-        )?;
+        )?);
 
         g.runtime_db
             .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
@@ -671,13 +689,13 @@ impl StateStore {
             &thread_row.chain_root_id,
             thread_id,
         );
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![snapshot_update],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         Ok(persisted_from_append(&result, &[event]))
     }
@@ -830,13 +848,13 @@ impl StateStore {
         });
 
         let te = convert_events(&events_to_append, &thread_row.chain_root_id, thread_id);
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![snapshot_update],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         Ok(persisted_from_append(&result, &events_to_append))
     }
@@ -942,8 +960,11 @@ impl StateStore {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        g.state_db
-            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+        committed_value(g.state_db.add_thread(
+            chain_root_id,
+            successor_snapshot,
+            g.signer.as_ref(),
+        )?);
 
         g.runtime_db
             .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
@@ -965,13 +986,13 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events(
             chain_root_id,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -988,13 +1009,13 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
@@ -1173,8 +1194,11 @@ impl StateStore {
 
         // State-db successor snapshot (creates the upstream edge).
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        g.state_db
-            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+        committed_value(g.state_db.add_thread(
+            chain_root_id,
+            successor_snapshot,
+            g.signer.as_ref(),
+        )?);
 
         // Settle the source to `continued` (running by the check above) in the
         // same append as its `thread_continued` event — the final state change.
@@ -1228,7 +1252,7 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events(
             chain_root_id,
             source_thread_id,
             ste,
@@ -1237,7 +1261,7 @@ impl StateStore {
                 new_snapshot: source_snapshot,
             }],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -1253,13 +1277,13 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
@@ -1401,8 +1425,11 @@ impl StateStore {
         }
 
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        g.state_db
-            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+        committed_value(g.state_db.add_thread(
+            chain_root_id,
+            successor_snapshot,
+            g.signer.as_ref(),
+        )?);
 
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
@@ -1418,13 +1445,13 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events(
             chain_root_id,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -1440,13 +1467,13 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
@@ -1612,13 +1639,13 @@ impl StateStore {
             &thread_row.chain_root_id,
             thread_id,
         );
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let persisted = persisted_from_append(&result, &[event]);
 
