@@ -324,7 +324,6 @@ pub(crate) fn resolve_dispatch_hop(
     // **P1.1**: extract thread_profile from the schema's execution
     // block at every hop — even non-terminator hops. The dispatch loop
     // captures this from the first hop as the root subject profile.
-    
 
     let schema = ctx.engine.kinds.get(&schema_kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();

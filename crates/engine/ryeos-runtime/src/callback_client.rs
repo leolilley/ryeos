@@ -683,10 +683,10 @@ impl CallbackClient {
     ///
     /// `tool` is the canonical ref (e.g. `apps_tv_tracker_workspace_render_chart`)
     /// so SSE consumers can route results without cross-referencing tool_call_start.
-        // Wire-shaped: each argument is one field of the emitted result
+    // Wire-shaped: each argument is one field of the emitted result
     // envelope; eight call sites pass them positionally today.
     #[allow(clippy::too_many_arguments)]
-pub async fn emit_tool_result(
+    pub async fn emit_tool_result(
         &self,
         call_id: &str,
         tool: &str,

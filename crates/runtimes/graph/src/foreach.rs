@@ -106,9 +106,8 @@ struct RetryEventCtx {
 /// walker step (they do NOT consume walker steps and are not individually
 /// checkpointed); each item keeps its own attempt count. Every re-attempt
 /// emits a braid-visible `graph_node_retry` event, then sleeps the backoff.
-// Execution plumbing: each argument is a distinct leg of the thread's
-// auth/provenance context, threaded verbatim — a struct would rename,
-// not simplify. Restructure with a compiler in the loop, not here.
+// Retry plumbing: the policy, backoff, and per-item event context for one
+// dispatch attempt, threaded verbatim from the foreach loop.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_item_with_retry(
     client: &CallbackClient,

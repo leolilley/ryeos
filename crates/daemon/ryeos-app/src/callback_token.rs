@@ -105,10 +105,10 @@ impl CallbackCapabilityStore {
         )
     }
 
-        // One argument per capability field; eleven call sites across five
+    // One argument per capability field; eleven call sites across five
     // crates bind them positionally — restructure with a compiler, not here.
     #[allow(clippy::too_many_arguments)]
-pub fn generate_with_context(
+    pub fn generate_with_context(
         &self,
         thread_id: &str,
         project_path: PathBuf,

@@ -226,10 +226,7 @@ impl TryFrom<FieldTypeRaw> for FieldType {
                 }
 
                 // Recursively validate nested FieldTypeRaw -> FieldType
-                let nested_contract = contract
-                    .map(Box::new)
-                    .map(Ok::<Box<ValueShape>, String>)
-                    .transpose()?;
+                let nested_contract = contract.map(Box::new);
                 let element_type = elements
                     .map(|e| FieldType::try_from(*e).map(Box::new))
                     .transpose()?;

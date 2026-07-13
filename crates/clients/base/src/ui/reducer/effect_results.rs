@@ -1003,6 +1003,48 @@ mod tests {
     }
 
     #[test]
+    fn facet_write_evicts_prior_section_data_for_subscribed_views() {
+        // The counterpart guard to keeps-prior above: a facet write means
+        // the SUBJECT changed, and the old subject's sections must never
+        // render underneath the new selection — even if the refetch is
+        // skipped or fails.
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "sections",
+                "refresh": { "on_facet": "selection" },
+                "sections": [
+                    { "title": "A", "source": { "ref": "service:a" }, "projection": {} },
+                    { "title": "B", "source": { "ref": "service:b" }, "projection": {} }
+                ]
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/detail".to_string(),
+        });
+        let key = tile_id.0.to_string();
+        let k0 = crate::ui::content::section_source_key(&key, 0);
+        let k1 = crate::ui::content::section_source_key(&key, 1);
+        core.data
+            .sources
+            .insert(k0.clone(), serde_json::json!({ "stale": "A" }));
+        core.data
+            .sources
+            .insert(k1.clone(), serde_json::json!({ "stale": "B" }));
+
+        let effects = core.effects_for_facet("selection");
+
+        assert!(
+            core.data.sources.get(&k0).is_none(),
+            "old subject's section payload must not survive a facet write"
+        );
+        assert!(core.data.sources.get(&k1).is_none());
+        assert_eq!(effects.len(), 2, "one fresh fetch per section");
+    }
+
+    #[test]
     fn open_project_effect_result_rebinds_session_and_reloads() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {

@@ -1045,7 +1045,6 @@ fn dock_tile_vm(
         core.focus_target(),
         super::model::RyeOsFocusTarget::Dock { edge: focused } if focused == edge
     );
-    let (cursor, collapsed, expanded_rows, changed_rows) = dock_selected_state(core, &source_key);
     Some(RyeOsDockTileVm {
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
@@ -1054,7 +1053,7 @@ fn dock_tile_vm(
         view: bound_view_vm_keyed(
             core,
             &source_key,
-            (cursor, collapsed, expanded_rows, changed_rows),
+            dock_selected_state(core, &source_key),
             view_ref,
             &core.ui.atlas,
         ),
@@ -1062,14 +1061,17 @@ fn dock_tile_vm(
     })
 }
 
-type RowStateRefs<'a> = (
-    Option<usize>,
-    Option<&'a std::collections::BTreeSet<usize>>,
-    Option<&'a std::collections::BTreeSet<String>>,
-    Option<&'a std::collections::BTreeMap<String, u64>>,
-);
+/// Per-instance row-local UI state a bound view projects with — named
+/// fields so the two BTreeSet-shaped members can't be transposed.
+#[derive(Clone, Copy, Default)]
+struct RowLocalState<'a> {
+    cursor: Option<usize>,
+    collapsed: Option<&'a std::collections::BTreeSet<usize>>,
+    expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
+    changed_rows: Option<&'a std::collections::BTreeMap<String, u64>>,
+}
 
-fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowStateRefs<'a> {
+fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalState<'a> {
     match core.ui.dock_local.get(source_key) {
         Some(crate::workspace::ViewLocalState::GenericList {
             cursor,
@@ -1077,13 +1079,13 @@ fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowStateRef
             expanded_rows,
             changed_rows,
             ..
-        }) => (
-            Some(*cursor),
-            Some(collapsed),
-            Some(expanded_rows),
-            Some(changed_rows),
-        ),
-        _ => (None, None, None, None),
+        }) => RowLocalState {
+            cursor: Some(*cursor),
+            collapsed: Some(collapsed),
+            expanded_rows: Some(expanded_rows),
+            changed_rows: Some(changed_rows),
+        },
+        _ => RowLocalState::default(),
     }
 }
 
@@ -1103,12 +1105,12 @@ fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsView
     bound_view_vm_keyed(
         core,
         &tile_id.0.to_string(),
-        (
-            selected_cursor(core, tile_id),
-            selected_collapsed(core, tile_id),
+        RowLocalState {
+            cursor: selected_cursor(core, tile_id),
+            collapsed: selected_collapsed(core, tile_id),
             expanded_rows,
             changed_rows,
-        ),
+        },
         view_ref,
         core.tile_atlas_state(tile_id),
     )
@@ -1117,11 +1119,16 @@ fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsView
 fn bound_view_vm_keyed(
     core: &RyeOsCore,
     source_key: &str,
-    local: RowStateRefs<'_>,
+    local: RowLocalState<'_>,
     view_ref: &str,
     atlas: &crate::atlas::AtlasUiStateVm,
 ) -> RyeOsViewVm {
-    let (cursor, collapsed, expanded_rows, changed_rows) = local;
+    let RowLocalState {
+        cursor,
+        collapsed,
+        expanded_rows,
+        changed_rows,
+    } = local;
     let Some(binding) = core.views.get(view_ref) else {
         return RyeOsViewVm::Placeholder {
             title: view_ref.to_string(),
