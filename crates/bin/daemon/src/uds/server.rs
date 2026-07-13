@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use tokio::net::UnixListener;
 
@@ -22,7 +22,10 @@ use ryeos_app::thread_lifecycle::{
     ThreadMarkRunningParams,
 };
 
+mod routing;
 mod transport;
+
+pub(crate) use routing::dispatch;
 
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
     loop {
@@ -49,57 +52,6 @@ fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(filtered)
         }
         other => other.clone(),
-    }
-}
-
-pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
-    match request.method.as_str() {
-        // ── daemon health (lightweight, only ungated method) ─────────
-        "system.health" => {
-            let thread_projection = state.state_store.projection_health_snapshot();
-            let status = if thread_projection.status
-                == ryeos_app::projection_health::ThreadProjectionState::Current
-            {
-                "ok"
-            } else {
-                "degraded"
-            };
-            RpcResponse::ok(request.request_id, json!({
-                "status": status,
-                "thread_projection": thread_projection,
-            }))
-        }
-
-        // ── local lifecycle control (local UDS only, no public HTTP surface) ─
-        "lifecycle.status" => RpcResponse::ok(
-            request.request_id,
-            json!({
-                "status": "running",
-                "pid": std::process::id(),
-                "version": env!("CARGO_PKG_VERSION"),
-                "started_at": &state.started_at_iso,
-                "bind": state.config.bind.to_string(),
-                "uds_path": state.config.uds_path.display().to_string(),
-                "app_root": state.config.app_root.display().to_string(),
-                "thread_projection": state.state_store.projection_health_snapshot(),
-            }),
-        ),
-        "lifecycle.shutdown" => {
-            crate::request_shutdown();
-            RpcResponse::ok(request.request_id, json!({ "accepted": true }))
-        }
-
-        // ── runtime callbacks (token-gated, used by runtimes) ───────
-        other if other.starts_with("runtime.") => rpc_result(
-            request.request_id,
-            dispatch_runtime_method(other, &request.params, state).await,
-        ),
-
-        other => RpcResponse::err(
-            request.request_id,
-            "unknown_method",
-            format!("unknown rpc method: {other}"),
-        ),
     }
 }
 
@@ -887,16 +839,6 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     serde_json::to_value(facets_map).context("failed to encode facets")
-}
-
-fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {
-    match result {
-        Ok(value) => RpcResponse::ok(request_id, value),
-        // `{:#}` walks the anyhow cause chain, so a deep failure (e.g. a serde
-        // decode error under "invalid <method> params") surfaces its root cause
-        // to the caller instead of only the top-level context line.
-        Err(err) => RpcResponse::err(request_id, "request_failed", format!("{err:#}")),
-    }
 }
 
 #[cfg(test)]
