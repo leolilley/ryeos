@@ -104,6 +104,19 @@ pub struct RuntimeLaunchMetadata {
     /// OR native-resume launches. `None` for threads that are neither.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_context: Option<ResumeContext>,
+
+    /// Validated parent execution seed used when a detached follow child is
+    /// admitted later, after the live callback context is gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_parent_context: Option<PersistedParentExecutionContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistedParentExecutionContext {
+    pub parent_thread_id: String,
+    pub hard_limits: serde_json::Value,
+    pub depth: u32,
 }
 
 impl Default for RuntimeLaunchMetadata {
@@ -114,6 +127,7 @@ impl Default for RuntimeLaunchMetadata {
             native_resume: None,
             checkpoint_dir: None,
             resume_context: None,
+            follow_parent_context: None,
         }
     }
 }
@@ -277,6 +291,7 @@ impl RuntimeLaunchMetadata {
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
+            follow_parent_context: None,
         }
     }
 
@@ -289,6 +304,7 @@ impl RuntimeLaunchMetadata {
             && self.native_resume.is_none()
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
+            && self.follow_parent_context.is_none()
     }
 
     /// Set the daemon-allocated checkpoint directory.
@@ -392,6 +408,7 @@ mod tests {
             native_resume: None,
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
+            follow_parent_context: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();

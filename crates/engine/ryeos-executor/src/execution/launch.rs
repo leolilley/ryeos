@@ -2529,13 +2529,21 @@ async fn launch_claimed_follow_child(
             thread.chain_root_id
         )));
     }
-    let identity = state
+    let metadata = state
         .state_store
         .get_launch_metadata(&thread_id)?
-        .and_then(|m| m.resume_context)
         .ok_or_else(|| {
             anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
         })?;
+    let persisted_parent_context = metadata.follow_parent_context.map(|p| crate::dispatch::ParentExecutionContext {
+        parent_thread_id: p.parent_thread_id,
+        hard_limits: p.hard_limits,
+        depth: p.depth,
+    });
+    let identity = metadata.resume_context.ok_or_else(|| {
+        anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
+    })?;
+    let parent_context = parent_context.or(persisted_parent_context);
 
     let mut params =
         crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
@@ -3082,6 +3090,29 @@ pub async fn launch_follow_resume_successor(
     }
 }
 
+fn follow_resume_payload(fanout: bool, envelopes: Vec<Value>) -> Value {
+    if !fanout {
+        return envelopes.into_iter().next().unwrap_or(Value::Null);
+    }
+    let statuses: Vec<String> = envelopes.iter().map(|envelope| {
+        if envelope.get("success").and_then(Value::as_bool) == Some(true)
+            && envelope.get("status").and_then(Value::as_str) == Some("completed") {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        }
+    }).collect();
+    let failed = statuses.iter().filter(|status| status.as_str() == "failed").count();
+    let expected = envelopes.len();
+    json!({
+        "fanout": true,
+        "items": envelopes,
+        "statuses": statuses,
+        "failed": failed,
+        "expected": expected,
+    })
+}
+
 async fn launch_follow_resume_claimed(
     state: &AppState,
     waiter: &ryeos_app::runtime_db::FollowWaiter,
@@ -3113,12 +3144,13 @@ async fn launch_follow_resume_claimed(
         return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
     }
 
-    let terminal_envelope = waiter.terminal_envelope.clone().ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "follow-resume: waiter {} has no terminal envelope",
-            waiter.follow_key
-        ))
-    })?;
+    let mut envelopes = Vec::with_capacity(waiter.expected_children as usize);
+    for index in 0..waiter.expected_children {
+        let child = state.state_store.get_follow_child(&waiter.follow_key, index)?
+            .ok_or_else(|| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume: missing child index {index}")))?;
+        envelopes.push(child.terminal_envelope.ok_or_else(|| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume: child index {index} has no terminal envelope")))?);
+    }
+    let terminal_envelope = follow_resume_payload(waiter.fanout, envelopes);
 
     // Mark resuming (ready→resuming; idempotent on resuming) BEFORE mutating the
     // successor's checkpoint, so a crash mid-resume is re-driven by reconcile.

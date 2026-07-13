@@ -67,12 +67,27 @@ pub struct SpawnFollowChildRequest {
     pub follow_node: String,
     pub step_count: i64,
     /// Canonical ref of the child item to launch.
-    pub child_item_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_item_ref: Option<String>,
     #[serde(default)]
     pub child_parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children: Option<Vec<FollowChildSpec>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_window_width: Option<u32>,
     /// Optional graph frontier id, recorded on the waiter for diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontier_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowChildSpec {
+    pub item_ref: String,
+    #[serde(default)]
+    pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
 }
 
 /// Terminal completion a runtime sends when it self-finalizes a thread.

@@ -332,14 +332,42 @@ impl CallbackClient {
             graph_run_id: graph_run_id.to_string(),
             follow_node: follow_node.to_string(),
             step_count,
-            child_item_ref: child_item_ref.to_string(),
+            child_item_ref: Some(child_item_ref.to_string()),
             child_parameters,
+            children: None,
+            launch_window_width: None,
             frontier_id,
         };
         client
             .spawn_follow_child(request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub async fn spawn_follow_children(
+        &self,
+        graph_run_id: &str,
+        follow_node: &str,
+        step_count: i64,
+        children: Vec<crate::callback::FollowChildSpec>,
+        launch_window_width: Option<u32>,
+        frontier_id: Option<String>,
+    ) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| anyhow::anyhow!(
+            "callback spawn_follow_children called without an inner UDS client (socket missing); the follow suspend cannot be recorded"
+        ))?;
+        client.spawn_follow_child(crate::callback::SpawnFollowChildRequest {
+            thread_id: self.thread_id.clone(),
+            project_path: self.project_path.clone(),
+            graph_run_id: graph_run_id.to_string(),
+            follow_node: follow_node.to_string(),
+            step_count,
+            child_item_ref: None,
+            child_parameters: Value::Null,
+            children: Some(children),
+            launch_window_width,
+            frontier_id,
+        }).await.map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
