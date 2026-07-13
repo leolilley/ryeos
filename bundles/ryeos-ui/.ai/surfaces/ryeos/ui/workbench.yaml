@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:93b5b7ba4aaca6613780324e0e8bfb33cb6d4c058d462c9639777e375a775ba3:MyeImrwOthnPyi9li+c5ptjmIaA0yZCpddxjWRuAXYLaqpu5+N6hSZqsDkpRu3OIHn3Mocl3BqTTip3ZJfmfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T01:54:18Z:faa4ccaaee6c94641f4358a49720eec2e980b99a42c435fcc9265613e5802666:ROmbSmzkOzg7CYxBWDiLp8XN+5bxHpzUlPc9GFyyCPLRrqp34pU5YstXSqF1z3YxRP0ToUF3q+McJXWrGJefDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
@@ -21,20 +21,26 @@ style:
   border: thin
 
 library:
-  - view:ryeos/graph/topology
-  - view:ryeos/atlas
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/projects/list
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
-  - view:ryeos/node/events
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/graph/topology
+      - view:ryeos/atlas
+      - view:ryeos/commands/grammar
 
 input:
   route:

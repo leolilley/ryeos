@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:18a1991738a6058d7834b6d292b3f92742a667da73a3f93cc2e35a0207560835:yrFurBhHAVGReR5g6PZR1mopzluNx4U0OiJNKC0Pr7ToutUZN0Q/7NbHdVk18AZk/7OxVUbyvA+r8wNro2yJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T01:54:18Z:1a784424cd85634a72089d6a8cf8adb19e5c4d16450d1bdacbfd6a42af33250e:Nn1kGtmNc5M9m/61i/rLeoklFOa5GdwrGjNYbqjRI2Gkdprv5bou3bfN0FZ56GQznBM5AeK+UiKqzXQhbx6FBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
 version: "1.0.0"
 description: Directive thread — watch and drive a single execution stream
@@ -25,13 +25,19 @@ style:
   border: thin
 
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/node/events
-  - view:ryeos/projects/list
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
 
 input:
   route:
