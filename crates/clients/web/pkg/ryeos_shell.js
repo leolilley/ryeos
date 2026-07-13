@@ -17,6 +17,8 @@ let latestDimension = null;
 let seatThreadId = null;
 let seatSynced = 0;
 let seatSyncing = false;
+let overlayOpenLastCommit = false;
+let overlayReturnFocus = null;
 
 export async function bootRyeOs(appRoot) {
   root = appRoot;
@@ -43,12 +45,19 @@ async function commit(envelope) {
   try {
     currentEnvelope = envelope;
     const focus = captureFocus(root);
+    const overlayOpen = (envelope.view_model?.overlays || []).length > 0;
+    if (overlayOpen && !overlayOpenLastCommit) overlayReturnFocus = focus;
     const scroll = captureTileScroll(root);
     renderDom(root, envelope.view_model, envelope.scene_model, dispatchUi, shellController());
     restoreTileScroll(root, scroll);
     revealSelectedRows(root);
     restoreFocus(root, focus);
-    if ((envelope.view_model?.overlays || []).length) {
+    if (!overlayOpen && overlayOpenLastCommit) {
+      restoreFocus(root, overlayReturnFocus);
+      overlayReturnFocus = null;
+    }
+    overlayOpenLastCommit = overlayOpen;
+    if (overlayOpen) {
       requestAnimationFrame(() => root?.querySelector("[data-ryeos-overlay-input]")?.focus());
     }
     for (const effect of envelope.effects || []) {
@@ -95,7 +104,7 @@ async function attachSeat(session, envelope) {
     seatSynced = currentEvents > seededEvents ? currentEvents : 0;
     return replayedEnvelope;
   } catch (error) {
-    console.warn("RyeOS RyeOs seat attach failed; continuing with local-only seat", error);
+    console.warn("RyeOS seat attach failed; continuing with local-only seat", error);
     seatThreadId = null;
     seatSynced = 0;
     return envelope;
@@ -127,7 +136,7 @@ async function syncSeatBraid() {
     });
     seatSynced = targetLen;
   } catch (error) {
-    console.warn("RyeOS RyeOs seat sync failed", error);
+    console.warn("RyeOS seat sync failed", error);
   } finally {
     seatSyncing = false;
     if (safeSeatEvents().length > seatSynced) void syncSeatBraid();
@@ -274,7 +283,7 @@ function attachBrowserEvents() {
     try {
       outcome = ryeos_key(key);
     } catch (error) {
-      console.warn("RyeOS RyeOs key handling failed", error);
+      console.warn("RyeOS key handling failed", error);
       return;
     }
     // An unhandled key (unbound, or Ctrl+C which is native copy in the browser)

@@ -121,6 +121,7 @@ function inputDock(inputVm, dispatchUi) {
   input.rows = 1;
   input.value = inputVm.text || "";
   input.placeholder = inputVm.placeholder || "type RyeOS input…";
+  input.setAttribute("aria-label", inputVm.route_label ? `Input for ${inputVm.route_label}` : "RyeOS input");
   input.spellcheck = false;
   input.autocomplete = "off";
   input.setAttribute("data-focus-key", "ryeos-input-dock");
@@ -140,6 +141,7 @@ function inputDock(inputVm, dispatchUi) {
   submit.type = "button";
   submit.disabled = !inputVm.submit_enabled;
   submit.textContent = "send";
+  submit.setAttribute("aria-label", "Send RyeOS input");
   submit.addEventListener("click", () => dispatchUi({ type: "submit_input" }));
   row.append(prompt, input, submit);
   wrap.append(meta, row);

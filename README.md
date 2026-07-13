@@ -195,6 +195,47 @@ refresh bundle artifacts by default. Use
 `scripts/pkg/install-local-direct.sh --populate` only when bundle-owned binaries,
 CAS manifests, or signed bundle outputs actually need to be regenerated.
 
+## Five-minute first run
+
+After installation, initialize the local system space and start the node:
+
+```bash
+ryeos init
+ryeos start
+ryeos node status
+```
+
+Open either operator surface from a project directory:
+
+```bash
+cd /path/to/project
+ryeos tui
+# or
+ryeos web
+```
+
+Run a signed example and inspect its durable thread:
+
+```bash
+ryeos execute directive:ryeos/examples/continuing_research
+ryeos thread list
+ryeos thread tail <thread-id>
+```
+
+To exercise the core recovery guarantee, stop and restart the node while the
+example is active, then inspect the same thread and its continuation chain:
+
+```bash
+ryeos stop
+ryeos start
+ryeos thread get <thread-id>
+ryeos thread chain <thread-id>
+```
+
+If startup fails, `ryeos node doctor` performs the offline lifecycle and state
+checks. The terminal and browser clients are projections over the same durable
+threads; closing either client does not cancel the underlying work.
+
 ## Using RyeOS from an AI client
 
 The MCP adapter is deliberately thin. It exposes one tool, `cli`, which invokes

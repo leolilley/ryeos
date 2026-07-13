@@ -130,7 +130,7 @@ body {
   white-space: pre;
 }
 
-/* RyeOS RyeOs ----------------------------------------------------------- */
+/* RyeOS ---------------------------------------------------------------- */
 .ryeos-app {
   min-height: 100vh;
   display: grid;
@@ -2473,3 +2473,17 @@ body,
 
 .ryeos-backdrop-text.accent { color: var(--ryeos-accent, #d65d0e); }
 .ryeos-backdrop-text.good { color: var(--ryeos-good, #8ec07c); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .ryeos-backdrop-dot,
+  .ryeos-backdrop-shard {
+    transition: none !important;
+  }
+}
