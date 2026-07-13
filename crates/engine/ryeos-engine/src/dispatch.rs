@@ -463,7 +463,7 @@ mod tests {
         .unwrap();
         EngineContext {
             app_root,
-            sandbox_enabled: true,
+            sandbox_enabled: false,
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),

@@ -12,11 +12,10 @@
 //!   1. A multi-node chain completes across several distinct successor threads,
 //!      each running exactly one node — the resume started from the copied
 //!      checkpoint cursor, not a cold restart that re-runs earlier nodes.
-//!   2. A per-step `retry` attempt counter survives a segment cut: a node that
-//!      fails, schedules a retry, and then gets cut mid-retry resumes with the
-//!      attempt count intact (it exhausts the remaining attempt rather than
-//!      restarting the whole policy). Asserted by counting `graph_node_retry`
-//!      events across the whole chain.
+//!   2. A deterministic dispatch rejection does not consume an authored retry
+//!      budget across a segment cut. Retry-count checkpoint restoration is
+//!      covered at the walker boundary where a retryable callback failure can
+//!      be injected deterministically.
 
 mod common;
 
@@ -90,12 +89,10 @@ config:
     Ok(())
 }
 
-/// A retry node whose dispatch always fails (the referenced tool is not
-/// authorized, so the callback is denied on every attempt) with
-/// `retry: {attempts: 2}` and `segment_steps: 1`. The first failed attempt
-/// schedules a retry and the segment budget then cuts BEFORE the second attempt,
-/// so the successor must resume the retry with the persisted count. `on_error`
-/// routes the exhausted node to a return node so the run terminates cleanly.
+/// A retry-decorated node whose dispatch is deterministically rejected because
+/// the referenced tool is not authorized. Authored retry budgets apply only to
+/// explicitly retryable failures, so this routes directly to `on_error` and the
+/// segment successor terminates cleanly without emitting a retry milestone.
 fn plant_retry_segment_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
@@ -283,7 +280,7 @@ async fn graph_segment_cuts_resume_across_multiple_continuations() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn graph_retry_attempt_count_survives_a_segment_cut() {
+async fn graph_nonretryable_failure_does_not_consume_retry_budget_across_segment_cut() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
@@ -316,28 +313,11 @@ async fn graph_retry_attempt_count_survives_a_segment_cut() {
         "the retry+segment chain must reach thread_completed; events={events:#?}"
     );
 
-    // EXACTLY ONE graph_node_retry across the WHOLE chain. The first attempt
-    // fails and schedules a retry (attempt 1/2) on the original thread; the
-    // segment budget then cuts before the second attempt. Because the attempt
-    // counter rode the checkpoint (schema v2), the successor resumes with the
-    // count and exhausts the single remaining attempt — it does NOT restart the
-    // policy and emit a second retry. A restart would produce >= 2.
+    // Authorization and authoring failures are deterministic. They must route
+    // through on_error without consuming the authored retry budget.
     let retries = count_event(&events, "graph_node_retry");
     assert_eq!(
-        retries, 1,
-        "the persisted retry attempt count must survive the segment cut — exactly one \
-         graph_node_retry across the chain; events={events:#?}"
-    );
-    let retry_event = events
-        .iter()
-        .find(|(_, ty, _)| ty == "graph_node_retry")
-        .expect("one retry event");
-    assert_eq!(
-        retry_event.2.get("attempt").and_then(|v| v.as_u64()),
-        Some(1)
-    );
-    assert_eq!(
-        retry_event.2.get("attempts").and_then(|v| v.as_u64()),
-        Some(2)
+        retries, 0,
+        "a non-retryable dispatch rejection must not emit graph_node_retry; events={events:#?}"
     );
 }

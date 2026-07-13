@@ -37,7 +37,7 @@ done
 signer_fingerprint="${signer_fingerprint^^}"
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-version="$($root/scripts/release/resolve-version.sh push "$tag" "")"
+version="$("$root"/scripts/release/resolve-version.sh push "$tag" "")"
 
 [[ "$(git -C "$root" cat-file -t "refs/tags/$tag" 2>/dev/null)" == tag ]] || {
     echo "AUR release: $tag must be an annotated signed tag" >&2
