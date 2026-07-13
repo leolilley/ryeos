@@ -777,7 +777,9 @@ impl ContinuationReasonMarker {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    /// Parse a reserved marker string; `None` for anything caller-supplied
+    /// (deliberately not `std::str::FromStr` — absence is the common case).
+    pub fn parse_marker(value: &str) -> Option<Self> {
         match value {
             "operator_follow_up" => Some(Self::OperatorFollowUp),
             "graph_follow_resume" => Some(Self::GraphFollowResume),
@@ -789,9 +791,13 @@ impl ContinuationReasonMarker {
     /// paths scrub these from caller-supplied reasons so a runtime cannot forge
     /// an operator reset or a depth-exempt follow edge.
     pub fn is_reserved_str(value: &str) -> bool {
-        Self::from_str(value).is_some()
+        Self::parse_marker(value).is_some()
     }
 }
+
+/// `(successor_thread_id, reason, request_fingerprint)` — the tuple
+/// [`continuation_edge`] yields.
+pub type ContinuationEdge = (String, Option<String>, Option<String>);
 
 /// The continuation EDGE on a source's `thread_continued` payload, if any:
 /// `(successor_thread_id, reason, request_fingerprint)`. The fingerprint is
@@ -802,7 +808,7 @@ impl ContinuationReasonMarker {
 pub fn continuation_edge(
     db: &ProjectionDb,
     thread_id: &str,
-) -> anyhow::Result<Option<(String, Option<String>, Option<String>)>> {
+) -> anyhow::Result<Option<ContinuationEdge>> {
     let payload: Option<Vec<u8>> = db
         .connection()
         .query_row(

@@ -194,6 +194,17 @@ pub(crate) fn fold_timeline(
     }
 }
 
+/// Borrowed view over the cached full-transcript arrays
+/// [`fold_timeline_window`] reads — the parallel per-entry slices built
+/// once per source (`RyeOsTimelineSourceCache`), never rescanned here.
+pub(crate) struct TimelineWindowInput<'a> {
+    pub entries: &'a [RyeOsTimelineEntryVm],
+    pub indents: &'a [u8],
+    pub sources: &'a [Option<TimelineEntrySource>],
+    pub sections: &'a [usize],
+    pub collapsible: &'a std::collections::BTreeSet<usize>,
+}
+
 /// Fold a render window around the selected visible entry, cloning only the
 /// entries the renderer can plausibly draw. This keeps transcript render cost
 /// bounded while preserving the cursor's distance-from-bottom semantics.
@@ -207,16 +218,19 @@ pub(crate) fn fold_timeline(
 /// there in each direction — never the full transcript length, no matter how
 /// long the thread is.
 pub(crate) fn fold_timeline_window(
-    full: &[RyeOsTimelineEntryVm],
-    full_indents: &[u8],
-    full_sources: &[Option<TimelineEntrySource>],
-    full_sections: &[usize],
-    collapsible: &std::collections::BTreeSet<usize>,
+    input: TimelineWindowInput<'_>,
     tail_entry: Option<RyeOsTimelineEntryVm>,
     collapsed: &std::collections::BTreeSet<usize>,
     cursor_from_bottom: usize,
     window: usize,
 ) -> FoldedTimelineWindow {
+    let TimelineWindowInput {
+        entries: full,
+        indents: full_indents,
+        sources: full_sources,
+        sections: full_sections,
+        collapsible,
+    } = input;
     let total = full.len() + tail_entry.is_some() as usize;
     // The live tail entry is never a `Separator` (a Block or a "working…"
     // Line), so it always extends the last real section rather than opening
@@ -617,9 +631,7 @@ pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelin
 }
 
 pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let Some(head) = core.seat.fold().input_route().thread else {
-        return None;
-    };
+    let head = core.seat.fold().input_route().thread?;
     // Streaming output for the head thread → render it with a trailing cursor.
     if let Some(buf) = core.data.live_delta.as_ref() {
         if !buf.text.is_empty() && buf.thread == head {

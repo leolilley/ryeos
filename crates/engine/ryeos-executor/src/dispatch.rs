@@ -332,7 +332,6 @@ pub(crate) fn resolve_dispatch_hop(
     // **P1.1**: extract thread_profile from the schema's execution
     // block at every hop — even non-terminator hops. The dispatch loop
     // captures this from the first hop as the root subject profile.
-    let thread_profile: Option<String>;
 
     let schema = ctx.engine.kinds.get(&schema_kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
@@ -354,7 +353,7 @@ pub(crate) fn resolve_dispatch_hop(
                 detail: "schema has no `execution:` block".into(),
             })?;
 
-    thread_profile = exec.thread_profile.as_ref().map(|tp| tp.name.clone());
+    let thread_profile: Option<String> = exec.thread_profile.as_ref().map(|tp| tp.name.clone());
 
     // **P1.4**: for runtime-kind refs, also look up the runtime
     // registry. This provides binary_ref, required_caps, and the
@@ -1013,6 +1012,10 @@ fn verified_loader_for_method_runtime(
     ))
 }
 
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_method(
     kind: &str,
     method_name: &str,
@@ -1285,13 +1288,13 @@ pub(crate) async fn dispatch_method(
         )
         .map_err(|e| DispatchError::Internal(e.into()))?;
         let subprocess_request = lillux::SubprocessRequest {
-                cmd: executor_path_str,
-                args: vec![],
-                cwd: Some(request.project_path.to_string_lossy().into_owned()),
-                envs,
-                stdin_data: Some(stdin_data),
-                timeout: 120.0,
-            };
+            cmd: executor_path_str,
+            args: vec![],
+            cwd: Some(request.project_path.to_string_lossy().into_owned()),
+            envs,
+            stdin_data: Some(stdin_data),
+            timeout: 120.0,
+        };
         let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
             subprocess_request,
             &state.config.app_root,
@@ -2017,13 +2020,13 @@ async fn dispatch_streaming_subprocess(
     )
     .map_err(|e| DispatchError::Internal(e.into()))?;
     let subprocess_request = lillux::SubprocessRequest {
-            cmd: executor_path_str,
-            args: vec![],
-            cwd: Some(request.project_path.to_string_lossy().into_owned()),
-            envs,
-            stdin_data: Some(stdin_data),
-            timeout: 120.0,
-        };
+        cmd: executor_path_str,
+        args: vec![],
+        cwd: Some(request.project_path.to_string_lossy().into_owned()),
+        envs,
+        stdin_data: Some(stdin_data),
+        timeout: 120.0,
+    };
     let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
         subprocess_request,
         &state.config.app_root,
@@ -3288,7 +3291,7 @@ metadata:
       key: name
 "##;
 
-    fn write_runtime_kind_schema(kinds_dir: &PathBuf) {
+    fn write_runtime_kind_schema(kinds_dir: &Path) {
         let runtime_dir = kinds_dir.join("runtime");
         fs::create_dir_all(&runtime_dir).unwrap();
         let signed =

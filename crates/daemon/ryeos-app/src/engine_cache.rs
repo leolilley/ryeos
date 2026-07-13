@@ -264,7 +264,7 @@ impl EngineCache {
         let mut slots = self.inner.slots.lock().unwrap();
 
         // Transition Building → Ready.
-        let (engine, user_temp) = build_result.map_err(|user_err| {
+        let (engine, user_temp) = build_result.inspect_err(|user_err| {
             // Remove slot so retry works.
             slots.remove(&key);
             // Signal waiters with the builder's failure detail so they
@@ -279,7 +279,6 @@ impl EngineCache {
                 }));
             }
             pending.done.notify_all();
-            user_err
         })?;
 
         // Remove our own Building slot BEFORE evicting for capacity so
@@ -784,15 +783,15 @@ mod tests {
                 let build_count = build_count.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let result = cache
+
+                    cache
                         .get_or_insert_with::<_, BuildWaitError>(key.clone(), || {
                             build_count.fetch_add(1, Ordering::SeqCst);
                             // Simulate slow build.
                             std::thread::sleep(Duration::from_millis(50));
                             Ok((eng.clone(), None))
                         })
-                        .unwrap();
-                    result
+                        .unwrap()
                 })
             })
             .collect();

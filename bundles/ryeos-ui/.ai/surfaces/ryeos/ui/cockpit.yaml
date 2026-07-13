@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:42c26311861a3ca045d55022b82d817e59e76b4c41223aac04cdc5f553c8b1bc:iZ8PE8jZwmAfa9g2SarWR9q1yskQ9ikyeNSlsYj/7BoYDtpEFSJZys/QJUbagVA3ImX2gAP012WYt8ycFJc4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T01:54:18Z:3c9aba1bf64c26037c8cb14381728e6de8cb28ed8c962bb4b07f25ac45f39eaa:NpGjLcXZjMm9jpsIksV9C1aqLzID0bxaPFnNeDHojsHuSP8UHOCCL53Ynd6uGPltWWBMsHRfKgHdBVWAeraRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-cockpit
 version: "1.0.0"
 description: >-
@@ -32,19 +32,25 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/projects/list
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
-  - view:ryeos/node/events
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/graph/topology
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/graph/topology
+      - view:ryeos/commands/grammar
 
 input:
   route:

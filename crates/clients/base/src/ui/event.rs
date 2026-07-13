@@ -249,6 +249,13 @@ pub enum RyeOsUiEvent {
     ChooseOverlay {
         secondary: bool,
     },
+    /// Fold (`expand: false`) or unfold the launcher group under the
+    /// overlay selection. Folding from a leaf lands the selection on the
+    /// group's header. Inert while a search query is live — matches
+    /// present under force-expanded headers.
+    FoldOverlayGroup {
+        expand: bool,
+    },
     SetTileCursor {
         tile_id: String,
         index: usize,

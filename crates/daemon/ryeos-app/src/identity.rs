@@ -205,6 +205,9 @@ pub enum WildcardPolicy {
 ///
 /// `wildcard` controls whether wildcard scopes are accepted in `scopes`. See
 /// [`WildcardPolicy`] for when each variant is appropriate.
+// One argument per authorized_key TOML field; a dozen call sites
+// (tests included) enumerate them positionally.
+#[allow(clippy::too_many_arguments)]
 pub fn write_authorized_key_toml(
     auth_dir: &Path,
     fingerprint: &str,

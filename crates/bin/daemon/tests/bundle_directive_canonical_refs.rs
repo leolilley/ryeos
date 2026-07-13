@@ -164,7 +164,7 @@ fn bundle_directives_use_canonical_context_refs() {
                 let path = entry.path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.extension().map_or(false, |ext| ext == "md") {
+                } else if path.extension().is_some_and(|ext| ext == "md") {
                     all_violations.extend(check_directive_file(&path));
                 }
             }

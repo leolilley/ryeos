@@ -58,7 +58,7 @@ pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
         };
         let namespace_key = path.join("/");
         paths.insert(path);
-        let kind = AtlasItemKind::from_str(&item.kind);
+        let kind = AtlasItemKind::parse_label(&item.kind);
         let canonical_ref = if item.canonical_ref.is_empty() {
             fallback_canonical_ref(kind, &namespace_key)
         } else {
@@ -75,7 +75,7 @@ pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
                 }),
                 canonical_ref,
                 kind,
-                scope: AtlasScope::from_str(&item.scope),
+                scope: AtlasScope::parse_label(&item.scope),
                 label: non_empty(item.label).unwrap_or_else(|| label_from_key(&namespace_key)),
                 source_path: item.source_path,
                 executable: item.executable,
@@ -198,7 +198,7 @@ pub fn build_file_space_atlas(input: AtlasFileSpaceInput) -> NamespaceAtlasVm {
                 }),
                 canonical_ref: file_ref,
                 kind: AtlasItemKind::File,
-                scope: AtlasScope::from_str(&input.root),
+                scope: AtlasScope::parse_label(&input.root),
                 label: non_empty(entry.name).unwrap_or_else(|| label_from_key(&entry.path)),
                 source_path: entry.path,
                 executable: false,

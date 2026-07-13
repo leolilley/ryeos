@@ -203,6 +203,8 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         .with_composers(composers)
 }
 
+// Test fixture: one argument per AppState component under test.
+#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
     config: ryeos_app::config::Config,

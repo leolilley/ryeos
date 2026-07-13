@@ -34,7 +34,7 @@ pub fn build_compose_context_payload(
     let mut items_by_ref: BTreeMap<String, VerifiedItem> = BTreeMap::new();
     let mut edges: Vec<GraphEdge> = Vec::new();
 
-    for (_root_ref, resolution) in per_root {
+    for resolution in per_root.values() {
         // Root + ancestors.
         for resolved in std::iter::once(&resolution.root).chain(resolution.ancestors.iter()) {
             items_by_ref

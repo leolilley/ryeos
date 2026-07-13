@@ -37,29 +37,20 @@ struct FetchParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[derive(Default)]
 struct FetchConfig {
     #[serde(default)]
     allow_private_networks: bool,
 }
-impl Default for FetchConfig {
-    fn default() -> Self {
-        Self {
-            allow_private_networks: false,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum FetchFormat {
+    #[default]
     Markdown,
     Text,
     Html,
-}
-impl Default for FetchFormat {
-    fn default() -> Self {
-        Self::Markdown
-    }
 }
 
 #[derive(Debug, Serialize)]

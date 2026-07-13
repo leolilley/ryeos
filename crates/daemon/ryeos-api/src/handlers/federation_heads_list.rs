@@ -48,7 +48,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut trust_store = TrustStore::new();
     trust_store.insert(
         expected_signer.clone(),
-        state.identity.verifying_key().clone(),
+        *state.identity.verifying_key(),
     );
     let verified_heads = heads
         .into_iter()

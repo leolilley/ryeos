@@ -1,5 +1,5 @@
 [package]
-name = "ryeos-ui-terminal"
+name = "ryeos-client-terminal"
 version = "0.1.0"
 edition = "2021"
 description = "Native terminal TUI for Rye OS"

@@ -558,7 +558,7 @@ fn capability_subtree<'a>(parsed: &'a Value, sub: &str) -> Option<&'a Map<String
 }
 
 /// `requires.capabilities.declared` value (a list of cap strings), if present.
-pub(crate) fn declared_value<'a>(parsed: &'a Value) -> Option<&'a Value> {
+pub(crate) fn declared_value(parsed: &Value) -> Option<&Value> {
     parsed
         .get("requires")?
         .get("capabilities")?

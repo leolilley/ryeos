@@ -48,7 +48,7 @@ impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
 }
 
 fn load_live_bundle_roots(state: &AppState) -> Result<Vec<PathBuf>, ProjectSourceError> {
-    let daemon_engine = &(*state).engine;
+    let daemon_engine = &state.engine;
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root: state.config.app_root.as_path(),
         trust_store: &daemon_engine.trust_store,
@@ -174,7 +174,7 @@ pub fn resolve_project_context(
             // LiveFs uses the daemon's startup engine directly — no
             // per-request overlay needed because the daemon's own
             // app root is what resolves anyway.
-            request_engine: Arc::clone(&(*state).engine),
+            request_engine: Arc::clone(&state.engine),
         },
         ProjectSource::PushedHead => {
             // HEAD lookup MUST use the same canonical ref string as

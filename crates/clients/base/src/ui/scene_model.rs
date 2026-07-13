@@ -1037,7 +1037,7 @@ mod tests {
         let stack_node = atlas
             .nodes
             .iter()
-            .find(|node| node.namespace_key == "rye/core/create_tool")
+            .find(|node| node.namespace_key == "ryeos/core/create_tool")
             .expect("projected stack");
         assert_eq!(stack_node.stack.len(), 2);
     }

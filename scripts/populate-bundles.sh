@@ -226,7 +226,7 @@ case "$BUNDLE_SET" in
   full)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-browser-tools \
-          ryeos-ui-terminal ryeos-ui-web)
+          ryeos-client-terminal ryeos-client-web)
     ;;
   central-host)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \

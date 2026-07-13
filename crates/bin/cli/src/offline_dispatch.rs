@@ -111,8 +111,7 @@ pub async fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
-        )
-        .map(|result| result.map(|outcome| outcome));
+        );
     }
 
     if has_tool_command(&item.composed_value) {

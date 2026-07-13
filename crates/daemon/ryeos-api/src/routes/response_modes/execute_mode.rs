@@ -914,7 +914,8 @@ fn dispatch_error_response(
 #[derive(Debug)]
 enum TargetSitePlan {
     Local,
-    Remote(TargetSiteForwardPlan),
+    /// Boxed: the forward plan carries the whole resolved remote.
+    Remote(Box<TargetSiteForwardPlan>),
 }
 
 #[derive(Debug)]
@@ -1025,12 +1026,12 @@ fn plan_target_site_forward(
         )
     };
 
-    Ok(TargetSitePlan::Remote(TargetSiteForwardPlan {
+    Ok(TargetSitePlan::Remote(Box::new(TargetSiteForwardPlan {
         target_site_id: target_site_id.to_string(),
         remote,
         local_project_path,
         remote_project_path,
-    }))
+    })))
 }
 
 fn target_site_unsupported(

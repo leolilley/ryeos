@@ -25,6 +25,10 @@ use serde_json::{json, Value};
 use super::LaunchAugmentationError;
 
 /// Run the `ComposeContextPositions` augmentation.
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     decl: &LaunchAugmentationDecl,
     resolution: &mut ResolutionOutput,
@@ -254,7 +258,7 @@ pub async fn run(
         );
         let envs = ryeos_app::process::build_subprocess_envs_with_roots(
             &std::collections::BTreeMap::new(),
-            &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
+            &[("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
             roots,
         )
         .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
@@ -303,7 +307,7 @@ pub async fn run(
             return Err(LaunchAugmentationError::ChildFailed {
                 kind: target_kind.clone(),
                 method: target_method.clone(),
-                error: batch_result.error,
+                error: batch_result.error.map(Box::new),
             });
         }
 
@@ -460,9 +464,9 @@ fn write_empty(resolution: &mut ResolutionOutput, output_derived: &str, meta_out
         .insert(meta_output_derived.to_string(), json!({}));
 }
 
-fn rendered_output_object<'a>(
-    output: &'a Value,
-) -> Result<&'a serde_json::Map<String, Value>, LaunchAugmentationError> {
+fn rendered_output_object(
+    output: &Value,
+) -> Result<&serde_json::Map<String, Value>, LaunchAugmentationError> {
     output
         .get("rendered")
         .and_then(|v| v.as_object())

@@ -213,7 +213,9 @@ fn default_file_space_root() -> String {
 }
 
 impl AtlasItemKind {
-    pub fn from_str(value: &str) -> Self {
+    /// Coerce a daemon-reported kind label; unknown labels land on `Other`
+    /// (infallible, so this is deliberately not `std::str::FromStr`).
+    pub fn parse_label(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "directive" | "directives" => Self::Directive,
             "tool" | "tools" => Self::Tool,
@@ -248,7 +250,9 @@ impl AtlasItemKind {
 }
 
 impl AtlasScope {
-    pub fn from_str(value: &str) -> Self {
+    /// Coerce a daemon-reported scope label; unknown labels land on
+    /// `Unknown` (infallible, so this is deliberately not `std::str::FromStr`).
+    pub fn parse_label(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "project" | "project_ai" => Self::Project,
             "user" | "user_ai" => Self::User,

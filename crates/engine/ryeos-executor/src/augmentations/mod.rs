@@ -22,6 +22,10 @@ use crate::dispatch_error::DispatchError;
 /// Mutates `resolution.composed.derived` in place — successful
 /// augmentations write their outputs back into the composed view so
 /// the parent runtime receives them via the envelope.
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_augmentations(
     exec: &ExecutionSchema,
     resolution: &mut ResolutionOutput,
@@ -120,7 +124,9 @@ pub enum LaunchAugmentationError {
     ChildFailed {
         kind: String,
         method: String,
-        error: Option<ryeos_runtime::method_wire::MethodCallError>,
+        /// Boxed: the wire error dominates the enum's size, and this
+        /// variant rides in every augmentation `Result`.
+        error: Option<Box<ryeos_runtime::method_wire::MethodCallError>>,
     },
 
     #[error("serde: {0}")]

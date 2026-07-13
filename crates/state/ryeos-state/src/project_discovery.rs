@@ -10,10 +10,9 @@ use std::path::{Path, PathBuf};
 /// Walk up from `start`. At each level, in priority order, check for:
 ///   1. `.ai/`            (Rye space marker)
 ///   2. `.ryeos-project`  (explicit opt-in marker file; the answer
-///                         for monorepo subpackages and non-git dirs)
+///      for monorepo subpackages and non-git dirs)
 ///   3. `.git`            (entry — directory OR file; git worktrees
-///                         and submodules use a `.git` file pointing
-///                         at the real gitdir)
+///      and submodules use a `.git` file pointing at the real gitdir)
 ///
 /// Returns `Ok(Some(root))` on first match, `Ok(None)` if none found
 /// before the filebundle root, or `Err` on IO.

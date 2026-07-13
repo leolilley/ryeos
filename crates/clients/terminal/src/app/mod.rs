@@ -334,6 +334,11 @@ pub async fn run(
                     let effects = core.refresh_focused_feeds();
                     spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                 }
+                // Step the scene clock exactly once per on-time tick (see
+                // `advance_scene_frame`): the fast tick period equals the
+                // scene cadence, so re-flooring wall time here would alias
+                // into held frames and double steps.
+                core.advance_scene_frame(tick_now);
                 let effects = core.dispatch(RyeOsEvent::Tick { now_ms: tick_now });
                 spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                 queue_seat_sync(
@@ -348,8 +353,21 @@ pub async fn run(
         }
     }
 
+    // Give the terminal back BEFORE settling the seat: the close is one
+    // best-effort daemon round trip on `/execute`, which deliberately has
+    // no total request timeout, so it must never hold the raw alternate
+    // screen hostage on a slow daemon. Drop the input stream first so a
+    // keystroke typed at the restored shell isn't eaten by the reader.
+    drop(events);
+    drop(term);
     if let Some(thread_id) = &seat_thread {
-        seat::close_seat_thread(&client, thread_id).await;
+        // Hard deadline on the settle: an unsettled seat is simply
+        // reattached (or superseded) on the next launch.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            seat::close_seat_thread(&client, thread_id),
+        )
+        .await;
     }
 
     Ok(())

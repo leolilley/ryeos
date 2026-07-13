@@ -786,21 +786,13 @@ fn default_alias_depth() -> usize {
 
 /// Policy for folding resolved graph nodes into an item's effective
 /// trust class.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EffectiveTrustPolicy {
     /// When true, items reached through `resolve_references` are folded
     /// into `ResolutionOutput.effective_trust_class` along with root +
     /// extends ancestors. When false, references remain explicit
     /// provenance/edge trust only.
     pub include_references: bool,
-}
-
-impl Default for EffectiveTrustPolicy {
-    fn default() -> Self {
-        Self {
-            include_references: false,
-        }
-    }
 }
 
 /// Complete schema for a single item kind, loaded from a kind schema

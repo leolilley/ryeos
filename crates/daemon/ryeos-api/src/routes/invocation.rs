@@ -245,13 +245,19 @@ pub async fn invoke_checked(
     let result = invoker.invoke(ctx).await?;
 
     // 4. Verify result type matches declared contract.
-    let result_matches = match (&result, contract.output) {
-        (RouteInvocationResult::Json(_), RouteInvocationOutput::Json) => true,
-        (RouteInvocationResult::Stream(_), RouteInvocationOutput::Stream) => true,
-        (RouteInvocationResult::Principal(_), RouteInvocationOutput::Principal) => true,
-        (RouteInvocationResult::Accepted { .. }, RouteInvocationOutput::Accepted) => true,
-        _ => false,
-    };
+    let result_matches = matches!(
+        (&result, contract.output),
+        (RouteInvocationResult::Json(_), RouteInvocationOutput::Json)
+            | (RouteInvocationResult::Stream(_), RouteInvocationOutput::Stream)
+            | (
+                RouteInvocationResult::Principal(_),
+                RouteInvocationOutput::Principal
+            )
+            | (
+                RouteInvocationResult::Accepted { .. },
+                RouteInvocationOutput::Accepted
+            )
+    );
 
     if !result_matches {
         return Err(RouteDispatchError::Internal(format!(

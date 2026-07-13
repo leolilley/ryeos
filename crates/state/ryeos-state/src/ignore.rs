@@ -132,14 +132,14 @@ impl IgnoreMatcher {
         }
 
         // Check directory patterns against every path component.
-        for component in rel.split(|c: char| c == '/' || c == '\\') {
+        for component in rel.split(['/', '\\']) {
             if self.dir_patterns.contains(&component.to_string()) {
                 return true;
             }
         }
 
         // Check file glob patterns against the filename.
-        if let Some(filename) = rel.rsplit(|c: char| c == '/' || c == '\\').next() {
+        if let Some(filename) = rel.rsplit(['/', '\\']).next() {
             for pattern in &self.file_patterns {
                 if pattern.matches(filename) {
                     return true;

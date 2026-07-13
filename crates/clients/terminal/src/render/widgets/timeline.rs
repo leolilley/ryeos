@@ -50,15 +50,22 @@ impl FeedLine {
     }
 }
 
+/// Borrowed parallel per-entry metadata arrays, indexed by ABSOLUTE entry
+/// index — a windowed `entries` slice addresses them via its entry offset.
+#[derive(Clone, Copy)]
+pub struct TimelineEntryMeta<'a> {
+    pub indents: &'a [u8],
+    pub expandable: &'a [bool],
+    pub expanded: &'a [bool],
+    pub details: &'a [Vec<RyeOsRowDetailVm>],
+}
+
 pub fn draw_timeline(
     surface: &mut TextSurface,
     rect: Rect,
     entries: &[RyeOsTimelineEntryVm],
-    entry_indents: &[u8],
+    meta: TimelineEntryMeta<'_>,
     selected: Option<usize>,
-    entry_expandable: &[bool],
-    entry_expanded: &[bool],
-    entry_details: &[Vec<RyeOsRowDetailVm>],
 ) {
     let width = rect.w as usize;
     let height = rect.h as usize;
@@ -80,16 +87,7 @@ pub fn draw_timeline(
     };
 
     let mut lines = Vec::new();
-    push_timeline_lines(
-        &mut lines,
-        &entries[entry_start..entry_end],
-        entry_indents,
-        width,
-        entry_expandable,
-        entry_expanded,
-        entry_details,
-        entry_start,
-    );
+    push_timeline_lines(&mut lines, &entries[entry_start..entry_end], meta, width, entry_start);
 
     let visible = lines.len().min(height);
     // Default bottom-anchored (the tail). Once the point is on an entry, use
@@ -140,13 +138,16 @@ pub fn draw_timeline(
 fn push_timeline_lines(
     lines: &mut Vec<FeedLine>,
     entries: &[RyeOsTimelineEntryVm],
-    entry_indents: &[u8],
+    meta: TimelineEntryMeta<'_>,
     width: usize,
-    entry_expandable: &[bool],
-    entry_expanded: &[bool],
-    entry_details: &[Vec<RyeOsRowDetailVm>],
     entry_offset: usize,
 ) {
+    let TimelineEntryMeta {
+        indents: entry_indents,
+        expandable: entry_expandable,
+        expanded: entry_expanded,
+        details: entry_details,
+    } = meta;
     if entries.is_empty() {
         lines.push(FeedLine::plain(
             "no timeline events loaded".to_string(),
@@ -459,6 +460,13 @@ fn draw_inline(
 mod tests {
     use super::*;
 
+    const EMPTY_META: TimelineEntryMeta<'static> = TimelineEntryMeta {
+        indents: &[],
+        expandable: &[],
+        expanded: &[],
+        details: &[],
+    };
+
     fn line(primary: &str) -> RyeOsTimelineEntryVm {
         RyeOsTimelineEntryVm::Line {
             primary: primary.to_string(),
@@ -478,19 +486,19 @@ mod tests {
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
 
         // ATX heading: marker stripped, rendered bold.
-        assert!(texts.iter().any(|t| *t == "Title"), "heading: {texts:?}");
+        assert!(texts.contains(&"Title"), "heading: {texts:?}");
         // Soft-wrapped prose reflows into one paragraph line.
         assert!(
-            texts.iter().any(|t| *t == "para one with soft wrap"),
+            texts.contains(&"para one with soft wrap"),
             "prose reflow: {texts:?}"
         );
         // Bullets get a glyph.
-        assert!(texts.iter().any(|t| *t == "• first"), "bullet: {texts:?}");
-        assert!(texts.iter().any(|t| *t == "• second"));
+        assert!(texts.contains(&"• first"), "bullet: {texts:?}");
+        assert!(texts.contains(&"• second"));
         // Fenced code renders verbatim (whitespace preserved) with a gutter,
         // and the ``` fences themselves are not emitted.
         assert!(
-            texts.iter().any(|t| *t == "  code  spaced"),
+            texts.contains(&"  code  spaced"),
             "verbatim code: {texts:?}"
         );
         assert!(!texts.iter().any(|t| t.contains("```")), "fences hidden");
@@ -546,7 +554,7 @@ mod tests {
             w: 20,
             h: 4,
         };
-        draw_timeline(&mut surface, rect, &entries, &[], None, &[], &[], &[]);
+        draw_timeline(&mut surface, rect, &entries, EMPTY_META, None);
         // The bottom row shows the newest entry — the feed tails.
         assert!(
             row_text(&surface, 20, 3).contains("entry 9"),
@@ -566,7 +574,7 @@ mod tests {
             h: 4,
         };
         // Point on the oldest entry — far above the tail; the feed scrolls up.
-        draw_timeline(&mut surface, rect, &entries, &[], Some(0), &[], &[], &[]);
+        draw_timeline(&mut surface, rect, &entries, EMPTY_META, Some(0));
         assert!(
             row_text(&surface, 20, 0).contains("entry 0"),
             "scrolled to reveal the selected oldest entry: {:?}",
@@ -594,7 +602,7 @@ mod tests {
             w: 20,
             h: 5,
         };
-        draw_timeline(&mut surface, rect, &entries, &[], Some(5), &[], &[], &[]);
+        draw_timeline(&mut surface, rect, &entries, EMPTY_META, Some(5));
         assert!(
             row_text(&surface, 20, 2).contains("entry 5"),
             "selected midpoint row: {:?}",

@@ -43,6 +43,7 @@ impl RyeOsCore {
     /// (no submit — buffer is live), `submit: <affordance>` (fire it with
     /// `{value}`), `submit: route` (the engine route-fold: classification
     /// + route_seq + ratchet, unchanged).
+    ///
     /// `interrupt` selects the live-delivery intent for a submit that routes at a
     /// RUNNING thread: `true` cuts the in-flight cognition (forceful redirect),
     /// `false` steers (folds at the next turn boundary). It is carried as the
@@ -323,7 +324,7 @@ impl RyeOsCore {
     /// Build the ordered target slots for route-chain cycling:
     /// `[NewConversation] + [synthetic current if its root isn't fetched]
     /// + [fetched chain heads]`, deduped by `chain_root` (preferring the
-    /// fetched head when the current chain is also present in fetched data).
+    ///   fetched head when the current chain is also present in fetched data).
     pub(crate) fn route_chain_slots(&self, route: &super::seat::InputRoute) -> Vec<TargetSlot> {
         let fetched = self.input_target_chains();
         let mut slots = vec![TargetSlot::NewConversation];
@@ -1298,7 +1299,7 @@ mod tests {
         let tile_id = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/palette".to_string(),
         });
-        core.workspace.focused_tile = tile_id;
+        focus_tile(&mut core, tile_id);
         set_focused_input(&mut core, "do the thing");
 
         let effects = core.dispatch(RyeOsEvent::Ui {
@@ -1368,15 +1369,15 @@ mod tests {
         });
         assert_ne!(first, second);
 
-        core.workspace.focused_tile = first;
+        focus_tile(&mut core, first);
         set_focused_input(&mut core, "first-buffer");
-        core.workspace.focused_tile = second;
+        focus_tile(&mut core, second);
         set_focused_input(&mut core, "second-buffer");
 
         // The same `view:` rendered twice keeps independent buffers.
-        core.workspace.focused_tile = first;
+        focus_tile(&mut core, first);
         assert_eq!(focused_input_text(&core), "first-buffer");
-        core.workspace.focused_tile = second;
+        focus_tile(&mut core, second);
         assert_eq!(focused_input_text(&core), "second-buffer");
     }
 }

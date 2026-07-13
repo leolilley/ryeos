@@ -214,7 +214,8 @@ enum CommitResult {
         /// advance to a fresh node resets it to 0.
         next_retry_attempt: u32,
     },
-    Terminate(GraphResult),
+    /// Boxed: a `GraphResult` dwarfs `Advance`'s cursor fields.
+    Terminate(Box<GraphResult>),
 }
 
 /// A cooperative control action drained from the thread's command queue between
@@ -734,7 +735,7 @@ impl Walker {
                     .await
                 {
                     CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                    CommitResult::Terminate(result) => result,
+                    CommitResult::Terminate(result) => *result,
                 };
             }
 
@@ -763,7 +764,7 @@ impl Walker {
                         .await
                     {
                         CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                        CommitResult::Terminate(result) => return result,
+                        CommitResult::Terminate(result) => return *result,
                     }
                 }
             };
@@ -809,7 +810,7 @@ impl Walker {
                     retry_attempt = next_retry_attempt;
                     steps_this_segment += 1;
                 }
-                CommitResult::Terminate(result) => return result,
+                CommitResult::Terminate(result) => return *result,
             }
         }
 
@@ -838,7 +839,7 @@ impl Walker {
                 .await
             {
                 CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => result,
+                CommitResult::Terminate(result) => *result,
             };
         }
 
@@ -867,7 +868,7 @@ impl Walker {
                 .await
             {
                 CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => result,
+                CommitResult::Terminate(result) => *result,
             };
         }
 
@@ -899,7 +900,7 @@ impl Walker {
                 .await
             {
                 CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => result,
+                CommitResult::Terminate(result) => *result,
             };
         }
 
@@ -1162,7 +1163,7 @@ impl Walker {
                             client: &self.client,
                             exec_ctx: Some(exec_ctx),
                             step,
-                            current_node: &current,
+                            current_node: current,
                             graph_run_id,
                             definition_ref: &self.graph.definition_ref,
                             definition_hash: &self.graph.definition_hash,
@@ -1184,7 +1185,7 @@ impl Walker {
                             client: &self.client,
                             exec_ctx: Some(exec_ctx),
                             step,
-                            current_node: &current,
+                            current_node: current,
                             graph_run_id,
                             definition_ref: &self.graph.definition_ref,
                             definition_hash: &self.graph.definition_hash,
@@ -1222,7 +1223,7 @@ impl Walker {
                             // iterations before the failure.
                             return StepOutcome::DispatchHardError {
                                 item_id: Some(foreach_item_id),
-                                error: foreach_failure_summary(&current, &errors),
+                                error: foreach_failure_summary(current, &errors),
                                 next_on_error: policy,
                                 elapsed_ms: start.elapsed().as_millis() as u64,
                                 cost: cost.clone(),
@@ -1720,7 +1721,7 @@ impl Walker {
                             let acc = self.accounting.lock().unwrap();
                             (acc.total.clone(), acc.nodes.clone())
                         };
-                        CommitResult::Terminate(GraphResult {
+                        CommitResult::Terminate(Box::new(GraphResult {
                             success: false,
                             graph_id: self.graph.graph_id.clone(),
                             definition_ref: self.graph.definition_ref.clone(),
@@ -1743,7 +1744,7 @@ impl Walker {
                             error: None,
                             cost: agg_cost,
                             node_costs,
-                        })
+                        }))
                     }
                     Err(e) => {
                         let msg = format!("follow handoff failed: {e}");
@@ -2584,11 +2585,15 @@ impl Walker {
         self.record_callback_warning("finalize_thread", r.map(|_| ()));
         guard.finalized = true;
 
-        CommitResult::Terminate(graph_result)
+        CommitResult::Terminate(Box::new(graph_result))
     }
 
     /// Write a checkpoint pointing at the next node. If the checkpoint
     /// write fails, terminates with an error.
+    // Execution plumbing: each argument is a distinct leg of the thread's
+    // auth/provenance context, threaded verbatim — a struct would rename,
+    // not simplify. Restructure with a compiler in the loop, not here.
+    #[allow(clippy::too_many_arguments)]
     async fn write_checkpoint_or_error(
         &self,
         graph_run_id: &str,
@@ -2666,7 +2671,7 @@ impl Walker {
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
             guard.finalized = true;
 
-            return CommitResult::Terminate(graph_result);
+            return CommitResult::Terminate(Box::new(graph_result));
         }
 
         CommitResult::Advance {

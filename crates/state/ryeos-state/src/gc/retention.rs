@@ -299,7 +299,7 @@ mod tests {
 
         let now = millis_days_ago(0);
         let old = now - 100 * 86_400_000; // 100 days old
-        let recent = now - 1 * 86_400_000; // 1 day old
+        let recent = now - 86_400_000; // 1 day old
 
         // Old terminal group (2 lines) + recent terminal group (1 line) +
         // in-flight group (dispatched, no terminal status).

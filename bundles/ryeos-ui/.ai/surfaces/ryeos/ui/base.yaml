@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:8400d283afd8c52564c482e2b8d17d045bffc1424a4ef2ded15dcef57dd457a2:0rfD6LWnqXgh8NU1lVF4X7ATT1CF7t8diKIu8QeRx7n0CLBKPvazyRhSfwCXnJ0C8e5beKdQN6bGDSsBkNOSCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T01:54:18Z:f8d1a0f027befd65a13a0bdd049be1007e93c17f77412d0aa3d3da412f066de0:2vfNhAzjMZB/6TvpXNlhpEhmMOChQyY45FN0UoCw1qmmGYHvX+RLCpia6sVO3/Qg3qLkFS8fXV0SyIXEIasXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 version: "1.0.0"
 description: RyeOS UI home space
@@ -9,8 +9,9 @@ tiling:
   stack: { arrange: horizontal }
   insert: end
 
-tiles:
-  - "view:ryeos/backdrop/splash"
+# The base center starts empty — the backdrop scene (below) fills it
+# until the operator opens a lens.
+tiles: []
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }

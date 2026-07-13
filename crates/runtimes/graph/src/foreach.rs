@@ -106,6 +106,10 @@ struct RetryEventCtx {
 /// walker step (they do NOT consume walker steps and are not individually
 /// checkpointed); each item keeps its own attempt count. Every re-attempt
 /// emits a braid-visible `graph_node_retry` event, then sleeps the backoff.
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_item_with_retry(
     client: &CallbackClient,
     action: &Value,
@@ -123,7 +127,7 @@ async fn dispatch_item_with_retry(
         let outcome =
             crate::dispatch::dispatch_action(client, action, thread_id, project_path, exec_ctx)
                 .await;
-        let failed = matches!(&outcome, Err(_))
+        let failed = outcome.is_err()
             || matches!(&outcome, Ok(crate::dispatch::ActionOutcome::Failure(_)));
         if !failed || attempt >= total {
             return outcome;

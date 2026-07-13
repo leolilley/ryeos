@@ -393,16 +393,16 @@ fn validate_protocol_injection_name(
     source: EnvInjectionSource,
     detail: &EnvSourceDetail,
 ) -> Result<(), EnvContractError> {
-    let allowed = match (source, key) {
-        (EnvInjectionSource::CallbackSocketPath, "RYEOSD_SOCKET_PATH") => true,
-        (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN") => true,
-        (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID") => true,
-        (EnvInjectionSource::ProjectPath, "RYEOSD_PROJECT_PATH") => true,
-        (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH") => true,
-        (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN") => true,
-        (EnvInjectionSource::AppRoot, "RYEOS_APP_ROOT") => true,
-        _ => false,
-    };
+    let allowed = matches!(
+        (source, key),
+        (EnvInjectionSource::CallbackSocketPath, "RYEOSD_SOCKET_PATH")
+            | (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN")
+            | (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID")
+            | (EnvInjectionSource::ProjectPath, "RYEOSD_PROJECT_PATH")
+            | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
+            | (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN")
+            | (EnvInjectionSource::AppRoot, "RYEOS_APP_ROOT")
+    );
     if allowed {
         return Ok(());
     }

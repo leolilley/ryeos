@@ -233,7 +233,7 @@ impl LifecycleStartLock {
         #[cfg(unix)]
         {
             use std::io::Write;
-            let _ = (&file).set_len(0);
+            let _ = file.set_len(0);
             let _ = writeln!(&file, "{}", std::process::id());
         }
         Ok(Self { _file: file })

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:802bb7d18eae74de1f357990cdbf0c4d54934b0699766ea1d563319f4742d98f:EEyGSi0s4yrT2CEGfEA0HESwHyGYNVhq1UcaQYaQ4Zh+jnkmSlxanahLIEEKWK+MYb2X14JUS20VY4gSiGAcAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T01:54:18Z:e7fb76531dc3cdf9242eb1ecf49548aa38edd5cbe1b4a9b713f11763a4ae7c51:qSg+0mBkhTOwG1zAB5zGL7JQC/dPA2euAY7xZuGMAmGUgbOFPwoBq8FPMovHTjkPTcNelPiHn7jree/PJuBrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 version: "1.0.0"
 description: Active project explorer for files, signed items, and related execution
@@ -25,11 +25,15 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
 
 input:
   route:

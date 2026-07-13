@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:fbd518e6976539d49fed4385ca076810f9909bfaab224d515bf708f5a4f0ee74:ICkVRhOfBC1OwHZBQ7W2YXc7GNoenFrrMfVsXe/HGUCUuGcN29KcUzNlTA6nXzM9VOagFM0oTu1ZYGZwtxqZCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T01:54:18Z:bd785d0766e3ee2e941d1f3deae2dec2c24819fb5696fc1d37892b58315fa76a:K9NBe4MJ18HUDz8R0nSrALxYskmhaFWs4jwQpxmvx0kZB26PIRXOMcE4vRjESLDUXat2BtrXo1RhXaK43DU1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 version: "1.0.0"
 description: Node overview for all live threads, projects, events, remotes, and maintenance
@@ -25,13 +25,17 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/node/threads/history
-  - view:ryeos/node/events
-  - view:ryeos/projects/list
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/node/threads/history
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/commands/grammar
 
 input:
   route:

@@ -469,6 +469,13 @@ pub struct RyeOsRuntimeState {
     pub activity_pulse: f32,
     #[serde(default)]
     pub attention_until_ms: u64,
+    /// Scene animation frame counter, driven by `advance_scene_frame`.
+    /// While `scene_frame_anchor_ms` is 0 the clock is undriven and
+    /// `RyeOsCore::scene_frame` falls back to wall-clock quantization.
+    #[serde(default)]
+    pub scene_frame: u64,
+    #[serde(default)]
+    pub scene_frame_anchor_ms: u64,
 }
 
 impl Default for RyeOsRuntimeState {
@@ -479,6 +486,8 @@ impl Default for RyeOsRuntimeState {
             last_tick_ms: 0,
             activity_pulse: 0.0,
             attention_until_ms: 0,
+            scene_frame: 0,
+            scene_frame_anchor_ms: 0,
         }
     }
 }
@@ -516,8 +525,10 @@ impl RyeOsCore {
             .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
             .unwrap_or_else(builtin_default);
         let input_route = super::seat::InputRoute::from_surface_input(surface.input.as_ref());
-        let mut core = Self::default();
-        core.views = super::content::views_from_surface(session.effective_surface.as_ref());
+        let mut core = Self {
+            views: super::content::views_from_surface(session.effective_surface.as_ref()),
+            ..Self::default()
+        };
         core.data.session = Some(session);
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
@@ -530,6 +541,13 @@ impl RyeOsCore {
         // Edge slots initialize FROM the surface slots block; the
         // fallback surface's slots are the only default source.
         core.ui.docks = RyeOsDockState::from_slots(&surface.slots);
+        // Initial focus lands on the surface's input slot (bottom-first,
+        // the conventional initial input focus) so a fresh session types
+        // straight into the chat line; surfaces without a visible input
+        // slot keep the workspace-tile fallback.
+        if let Some(edge) = core.default_input_edge() {
+            core.ui.focus_target = Some(RyeOsFocusTarget::Dock { edge });
+        }
         core.style = surface.style;
         core.workspace = surface.to_workspace();
         let blank = Workspace::from_tiling(surface.tiling.clone(), Vec::new());
@@ -732,23 +750,19 @@ impl RyeOsCore {
     /// state is layered on this entry point; refetches are content-bound via
     /// `refresh.on_hint`.
     pub fn note_hint(&mut self, kind: &str, payload: &serde_json::Value) -> Vec<RyeOsEffect> {
-        match kind {
-            "thread" => {
-                if payload
-                    .get("event_type")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|event| {
-                        matches!(
-                            event,
-                            "thread_failed" | "thread_killed" | "thread_timed_out"
-                        )
-                    })
-                {
-                    self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
-                }
+        if kind == "thread"
+            && payload
+                .get("event_type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event| {
+                    matches!(
+                        event,
+                        "thread_failed" | "thread_killed" | "thread_timed_out"
+                    )
+                })
+            {
+                self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
             }
-            _ => {}
-        }
         self.effects_for_hint(kind)
     }
 
@@ -967,13 +981,42 @@ impl RyeOsCore {
         self.generation = self.generation.saturating_add(1);
     }
 
-    /// The scene animation frame: wall clock quantized to the scene's
-    /// design cadence. Scene motion samples this — never `generation`,
-    /// which counts events — so animation speed is uniform regardless of
-    /// event traffic or the client's tick rate, and a stalled frame skips
-    /// ahead instead of compressing the missed steps.
+    /// The scene animation frame. Scene motion samples this — never
+    /// `generation`, which counts events — so animation speed is uniform
+    /// regardless of event traffic or the client's tick rate.
+    ///
+    /// Driven clients (the terminal loop calls `advance_scene_frame`
+    /// each tick) read the stepped counter; undriven clients (web paints
+    /// far above the scene cadence) fall back to wall-clock quantization,
+    /// where oversampling keeps the steps uniform.
     pub fn scene_frame(&self) -> u64 {
+        if self.runtime.scene_frame_anchor_ms != 0 {
+            return self.runtime.scene_frame;
+        }
         self.runtime.now_ms / super::scene_model::SCENE_FRAME_MS
+    }
+
+    /// Advance the scene clock for one painted frame. A client whose tick
+    /// period EQUALS the scene cadence cannot re-floor the wall clock each
+    /// frame (`now_ms / SCENE_FRAME_MS` sampled every SCENE_FRAME_MS
+    /// aliases against the bucket boundaries: a held frame, then a double
+    /// step, whenever the tick phase drifts near an edge). Instead the
+    /// counter steps by the rounded elapsed frames, clamped to at least
+    /// one — exactly one step per on-time tick, catch-up on a stall or a
+    /// slow tick mode — so wall time still governs the average rate while
+    /// every painted frame moves.
+    pub fn advance_scene_frame(&mut self, now_ms: u64) {
+        let frame_ms = super::scene_model::SCENE_FRAME_MS;
+        if self.runtime.scene_frame_anchor_ms == 0 {
+            // First driven frame: adopt the wall-clock frame so the
+            // counter continues exactly where the fallback left off.
+            self.runtime.scene_frame = now_ms / frame_ms;
+        } else {
+            let elapsed = now_ms.saturating_sub(self.runtime.scene_frame_anchor_ms);
+            let steps = ((elapsed + frame_ms / 2) / frame_ms).max(1);
+            self.runtime.scene_frame = self.runtime.scene_frame.wrapping_add(steps);
+        }
+        self.runtime.scene_frame_anchor_ms = now_ms;
     }
 
     /// Atlas arrangement for a specific tile, falling back to the ambient
@@ -1954,6 +1997,11 @@ mod tests {
     fn visible_input_submit_respects_read_only_default() {
         let mut core = RyeOsCore::default();
         with_input_view(&mut core);
+        // Focus moves explicitly — `RyeOsCore::new` lands it on the input
+        // slot, but a bare default core starts on the workspace fallback.
+        core.dispatch(super::super::event::RyeOsEvent::Ui {
+            event: super::super::event::RyeOsUiEvent::FocusInput,
+        });
         core.focused_input_buffer_mut()
             .unwrap()
             .set_text("run this".to_string(), 8);
