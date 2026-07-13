@@ -1706,6 +1706,44 @@ mod tests {
     }
 
     #[test]
+    fn flat_library_entries_shelve_under_their_path_derived_group() {
+        // Both library shapes are supported: grouped entries are the
+        // canonical form, bare refs (the legacy flat form) shelve under
+        // their path-derived group — and merge into a declared group of
+        // the same name rather than duplicating the header.
+        let mut session = session();
+        session.effective_surface = Some(serde_json::json!({
+            "name": "mixed",
+            "library": [
+                { "group": "Alpha", "views": ["view:test/alpha/one"] },
+                "view:test/alpha/two",
+                "view:test/beta/one"
+            ]
+        }));
+        let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
+        for view_ref in ["view:test/alpha/one", "view:test/alpha/two", "view:test/beta/one"] {
+            seed_view(&mut core, view_ref);
+        }
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
+        });
+        let items = crate::ui::view_model::active_overlay_items(&core);
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|item| item.header)
+            .map(|item| item.category.as_str())
+            .collect();
+        assert_eq!(
+            headers,
+            ["Alpha", "beta"],
+            "flat alpha ref merges into declared Alpha; beta derives its own group"
+        );
+        assert_eq!(items.len(), 5, "two headers + three leaves");
+    }
+
+    #[test]
     fn filter_input_views_are_launchable_but_the_bare_input_line_is_not() {
         // The thread history views carry live FILTER inputs and are the
         // canonical center lenses; only the content-less chat line

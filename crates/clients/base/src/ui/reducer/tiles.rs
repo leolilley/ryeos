@@ -62,34 +62,66 @@ impl RyeOsCore {
     }
 
     /// The surface's declared library groups, filtered to lensable refs.
-    /// The `library:` shape is grouped — `[{ group, views: [ref…] }]` —
-    /// one key serving two consumers: `lens_library` cycles the flattened
-    /// declared order, `library_groups` hands the launcher the tree.
+    /// Grouped entries — `{ group, views: [ref…] }` — are the canonical
+    /// shape; a bare `view:` ref string (the legacy flat form) is shelved
+    /// under its path-derived group in declared order. One key serving
+    /// two consumers: `lens_library` cycles the flattened declared
+    /// order, `library_groups` hands the launcher the tree.
     fn library_groups_declared(&self) -> Vec<LibraryGroup> {
-        self.data
+        let Some(entries) = self
+            .data
             .session
             .as_ref()
             .and_then(|session| session.effective_surface.as_ref())
             .and_then(|surface| surface.get("library"))
             .and_then(|library| library.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| {
-                        let title = entry.get("group")?.as_str()?.trim().to_string();
-                        let refs = entry
-                            .get("views")?
-                            .as_array()?
-                            .iter()
-                            .filter_map(|value| value.as_str())
-                            .filter(|view_ref| self.lensable(view_ref))
-                            .map(str::to_string)
-                            .collect::<Vec<_>>();
-                        (!title.is_empty()).then_some(LibraryGroup { title, refs })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        else {
+            return Vec::new();
+        };
+        let mut groups: Vec<LibraryGroup> = Vec::new();
+        let mut add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| {
+            match groups
+                .iter_mut()
+                .find(|group| group.title.eq_ignore_ascii_case(&title))
+            {
+                Some(existing) => existing.refs.extend(refs),
+                None => groups.push(LibraryGroup { title, refs }),
+            }
+        };
+        for entry in entries {
+            if let Some(view_ref) = entry.as_str() {
+                if self.lensable(view_ref) {
+                    add(
+                        &mut groups,
+                        derived_group_title(view_ref),
+                        vec![view_ref.to_string()],
+                    );
+                }
+                continue;
+            }
+            let Some(title) = entry
+                .get("group")
+                .and_then(|value| value.as_str())
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty())
+            else {
+                continue;
+            };
+            let refs = entry
+                .get("views")
+                .and_then(|value| value.as_array())
+                .map(|views| {
+                    views
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .filter(|view_ref| self.lensable(view_ref))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            add(&mut groups, title, refs);
+        }
+        groups
     }
 
     /// The launcher's full tree: the declared groups plus every OTHER
