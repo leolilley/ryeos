@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::bundle_event_service::{
@@ -23,46 +22,17 @@ use ryeos_app::thread_lifecycle::{
     ThreadMarkRunningParams,
 };
 
+mod transport;
+
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await.context("uds accept failed")?;
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, state).await {
+            if let Err(err) = transport::handle_connection(stream, state).await {
                 tracing::warn!(error = %err, "uds connection error");
             }
         });
-    }
-}
-
-async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
-    loop {
-        let Some(frame) = read_frame(&mut stream).await? else {
-            return Ok(());
-        };
-
-        let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
-
-        // INFO so the ndjson sink records span NEW/CLOSE per request — a
-        // request that arrives and never closes is then attributable by
-        // method + request_id + thread_id from the trace alone. Entered via
-        // `instrument` (not a held `enter()` guard, which detaches from the
-        // task across `.await`).
-        let span = tracing::info_span!(
-            "uds:request",
-            method = %request.method,
-            request_id = %request.request_id,
-            thread_id = tracing::field::Empty,
-        );
-        // Opportunistically record thread_id when present in params.
-        if let Some(tid) = request.params.get("thread_id").and_then(|v| v.as_str()) {
-            span.record("thread_id", tid);
-        }
-
-        let response = tracing::Instrument::instrument(dispatch(request, &state), span).await;
-
-        let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
-        write_frame(&mut stream, &encoded).await?;
     }
 }
 
@@ -927,45 +897,6 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
         // to the caller instead of only the top-level context line.
         Err(err) => RpcResponse::err(request_id, "request_failed", format!("{err:#}")),
     }
-}
-
-const MAX_FRAME_SIZE: u32 = 10 * 1024 * 1024; // 10 MB
-
-async fn read_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(err).context("failed to read rpc frame length"),
-    }
-
-    let frame_len = u32::from_be_bytes(len_buf);
-    if frame_len > MAX_FRAME_SIZE {
-        return Err(anyhow!(
-            "frame too large: {} bytes (max {})",
-            frame_len,
-            MAX_FRAME_SIZE
-        ));
-    }
-    let mut frame = vec![0u8; frame_len as usize];
-    stream
-        .read_exact(&mut frame)
-        .await
-        .context("failed to read rpc frame body")?;
-    Ok(Some(frame))
-}
-
-async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
-    let len = (bytes.len() as u32).to_be_bytes();
-    stream
-        .write_all(&len)
-        .await
-        .context("failed to write rpc frame length")?;
-    stream
-        .write_all(bytes)
-        .await
-        .context("failed to write rpc frame body")?;
-    Ok(())
 }
 
 #[cfg(test)]
