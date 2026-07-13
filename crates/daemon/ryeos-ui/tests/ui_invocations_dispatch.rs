@@ -140,8 +140,8 @@ async fn session_local_invocation_publishes_to_session_bus() {
 
     let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:ui/seat/close" },
-            "params": { "thread_id": "T-1" }
+            "target": { "kind": "ref", "ref": "service:ui/seat/open" },
+            "params": { "surface_ref": "surface:ryeos/ui/base" }
         }),
         ctx,
         Arc::new(state),
@@ -159,6 +159,6 @@ async fn session_local_invocation_publishes_to_session_bus() {
 
     assert_eq!(event.event_type, "invocation.dispatched");
     assert_eq!(event.payload["target"]["kind"], "ref");
-    assert_eq!(event.payload["target"]["ref"], "service:ui/seat/close");
+    assert_eq!(event.payload["target"]["ref"], "service:ui/seat/open");
     assert_eq!(event.payload["invocation_id"], invocation_id);
 }

@@ -3359,8 +3359,11 @@ mod tests {
         .await;
         let err = rpc_err(&resp);
         assert!(
-            err.message.contains("deny-all") && err.message.contains("no effective_caps"),
-            "expected UDS boundary deny-all from empty callback caps, got: {err:?}"
+            err.code == "missing_cap"
+                && err.message.contains(
+                    "missing required capability: ryeos.execute.directive.ryeos/agent/core/base"
+                ),
+            "expected UDS boundary missing-cap denial from empty callback caps, got: {err:?}"
         );
     }
 

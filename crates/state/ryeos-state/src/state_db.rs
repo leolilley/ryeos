@@ -838,7 +838,13 @@ mod tests {
         let initial = db.create_chain("T-root", snapshot, &signer).unwrap();
         db.projection()
             .connection()
-            .execute_batch("DROP TABLE events")
+            .execute_batch(
+                "CREATE TRIGGER reject_test_event_projection
+                 BEFORE INSERT ON events
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected event projection failure');
+                 END;",
+            )
             .unwrap();
 
         let event = crate::objects::thread_event::NewEvent::new(
@@ -870,6 +876,10 @@ mod tests {
             "failed row projection must roll back the cursor advance"
         );
 
+        db.projection()
+            .connection()
+            .execute_batch("DROP TRIGGER reject_test_event_projection")
+            .unwrap();
         drop(db);
         let reopened = StateDb::open(dir.path()).unwrap();
         let projected = reopened

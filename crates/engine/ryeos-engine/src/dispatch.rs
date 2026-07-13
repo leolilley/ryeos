@@ -440,6 +440,17 @@ mod tests {
         dir
     }
 
+    fn host_executable(name: &str) -> String {
+        let search_path = std::env::var_os("PATH").expect("test PATH is set");
+        std::env::split_paths(&search_path)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+            .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+            .unwrap_or_else(|| panic!("test executable `{name}` is not available on PATH"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn test_engine_context() -> EngineContext {
         let app_root = tempdir();
         let policy_dir = app_root.join(".ai/node");
@@ -492,7 +503,7 @@ mod tests {
                 spec: PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello world".into()],
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
                     stdin_data: None,
@@ -533,7 +544,7 @@ mod tests {
                 spec: PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello debug".into()],
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env,
                     env_sources: HashMap::new(),
                     stdin_data: None,
@@ -580,7 +591,7 @@ mod tests {
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -612,7 +623,7 @@ mod tests {
                 spec: PlanSubprocessSpec {
                     cmd: "/bin/false".into(),
                     args: Vec::new(),
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
                     stdin_data: None,
@@ -654,7 +665,7 @@ mod tests {
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -711,7 +722,7 @@ mod tests {
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -799,7 +810,7 @@ mod tests {
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env,
@@ -832,7 +843,7 @@ mod tests {
                 spec: PlanSubprocessSpec {
                     cmd: "/nonexistent/binary".into(),
                     args: Vec::new(),
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
                     stdin_data: None,
@@ -848,12 +859,8 @@ mod tests {
         ]);
 
         let ctx = test_engine_context();
-        let completion = execute_plan(&plan, &ctx).unwrap();
-        // Lillux returns a failed result for spawn errors
-        assert!(!matches!(
-            completion.status,
-            ThreadTerminalStatus::Completed
-        ));
+        let error = execute_plan(&plan, &ctx).unwrap_err();
+        assert!(matches!(error, EngineError::SandboxPolicyRefused { .. }));
     }
 
     #[test]

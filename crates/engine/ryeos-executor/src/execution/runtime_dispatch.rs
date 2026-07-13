@@ -419,7 +419,11 @@ mod tests {
         // which does NOT match `ryeos.execute.tool.foo/*` — the `/`
         // separator is required.
         let err = enforce_callback_caps("tool:foobar", &caps, &auth).unwrap_err();
-        assert!(err.to_string().contains("not present"));
+        assert!(matches!(
+            err,
+            crate::dispatch_error::DispatchError::MissingCap { required }
+                if required == "ryeos.execute.tool.foobar"
+        ));
     }
 
     #[test]

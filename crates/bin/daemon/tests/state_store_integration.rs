@@ -1630,7 +1630,7 @@ mod integration_tests {
     // ── Cancel / attach_process status guard tests ────────────────
 
     #[test]
-    fn attach_process_skips_terminal_thread() {
+    fn attach_process_rejects_terminal_thread() {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread(
@@ -1658,18 +1658,20 @@ mod integration_tests {
             .finalize_thread("T-skip-attach", &finalize)
             .expect("finalize");
 
-        // attach_thread_process should succeed but NOT write stale PGID.
-        store
+        let error = store
             .attach_thread_process(
                 "T-skip-attach",
                 99999,
                 99999,
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
-            .expect("attach_process on terminal thread should succeed (no-op)");
+            .expect_err("attach_process on a terminal thread must fail loudly");
+        assert_eq!(
+            error.to_string(),
+            "refusing to attach process 99999/99999 to terminal thread T-skip-attach (cancelled)"
+        );
 
-        // Verify PGID was NOT written — the thread is terminal, attach
-        // should have been skipped.
+        // Verify the rejected attachment did not write a stale PGID.
         let detail = store
             .get_thread("T-skip-attach")
             .expect("get_thread")
