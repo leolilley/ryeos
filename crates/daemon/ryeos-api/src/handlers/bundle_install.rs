@@ -124,7 +124,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
-    let registration = serde_json::json!({ "path": target });
+    let registration = serde_json::json!({ "kind": "node", "path": target });
     if replaced {
         replace_dir_atomic(
             &req.source_path,
@@ -398,7 +398,7 @@ mod tests {
             target,
             preserve,
             &transaction,
-            serde_json::json!({ "path": target }),
+            serde_json::json!({ "kind": "node", "path": target }),
         )
         .unwrap();
     }

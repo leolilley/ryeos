@@ -441,7 +441,7 @@ mod tests {
         let tx = BundleTransaction::acquire(root.path(), "demo").unwrap();
         let staging = root.path().join(".ai/bundles/.demo.staging");
         std::fs::create_dir_all(staging.join(".ai")).unwrap();
-        let registration = serde_json::json!({ "path": tx.target() });
+        let registration = serde_json::json!({ "kind": "node", "path": tx.target() });
         tx.begin_present(BundleOperation::Install, &staging, registration)
             .unwrap();
         std::fs::rename(&staging, tx.target()).unwrap();

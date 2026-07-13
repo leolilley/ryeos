@@ -158,7 +158,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-        let registration = serde_json::json!({ "path": local_target });
+        let registration = serde_json::json!({ "kind": "node", "path": local_target });
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
             &staging,
