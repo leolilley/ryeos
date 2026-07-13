@@ -1019,7 +1019,7 @@ impl ScheduleReconcileTx {
                     if let Some(parent) = yaml_path.parent() {
                         let _ = fs::create_dir_all(parent);
                     }
-                    let _ = lillux::cas::atomic_write(&yaml_path, bytes);
+                    let _ = lillux::atomic_write(&yaml_path, bytes);
                 }
                 None => {
                     if yaml_path.exists() {

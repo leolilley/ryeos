@@ -5,12 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-pub use crate::atomic_fs::{
-    atomic_exchange_paths, atomic_write, atomic_write_private, remove_dir_all_durable,
-    remove_file_durable, rename_path_durable, sync_tree_durable,
-};
-pub use crate::locks::{with_exclusive_file_lock, ExclusiveFileLock};
-use crate::atomic_fs::next_temp_sequence;
+use crate::atomic_fs::{atomic_write, next_temp_sequence};
 
 // ── Public library primitives ──────────────────────────────────────
 

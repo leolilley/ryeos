@@ -308,7 +308,7 @@ fn materialize_manifest_to_staging(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        lillux::cas::atomic_write(&target, &blob)?;
+        lillux::atomic_write(&target, &blob)?;
         apply_mode(&target, item.mode)?;
         count += 1;
     }
