@@ -356,12 +356,9 @@ pub fn sandbox_wrap(
         let path = path.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), path.clone(), path]);
     }
-    if let Some(limit) = policy.max_open_files {
-        args.extend(["--rlimit-nofile".to_string(), limit.to_string()]);
-    }
-    if let Some(limit) = policy.max_processes {
-        args.extend(["--rlimit-nproc".to_string(), limit.to_string()]);
-    }
+    // Bubblewrap has no rlimit options. The requested limits remain visible on
+    // `EffectiveSandbox`; enforcing them requires `setrlimit` at the Lillux spawn
+    // boundary so they are inherited across Bubblewrap's fork/exec.
     args.push("--chdir".to_string());
     args.push(canonical_cwd.to_string_lossy().into_owned());
     args.push("--".to_string());
