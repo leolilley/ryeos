@@ -15,6 +15,10 @@ use crate::directive::{
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
 
+mod metadata;
+
+use metadata::harvest_chunk_meta;
+
 /// Compute a sha256 hex digest of the input bytes.
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -1403,114 +1407,6 @@ fn enforce_per_turn_output_cap(
     }
 
     Ok(())
-}
-
-/// Pull provider-side metadata (usage totals, finish_reason) out of a
-/// single SSE event block. The existing `parse_event_typed` /
-/// `parse_delta_merge` helpers only emit `StreamEvent`s; we still need
-/// to surface `TokenUsage` + `finish_reason` for cost accounting and
-/// the runner's State::ParsingResponse routing.
-///
-/// When `stream_paths` is provided, Gemini-style paths are used for
-/// usage and finish_reason extraction. Otherwise OpenAI/Anthropic-style
-/// paths are tried.
-fn harvest_chunk_meta(
-    block: &str,
-    last_usage: &mut Option<TokenUsage>,
-    last_finish: &mut Option<String>,
-    stream_paths: Option<&crate::directive::StreamPaths>,
-) {
-    use ryeos_runtime::template::resolve_path;
-
-    for line in block.lines() {
-        let line = line.trim_end_matches('\r');
-        let Some(rest) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let rest = rest.trim();
-        if rest == "[DONE]" || rest.is_empty() {
-            continue;
-        }
-        let parsed: Value = match serde_json::from_str(rest) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::trace!(
-                    "skipping malformed SSE data JSON: {e}; raw={}",
-                    &rest[..rest.len().min(120)]
-                );
-                continue;
-            }
-        };
-
-        // Usage extraction: try StreamPaths first (Gemini), then
-        // OpenAI/Anthropic-style paths.
-        if let Some(sp) = stream_paths {
-            if let Some(ref usage_path) = sp.usage_path {
-                if let Some(u) = resolve_path(&parsed, usage_path) {
-                    let new_input = sp
-                        .input_tokens_field
-                        .as_ref()
-                        .and_then(|f| u.get(f))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let new_output = sp
-                        .output_tokens_field
-                        .as_ref()
-                        .and_then(|f| u.get(f))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    if new_input > 0 || new_output > 0 {
-                        let prev_input = last_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
-                        let prev_output = last_usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
-                        *last_usage = Some(TokenUsage {
-                            input_tokens: new_input.max(prev_input),
-                            output_tokens: new_output.max(prev_output),
-                        });
-                    }
-                }
-            }
-            if let Some(ref fr_path) = sp.finish_reason_path {
-                if let Some(reason) = resolve_path(&parsed, fr_path).and_then(|v| v.as_str()) {
-                    if !reason.is_empty() {
-                        *last_finish = Some(reason.to_string());
-                    }
-                }
-            }
-        } else {
-            // OpenAI / Anthropic style
-            if let Some(u) = parsed.get("usage") {
-                let new_input = u
-                    .get("prompt_tokens")
-                    .or_else(|| u.get("input_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let new_output = u
-                    .get("completion_tokens")
-                    .or_else(|| u.get("output_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                if new_input > 0 || new_output > 0 {
-                    let prev_input = last_usage.as_ref().map(|u| u.input_tokens).unwrap_or(0);
-                    let prev_output = last_usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
-                    *last_usage = Some(TokenUsage {
-                        input_tokens: new_input.max(prev_input),
-                        output_tokens: new_output.max(prev_output),
-                    });
-                }
-            }
-
-            if let Some(reason) = parsed
-                .get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("finish_reason"))
-                .and_then(|f| f.as_str())
-            {
-                if !reason.is_empty() {
-                    *last_finish = Some(reason.to_string());
-                }
-            }
-        }
-    }
 }
 
 /// Inject sampling fields into the request body, gated by provider
