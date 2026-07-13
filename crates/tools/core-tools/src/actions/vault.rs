@@ -78,6 +78,24 @@ pub struct RewrapReport {
     pub keys_rewrapped: usize,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RewrapOutcome {
+    CommittedDurable {
+        report: RewrapReport,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
+    RestoredPrevious {
+        report: RewrapReport,
+        reason: String,
+    },
+    CommitDurabilityUncertain {
+        report: RewrapReport,
+        reason: String,
+    },
+}
+
 // ── Command implementations ──────────────────────────────────────────
 
 pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
@@ -169,7 +187,7 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     })
 }
 
-pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
+pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapOutcome> {
     let key_path = default_vault_secret_key_path(&opts.app_root);
     let pub_path = default_vault_public_key_path(&opts.app_root);
     let store_path = default_sealed_store_path(&opts.app_root);
@@ -185,7 +203,7 @@ fn run_rewrap_locked(
     key_path: PathBuf,
     pub_path: PathBuf,
     store_path: PathBuf,
-) -> Result<RewrapReport> {
+) -> Result<RewrapOutcome> {
     recover_rewrap(&key_path, &pub_path, &store_path)?;
 
     let old_sk = lillux::vault::read_secret_key(&key_path)
@@ -223,24 +241,41 @@ fn run_rewrap_locked(
 
     prepare_rewrap(&key_path, &pub_path, &store_path)?;
 
-    let activation = (|| -> Result<()> {
+    let report = RewrapReport {
+        store_path: store_path.clone(),
+        old_fingerprint: old_fingerprint.clone(),
+        new_fingerprint: new_fingerprint.clone(),
+        keys_rewrapped: plaintext.len(),
+    };
+
+    let activation = (|| -> std::result::Result<(), lillux::AtomicMutationError> {
         if rewrap_store {
-            lillux::atomic_write_private(&store_path, &std::fs::read(&new_store_path)?)
-                .context("activate rewrapped sealed store")?;
+            let bytes = std::fs::read(&new_store_path).map_err(|error| {
+                lillux::AtomicMutationError::BeforeCommit(error.into())
+            })?;
+            lillux::atomic_write_private(&store_path, &bytes)?;
         }
-        lillux::atomic_write(&pub_path, &std::fs::read(&new_pub_path)?)
-            .context("activate rotated public key")?;
+        let public_bytes = std::fs::read(&new_pub_path)
+            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        lillux::atomic_write(&pub_path, &public_bytes)?;
         // Secret key last: once this changes, the current generation is complete.
-        lillux::atomic_write_private(&key_path, &std::fs::read(&new_key_path)?)
-            .context("activate rotated secret key")?;
+        let secret_bytes = std::fs::read(&new_key_path)
+            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        lillux::atomic_write_private(&key_path, &secret_bytes)?;
         Ok(())
     })();
     if let Err(error) = activation {
-        let recovery = recover_rewrap(&key_path, &pub_path, &store_path);
-        recovery.context("recover failed vault rewrap")?;
-        return Err(error);
+        return Ok(handle_activation_failure(
+            &key_path,
+            &pub_path,
+            &store_path,
+            report,
+            error,
+        ));
     }
-    recover_rewrap(&key_path, &pub_path, &store_path)?;
+    let finalization_warning = recover_rewrap(&key_path, &pub_path, &store_path)
+        .err()
+        .map(|error| format!("rotation committed; deferred cleanup/recovery: {error:#}"));
 
     tracing::info!(
         old_fingerprint = %old_fingerprint,
@@ -250,17 +285,118 @@ fn run_rewrap_locked(
         "vault: rewrap complete — keypair rotated and store re-sealed"
     );
 
-    Ok(RewrapReport {
-        store_path,
-        old_fingerprint,
-        new_fingerprint,
-        keys_rewrapped: plaintext.len(),
+    Ok(RewrapOutcome::CommittedDurable {
+        report,
+        warning: finalization_warning,
     })
+}
+
+fn handle_activation_failure(
+    key_path: &Path,
+    public_path: &Path,
+    store_path: &Path,
+    report: RewrapReport,
+    error: lillux::AtomicMutationError,
+) -> RewrapOutcome {
+    match error {
+        lillux::AtomicMutationError::BeforeCommit(error) => {
+            match recover_rewrap(key_path, public_path, store_path) {
+                Ok(()) => RewrapOutcome::RestoredPrevious {
+                    report,
+                    reason: format!("{error:#}"),
+                },
+                Err(recovery_error) => RewrapOutcome::CommitDurabilityUncertain {
+                    report,
+                    reason: format!(
+                        "activation failed before its current commit point: {error:#}; durable recovery also failed: {recovery_error:#}"
+                    ),
+                },
+            }
+        }
+        lillux::AtomicMutationError::DurabilityUncertain(error) => {
+            // Do not reconcile here: the durable journal and backups are the
+            // evidence the next locked operation needs to select a generation.
+            RewrapOutcome::CommitDurabilityUncertain {
+                report,
+                reason: format!("{error:#}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expect_committed(outcome: RewrapOutcome) -> RewrapReport {
+        match outcome {
+            RewrapOutcome::CommittedDurable { report, .. } => report,
+            other => panic!("expected durable rewrap commit, got {other:?}"),
+        }
+    }
+
+    fn test_rewrap_report(state: &Path, old_fingerprint: String) -> RewrapReport {
+        RewrapReport {
+            store_path: default_sealed_store_path(state),
+            old_fingerprint,
+            new_fingerprint: "new-fingerprint".to_string(),
+            keys_rewrapped: 0,
+        }
+    }
+
+    #[test]
+    fn uncertain_activation_preserves_recovery_journal() {
+        let (state, old_key) = fresh_state_with_keypair();
+        let key_path = default_vault_secret_key_path(state.path());
+        let public_path = default_vault_public_key_path(state.path());
+        let store_path = default_sealed_store_path(state.path());
+        prepare_rewrap(&key_path, &public_path, &store_path).unwrap();
+        let journal = store_path.with_extension("rewrap-journal.toml");
+
+        let outcome = handle_activation_failure(
+            &key_path,
+            &public_path,
+            &store_path,
+            test_rewrap_report(state.path(), old_key.public_key().fingerprint()),
+            lillux::AtomicMutationError::DurabilityUncertain(anyhow::anyhow!(
+                "injected sync failure"
+            )),
+        );
+
+        assert!(matches!(
+            outcome,
+            RewrapOutcome::CommitDurabilityUncertain { .. }
+        ));
+        assert!(journal.exists());
+    }
+
+    #[test]
+    fn before_commit_failure_durably_restores_previous_generation() {
+        let (state, old_key) = fresh_state_with_keypair();
+        let key_path = default_vault_secret_key_path(state.path());
+        let public_path = default_vault_public_key_path(state.path());
+        let store_path = default_sealed_store_path(state.path());
+        prepare_rewrap(&key_path, &public_path, &store_path).unwrap();
+        let journal = store_path.with_extension("rewrap-journal.toml");
+
+        let outcome = handle_activation_failure(
+            &key_path,
+            &public_path,
+            &store_path,
+            test_rewrap_report(state.path(), old_key.public_key().fingerprint()),
+            lillux::AtomicMutationError::BeforeCommit(anyhow::anyhow!(
+                "injected pre-rename failure"
+            )),
+        );
+
+        assert!(matches!(outcome, RewrapOutcome::RestoredPrevious { .. }));
+        assert!(!journal.exists());
+        let restored = lillux::vault::read_secret_key(&key_path).unwrap();
+        assert_eq!(
+            restored.public_key().fingerprint(),
+            old_key.public_key().fingerprint()
+        );
+    }
 
     fn fresh_state_with_keypair() -> (tempfile::TempDir, lillux::vault::VaultSecretKey) {
         let tmp = tempfile::tempdir().unwrap();
@@ -408,10 +544,12 @@ mod tests {
         .unwrap();
         let old_fingerprint = old_sk.public_key().fingerprint();
 
-        let report = run_rewrap(&RewrapOptions {
-            app_root: state.path().to_path_buf(),
-        })
-        .unwrap();
+        let report = expect_committed(
+            run_rewrap(&RewrapOptions {
+                app_root: state.path().to_path_buf(),
+            })
+            .unwrap(),
+        );
         assert_eq!(report.old_fingerprint, old_fingerprint);
         assert_ne!(report.old_fingerprint, report.new_fingerprint);
         assert_eq!(report.keys_rewrapped, 2);
@@ -453,10 +591,12 @@ mod tests {
     #[test]
     fn rewrap_with_empty_store_only_rotates_keys() {
         let (state, old_sk) = fresh_state_with_keypair();
-        let report = run_rewrap(&RewrapOptions {
-            app_root: state.path().to_path_buf(),
-        })
-        .unwrap();
+        let report = expect_committed(
+            run_rewrap(&RewrapOptions {
+                app_root: state.path().to_path_buf(),
+            })
+            .unwrap(),
+        );
         assert_eq!(report.keys_rewrapped, 0);
         assert_ne!(report.new_fingerprint, old_sk.public_key().fingerprint());
     }
