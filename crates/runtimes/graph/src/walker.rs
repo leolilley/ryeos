@@ -23,6 +23,7 @@ use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
 
+mod checkpointing;
 mod transitions;
 
 use transitions::{
@@ -2929,113 +2930,6 @@ impl Walker {
         }
     }
 
-    /// Write a local checkpoint using the daemon-provided CheckpointWriter.
-    ///
-    /// Persists the versioned payload: cursor/step/state plus snapshots of the
-    /// `GraphAccounting` aggregate and `suppressed_errors`, so a resumed run
-    /// reconstructs cost and non-fatal error history from before the checkpoint
-    /// (both restored in `execute` from `resume_state`).
-    /// Write a checkpoint marking a follow suspend: `current_node` is the follow
-    /// node ITSELF (so re-entry re-drives the suspend idempotently by follow_key),
-    /// and a `pending_follow` marker carries LOCAL facts only (no child IDs) so the
-    /// resume path consumes the stored child result instead of re-dispatching.
-    async fn write_follow_checkpoint(
-        &self,
-        graph_run_id: &str,
-        follow_node: &str,
-        step: u32,
-        state: &Value,
-        suppressed_errors: &[ErrorRecord],
-    ) -> anyhow::Result<()> {
-        let Some(writer) = &self.checkpoint else {
-            return Ok(());
-        };
-        let accounting = {
-            let acc = self.accounting.lock().unwrap();
-            serde_json::to_value(&*acc).unwrap_or(Value::Null)
-        };
-        let mut pending = serde_json::Map::new();
-        pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
-        pending.insert("step_count".to_string(), json!(step));
-        pending.insert("graph_run_id".to_string(), json!(graph_run_id));
-        let mut payload = json!({
-            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
-            "graph_run_id": graph_run_id,
-            "current_node": follow_node,
-            "step_count": step,
-            "state": state,
-            "accounting": accounting,
-            "suppressed_errors": suppressed_errors,
-            // A follow node never carries retry (validation excludes the pair),
-            // so a follow suspend always checkpoints a zero attempt count.
-            "retry_attempt": 0,
-            "written_at": lillux::time::iso8601_now(),
-        });
-        payload[follow_keys::PENDING_FOLLOW] = Value::Object(pending);
-        writer.write(&payload)?;
-        Ok(())
-    }
-
-    async fn write_checkpoint(
-        &self,
-        graph_run_id: &str,
-        next_node: &str,
-        next_step: u32,
-        state: &Value,
-        suppressed_errors: &[ErrorRecord],
-        retry_attempt: u32,
-    ) -> anyhow::Result<()> {
-        let Some(writer) = &self.checkpoint else {
-            return Ok(());
-        };
-
-        // Accounting is interior-mutable on the walker; snapshot it under the
-        // lock (no await) so resume restores accumulated cost instead of
-        // restarting it at zero and under-billing the pre-checkpoint work.
-        let accounting = {
-            let acc = self.accounting.lock().unwrap();
-            serde_json::to_value(&*acc).unwrap_or(Value::Null)
-        };
-        writer.write(&json!({
-            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
-            "graph_run_id": graph_run_id,
-            "current_node": next_node,
-            "step_count": next_step,
-            "state": state,
-            "accounting": accounting,
-            "suppressed_errors": suppressed_errors,
-            // Per-step retry counter for `next_node`: non-zero only when the
-            // walker is re-entering the SAME node under a `retry` backoff, so a
-            // segment cut or crash mid-retry resumes with the count intact.
-            "retry_attempt": retry_attempt,
-            "written_at": lillux::time::iso8601_now(),
-        }))?;
-
-        // Test-only crash-injection hook (prod-inert: fires ONLY when
-        // `RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT` is set, which only the
-        // graph crash-recovery e2e sets — and that name only reaches this
-        // process because the daemon env allowlist lets it through). Once the
-        // checkpoint for `next_node` is durably written, park forever so a
-        // harness can SIGKILL the daemon with this thread's row still
-        // `running`, kill this orphaned process group, and then exercise the
-        // daemon's startup-reconcile native-resume path. The resumed launch
-        // injects `RYEOS_RESUME=1` (`is_resume()`), so this hook never fires on
-        // the resume pass: the walker proceeds from the checkpoint cursor to
-        // completion. Gated on `next_node` (the resume cursor), so the test
-        // names the node the graph should resume *into*.
-        if !CheckpointWriter::is_resume()
-            && std::env::var("RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT")
-                .ok()
-                .as_deref()
-                == Some(next_node)
-        {
-            // Park forever without depending on the tokio `time` feature:
-            // a never-resolving future suspends this task until the process
-            // is killed by the harness.
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
 }
 
 fn merge_into(target: &mut Value, source: &Value) {
