@@ -57,6 +57,10 @@ use serde::{Deserialize, Serialize};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 
+mod default_policy;
+
+use default_policy::materialize_node_defaults;
+
 /// SHA-256 fingerprint of the official publisher Ed25519 public key.
 ///
 /// This is the long-lived release key under which all official `core` and
@@ -380,69 +384,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
-    // ── 8b. Node-owned subprocess sandbox policy ──
-    let sandbox_policy_path = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("sandbox.yaml");
-    if !sandbox_policy_path.exists() {
-        let default_policy = r#"version: 1
-backend_path: /usr/bin/bwrap
-allow_network: true
-writable_paths:
-  - "{project}"
-allowed_env:
-  - "*"
-max_open_files: 1024
-max_processes: 256
-"#;
-        lillux::atomic_write_private(&sandbox_policy_path, default_policy.as_bytes())
-            .with_context(|| {
-                format!(
-                    "write default sandbox policy {}",
-                    sandbox_policy_path.display()
-                )
-            })?;
-    }
-
-    // ── 8c. Default ingest ignore config ──
-    let ignore_dir = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("ingest");
-    let ignore_path = ignore_dir.join("ignore.yaml");
-    if !ignore_path.exists() {
-        fs::create_dir_all(&ignore_dir)
-            .with_context(|| format!("create ingest dir {}", ignore_dir.display()))?;
-        let builtin = ryeos_app::ignore::builtin_patterns();
-        let patterns_yaml = builtin
-            .iter()
-            .map(|p| format!("  - {:?}", p))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!("patterns:\n{}\n", patterns_yaml);
-        fs::write(&ignore_path, content)
-            .with_context(|| format!("write ignore config {}", ignore_path.display()))?;
-    }
-
-    // ── 8c. Generated sync-policy discovery file ──
-    // A read-only window on the effective sync policy: deployable surfaces and
-    // the two code-enforced floors, pointing at ignore.yaml as the one editable
-    // input. Regenerated (overwritten) on every init so it tracks the binary.
-    let sync_dir = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("sync");
-    fs::create_dir_all(&sync_dir)
-        .with_context(|| format!("create sync dir {}", sync_dir.display()))?;
-    let policy_path = sync_dir.join("policy.yaml");
-    let policy_yaml =
-        ryeos_state::project_sync::render_effective_sync_policy_yaml(".ai/node/ingest/ignore.yaml");
-    fs::write(&policy_path, policy_yaml)
-        .with_context(|| format!("write sync policy {}", policy_path.display()))?;
+    // ── 8b. Node-owned default policies ──
+    materialize_node_defaults(&opts.app_root)?;
 
     // ── 9. Post-init trust verification ──
     let post_trust =
