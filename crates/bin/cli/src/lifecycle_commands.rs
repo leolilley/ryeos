@@ -697,7 +697,7 @@ fn inspect_sandbox_policy(
     let path = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node/sandbox.yaml");
-    let raw = std::fs::read_to_string(path)
+    let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("read sandbox policy {}", path.display()))?;
     let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
         .with_context(|| format!("strictly parse sandbox policy {}", path.display()))?;
