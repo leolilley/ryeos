@@ -18,6 +18,8 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/lint-workflows-and-shell.sh \
     scripts/release/resolve-version.sh \
     scripts/release/test-resolve-version.sh \
+    scripts/release/prepare-aur.sh \
+    scripts/release/test-prepare-aur.sh \
     scripts/pkg/bundle-sets.sh \
     scripts/pkg/install-local-direct.sh \
     scripts/populate-bundles.sh

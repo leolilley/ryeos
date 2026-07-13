@@ -65,6 +65,9 @@ jobs:
       - name: Check release input validation
         run: ./scripts/release/test-resolve-version.sh
 
+      - name: Check deterministic AUR metadata preparation
+        run: ./scripts/release/test-prepare-aur.sh
+
       - name: Check canonical naming
         run: ./scripts/lint-naming.sh
 
