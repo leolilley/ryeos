@@ -149,6 +149,40 @@ nodes:
       - to: finish
 ```
 
+For managed-runtime children whose whole continuation chains must finish before
+the graph proceeds, use an **action node with `follow: true` and `over`**, not a
+`foreach` node:
+
+```yaml
+nodes:
+  review-all:
+    type: action
+    over: "${inputs.subjects}"
+    as: subject
+    parallel: true
+    max_concurrency: 4
+    follow: true
+    action:
+      item_id: "directive:arc/review"
+      params:
+        subject: "${subject}"
+        run_id: "${_run.graph_run_id}"
+    facets: {cohort: "${_run.graph_run_id}", subject: "${subject}"}
+    collect: reviews
+    on_error: handle-partial
+    next: {type: unconditional, to: finish}
+```
+
+This cohort form requires `as` and `parallel: true`; `collect` must differ from
+`as`, and `retry`, caching, and `detach` are invalid. `max_concurrency`, when
+set, must be positive and bounds launched-and-live child chains. Collection is
+input-ordered, failed slots are `null`, and successful assignment/collection is
+committed before `on_error` routing. An empty input succeeds with `[]`. Actions,
+params, and facets interpolate per item, including `${_run.graph_run_id}`. The
+parent's effective capabilities and hard limits bound every child. See
+`graphs/follow.md` for capability wildcard examples, cancellation/resume
+behavior, and a complete authoring example.
+
 ## Hooks
 
 Declare `config.hooks` to observe graph lifecycle events with the same typed
