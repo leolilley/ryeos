@@ -544,6 +544,9 @@ async fn main() -> Result<()> {
     // Follow reconcile actions collected here, dispatched post-listener too: a
     // resumed parent's (or relaunched child's) first callback must not precede a
     // bound listener.
+    // LOAD-BEARING ORDER: settle cancellation tombstones before follow
+    // reconciliation can classify an admitted-but-unlaunched child for relaunch.
+    ryeos_app::cascade::repair_cancelled_window_members(&app_state)?;
     let follow_actions = reconcile::reconcile_follow(&app_state)?;
 
     // Scheduler reload channel — must be created BEFORE the router is built
@@ -781,6 +784,9 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
+                if let Err(err) = ryeos_app::cascade::repair_cancelled_window_members(&st) {
+                    tracing::warn!(error = %err, "cancelled launch-window repair failed");
+                }
                 match reconcile::reconcile_follow(&st) {
                     Ok(actions) => dispatch_follow_actions(&st, actions),
                     Err(err) => {
@@ -910,9 +916,9 @@ fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Op
 /// pass and the periodic recovery sweep; every launch is claim-guarded, so
 /// concurrent drives are benign skips.
 fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowReconcileAction>) {
-    for action in actions {
-        let st = state.clone();
-        tokio::spawn(async move {
+    let st = state.clone();
+    tokio::spawn(async move {
+        for action in actions {
             use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
             let (label, outcome) = match action {
                 reconcile::FollowReconcileAction::Resume { follow_key } => {
@@ -939,8 +945,8 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
                     tracing::error!(action = %label, error = %err, "reconcile: follow action failed");
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 fn drain_running_threads(state: &AppState) {

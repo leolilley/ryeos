@@ -74,24 +74,21 @@ fn enforce_callback_caps(
     item_id: &str,
     effective_caps: &[String],
     authorizer: &ryeos_runtime::authorizer::Authorizer,
-) -> Result<()> {
-    if effective_caps.is_empty() {
-        anyhow::bail!(
-            "callback denied: no effective_caps on token (deny-all); \
-             requested item '{item_id}' cannot be dispatched"
-        );
-    }
-
+) -> std::result::Result<(), crate::dispatch_error::DispatchError> {
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_id)
-        .with_context(|| format!("invalid callback item_id '{item_id}'"))?;
+        .map_err(|error| crate::dispatch_error::DispatchError::InvalidRef(
+            item_id.to_string(),
+            error.to_string(),
+        ))?;
     let required = format!("ryeos.execute.{}.{}", canonical.kind, canonical.bare_id);
+
+    if effective_caps.is_empty() {
+        return Err(crate::dispatch_error::DispatchError::MissingCap { required });
+    }
 
     let policy = AuthorizationPolicy::require_all(&[&required]);
     if authorizer.authorize(effective_caps, &policy).is_err() {
-        anyhow::bail!(
-            "callback denied: required cap '{required}' not present in \
-             effective_caps {effective_caps:?}"
-        );
+        return Err(crate::dispatch_error::DispatchError::MissingCap { required });
     }
     Ok(())
 }
@@ -265,7 +262,7 @@ async fn handle_execute(
             );
         }
     }
-    result.map_err(|e| anyhow::anyhow!("{e}"))
+    result.map_err(anyhow::Error::new)
 }
 
 fn parent_execution_context_from_capability(
@@ -375,11 +372,8 @@ mod tests {
         let auth = test_auth();
         let caps: Vec<String> = vec![];
         let err = enforce_callback_caps("tool:foo/bar", &caps, &auth).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("deny-all") && msg.contains("tool:foo/bar"),
-            "deny-all error must mention the requested item; got: {msg}"
-        );
+        assert_eq!(err.code(), "missing_cap");
+        assert!(err.to_string().contains("ryeos.execute.tool.foo/bar"));
     }
 
     #[test]
@@ -390,7 +384,7 @@ mod tests {
         assert!(enforce_callback_caps("tool:other/foo", &caps, &auth).is_ok());
         // Different kind — denied.
         let err = enforce_callback_caps("directive:foo/bar", &caps, &auth).unwrap_err();
-        assert!(err.to_string().contains("not present"));
+        assert_eq!(err.code(), "missing_cap");
     }
 
     #[test]
@@ -401,7 +395,7 @@ mod tests {
         let caps = vec!["ryeos.execute.tool.foo/bar".to_string()];
         assert!(enforce_callback_caps("tool:foo/bar", &caps, &auth).is_ok());
         let err = enforce_callback_caps("tool:foo/baz", &caps, &auth).unwrap_err();
-        assert!(err.to_string().contains("not present"));
+        assert_eq!(err.code(), "missing_cap");
     }
 
     #[test]
@@ -410,7 +404,7 @@ mod tests {
         let caps = vec!["ryeos.execute.tool.foo".to_string()];
         let err = enforce_callback_caps("not-a-canonical-ref", &caps, &auth).unwrap_err();
         assert!(
-            err.to_string().contains("invalid callback item_id"),
+            err.code() == "invalid_ref",
             "must point at canonical-ref parse failure; got: {}",
             err
         );

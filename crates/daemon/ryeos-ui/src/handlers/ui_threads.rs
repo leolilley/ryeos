@@ -373,6 +373,12 @@ fn follow_rows(follow: Option<&ryeos_app::thread_lifecycle::FollowFact>) -> Valu
         rows.extend(row("child thread", f.child_thread_id.clone()));
         rows.extend(row("child status", f.child_terminal_status.clone()));
         rows.extend(row(
+            "cohort progress",
+            f.cohort
+                .as_ref()
+                .map(|cohort| format!("{} done / {} expected", cohort.done, cohort.expected)),
+        ));
+        rows.extend(row(
             "resume successor",
             f.parent_successor_thread_id.clone(),
         ));
@@ -490,6 +496,10 @@ mod tests {
             // Child still running → no terminal status → the row is dropped.
             child_terminal_status: None,
             parent_successor_thread_id: Some("T-succ".to_string()),
+            cohort: Some(ryeos_app::thread_lifecycle::FollowCohortProgress {
+                done: 1,
+                expected: 3,
+            }),
         };
         let rows = follow_rows(Some(&f));
         let by_label: std::collections::HashMap<&str, &str> = rows
@@ -503,6 +513,7 @@ mod tests {
         assert_eq!(by_label["follow node"], "n_follow");
         assert_eq!(by_label["child chain"], "T-child");
         assert_eq!(by_label["resume successor"], "T-succ");
+        assert_eq!(by_label["cohort progress"], "1 done / 3 expected");
         // The still-running child contributes no terminal-status row.
         assert!(!by_label.contains_key("child status"));
     }
@@ -520,6 +531,7 @@ mod tests {
             child_chain_root_id: None,
             child_terminal_status: None,
             parent_successor_thread_id: Some("T-succ".to_string()),
+            cohort: None,
         };
         let rows = follow_rows(Some(&f));
         let arr = rows.as_array().unwrap();

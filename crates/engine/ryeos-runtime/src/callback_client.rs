@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::callback::{ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
+use crate::callback::{CallbackError, ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
 use crate::envelope::EnvelopeCallback;
 use crate::events::{RuntimeEventType, StorageClass};
 
@@ -145,19 +145,20 @@ impl CallbackClient {
     pub async fn dispatch_action(
         &self,
         req: crate::callback::DispatchActionRequest,
-    ) -> Result<crate::callback_contract::CallbackDispatchResponse> {
+    ) -> std::result::Result<crate::callback_contract::CallbackDispatchResponse, CallbackError> {
         let client = self.inner.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
+            CallbackError::Transport(anyhow::anyhow!(
                 "callback dispatch_action called without an inner UDS client \
                  (socket missing); runtime cannot route to the daemon"
-            )
+            ))
         })?;
         let raw: Value = client
             .dispatch_action(req)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .await?;
         serde_json::from_value::<crate::callback_contract::CallbackDispatchResponse>(raw)
-            .map_err(|e| anyhow::anyhow!("invalid CallbackDispatchResponse from daemon: {e}"))
+            .map_err(|e| CallbackError::Transport(anyhow::anyhow!(
+                "invalid CallbackDispatchResponse from daemon: {e}"
+            )))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -332,14 +333,42 @@ impl CallbackClient {
             graph_run_id: graph_run_id.to_string(),
             follow_node: follow_node.to_string(),
             step_count,
-            child_item_ref: child_item_ref.to_string(),
+            child_item_ref: Some(child_item_ref.to_string()),
             child_parameters,
+            children: None,
+            launch_window_width: None,
             frontier_id,
         };
         client
             .spawn_follow_child(request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub async fn spawn_follow_children(
+        &self,
+        graph_run_id: &str,
+        follow_node: &str,
+        step_count: i64,
+        children: Vec<crate::callback::FollowChildSpec>,
+        launch_window_width: Option<u32>,
+        frontier_id: Option<String>,
+    ) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| anyhow::anyhow!(
+            "callback spawn_follow_children called without an inner UDS client (socket missing); the follow suspend cannot be recorded"
+        ))?;
+        client.spawn_follow_child(crate::callback::SpawnFollowChildRequest {
+            thread_id: self.thread_id.clone(),
+            project_path: self.project_path.clone(),
+            graph_run_id: graph_run_id.to_string(),
+            follow_node: follow_node.to_string(),
+            step_count,
+            child_item_ref: None,
+            child_parameters: Value::Null,
+            children: Some(children),
+            launch_window_width,
+            frontier_id,
+        }).await.map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.

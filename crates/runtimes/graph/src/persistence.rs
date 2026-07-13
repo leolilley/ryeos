@@ -165,6 +165,7 @@ mod tests {
             elapsed_ms: 142,
             error: None,
             cost: None,
+            fanout: None,
         };
         let (callback, mock) = make_callback();
         let output = write_node_receipt(&callback, "gr-1", &receipt)
@@ -196,6 +197,7 @@ mod tests {
             elapsed_ms: 5,
             error: Some("boom".to_string()),
             cost: None,
+            fanout: None,
         };
 
         let (callback, _mock) = make_callback();
@@ -235,6 +237,7 @@ mod tests {
                 total_usd: 0.001,
                 basis: None,
             }),
+            fanout: None,
         };
         let (callback, mock) = make_callback();
         let output = write_node_receipt(&callback, "gr-cost", &receipt)

@@ -1,13 +1,12 @@
-<!-- ryeos:signed:2026-07-03T09:54:31Z:37c0b8e20165a7c59b0e46ebfedd70ed94dc597bfa9bd92598e29b26d2069de0:jjS0FglEMN3mMGlW/DLQsAIdnxBrOAC7RRQCL7v7TiXfYz0mEppNlmt2Xb308TJ2WPyf1qnuVsETxbsD1DmPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-13T04:02:46Z:852d7f75a2fdc3003b5f0eb8723088178faf534a1f1833334c2df91a56b7a35f:9tMF/SV8L9YQWxuHB2+mIrOTakQswSf9g8qD4NhP6lQxaNKq0/mqwVLtBg/4Kwt7KbTa/+jMBX5rQbE4FVzhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
 version: "1.0.0"
 description: >
-  Authoring graph `follow:` nodes — how a parent graph launches a detached child
-  execution, suspends until the child chain terminates, and resumes with the
-  child's result; plus the follow lineage a client can read and the chain-budget
-  policy.
+  Authoring graph `follow:` nodes — single-child follow and bounded cohort
+  follow, suspension and durable resume, result folding, capabilities, and
+  follow lineage.
 ---
 
 # Graph Follow
@@ -17,6 +16,116 @@ suspends the parent until the child's whole continuation chain reaches terminal.
 The parent is then resumed from its checkpoint with the child's result injected.
 This is how one graph delegates a whole sub-execution to another and consumes its
 outcome, rather than making a single leaf action callback.
+
+## Classic follow versus cohort follow
+
+Classic follow launches one managed-runtime child from one action:
+
+```yaml
+review:
+  type: action
+  action:
+    item_id: "directive:example/review"
+    params: {subject: "${state.subject}"}
+  follow: true
+  on_error: failed
+  next: {type: unconditional, to: done}
+```
+
+Adding `over` selects **cohort follow**: the action is interpolated and followed
+once per array item, and the parent resumes only after the whole cohort is hard
+terminal. This is action-node syntax, not the older `type: foreach` shape. A
+cohort follow must declare `as`, set `parallel: true`, and use a `collect` name
+different from `as`. It cannot use `retry`, `cache`/`cache_result`, or `detach`.
+If present, `max_concurrency` must be positive (and fit in `u32`).
+
+`action.item_id`, all of `action.params`, and `facets` are recursively
+interpolated per item. The item is available under the declared `as` name;
+normal `state`, `inputs`, and execution context remain available. Use
+`${_run.graph_run_id}` for the current durable graph-run identity, for example
+to stamp every child with a cohort facet.
+
+An empty `over` array launches no children and succeeds immediately. Its result
+and collected value are empty arrays, assignment contributes no delta, and
+normal success routing is evaluated.
+
+## Cohort result and state semantics
+
+- Results are collected in input order, regardless of child completion order.
+  `collect: reviews` commits that aligned array to `state.reviews`.
+- `assign` is evaluated per successful item with that item's value and `result`
+  in scope. Successful deltas are merged in input order. Parallel items do not
+  observe another item's delta while running.
+- A failed child (or failed per-item assignment) occupies its original slot as
+  `null`; indices never collapse or reorder.
+- Successful `assign` deltas and the ordered `collect` array, including `null`
+  failed slots, are committed before the node routes to `on_error`. The error
+  handler can therefore inspect partial cohort progress.
+
+## Complete cohort example
+
+The parent must declare authority for every item a template may select. Namespace
+wildcards use a literal slash before `*`: `ryeos.execute.tool.example/*` covers
+`tool:example/explore` and deeper descendants but not `tool:example` or
+`tool:example-other`; the equivalent knowledge grant is
+`ryeos.execute.knowledge.example/*`.
+
+```yaml
+name: parallel-review
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.example/review
+      - ryeos.execute.tool.example/*
+      - ryeos.execute.knowledge.example/*
+
+nodes:
+  review:
+    type: action
+    over: "${inputs.jobs}"
+    as: job
+    parallel: true
+    max_concurrency: 4
+    follow: true
+    action:
+      item_id: "directive:example/review"
+      params:
+        subject: "${job.subject}"
+        context_ref: "knowledge:example/${job.context}"
+        cohort_run: "${_run.graph_run_id}"
+    facets:
+      cohort: "${_run.graph_run_id}"
+      subject: "${job.subject}"
+    collect: reviews
+    assign:
+      last_reviewed: "${job.subject}"
+    on_error: report_partial
+    next: {type: unconditional, to: done}
+
+  report_partial:
+    type: action
+    action:
+      item_id: "tool:example/report-partial"
+      params: {reviews: "${state.reviews}"}
+    next: {type: unconditional, to: done}
+
+  done:
+    type: return
+    output: "${state.reviews}"
+```
+
+`max_concurrency` is a launch window, not a batch partition: at most that many
+child chains are launched-and-live, and each hard-terminal child admits the next
+queued item. Omit it for the runtime default. Every child launch is also bounded
+by the parent's effective capabilities and inherited hard limits; a wildcard in
+the graph declaration cannot grant authority the parent itself does not have.
+
+Cancellation is lineage-aware: cancelling or killing the parent cascades to the
+launched cohort children. Suspension and cohort progress are durable. After a
+daemon restart or interrupted resume, the runtime reuses the checkpointed cohort
+and terminal child results rather than launching completed items again, then
+continues the parent when all slots are terminal.
 
 ## What follow does
 

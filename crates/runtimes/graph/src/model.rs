@@ -408,6 +408,18 @@ pub struct NodeReceipt {
     /// Cost reported by this node's native child, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<RuntimeCost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout: Option<FanoutReceiptSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FanoutReceiptSummary {
+    pub statuses: Vec<String>,
+    pub failed: usize,
+    pub expected: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<Value>>,
 }
 
 pub struct WalkContext {
@@ -415,6 +427,7 @@ pub struct WalkContext {
     pub inputs: Value,
     pub result: Option<Value>,
     pub execution: Option<Value>,
+    pub graph_run_id: Option<String>,
 }
 
 impl WalkContext {
@@ -427,6 +440,9 @@ impl WalkContext {
         }
         if let Some(ref execution) = self.execution {
             ctx.insert("_execution".into(), execution.clone());
+        }
+        if let Some(ref graph_run_id) = self.graph_run_id {
+            ctx.insert("_run".into(), serde_json::json!({"graph_run_id": graph_run_id}));
         }
         ctx.insert("_now".into(), Value::String(lillux::time::iso8601_now()));
         ctx.insert(

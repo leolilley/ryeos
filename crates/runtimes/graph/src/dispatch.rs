@@ -40,6 +40,23 @@ pub struct ActionFailure {
     /// Cost reported by a native child before it failed. `None` for
     /// subprocess failures and transport failures (no child cost exists).
     pub cost: Option<RuntimeCost>,
+    /// Whether the same authored action is eligible for another attempt.
+    /// Executed leaf failures default false; callback dispatch classification is
+    /// carried by [`ActionDispatchError`] before an envelope exists.
+    pub retryable: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{diagnostic}")]
+pub struct ActionDispatchError {
+    pub diagnostic: String,
+    pub retryable: bool,
+}
+
+impl From<anyhow::Error> for ActionDispatchError {
+    fn from(error: anyhow::Error) -> Self {
+        Self { diagnostic: format!("{error:#}"), retryable: false }
+    }
 }
 
 /// A successful leaf dispatch: the graph-visible result plus optional
@@ -97,7 +114,7 @@ pub async fn dispatch_action(
     thread_id: &str,
     project_path: &str,
     _exec_ctx: Option<&ExecutionContext>,
-) -> anyhow::Result<ActionOutcome> {
+) -> Result<ActionOutcome, ActionDispatchError> {
     let action = action.clone();
 
     let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -155,7 +172,10 @@ pub async fn dispatch_action(
     let response = client
         .dispatch_action(request)
         .await
-        .map_err(|e| anyhow::anyhow!("dispatch failed: {e}"))?;
+        .map_err(|error| ActionDispatchError {
+            diagnostic: format!("dispatch failed: {error}"),
+            retryable: error.retryable(),
+        })?;
 
     // The typed callback contract puts the leaf-dispatcher value in
     // `response.result`; the wrapping `thread` snapshot is for audit
@@ -202,6 +222,7 @@ pub async fn dispatch_action(
                          continuing child under daemon-managed follow"
                     ),
                     cost: success.cost,
+                    retryable: false,
                 }));
             }
             Ok(ActionOutcome::Success(success))
@@ -256,6 +277,7 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
             ActionOutcome::Failure(ActionFailure {
                 diagnostic: describe_native_failure(obj),
                 cost: parse_native_cost(obj),
+                retryable: false,
             })
         };
     }
@@ -269,6 +291,7 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
             ActionOutcome::Failure(ActionFailure {
                 diagnostic: describe_subprocess_failure(obj),
                 cost: None,
+                retryable: false,
             })
         };
     }

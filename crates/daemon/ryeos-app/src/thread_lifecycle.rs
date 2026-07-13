@@ -220,38 +220,47 @@ pub struct FollowFact {
     /// child's result).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_successor_thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cohort: Option<FollowCohortProgress>,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FollowCohortProgress { pub done: u32, pub expected: u32 }
 
 impl FollowFact {
     /// A suspended parent (found by its own thread id in the live waiter).
     fn suspended_parent(w: &crate::runtime_db::FollowWaiter) -> Self {
+        let child = w.children.first();
         Self {
             role: follow_role::SUSPENDED_PARENT,
             display_state: follow_display_state::SUSPENDED,
             phase: Some(w.phase.clone()),
             follow_node: Some(w.follow_node.clone()),
-            child_thread_id: w.child_thread_id.clone(),
-            child_chain_root_id: w.child_chain_root_id.clone(),
-            child_terminal_status: w.child_terminal_status.clone(),
+            child_thread_id: child.map(|c| c.child_thread_id.clone()),
+            child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
+            child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+            cohort: w.fanout.then(|| FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
         }
     }
 
     /// A resume successor recognized from the still-live waiter.
     fn resume_successor_live(w: &crate::runtime_db::FollowWaiter) -> Self {
+        let child = w.children.first();
         Self {
             role: follow_role::RESUME_SUCCESSOR,
-            display_state: if w.child_terminal_status.is_some() {
+            display_state: if w.children.iter().all(|c| c.terminal_status.is_some()) {
                 follow_display_state::RESUMED
             } else {
                 follow_display_state::RESUME_QUEUED
             },
             phase: None,
             follow_node: Some(w.follow_node.clone()),
-            child_thread_id: w.child_thread_id.clone(),
-            child_chain_root_id: w.child_chain_root_id.clone(),
-            child_terminal_status: w.child_terminal_status.clone(),
+            child_thread_id: child.map(|c| c.child_thread_id.clone()),
+            child_chain_root_id: child.map(|c| c.child_chain_root_id.clone()),
+            child_terminal_status: child.and_then(|c| c.terminal_status.clone()),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+            cohort: w.fanout.then(|| FollowCohortProgress { done: w.children.iter().filter(|c| c.terminal_status.is_some()).count() as u32, expected: w.expected_children }),
         }
     }
 
@@ -269,6 +278,7 @@ impl FollowFact {
             child_chain_root_id: None,
             child_terminal_status: None,
             parent_successor_thread_id: Some(successor_thread_id.to_string()),
+            cohort: None,
         }
     }
 }
@@ -2548,11 +2558,20 @@ mod tests {
             graph_run_id: "gr-1".to_string(),
             step_count: 3,
             frontier_id: None,
-            child_thread_id: Some("child-1".to_string()),
-            child_chain_root_id: Some("chain-child".to_string()),
-            child_terminal_thread_id: terminal.map(|_| "child-tail".to_string()),
-            child_terminal_status: terminal.map(str::to_string),
-            terminal_envelope: None,
+            fanout: false,
+            expected_children: 1,
+            children: vec![crate::runtime_db::FollowWaiterChild {
+                item_index: 0,
+                item_ref: "directive:example/child".to_string(),
+                spec_hash: "spec-1".to_string(),
+                child_thread_id: "child-1".to_string(),
+                child_chain_root_id: "chain-child".to_string(),
+                terminal_thread_id: terminal.map(|_| "child-tail".to_string()),
+                terminal_status: terminal.map(str::to_string),
+                terminal_envelope: None,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            }],
             phase: phase.to_string(),
             created_at_ms: 0,
             updated_at_ms: 0,

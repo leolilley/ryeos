@@ -39,6 +39,7 @@ fn follow_checkpoint_payload(
     state: &Value,
     accounting: Value,
     suppressed_errors: &[ErrorRecord],
+    iteration_snapshot: Option<&[Value]>,
     written_at: &str,
 ) -> Value {
     let mut payload = checkpoint_payload(
@@ -55,6 +56,9 @@ fn follow_checkpoint_payload(
     pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
     pending.insert("step_count".to_string(), json!(step));
     pending.insert("graph_run_id".to_string(), json!(graph_run_id));
+    if let Some(items) = iteration_snapshot {
+        pending.insert("iteration_snapshot".to_string(), json!(items));
+    }
     payload[follow_keys::PENDING_FOLLOW] = Value::Object(pending);
     payload
 }
@@ -69,6 +73,7 @@ impl Walker {
         step: u32,
         state: &Value,
         suppressed_errors: &[ErrorRecord],
+        iteration_snapshot: Option<&[Value]>,
     ) -> anyhow::Result<()> {
         let Some(writer) = &self.checkpoint else {
             return Ok(());
@@ -84,6 +89,7 @@ impl Walker {
             state,
             accounting,
             suppressed_errors,
+            iteration_snapshot,
             &lillux::time::iso8601_now(),
         ))?;
         Ok(())
@@ -171,6 +177,7 @@ mod tests {
             &json!({}),
             Value::Null,
             &[],
+            None,
             "2026-01-02T03:04:05Z",
         );
 

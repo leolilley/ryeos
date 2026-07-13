@@ -293,7 +293,31 @@ fn handle_attach_process(
     // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
     // probe instead of treating the thread as dead.
     params.pgid = ryeos_app::process::pgid_of(params.pid);
-    serde_json::to_value(state.threads.attach_process(&params)?)
+    let attached = match state.threads.attach_process(&params) {
+        Ok(thread) => thread,
+        Err(error) => {
+            if params.pgid > 0 {
+                let _ = ryeos_app::process::hard_kill_process_group(params.pgid);
+            }
+            return Err(error).context("runtime.attach_process refused; spawned process group killed");
+        }
+    };
+    if state
+        .state_store
+        .launch_window_is_cancelled(&attached.chain_root_id)?
+    {
+        let report = ryeos_app::cascade::signal_thread(
+            &state.state_store,
+            &attached.thread_id,
+            ryeos_app::cascade::CascadeMode::Graceful,
+        );
+        tracing::info!(
+            thread_id = %attached.thread_id,
+            report = %report,
+            "late follow-child process attachment observed cancellation tombstone"
+        );
+    }
+    serde_json::to_value(attached)
         .context("failed to encode runtime.attach_process result")
 }
 
@@ -738,14 +762,15 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode)
+        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode)
         {
-            Ok(report) => tracing::info!(
-                thread_id = %thread_id,
-                command_type = %command_type,
-                report = %report,
-                "cancel/kill signalled target and descendants"
-            ),
+            Ok((report, cancelled_roots)) => {
+                for root in cancelled_roots {
+                    ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
+                }
+                tracing::info!(thread_id = %thread_id, command_type = %command_type,
+                    report = %report, "cancel/kill signalled target and descendants");
+            }
             Err(e) => tracing::warn!(
                 thread_id = %thread_id,
                 command_type = %command_type,
@@ -1320,17 +1345,22 @@ mod tests {
                 graph_run_id: "g".to_string(),
                 step_count: 0,
                 frontier_id: None,
+                fanout: false,
+                expected_children: 1,
             })
             .unwrap();
-        state
-            .state_store
-            .set_follow_child(wk, child, child)
-            .unwrap();
+        set_test_follow_child(state, wk, child);
         state
             .state_store
             .set_follow_parent_successor(wk, successor)
             .unwrap();
         state.state_store.mark_follow_waiting(wk).unwrap();
+    }
+
+    fn set_test_follow_child(state: &AppState, follow_key: &str, child: &str) {
+        let item_ref = "graph:test";
+        let hash = ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &json!(null), None);
+        state.state_store.set_follow_child(follow_key, 0, item_ref, &hash, child, child).unwrap();
     }
 
     fn finalize_child(
@@ -1633,7 +1663,7 @@ mod tests {
         // The synthesized envelope is a VISIBLE degraded FAILURE (so the parent
         // resumes into on_error, not a silent empty success), and carries the
         // persisted child status/result for diagnostics.
-        let env = waiter
+        let env = waiter.children[0]
             .terminal_envelope
             .expect("recovered waiter must carry a terminal envelope");
         assert_eq!(
@@ -1681,7 +1711,7 @@ mod tests {
             ryeos_app::runtime_db::follow_phase::READY,
             "cancelling the child must ready the parent's waiter"
         );
-        let env = waiter
+        let env = waiter.children[0]
             .terminal_envelope
             .expect("cancelled child must store a terminal envelope");
         assert_eq!(
@@ -1757,7 +1787,7 @@ mod tests {
             "the child's own terminal readies the waiter"
         );
         assert_eq!(
-            waiter.child_terminal_thread_id.as_deref(),
+            waiter.children[0].terminal_thread_id.as_deref(),
             Some("Cfollow"),
             "the recorded terminal is the child, not the auxiliary"
         );
@@ -1783,12 +1813,11 @@ mod tests {
                 graph_run_id: "g".to_string(),
                 step_count: 0,
                 frontier_id: None,
+                fanout: false,
+                expected_children: 1,
             })
             .unwrap();
-        state
-            .state_store
-            .set_follow_child("wk-res", "Cres", "Cres")
-            .unwrap();
+        set_test_follow_child(&state, "wk-res", "Cres");
         state
             .state_store
             .set_follow_parent_successor("wk-res", "S")
@@ -1839,12 +1868,11 @@ mod tests {
                 graph_run_id: "g".to_string(),
                 step_count: 0,
                 frontier_id: None,
+                fanout: false,
+                expected_children: 1,
             })
             .unwrap();
-        state
-            .state_store
-            .set_follow_child("wk-res2", "Cnc", "Cnc")
-            .unwrap();
+        set_test_follow_child(&state, "wk-res2", "Cnc");
 
         let actions = crate::reconcile::reconcile_follow(&state).unwrap();
         assert!(
@@ -2013,7 +2041,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.terminal_envelope.expect("degraded envelope stored");
+        let env = w.children[0].terminal_envelope.expect("degraded envelope stored");
         assert_eq!(env["success"], json!(false));
         assert_eq!(env["status"], json!("failed"));
         assert_eq!(
@@ -2067,7 +2095,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.terminal_envelope.expect("canonical envelope stored");
+        let env = w.children[0].terminal_envelope.expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
         assert_eq!(env["warnings"], json!(["w1"]));
@@ -2093,7 +2121,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::WAITING);
-        assert!(w.terminal_envelope.is_none());
+        assert!(w.children[0].terminal_envelope.is_none());
     }
 
     #[tokio::test]
@@ -2142,7 +2170,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.terminal_envelope.expect("canonical envelope stored");
+        let env = w.children[0].terminal_envelope.expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["result"], json!("directive_return"));
         assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));

@@ -245,6 +245,30 @@ pub enum BuildAndLaunchError {
     Internal(#[from] anyhow::Error),
 }
 
+impl BuildAndLaunchError {
+    /// Whether a launch failure is an infrastructure interruption that is safe
+    /// to re-drive without changing the authored execution. Keep this deliberately
+    /// narrow: capability, secret, materialization, and unknown failures are
+    /// deterministic until proven otherwise.
+    fn retryable_launch_interruption(&self) -> bool {
+        match self {
+            Self::Internal(error) => error.chain().any(|cause| {
+                cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                    )
+                })
+            }),
+            Self::Materialization(_)
+            | Self::MissingSecrets { .. }
+            | Self::CapabilityRejected { .. } => false,
+        }
+    }
+}
+
 impl From<serde_json::Error> for BuildAndLaunchError {
     fn from(e: serde_json::Error) -> Self {
         Self::Internal(anyhow::anyhow!(e))
@@ -2485,13 +2509,21 @@ async fn launch_claimed_follow_child(
             thread.chain_root_id
         )));
     }
-    let identity = state
+    let metadata = state
         .state_store
         .get_launch_metadata(&thread_id)?
-        .and_then(|m| m.resume_context)
         .ok_or_else(|| {
             anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
         })?;
+    let persisted_parent_context = metadata.follow_parent_context.map(|p| crate::dispatch::ParentExecutionContext {
+        parent_thread_id: p.parent_thread_id,
+        hard_limits: p.hard_limits,
+        depth: p.depth,
+    });
+    let identity = metadata.resume_context.ok_or_else(|| {
+        anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
+    })?;
+    let parent_context = parent_context.or(persisted_parent_context);
 
     let mut params =
         crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
@@ -2554,8 +2586,8 @@ async fn launch_claimed_follow_child(
             // Fresh launch, not a checkpoint resume.
             checkpoint_resume_mode: CheckpointResumeMode::None,
             // Clamp the child to the parent's hard limits + launch at parent depth
-            // + 1 on the hot path; `None` on reconcile (root behavior), exactly like
-            // a normal callback-dispatched native-resume child.
+            // + 1 on the hot path; reconcile reconstructs the persisted parent
+            // execution context below rather than silently granting root limits.
             parent_execution_context: parent_context.as_ref(),
         },
         thread,
@@ -2612,6 +2644,24 @@ pub async fn launch_follow_child(
             return Err(e.into());
         }
     };
+
+    // Cancellation tombstones are checked after claiming, so admission and an
+    // ancestor cancel cannot race into a spawn. Finalize this never-launched row
+    // and wake its own follow chain immediately.
+    if state.state_store.launch_window_is_cancelled(&thread.chain_root_id)? {
+        let chain_root = thread.chain_root_id.clone();
+        let cancelled = state.threads.finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            thread_id: thread.thread_id.clone(), status: "cancelled".into(),
+            outcome_code: Some("cancelled".into()), result: None,
+            error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+            metadata: None, artifacts: Vec::new(), final_cost: None, summary_json: None,
+        });
+        let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+        cancelled?;
+        state.state_store.discard_window_member(&chain_root)?;
+        kick_follow_resume_if_ready(&state, &chain_root);
+        return Ok(SuccessorLaunchOutcome::Skipped("cancelled"));
+    }
 
     // A terminal row is already done (a duplicate trigger or a stale-lease reclaim
     // of a settled child) — release and skip without finalizing.
@@ -3022,6 +3072,19 @@ pub async fn launch_follow_resume_successor(
         // not-created branch below).
         Ok(skipped) => Ok(skipped),
         Err(e) => {
+            // A transient filesystem/CAS interruption leaves the successor
+            // `created` and the waiter `resuming`. Preserve both so the periodic
+            // follow reconciler can safely re-drive the idempotent checkpoint
+            // splice and launch. Deterministic defects still terminalize below.
+            if e.retryable_launch_interruption() {
+                tracing::warn!(
+                    follow_key,
+                    successor_id,
+                    error = %e,
+                    "follow-resume launch interrupted; leaving waiter for reconcile"
+                );
+                return Err(e);
+            }
             // A failed parent-resume finalizes the successor. If THIS parent chain is
             // itself the child of an OUTER follow (nested follow), that finalize flips
             // the outer waiter to ready — so kick it. The follow-resume successor
@@ -3036,6 +3099,28 @@ pub async fn launch_follow_resume_successor(
             Err(e)
         }
     }
+}
+
+fn follow_resume_payload(fanout: bool, envelopes: Vec<Value>) -> Value {
+    if !fanout {
+        return envelopes.into_iter().next().unwrap_or(Value::Null);
+    }
+    let statuses: Vec<String> = envelopes.iter().map(|envelope| {
+        if ryeos_runtime::envelope::envelope_succeeded(envelope) {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        }
+    }).collect();
+    let failed = statuses.iter().filter(|status| status.as_str() == "failed").count();
+    let expected = envelopes.len();
+    json!({
+        "fanout": true,
+        "items": envelopes,
+        "statuses": statuses,
+        "failed": failed,
+        "expected": expected,
+    })
 }
 
 async fn launch_follow_resume_claimed(
@@ -3069,12 +3154,13 @@ async fn launch_follow_resume_claimed(
         return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
     }
 
-    let terminal_envelope = waiter.terminal_envelope.clone().ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "follow-resume: waiter {} has no terminal envelope",
-            waiter.follow_key
-        ))
-    })?;
+    let mut envelopes = Vec::with_capacity(waiter.expected_children as usize);
+    for index in 0..waiter.expected_children {
+        let child = state.state_store.get_follow_child(&waiter.follow_key, index)?
+            .ok_or_else(|| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume: missing child index {index}")))?;
+        envelopes.push(child.terminal_envelope.ok_or_else(|| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume: child index {index} has no terminal envelope")))?);
+    }
+    let terminal_envelope = follow_resume_payload(waiter.fanout, envelopes);
 
     // Mark resuming (ready→resuming; idempotent on resuming) BEFORE mutating the
     // successor's checkpoint, so a crash mid-resume is re-driven by reconcile.

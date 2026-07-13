@@ -1957,7 +1957,15 @@ impl StateStore {
                     pgid,
                     "skipping attach_process — thread already terminal"
                 );
-                return Ok(());
+                anyhow::bail!(
+                    "refusing to attach process {pid}/{pgid} to terminal thread {thread_id} ({})",
+                    thread.status
+                );
+            }
+            if g.runtime_db.launch_window_is_cancelled(&thread.chain_root_id)? {
+                anyhow::bail!(
+                    "refusing to attach process {pid}/{pgid} to cancelled launch-window member {thread_id}"
+                );
             }
         }
         g.runtime_db
@@ -2018,12 +2026,30 @@ impl StateStore {
     pub fn set_follow_child(
         &self,
         follow_key: &str,
+        item_index: u32,
+        item_ref: &str,
+        spec_hash: &str,
         child_thread_id: &str,
         child_chain_root_id: &str,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db
-            .set_follow_child(follow_key, child_thread_id, child_chain_root_id)
+        g.runtime_db.set_follow_child(
+            follow_key,
+            item_index,
+            item_ref,
+            spec_hash,
+            child_thread_id,
+            child_chain_root_id,
+        )
+    }
+
+    pub fn get_follow_child(
+        &self,
+        follow_key: &str,
+        item_index: u32,
+    ) -> Result<Option<runtime_db::FollowWaiterChild>> {
+        let g = self.lock()?;
+        g.runtime_db.get_follow_child(follow_key, item_index)
     }
 
     pub fn set_follow_parent_successor(
@@ -2369,6 +2395,12 @@ impl StateStore {
             .launch_window_admit(window_key, global_live_limit, now_ms)
     }
 
+    /// Repair membership without admitting it; used when launch metadata proves
+    /// the child was originally windowed but the membership write was lost.
+    pub fn launch_window_insert_only(&self, child_chain_root_id: &str, window_key: &str, width: u32, now_ms: i64) -> Result<bool> {
+        self.lock()?.runtime_db.launch_window_insert(child_chain_root_id, window_key, width, now_ms)
+    }
+
     /// Release a window slot for a chain that reached a hard terminal and
     /// admit the window's next queued members (returned for launching).
     pub fn launch_window_release(
@@ -2385,6 +2417,27 @@ impl StateStore {
     pub fn launch_window_is_queued(&self, child_chain_root_id: &str) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db.launch_window_is_queued(child_chain_root_id)
+    }
+
+    pub fn launch_window_cancel_queued(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+        let mut g = self.lock()?;
+        g.runtime_db.launch_window_cancel_queued(chain_roots, now_ms)
+    }
+
+    pub fn launch_window_cancel_members(&self, chain_roots: &[String], now_ms: i64) -> Result<Vec<String>> {
+        self.lock()?.runtime_db.launch_window_cancel_members(chain_roots, now_ms)
+    }
+
+    pub fn launch_window_is_cancelled(&self, chain_root: &str) -> Result<bool> {
+        self.lock()?.runtime_db.launch_window_is_cancelled(chain_root)
+    }
+
+    pub fn list_cancelled_window_members(&self) -> Result<Vec<String>> {
+        self.lock()?.runtime_db.launch_window_cancelled_members()
+    }
+
+    pub fn discard_window_member(&self, chain_root: &str) -> Result<()> {
+        self.lock()?.runtime_db.launch_window_discard_member(chain_root)
     }
 
     pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {
