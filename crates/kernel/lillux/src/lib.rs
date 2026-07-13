@@ -1,18 +1,21 @@
+pub mod atomic_fs;
 pub mod cas;
 pub mod crypto;
 pub mod exec;
 pub mod identity;
+pub mod locks;
 pub mod signature;
 pub mod time;
 pub mod vault;
 
 pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
 
-pub use cas::{
-    atomic_exchange_paths, atomic_write, atomic_write_batch, atomic_write_private, canonical_json,
-    remove_dir_all_durable, remove_file_durable, rename_path_durable, sha256_hex, shard_path,
-    sync_tree_durable, valid_hash, with_exclusive_file_lock, CasStore, ExclusiveFileLock,
+pub use atomic_fs::{
+    atomic_exchange_paths, atomic_write, atomic_write_private, remove_dir_all_durable,
+    remove_file_durable, rename_path_durable, sync_tree_durable,
 };
+pub use cas::{atomic_write_batch, canonical_json, sha256_hex, shard_path, valid_hash, CasStore};
+pub use locks::{with_exclusive_file_lock, ExclusiveFileLock};
 
 pub use identity::envelope::{
     inspect_envelope, open_envelope, seal_envelope, validate_envelope_env, AadFields, Envelope,
