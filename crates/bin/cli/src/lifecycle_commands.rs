@@ -431,23 +431,18 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         }
     }
 
-    // The daemon fails closed when its node-owned subprocess policy or backend
-    // is unavailable. Diagnose that boundary offline instead of making the
-    // operator infer it from a failed launch.
+    // Report the node-config activation switch first. Backend policy health is
+    // relevant only when the operator explicitly enables sandboxing.
     if initialized {
-        let policy_path = config
-            .app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("node/sandbox.yaml");
-        match inspect_sandbox_policy(&policy_path) {
+        match inspect_sandbox_policy(&config.app_root, config.sandbox_enabled) {
             Ok(detail) => checks.push(check("sandbox", OK, detail)),
             Err(error) => checks.push(check(
                 "sandbox",
                 FAIL,
                 serde_json::json!({
-                    "policy": policy_path,
+                    "app_root": config.app_root,
                     "error": format!("{error:#}"),
-                    "fix": "install Bubblewrap and repair the node policy; then run `ryeos node doctor` again",
+                    "fix": "set `sandbox_enabled: false` in node config or repair the Bubblewrap policy; then run `ryeos node doctor` again",
                 }),
             )),
         }
@@ -684,9 +679,24 @@ fn check(
     }
 }
 
-fn inspect_sandbox_policy(path: &std::path::Path) -> Result<serde_json::Value> {
+fn inspect_sandbox_policy(
+    app_root: &std::path::Path,
+    sandbox_enabled: bool,
+) -> Result<serde_json::Value> {
     use std::os::unix::fs::PermissionsExt;
 
+    let config_path = app_root.join(ryeos_engine::AI_DIR).join("node/config.yaml");
+    if !sandbox_enabled {
+        return Ok(serde_json::json!({
+            "config": config_path,
+            "enabled": false,
+            "backend_status": "disabled",
+        }));
+    }
+
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/sandbox.yaml");
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read sandbox policy {}", path.display()))?;
     let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
@@ -718,6 +728,8 @@ fn inspect_sandbox_policy(path: &std::path::Path) -> Result<serde_json::Value> {
         policy.backend_path.display()
     );
     Ok(serde_json::json!({
+        "config": config_path,
+        "enabled": true,
         "policy": path,
         "version": policy.version,
         "backend": policy.backend_path,
@@ -956,6 +968,13 @@ fn default_app_root() -> PathBuf {
 mod tests {
     use super::*;
 
+    fn sandbox_root() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let node = temp.path().join(".ai/node");
+        std::fs::create_dir_all(&node).unwrap();
+        temp
+    }
+
     fn sandbox_policy(backend: &std::path::Path, version: u32) -> String {
         format!(
             "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
@@ -981,20 +1000,20 @@ mod tests {
     fn sandbox_doctor_accepts_absolute_regular_executable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_root();
         let backend = temp.path().join("bwrap");
         std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let policy = temp.path().join("sandbox.yaml");
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
         std::fs::write(&policy, sandbox_policy(&backend, 1)).unwrap();
 
-        assert!(inspect_sandbox_policy(&policy).is_ok());
+        assert!(inspect_sandbox_policy(temp.path(), true).is_ok());
     }
 
     #[test]
     fn sandbox_doctor_rejects_unknown_fields_and_bad_backend() {
-        let temp = tempfile::tempdir().unwrap();
-        let policy = temp.path().join("sandbox.yaml");
+        let temp = sandbox_root();
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
         std::fs::write(
             &policy,
             format!(
@@ -1004,7 +1023,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = inspect_sandbox_policy(&policy).unwrap_err().to_string();
+        let error = inspect_sandbox_policy(temp.path(), true)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("strictly parse"));
 
         std::fs::write(
@@ -1012,7 +1033,7 @@ mod tests {
             sandbox_policy(std::path::Path::new("relative/bwrap"), 1),
         )
         .unwrap();
-        assert!(inspect_sandbox_policy(&policy)
+        assert!(inspect_sandbox_policy(temp.path(), true)
             .unwrap_err()
             .to_string()
             .contains("absolute"));

@@ -258,6 +258,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
 
     let engine_ctx = EngineContext {
         app_root: sandbox_app_root(),
+        sandbox_enabled: true,
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -362,6 +363,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let engine_ctx = EngineContext {
         app_root: sandbox_app_root(),
+        sandbox_enabled: true,
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),
@@ -456,6 +458,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
 
     let engine_ctx = EngineContext {
         app_root: sandbox_app_root(),
+        sandbox_enabled: true,
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

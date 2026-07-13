@@ -1,12 +1,15 @@
 # Execution sandbox contract
 
-RyeOS launches tool and runtime subprocesses through a node-owned Bubblewrap
-policy on Linux. The policy is stored at `<app-root>/.ai/node/sandbox.yaml` and
-is created by `ryeos init`. Items and bundles cannot weaken it.
+RyeOS can launch tool and runtime subprocesses through a node-owned Bubblewrap
+policy on Linux. Sandboxing is opt-in through the flat
+`sandbox_enabled: true` setting in `<app-root>/.ai/node/config.yaml`; it is
+disabled when the setting is absent or false. The policy is stored at
+`<app-root>/.ai/node/sandbox.yaml` and is created by `ryeos init`. Items and
+bundles cannot enable or weaken it.
 
 ## Enforcement boundary
 
-Before every subprocess spawn, RyeOS loads and strictly parses the policy,
+When enabled, before every subprocess spawn RyeOS loads and strictly parses the policy,
 checks the configured backend, validates the complete constructed environment,
 resolves writable roots, and wraps the existing `SubprocessSpec`. Execution is
 refused when the policy is missing or invalid, its version is unsupported, the
@@ -19,7 +22,16 @@ and bind-mounts only the configured writable roots as writable. Network access
 is either shared with the host or isolated. Open-file and process limits are
 applied when configured.
 
-## Initial policy
+## Activation and initial policy
+
+Enable the boundary in the node's existing flat configuration:
+
+```yaml
+sandbox_enabled: true
+```
+
+The default is `false`. The policy created by `ryeos init` is inert until the
+operator enables it.
 
 The policy created by `ryeos init` is deliberately usable rather than a claim
 of least privilege:

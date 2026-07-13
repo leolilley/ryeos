@@ -34,6 +34,7 @@ pub struct PlanContext {
 #[derive(Debug, Clone)]
 pub struct EngineContext {
     pub app_root: PathBuf,
+    pub sandbox_enabled: bool,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,

@@ -19,6 +19,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub app_root: &'a Path,
+    pub sandbox_enabled: bool,
     pub cas_root: &'a Path,
     /// Daemon-allocated checkpoint dir for a replay-aware runtime.
     pub checkpoint_dir: Option<&'a Path>,
@@ -40,6 +41,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         thread_auth_token,
         roots,
         app_root,
+        sandbox_enabled,
         cas_root,
         checkpoint_dir,
         is_resume,
@@ -133,6 +135,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
     let request = super::super::lillux_bridge::to_lillux_request(&spec);
     let request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
         request,
+        sandbox_enabled,
         app_root,
         &spec.project_path,
         &spec.item_ref.to_string(),

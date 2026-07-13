@@ -37,17 +37,21 @@ pub fn load_node_sandbox_policy(
 /// node-policy-wrapped request. Diagnostic probes intentionally do not use it.
 pub fn sandbox_lillux_request(
     request: lillux::SubprocessRequest,
+    sandbox_enabled: bool,
     app_root: &std::path::Path,
     project_path: &std::path::Path,
     item_ref: &str,
     thread_id: &str,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
-    let policy = load_node_sandbox_policy(app_root)?;
     if !request.timeout.is_finite() || request.timeout < 0.0 {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!("invalid subprocess timeout {}", request.timeout),
         });
     }
+    if !sandbox_enabled {
+        return Ok(request);
+    }
+    let policy = load_node_sandbox_policy(app_root)?;
     let cwd = request
         .cwd
         .as_deref()
@@ -440,6 +444,31 @@ mod tests {
     }
 
     #[test]
+    fn executable_boundary_is_a_noop_when_sandbox_is_disabled() {
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "true".to_string()],
+            cwd: Some("/tmp".to_string()),
+            envs: vec![],
+            stdin_data: None,
+            timeout: 1.0,
+        };
+
+        let unchanged = sandbox_lillux_request(
+            request,
+            false,
+            std::path::Path::new("/missing/app-root"),
+            std::path::Path::new("/tmp"),
+            "tool:test/probe",
+            "T-test",
+        )
+        .unwrap();
+
+        assert_eq!(unchanged.cmd, "/bin/sh");
+        assert_eq!(unchanged.args, ["-c", "true"]);
+    }
+
+    #[test]
     fn executable_boundary_requires_node_policy() {
         let app_root = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -453,6 +482,7 @@ mod tests {
         };
         let error = match sandbox_lillux_request(
             request,
+            true,
             app_root.path(),
             project.path(),
             "tool:test/probe",
@@ -484,6 +514,7 @@ mod tests {
         };
         let wrapped = sandbox_lillux_request(
             request,
+            true,
             app_root.path(),
             project.path(),
             "tool:test/probe",

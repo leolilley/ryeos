@@ -5,10 +5,11 @@
 
 ## Status
 
-Implemented for Linux through a node-owned Bubblewrap policy at
-`<app-root>/.ai/node/sandbox.yaml`. Missing policy, unsupported policy version,
-missing backend, disallowed environment bindings, and working directories
-outside writable roots all fail closed before spawn.
+Implemented as an opt-in Linux boundary. The resolved flat node setting
+`sandbox_enabled` defaults to false; when true, RyeOS applies the node-owned
+Bubblewrap policy at `<app-root>/.ai/node/sandbox.yaml`. Missing policy,
+unsupported policy version, missing backend, disallowed environment bindings,
+and working directories outside writable roots all fail closed before spawn.
 
 ## Goal
 

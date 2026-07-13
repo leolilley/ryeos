@@ -1297,6 +1297,7 @@ pub(crate) async fn dispatch_method(
         };
         let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
             subprocess_request,
+            state.config.sandbox_enabled,
             &state.config.app_root,
             request.project_path,
             &canonical_ref.to_string(),
@@ -2029,6 +2030,7 @@ async fn dispatch_streaming_subprocess(
     };
     let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
         subprocess_request,
+        state.config.sandbox_enabled,
         &state.config.app_root,
         request.project_path,
         &item_ref_str,

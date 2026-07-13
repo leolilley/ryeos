@@ -6,7 +6,7 @@
 //! like `{interpreter}` resolve.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;

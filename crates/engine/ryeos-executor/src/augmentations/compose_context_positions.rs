@@ -272,6 +272,7 @@ pub async fn run(
         };
         let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
             subprocess_request,
+            state.config.sandbox_enabled,
             &state.config.app_root,
             project_path,
             &format!("runtime:{target_kind}"),
