@@ -337,33 +337,47 @@ jobs:
             fi
           done
 
-      - name: Push immutable standard version
+      # The pre-login images above exist only for local qualification. These
+      # are the final registry builds and the sole source of release digests.
+      - name: Build and push attested immutable standard version
         id: push-standard
-        env:
-          VERSION: ${{ needs.qualify.outputs.version }}
-        run: |
-          SRC="ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}"
-          VERSION_TAG="ghcr.io/leolilley/ryeos-standard:${VERSION}"
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile.standard
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
+          build-args: |
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+          tags: ghcr.io/leolilley/ryeos-standard:${{ needs.qualify.outputs.version }}
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
-          docker tag "$SRC" "$VERSION_TAG"
-          docker push "$VERSION_TAG"
-
-          DIGEST="$(docker buildx imagetools inspect "$VERSION_TAG" --format '{{ json .Manifest.Digest }}' | tr -d '"')"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Push immutable central-host version
+      - name: Build and push attested immutable central-host version
         id: push-central-host
-        env:
-          VERSION: ${{ needs.qualify.outputs.version }}
-        run: |
-          SRC="ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}"
-          VERSION_TAG="ghcr.io/leolilley/ryeos-central-host:${VERSION}"
-
-          docker tag "$SRC" "$VERSION_TAG"
-          docker push "$VERSION_TAG"
-
-          DIGEST="$(docker buildx imagetools inspect "$VERSION_TAG" --format '{{ json .Manifest.Digest }}' | tr -d '"')"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile.central-host
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
+          build-args: |
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+          tags: ghcr.io/leolilley/ryeos-central-host:${{ needs.qualify.outputs.version }}
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
@@ -372,26 +386,70 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "true"
           DIGEST: ${{ steps.push-standard.outputs.digest }}
-        run: cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
 
       - name: Cosign sign central-host image (keyless)
         env:
           COSIGN_EXPERIMENTAL: "true"
           DIGEST: ${{ steps.push-central-host.outputs.digest }}
-        run: cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
+
+      - name: Verify standard signature and build attestations
+        env:
+          DIGEST: ${{ steps.push-standard.outputs.digest }}
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          IMAGE="ghcr.io/leolilley/ryeos-standard@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$IMAGE"
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .Provenance }}' > provenance.json
+          jq -e 'type == "object" and length > 0' provenance.json
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.. | strings | select(. == $sha)' provenance.json
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .SBOM }}' > sbom.json
+          jq -e 'type == "object" and length > 0' sbom.json
+
+      - name: Verify central-host signature and build attestations
+        env:
+          DIGEST: ${{ steps.push-central-host.outputs.digest }}
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          IMAGE="ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$IMAGE"
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .Provenance }}' > provenance.json
+          jq -e 'type == "object" and length > 0' provenance.json
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.. | strings | select(. == $sha)' provenance.json
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .SBOM }}' > sbom.json
+          jq -e 'type == "object" and length > 0' sbom.json
 
       # Mutable tags move only after both immutable artifacts have passed
       # provenance verification, publication, and signing.
       - name: Promote verified images to latest
         env:
-          VERSION: ${{ needs.qualify.outputs.version }}
+          STANDARD_DIGEST: ${{ steps.push-standard.outputs.digest }}
+          CENTRAL_DIGEST: ${{ steps.push-central-host.outputs.digest }}
         run: |
-          STANDARD_VERSION="ghcr.io/leolilley/ryeos-standard:${VERSION}"
-          CENTRAL_VERSION="ghcr.io/leolilley/ryeos-central-host:${VERSION}"
-
           docker buildx imagetools create \
             --tag ghcr.io/leolilley/ryeos-standard:latest \
-            "$STANDARD_VERSION"
+            "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}"
           docker buildx imagetools create \
             --tag ghcr.io/leolilley/ryeos-central-host:latest \
-            "$CENTRAL_VERSION"
+            "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}"
