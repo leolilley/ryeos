@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:98ac08b67e72955bed2d8debf73c5f30f2f1aeac4a1a31c47bdccf0d85722594:s+2DCfU/fMxQvR/7r2e3qR1ldo4n0XmqTQxkgjgxXZBKpceQFfaEGBNjeG2p4FMheDx0fhavbOkfBrlQZGofCw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T02:11:07Z:211c48ea73abcb5dedffe7dabe87647acf2f15975b69f3d1ced16d561f87adf0:2CQqq+Uf1Cwrl46boxY/HJRtye9bZ8rPK0OvCTAilS3BXd/8lHqP4ssj4JXmGhfhcZLCak/crEBoKNyVn85FAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
@@ -47,6 +47,15 @@ A managed tool runtime can standardize process behavior, but it should not be th
 Likewise, any future per-tool sandbox profile is an intersecting restriction
 beneath the immutable node policy, never item-authored authority to enable or
 broaden mounts, network, environment, or limits.
+
+That profile remains an inner application-policy layer. It must not be used as
+the claim that hostile multi-tenancy is complete: CPU, memory, and process-count
+budgets belong to an outer cgroup/worker controller; hostile workloads require a
+VM, microVM, or dedicated worker boundary; and principal-scoped storage,
+secrets, networking, audit, and cleanup remain hosted-node concerns. The
+node-owned sandbox provides the stable launch handoff where those later layers
+can be attached. See `ryeos/future/hosted-node-trust-boundaries` for the layered
+completion model.
 
 ## Authority model sketch
 

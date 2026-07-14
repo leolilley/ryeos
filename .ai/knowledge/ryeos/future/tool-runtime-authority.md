@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:436b8f23d806800ae18df9fefca4af01651bafe2f66eb9a8154252e3885c4fa6:0MnqM0ibaROD6UVzZpq6EewTECSvhl9iOOCE+ZWUtaF7/WUAI3fvBlrg5pM14SqXVGb6s5NVMe+yH5hccFRHBA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T02:11:07Z:3fcc0190530e62ac916182e7bb11097d42fff3c4e56384911660a4b2c1d978de:B+ZgDhvI74EKAgsUMKxYJIp+8ogVs0RrVnBce6yjFNcNEAEwvSmftUb9329+iYCMy5CFzl3p9Yt+oXoI8luvAA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Tool Runtime Authority Model
 
 ## Status
@@ -101,6 +101,14 @@ A future managed tool runtime may standardize launch behavior, sandboxing, strea
 Any future per-tool sandbox profile must only narrow the immutable node-owned
 policy. It cannot enable a disabled node boundary, add mounts/network access,
 or override node limits.
+
+Per-tool profiles are not a substitute for hosted workload isolation. The
+current inner boundary deliberately does not provide CPU/memory/process cgroup
+quotas, cross-principal PID/signal isolation, or immutable closure capture for
+all transitive imports and assets. Hostile workloads still require a cgroup and
+a VM, microVM, or dedicated outer worker together with principal-scoped data,
+secrets, network, accounting, and cleanup. The existing shared launch boundary
+is what lets those future layers be added once, beneath every tool/runtime path.
 
 ## Future triggers
 

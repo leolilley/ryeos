@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:bf02ee73cb8d2e39b2900cd03c7585a977824cabbc21a4cab165825698687b57:a5/q82LhnxXQxuzIrUXL3YsQw31cr7k80PhTk/1XAtGIGGPV6wmK9ihg4vAVLOTpdMgjX8pD0GkW5lrxcCctCQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T02:13:36Z:43d0f7d6322fce777a27bca0273ed35cc3c6edf5fa0f53cb6126645b376ef0ba:3nexAzSpp9LU+Bu4XG0hbmDubxr7CpNthLxm86d20744sy/XGxt8shxt0dkiiHvoZjHWKkQTpgAip3ODELqdDQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/development
 name: sandbox-runtime
@@ -274,4 +274,3 @@ both execute through normal signature and authorization paths.
 Do not add item-authored profiles, secondary activation sources, implicit path
 creation, or per-spawn policy reads. Those would break node ownership, path
 authority, and policy-generation observability.
-<!-- ryeos:signed:2026-07-14T01:54:13Z:43d0f7d6322fce777a27bca0273ed35cc3c6edf5fa0f53cb6126645b376ef0ba:3nexAzSpp9LU+Bu4XG0hbmDubxr7CpNthLxm86d20744sy/XGxt8shxt0dkiiHvoZjHWKkQTpgAip3ODELqdDQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
