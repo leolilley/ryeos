@@ -700,6 +700,7 @@ struct SandboxPolicyInspection {
 }
 
 fn inspect_sandbox_policy(app_root: &std::path::Path) -> Result<SandboxPolicyInspection> {
+    use ryeos_core_tools::actions::doctor::{NA, OK};
     use ryeos_engine::sandbox::{SandboxMode, SandboxRuntime};
 
     let runtime = SandboxRuntime::load(app_root).map_err(|error| anyhow::anyhow!(error))?;
@@ -985,6 +986,7 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_core_tools::actions::doctor::{NA, OK};
 
     fn sandbox_policy(backend: &std::path::Path, mode: &str, open_files: Option<u64>) -> String {
         let open_files = open_files

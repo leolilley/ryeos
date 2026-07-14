@@ -4,6 +4,7 @@ use serde_json::json;
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::state::AppState;
 
+#[cfg(test)]
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
     dispatch_with_peer(request, state, None).await
 }

@@ -1276,10 +1276,10 @@ async fn run_claimed_thread_row_inner(
         )?;
         if inherited_stop.is_some() {
             super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)?;
-            anyhow::bail!(
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "parent {} was stop-requested before child launch",
                 parent_ctx.parent_thread_id
-            );
+            )));
         }
     }
 
@@ -1298,7 +1298,9 @@ async fn run_claimed_thread_row_inner(
                 .record_child_link(previous, &thread_id, "continuation")?;
         if inherited_stop.is_some() {
             super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)?;
-            anyhow::bail!("predecessor {previous} was stop-requested before continuation launch");
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "predecessor {previous} was stop-requested before continuation launch"
+            )));
         }
     }
 

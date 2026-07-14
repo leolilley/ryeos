@@ -499,7 +499,7 @@ pub enum FinalizeCreatedUnattachedOutcome {
 
 impl FinalizeCreatedUnattachedOutcome {
     pub fn is_settled(&self) -> bool {
-        matches!(Self::Finalized(_) | Self::AlreadyTerminal(_), self)
+        matches!(self, Self::Finalized(_) | Self::AlreadyTerminal(_))
     }
 }
 

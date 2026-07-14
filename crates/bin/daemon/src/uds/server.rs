@@ -33,6 +33,7 @@ use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 mod routing;
 mod transport;
 
+#[cfg(test)]
 pub(crate) use routing::dispatch;
 
 /// Kernel-authenticated identity of the process that opened this Unix stream.
@@ -1157,11 +1158,15 @@ mod tests {
         let matching = peer(42);
         verify_attaching_peer_pid(42, Some(&matching)).unwrap();
 
-        let missing = verify_attaching_peer_pid(42, None).unwrap_err();
+        let missing = verify_attaching_peer_pid(42, None)
+            .err()
+            .expect("missing authenticated Unix peer should be rejected");
         assert!(format!("{missing:#}").contains("kernel-authenticated Unix peer pidfd"));
 
         let other = peer(43);
-        let mismatched = verify_attaching_peer_pid(42, Some(&other)).unwrap_err();
+        let mismatched = verify_attaching_peer_pid(42, Some(&other))
+            .err()
+            .expect("mismatched authenticated Unix peer should be rejected");
         let message = format!("{mismatched:#}");
         assert!(message.contains("reported 42"), "got: {message}");
         assert!(message.contains("Unix peer 43"), "got: {message}");

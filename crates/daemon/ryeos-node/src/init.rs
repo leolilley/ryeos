@@ -61,6 +61,7 @@ use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 mod bundle_install;
 mod default_policy;
 
+#[cfg(test)]
 pub(crate) use bundle_install::copy_dir_recursive;
 use bundle_install::{
     bundle_registration_value, install_bundle, replace_bundle, verify_bundle_structure,

@@ -1341,7 +1341,6 @@ mod tests {
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
     use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
-    use serde_json::json;
 
     #[test]
     fn only_trusted_effective_classes_are_dispatchable() {

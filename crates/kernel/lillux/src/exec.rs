@@ -249,6 +249,7 @@ enum WrapperPoll {
     /// wrapper PID/PGID for one final identity-checked group cleanup.
     ExitedUnreaped,
     /// Non-Linux fallback where `Child::try_wait` necessarily reaped first.
+    #[cfg(not(target_os = "linux"))]
     ExitedReaped(process::ExitStatus),
 }
 
@@ -315,6 +316,7 @@ impl RunningProcess {
                         Err(error) => return self.wait_error_result(error),
                     }
                 }
+                #[cfg(not(target_os = "linux"))]
                 Ok(WrapperPoll::ExitedReaped(status)) => {
                     self.wrapper_reaped = true;
                     // On targets without WNOWAIT, revalidation safely skips a
@@ -973,8 +975,6 @@ fn configure_nonblocking_fd<T>(reader: &mut T) -> Result<(), String>
 where
     T: std::os::fd::AsRawFd,
 {
-    use std::os::fd::AsRawFd as _;
-
     let fd = reader.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {

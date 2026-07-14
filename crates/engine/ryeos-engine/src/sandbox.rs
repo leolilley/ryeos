@@ -1640,7 +1640,7 @@ fn resolve_backend(
 fn probe_bubblewrap_backend(handle: &Arc<std::fs::File>) -> Result<String, EngineError> {
     let command = format!("/proc/self/fd/{}", mount_fd_arg(handle));
     let run = |argument: &str| {
-        lillux::lib_run(lillux::SubprocessRequest {
+        lillux::run(lillux::SubprocessRequest {
             cmd: command.clone(),
             args: vec![argument.to_string()],
             cwd: Some("/".to_string()),
@@ -2723,10 +2723,22 @@ fn resolve_readable_mounts(
         return Ok(verified_code_mounts.to_vec());
     }
 
-    let destination = match configured {
-        "{project}" => project_destination.to_path_buf(),
-        "{cwd}" => cwd_destination.to_path_buf(),
-        other => PathBuf::from(other),
+    let (source, destination) = match configured {
+        "{project}" => (
+            canonical_project.to_path_buf(),
+            project_destination.to_path_buf(),
+        ),
+        "{cwd}" => (canonical_cwd.to_path_buf(), cwd_destination.to_path_buf()),
+        other => {
+            let destination = PathBuf::from(other);
+            let source = std::fs::canonicalize(&destination).map_err(|error| {
+                refused(format!(
+                    "sandbox readable path {} cannot be resolved: {error}",
+                    destination.display()
+                ))
+            })?;
+            (source, destination)
+        }
     };
     if !destination.is_absolute() && !matches!(configured, "{project}" | "{cwd}") {
         return Err(refused(format!(
@@ -2734,12 +2746,6 @@ fn resolve_readable_mounts(
             destination.display()
         )));
     }
-    let source = std::fs::canonicalize(&destination).map_err(|error| {
-        refused(format!(
-            "sandbox readable path {} cannot be resolved: {error}",
-            destination.display()
-        ))
-    })?;
     let source_handle = pin_mount_source("readable mount", &source)?;
     Ok(vec![ReadableMount {
         destination,
@@ -3269,7 +3275,8 @@ mod tests {
                     thread_id: "T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("sandbox request with an interior NUL should be rejected");
 
         assert!(error.to_string().contains("interior NUL"));
     }
@@ -3445,7 +3452,8 @@ mod tests {
                     thread_id: "T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("runtime workspace outside the execution root should be rejected");
         assert!(error.to_string().contains("protected app root"));
     }
 
@@ -3594,7 +3602,8 @@ mod tests {
                     thread_id: "T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("writable app-root project should be rejected");
 
         assert!(error.to_string().contains("protected app root"));
     }
@@ -3704,7 +3713,8 @@ mod tests {
                     thread_id: "T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("non-normal namespace destination should be rejected");
 
         assert!(error.to_string().contains("normal path components"));
     }
@@ -3843,7 +3853,8 @@ mod tests {
                     thread_id: "T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("verified code changed after hashing should be rejected");
 
         assert!(error.to_string().contains("changed after verification"));
     }
@@ -3882,7 +3893,8 @@ mod tests {
                     thread_id: "T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("verified code absent from readable policy should be rejected");
 
         assert!(error.to_string().contains("not pinned read-only"));
     }
@@ -3914,7 +3926,8 @@ mod tests {
                     thread_id: "../T-test",
                 },
             )
-            .unwrap_err();
+            .err()
+            .expect("invalid sandbox thread id should be rejected");
 
         assert!(error.to_string().contains("one normal path component"));
     }

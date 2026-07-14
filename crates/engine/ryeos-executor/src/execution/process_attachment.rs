@@ -188,7 +188,7 @@ pub(crate) fn capture_or_adopt_owned_identity(
                     .flatten()
             });
             existing.ok_or_else(|| {
-                capture_error.context(
+                anyhow::Error::new(capture_error).context(
                     "capture owned process identity and no exact authenticated self-attach exists",
                 )
             })
