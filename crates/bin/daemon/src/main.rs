@@ -69,6 +69,18 @@ fn build_route_table(
     })
 }
 
+fn prospective_node_config_validator(
+    ui: Arc<ryeos_ui::UiState>,
+) -> Arc<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator> {
+    Arc::new(
+        ryeos_app::prospective_admission::ProspectiveNodeConfigValidator::new(move |snapshot| {
+            build_route_table(snapshot, ui.clone())
+                .map(|_| ())
+                .context("prospective route-table compilation failed")
+        }),
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -291,6 +303,8 @@ async fn main() -> Result<()> {
     // Build UI state (browser sessions + session bus).
     let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
     let ui_state_for_hints = ui_state.clone();
+    let prospective_node_config_validator =
+        prospective_node_config_validator(ui_state.clone());
 
     // Build the route table from the node-config snapshot.
     let route_table = {
@@ -429,6 +443,7 @@ async fn main() -> Result<()> {
             let mut ext = ryeos_app::extension_state::ExtensionState::new();
             ext.insert(ui_state);
             ext.insert(route_diagnostics);
+            ext.insert(prospective_node_config_validator);
             Arc::new(ext)
         },
         write_barrier: Arc::new(write_barrier),
@@ -1154,6 +1169,9 @@ async fn run_service_standalone(
         ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
             .context("load node sandbox policy")?,
     );
+    let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
+    let standalone_node_config_validator =
+        prospective_node_config_validator(standalone_ui_state.clone());
 
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
@@ -1171,7 +1189,12 @@ async fn run_service_standalone(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
+        extensions: {
+            let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+            extensions.insert(standalone_ui_state);
+            extensions.insert(standalone_node_config_validator);
+            Arc::new(extensions)
+        },
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),

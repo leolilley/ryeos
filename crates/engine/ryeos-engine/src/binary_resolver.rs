@@ -25,7 +25,7 @@
 //! All three shapes go through the same manifest-hash + trust-store
 //! verification path below.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -439,6 +439,51 @@ pub fn verify_bundle_executor_manifest(
     bundle_root: &Path,
     node_trust_store: &TrustStore,
 ) -> Result<(), EngineError> {
+    verify_bundle_executor_manifest_items(bundle_root, node_trust_store).map(|_| ())
+}
+
+/// Verify every admitted bundle's executable set and require one owner for
+/// each native-executor identity.
+///
+/// Native executor references are globally addressed as
+/// `native:<bare-name>` at launch time, with the target triple supplied by the
+/// node. Consequently, two bundles may not both publish the same
+/// `bin/<target-triple>/<bare-name>` identity. Checking every target triple at
+/// admission time keeps a bundle set portable: a collision cannot remain
+/// dormant merely because the current node has a different host triple.
+pub fn verify_bundle_executor_manifests(
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+) -> Result<(), EngineError> {
+    let mut owners: HashMap<String, &Path> = HashMap::new();
+
+    for bundle_root in bundle_roots {
+        let mut item_refs: Vec<String> =
+            verify_bundle_executor_manifest_items(bundle_root, node_trust_store)?
+                .into_iter()
+                .collect();
+        item_refs.sort_unstable();
+        for item_ref in item_refs {
+            if let Some(first_root) = owners.insert(item_ref.clone(), bundle_root.as_path()) {
+                return Err(EngineError::BinManifestInvalid {
+                    bin: item_ref.clone(),
+                    reason: format!(
+                        "native executor identity `{item_ref}` is published by both {} and {}; each target-triple/name identity must have exactly one admitted bundle owner",
+                        first_root.display(),
+                        bundle_root.display(),
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_bundle_executor_manifest_items(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<HashSet<String>, EngineError> {
     let ai_dir = bundle_root.join(crate::AI_DIR);
     require_regular_bundle_ai_tree(bundle_root, &ai_dir, true)?;
     let bin_root = ai_dir.join("bin");
@@ -482,7 +527,7 @@ pub fn verify_bundle_executor_manifest(
     };
 
     if bin_root_metadata.is_none() && !manifest_ref_exists {
-        return Ok(());
+        return Ok(HashSet::new());
     }
     if !manifest_ref_exists {
         return Err(EngineError::BinManifestMissing {
@@ -722,7 +767,7 @@ pub fn verify_bundle_executor_manifest(
         ));
     }
 
-    Ok(())
+    Ok(expected_item_refs)
 }
 
 fn bundle_executor_error(bundle_root: &Path, reason: impl Into<String>) -> EngineError {
@@ -1311,7 +1356,14 @@ mod tests {
     /// and the signed `refs/bundles/manifest` pointer. Returns the signer
     /// fingerprint and signing key used for both trust anchors.
     fn write_resolver_fixture(bundle_root: &Path, bin_name: &str) -> (String, SigningKey) {
-        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        write_resolver_fixture_for_triple(bundle_root, bin_name, env!("RYEOS_ENGINE_HOST_TRIPLE"))
+    }
+
+    fn write_resolver_fixture_for_triple(
+        bundle_root: &Path,
+        bin_name: &str,
+        triple: &str,
+    ) -> (String, SigningKey) {
         let ai = bundle_root.join(crate::AI_DIR);
         let bin_dir = ai.join("bin").join(triple);
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -1406,6 +1458,40 @@ mod tests {
         let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
             .expect_err("an extra on-disk executable must be refused");
         assert!(error.to_string().contains("not authorized"));
+    }
+
+    #[test]
+    fn admitted_bundle_set_rejects_duplicate_native_executor_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let collision_triple = "future-vendor-platform-abi";
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple(&first, "shared-executor", collision_triple);
+        write_resolver_fixture_for_triple(&second, "shared-executor", collision_triple);
+
+        let error = verify_bundle_executor_manifests(
+            &[first.clone(), second.clone()],
+            &trust_store_for(&fingerprint, &key),
+        )
+        .expect_err("two owners of one target-triple/name identity must be refused");
+        let message = error.to_string();
+        assert!(message.contains(&format!("bin/{collision_triple}/shared-executor")));
+        assert!(message.contains(&first.display().to_string()));
+        assert!(message.contains(&second.display().to_string()));
+    }
+
+    #[test]
+    fn admitted_bundle_set_allows_same_bare_name_for_different_triples() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple(&first, "portable-executor", "target-one");
+        write_resolver_fixture_for_triple(&second, "portable-executor", "target-two");
+
+        verify_bundle_executor_manifests(&[first, second], &trust_store_for(&fingerprint, &key))
+            .expect("target triple is part of the native executor identity");
     }
 
     #[cfg(unix)]

@@ -48,6 +48,20 @@ pub fn rebuild_bundle_manifest(
     bundle_root: &Path,
     signing_key: &SigningKey,
 ) -> Result<RebuildReport> {
+    super::publisher_transaction::with_staged_bundle_generation(bundle_root, |staging| {
+        rebuild_bundle_manifest_in_place(staging, signing_key)
+    })
+}
+
+/// Rebuild publisher artifacts directly in `bundle_root`.
+///
+/// Callers must already own a complete staged bundle generation. The public
+/// entry point above supplies that transaction; the full publish pipeline has
+/// its own outer transaction and uses this helper to avoid nested copies.
+pub(super) fn rebuild_bundle_manifest_in_place(
+    bundle_root: &Path,
+    signing_key: &SigningKey,
+) -> Result<RebuildReport> {
     require_real_directory(bundle_root, "bundle root")?;
     let ai_root = bundle_root.join(".ai");
     validate_publish_control_tree(&ai_root, true)?;

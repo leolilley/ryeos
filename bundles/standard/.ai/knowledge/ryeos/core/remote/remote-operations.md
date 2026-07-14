@@ -2,7 +2,7 @@
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.6.0"
+version: "3.7.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -316,9 +316,19 @@ ryeos remote bundle-install --remote production --bundle-name standard
 ```
 
 **Fail-closed**:
-- Missing blobs → abort before materialization.
-- Preflight failure → clean up partial directory.
-- No registration written unless preflight passes.
+
+- The export is limited to 10,000 files, 20,000 total tree entries, 64 levels,
+  4 KiB paths, 32 MiB per file, and 256 MiB of declared file content.
+- Object responses are streamed into bounded buffers and fetched in bounded
+  batches; the installer never retains a whole-bundle blob map.
+- Missing, duplicate, malformed, wrong-sized, or hash-mismatched blobs abort
+  the operation and remove the hidden staging generation.
+- The completed staging tree must pass signed-manifest preflight and the same
+  prospective engine/node-config admission used at node boot. A bundle that
+  would introduce a registry, protocol, runtime, command, or native-executor
+  collision never becomes live.
+- No registration is written unless activation succeeds. Transaction recovery
+  completes an interrupted committed install and invalidates cached engines.
 
 Local capability: `ryeos.execute.service.bundle/install`.
 Remote scopes on the target: `ryeos.execute.service.bundle/export`,
@@ -428,7 +438,7 @@ exist in the single-app-root model.
 Executable tool/runtime launches then pass through the target node's sandbox
 snapshot exactly like local launches. Remote content cannot enable or weaken
 that policy. The default readable placeholders expose only the verified bundle
-roots, resolved pushed item source, operator trust directory, and any exact
+roots, resolved pushed item source, node trusted-key directory, and any exact
 callback socket required by the managed launch; the request-owned checkout is
 the writable project.
 

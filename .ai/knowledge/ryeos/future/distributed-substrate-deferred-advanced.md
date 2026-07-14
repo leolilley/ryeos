@@ -4,7 +4,7 @@ category: ryeos/future
 name: distributed-substrate-deferred-advanced
 title: Distributed Substrate Deferred Advanced Implementation
 entry_type: implementation_guide
-version: "0.2.0"
+version: "0.3.0"
 author: amp
 created_at: 2026-05-30T00:00:00Z
 description: Future implementation notes intentionally left out of the immediate distributed substrate hardening path, with triggers for when to pull them forward.
@@ -85,8 +85,9 @@ add, per principal or job:
   whole-workload teardown across descendant process groups and sessions;
 - a VM, microVM, or dedicated outer worker selected by the deployment threat
   model;
-- bounded node-side stdout, stderr, and event capture or private spooling that
-  cannot be exhausted by guest output rate;
+- preservation of the current bounded stdout/stderr supervision, plus bounded
+  event capture and optional private spooling that cannot be exhausted by
+  guest output rate;
 - principal-scoped workspace, cache, secret, and egress authority;
 - durable worker identity, audit, cancellation, cleanup, and retry semantics;
   and

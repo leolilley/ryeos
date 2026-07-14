@@ -21,9 +21,8 @@ use crate::actions::publish::generate_and_sign_manifest;
 pub struct ManifestSignReport {
     pub bundle_source: PathBuf,
     pub author_fingerprint: String,
-    /// Path to the generated + signed `.ai/manifest.yaml`. `None` when the
-    /// bundle declares no `manifest.source.yaml` (manifests are optional).
-    pub manifest_generated: Option<PathBuf>,
+    /// Path to the generated + signed `.ai/manifest.yaml`.
+    pub manifest_generated: PathBuf,
     /// Whether the manifest file was actually (re)written.
     pub manifest_changed: bool,
 }
@@ -52,12 +51,8 @@ pub fn manifest_sign(
     }
 
     let (manifest_generated, manifest_changed) =
-        match generate_and_sign_manifest(&ai_dir, bundle_source, name, signing_key)
-            .context("manifest generation failed")?
-        {
-            Some((path, changed)) => (Some(path), changed),
-            None => (None, false),
-        };
+        generate_and_sign_manifest(&ai_dir, bundle_source, name, signing_key)
+            .context("manifest generation failed")?;
 
     let author_fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
 
@@ -94,7 +89,7 @@ mod tests {
         );
 
         let report = manifest_sign(&bundle, None, &test_key()).expect("manifest sign");
-        let manifest_path = report.manifest_generated.expect("manifest generated");
+        let manifest_path = report.manifest_generated;
         assert_eq!(manifest_path, ai.join("manifest.yaml"));
         assert!(report.manifest_changed);
 
@@ -128,7 +123,7 @@ mod tests {
 
         // With the override equal to the declared name it materializes.
         let report = manifest_sign(&bundle, Some("arc"), &test_key()).expect("override");
-        assert!(report.manifest_generated.is_some());
+        assert!(report.manifest_generated.is_file());
 
         // An override that disagrees with the declared name is rejected.
         let err = manifest_sign(&bundle, Some("nope"), &test_key()).unwrap_err();

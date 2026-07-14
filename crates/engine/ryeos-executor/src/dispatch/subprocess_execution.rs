@@ -381,6 +381,7 @@ async fn dispatch_streaming_subprocess(
         timeout: 120.0,
         limits: None,
         inherited_fds: Vec::new(),
+        supervised_status: None,
     };
     let subprocess_request = state
         .sandbox
@@ -392,7 +393,7 @@ async fn dispatch_streaming_subprocess(
                 state_root: request.provenance.state_root_override(),
                 checkpoint_dir: None,
                 bundle_roots: &bundle_roots,
-                operator_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
+                node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                 verified_code: &sandbox_verified_code,
                 item_ref: &item_ref_str,
                 thread_id: "streaming-tool",

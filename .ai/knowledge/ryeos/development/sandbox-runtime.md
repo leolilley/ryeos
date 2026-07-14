@@ -4,7 +4,7 @@ category: ryeos/development
 name: sandbox-runtime
 title: Node Sandbox Runtime Architecture
 entry_type: implementation_guide
-version: "1.0.0"
+version: "1.1.0"
 description: Deep implementation map for the immutable RyeOS strict sandbox, exact-byte execution boundary, launch coverage, path authority, and state durability.
 tags:
   - sandbox
@@ -28,20 +28,22 @@ overrides are rejected.
 canonical app-root identity, opens the fixed source below that canonical root
 as a regular non-symlink file, strictly parses it, hashes the exact source, and
 re-resolves the supplied app root before returning an immutable typed snapshot.
-The operator spelling is retained only as the namespace destination; a changed
+The supplied spelling is retained only as the namespace destination; a changed
 canonical association refuses startup. Daemon startup uses `load_for_daemon`
 to pin the configured callback UDS path into the same snapshot. Standalone and
 offline callers use `load`. Disabled snapshots still validate the full schema,
-absolute backend spelling, and mandatory artifact limits, but do not inspect
-backend availability or modify a subprocess request. Enforced snapshots resolve and
-read the backend once, require unprivileged executable regular-file metadata
+absolute backend spelling, and mandatory output/artifact limits, but do not inspect
+backend availability or add OS-confinement wrapping. Node-owned output retention
+limits still apply to every request. Enforced snapshots resolve and read the backend
+once, require unprivileged executable regular-file metadata
 (no setuid, setgid, or file capabilities), materialize its exact bytes in the
-runtime's private artifact generation, and validate the Lillux open-file limit
-before startup succeeds. Later launches execute the captured inode through
+runtime's private artifact generation, and validate the Lillux subprocess
+limits before startup succeeds. Later launches execute the captured inode through
 `/proc/self/fd`, not the configured pathname. Inspection exposes its captured
 SHA-256 and version. Startup invokes the exact capture with `--version` and
-`--help`, requiring Bubblewrap 0.11.0+ and the fd-bind/argv0 features used by
-request construction. The configured executable is a node-approved host
+`--help`, requiring Bubblewrap 0.11.0+ and the `--args`, fd-bind,
+`--json-status-fd`, and argv0 features used by request construction. The
+configured executable is a node-approved host
 dependency; the probe establishes compatibility, while the node-owned policy
 is the authority selecting those bytes.
 
@@ -75,25 +77,28 @@ to authorize native executor manifests. `Engine::with_trust_store` never
 implicitly expands node trust; full-node constructors must pass
 `with_node_trust_store` deliberately.
 
-The strict sandbox requires these artifact controls in `limits`:
+The strict sandbox requires these runtime controls in `limits`:
 
 ```yaml
+stdout_bytes: 8388608
+stderr_bytes: 8388608
 verified_artifact_file_bytes: 67108864
 verified_artifact_total_bytes: 268435456
 verified_artifact_files: 4096
 ```
 
-They bound a single exact artifact, aggregate exact-artifact bytes, and unique
-artifact count in one runtime generation. Values must be positive, and the
-aggregate byte bound cannot be below the per-file bound. `open_files` remains
-the optional per-process descriptor limit.
+The first two fields bound daemon-retained output for each stream. The
+remaining fields bound a single exact artifact, aggregate exact-artifact bytes,
+and unique artifact count in one runtime generation. Values must be positive,
+and the aggregate artifact byte bound cannot be below the per-file bound.
+`open_files` remains the optional per-process descriptor limit.
 
 ## Launch context and coverage
 
 `SandboxLaunchContext` carries engine/daemon-derived facts only: canonical item
 reference, one-component thread identifier, project authority and path,
-optional state root and checkpoint directory, verified bundle roots, operator
-trust directory, and zero or more `SandboxVerifiedCode` exact-byte identities.
+optional state root and checkpoint directory, verified bundle roots, node
+trusted-key directory, and zero or more `SandboxVerifiedCode` exact-byte identities.
 None of these fields can activate or relax the policy.
 
 The shared runtime is applied at:
@@ -164,8 +169,10 @@ Host sources and namespace destinations are deliberately separate. Sources are
 canonicalized for overlap and containment checks. Destinations retain the
 absolute spelling supplied by the policy or launch context, preserving a
 process's expected path even when an app or project root was reached through a
-symlink. Required visibility checks pair canonical source containment with
-lexical destination containment, rejecting `..` and symlink escapes.
+symlink. Every app, project, cwd, state, checkpoint, socket, bundle, trusted-key,
+policy, and generated-code destination must be an absolute root followed only
+by normal components. Parent traversal is rejected before Bubblewrap can
+reinterpret a destination inside its new root.
 
 The generated readable surface consists of the exact public identity document,
 the pinned callback socket when requested, verified bundle roots, the node
@@ -222,7 +229,16 @@ signal isolation.
 Bubblewrap receives no target environment. `--clearenv` and explicit
 `--setenv` arguments construct it inside the namespace, preventing variables
 such as `LD_PRELOAD` from affecting Bubblewrap's loader. `TMPDIR` is normalized
-to namespace-local `/tmp`.
+to namespace-local `/tmp`. The complete option vector, including all target
+environment values and arguments, is NUL-separated in a sealed anonymous file.
+Bubblewrap's host-visible argv contains only `--args <fd>`.
+
+A private `--json-status-fd` pipe reports the target host PID. With
+`--new-session`, that PID is the initial target process-group leader. Lillux
+therefore supervises both the target and outer Bubblewrap groups and kills both
+on timeout, cancellation, output overflow, or wait failure. Deliberate
+descendant `setsid` escape remains outside this local guarantee; hosted workers
+add cgroup ownership and `cgroup.kill`.
 
 Writable binds are installed before read-only binds. Verified-code mirrors,
 exact artifact overlays, and captured non-system commands are pinned after
@@ -231,9 +247,12 @@ request executes the exact startup-captured Bubblewrap artifact and uses the
 canonical cwd for host spawn; Bubblewrap changes to the preserved namespace
 destination.
 
-`limits.open_files` is merged with a request limit using the lower value and
-installed as `RLIMIT_NOFILE` before exec. `RLIMIT_NPROC` is deliberately absent
-because it is scoped to the daemon's real UID, not one sandbox.
+`limits.open_files`, `limits.stdout_bytes`, and `limits.stderr_bytes` are each
+merged with request limits using the lower value. The first is installed as
+`RLIMIT_NOFILE` before exec. Output drainers retain only the configured prefix,
+continue draining to avoid pipe deadlock, and terminate the supervised workload
+with an explicit truncation outcome on overflow. `RLIMIT_NPROC` is deliberately
+absent because it is scoped to the daemon's real UID, not one sandbox.
 
 ## Workspace and CAS durability
 
@@ -261,7 +280,8 @@ of CAS reachability. Other rebuildable cache children may still be removed.
 
 `ryeos node doctor` calls the production loader. Disabled mode is a healthy
 inactive opt-out and does not require Bubblewrap. Enforce mode validates the
-backend and reports filesystem, network, environment, and open-file posture.
+backend and reports filesystem, network, environment, open-file, and bounded
+output posture.
 Release smoke keeps separate default-disabled and explicit-enforcement profiles;
 both execute through normal signature and authorization paths.
 

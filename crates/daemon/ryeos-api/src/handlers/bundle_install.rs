@@ -14,9 +14,13 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use ryeos_bundle::preflight::{
-    preflight_verify_bundle_in_context, preflight_verify_bundle_staging_in_context,
+use ryeos_bundle::plan::{
+    build_plan, BundlePlan, BundlePlanMode, BundleSource, PlanInput, VerificationSubjectKind,
 };
+use ryeos_bundle::preflight::{
+    preflight_verify_bundle_staging_in_context, preflight_verify_named_bundle_in_context,
+};
+use ryeos_engine::trust::TrustStore;
 
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
@@ -83,6 +87,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     ) && transaction.target().is_dir()
         && !req.replace
     {
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        tracing::info!(
+            bundle = %req.name,
+            engine_cache_generation = new_gen,
+            "recovered bundle install: bumped engine cache generation"
+        );
         return Ok(serde_json::json!({
             "name": req.name,
             "path": transaction.target(),
@@ -109,19 +119,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .source_path
         .canonicalize()
         .with_context(|| format!("canonicalize source path {}", req.source_path.display()))?;
-    let installed_dependency_roots: Vec<PathBuf> =
-        ryeos_bundle::installed::load_installed_bundle_records(&state.config.app_root)
-            .context("preflight: load installed bundle registrations")?
-            .into_iter()
-            .filter(|record| record.name != req.name && record.bundle_root != source_canonical)
-            .map(|record| record.bundle_root)
-            .collect();
-    preflight_verify_bundle_in_context(
-        &req.source_path,
-        &installed_dependency_roots,
-        &node_config_root,
+    let source_plan = build_prospective_bundle_plan(
+        &state.config.app_root,
+        &req.name,
+        &source_canonical,
+        req.replace,
     )
-    .context("preflight verification refused install")?;
+    .context("build prospective source bundle graph")?;
+    verify_planned_candidate(&source_plan, &req.name, &node_config_root, false)
+        .context("preflight verification refused install")?;
 
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
@@ -135,13 +141,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
             |staging| {
-                preflight_verify_bundle_staging_in_context(
-                    staging,
+                admit_completed_staging(
+                    &state.config.app_root,
                     &req.name,
-                    &installed_dependency_roots,
+                    staging,
+                    true,
                     &node_config_root,
+                    &state.engine.node_trust_store,
                 )
-                .context("preflight verification refused completed replacement staging tree")
+                .context("admission refused completed replacement staging tree")
             },
         )
         .with_context(|| {
@@ -158,13 +166,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
             |staging| {
-                preflight_verify_bundle_staging_in_context(
-                    staging,
+                admit_completed_staging(
+                    &state.config.app_root,
                     &req.name,
-                    &installed_dependency_roots,
+                    staging,
+                    false,
                     &node_config_root,
+                    &state.engine.node_trust_store,
                 )
-                .context("preflight verification refused completed install staging tree")
+                .context("admission refused completed install staging tree")
             },
         )
         .with_context(|| {
@@ -204,6 +214,143 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "preserve_runtime_artifacts": req.preserve_runtime_artifacts,
     });
     Ok(report)
+}
+
+/// Build the exact post-operation bundle graph used for dependency closure and
+/// prospective boot admission.
+pub(crate) fn build_prospective_bundle_plan(
+    app_root: &Path,
+    bundle_name: &str,
+    candidate_root: &Path,
+    replace: bool,
+) -> Result<BundlePlan> {
+    let candidate_root = candidate_root.canonicalize().with_context(|| {
+        format!(
+            "canonicalize prospective bundle root {}",
+            candidate_root.display()
+        )
+    })?;
+    let installed = ryeos_bundle::installed::load_installed_plan_inputs(app_root)
+        .context("load verified installed bundle graph")?;
+    let candidate = PlanInput {
+        name: bundle_name.to_string(),
+        source: BundleSource::SourceDir(candidate_root),
+    };
+    let mode = if replace {
+        BundlePlanMode::Replace
+    } else {
+        BundlePlanMode::Install
+    };
+    build_plan(mode, &[candidate], &installed).context("resolve prospective bundle graph")
+}
+
+/// Verify only the candidate using the planner's exact transitive dependency
+/// closure, never the ambient set of every installed bundle.
+pub(crate) fn verify_planned_candidate(
+    plan: &BundlePlan,
+    bundle_name: &str,
+    node_config_root: &Path,
+    completed_staging: bool,
+) -> Result<()> {
+    let job = plan
+        .verification_jobs
+        .iter()
+        .find(|job| {
+            job.subject == bundle_name
+                && job.subject_kind == VerificationSubjectKind::CandidateSource
+        })
+        .with_context(|| {
+            format!(
+                "prospective plan has no candidate verification job for '{}'",
+                bundle_name
+            )
+        })?;
+
+    if completed_staging {
+        preflight_verify_bundle_staging_in_context(
+            &job.subject_root,
+            bundle_name,
+            &job.dependency_roots,
+            node_config_root,
+        )
+    } else {
+        preflight_verify_named_bundle_in_context(
+            &job.subject_root,
+            bundle_name,
+            &job.dependency_roots,
+            node_config_root,
+        )
+    }
+}
+
+/// Re-plan the completed staging generation, verify it with the exact closure,
+/// then run the same node-owned registry/executable admission used at boot.
+pub(crate) fn admit_completed_staging(
+    app_root: &Path,
+    bundle_name: &str,
+    staging: &Path,
+    replace: bool,
+    node_config_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<()> {
+    let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
+    verify_planned_candidate(&plan, bundle_name, node_config_root, true)?;
+    let prospective_roots: Vec<PathBuf> = plan
+        .bundles
+        .values()
+        .map(|bundle| bundle.source.root_path().clone())
+        .collect();
+    ryeos_app::engine_init::admit_node_bundle_roots(&prospective_roots, node_trust_store)
+        .context("prospective bundle set would fail node engine boot")?;
+
+    // Exercise the second boot phase too: bundle-contributed node config is
+    // scanned from the prospective roots and command/policy collisions are
+    // rejected before activation. Existing records retain their node-owned
+    // command grants; a newly written/replaced record has no implicit grants.
+    let loader = ryeos_app::node_config::loader::BootstrapLoader {
+        app_root,
+        trust_store: node_trust_store,
+    };
+    let mut current_records: std::collections::BTreeMap<
+        String,
+        ryeos_app::node_config::BundleRecord,
+    > = loader
+        .load_bundle_section()
+        .context("load current node bundle registrations for prospective admission")?
+        .into_iter()
+        .map(|record| (record.name.clone(), record))
+        .collect();
+    let prospective_records = plan
+        .bundles
+        .iter()
+        .map(|(name, bundle)| {
+            if name == bundle_name {
+                Ok(ryeos_app::node_config::BundleRecord {
+                    name: name.clone(),
+                    path: bundle.source.root_path().clone(),
+                    command_registration_caps: Vec::new(),
+                    source_file: app_root
+                        .join(ryeos_engine::AI_DIR)
+                        .join("node/bundles")
+                        .join(format!("{name}.yaml")),
+                })
+            } else {
+                current_records.remove(name).with_context(|| {
+                    format!(
+                        "prospective bundle '{}' has no verified current registration",
+                        name
+                    )
+                })
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    loader
+        .load_full(
+            &ryeos_app::node_config::SectionTable::new(),
+            &prospective_records,
+        )
+        .context("prospective bundle set would fail full node-config boot")?;
+    Ok(())
 }
 
 fn install_dir_atomic(

@@ -279,7 +279,7 @@ fn check_imports(
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
         .collect::<Vec<_>>();
-    let sandbox_operator_trusted_keys_dir = operator_config_root.join("keys/trusted");
+    let sandbox_node_trusted_keys_dir = operator_config_root.join("keys/trusted");
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -303,7 +303,7 @@ fn check_imports(
                 &plan_ctx,
                 &project_path,
                 &sandbox_bundle_roots,
-                &sandbox_operator_trusted_keys_dir,
+                &sandbox_node_trusted_keys_dir,
                 &item_ref,
             ) {
                 Ok(report) => report,
@@ -332,7 +332,7 @@ fn import_one(
     plan_ctx: &PlanContext,
     project_path: &Path,
     sandbox_bundle_roots: &[PathBuf],
-    sandbox_operator_trusted_keys_dir: &Path,
+    sandbox_node_trusted_keys_dir: &Path,
     item_ref: &str,
 ) -> Result<Value, String> {
     let canonical = CanonicalRef::parse(item_ref).map_err(|e| format!("invalid ref: {e}"))?;
@@ -358,7 +358,7 @@ fn import_one(
             state_root: None,
             checkpoint_dir: None,
             bundle_roots: sandbox_bundle_roots,
-            operator_trusted_keys_dir: Some(sandbox_operator_trusted_keys_dir),
+            node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
             verified_code: &sandbox_verified_code,
             item_ref,
             thread_id: "offline-doctor",

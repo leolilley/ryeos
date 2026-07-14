@@ -2,7 +2,7 @@
 ---
 category: ryeos/core/node
 tags: [node, sandbox, bubblewrap, security, subprocess, node-policy]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Node contract for the node-owned subprocess sandbox: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -25,10 +25,10 @@ installed runtime node-trusted.
 
 The policy has two modes:
 
-- `mode: disabled` leaves the subprocess request unchanged. This is the
-  default and does not require Bubblewrap. Signature, trust, authorization,
-  and capability checks still run, but there is no OS confinement or
-  verification-to-exec path pinning.
+- `mode: disabled` does not wrap the subprocess in Bubblewrap. This is the
+  default and does not require Bubblewrap. Node-owned stdout/stderr retention
+  caps, signature, trust, authorization, and capability checks still apply,
+  but there is no OS confinement or verification-to-exec path pinning.
 - `mode: enforce` applies the complete policy and refuses the launch if any
   requested control cannot be enforced.
 
@@ -45,7 +45,7 @@ filesystem:
     - "{node_public_identity}"
     - "{daemon_socket}"
     - "{bundle_roots}"
-    - "{operator_trusted_keys}"
+    - "{node_trusted_keys}"
     - "{verified_code}"
   writable:
     - "{project}"
@@ -57,6 +57,8 @@ environment:
     - "*"
 limits:
   open_files: 1024
+  stdout_bytes: 8388608
+  stderr_bytes: 8388608
   verified_artifact_file_bytes: 67108864
   verified_artifact_total_bytes: 268435456
   verified_artifact_files: 4096
@@ -82,18 +84,22 @@ source digest. `ryeos node status` is the narrower local lifecycle probe.
   the captured inode rather than reopening the configured path; inspection
   reports its captured SHA-256 and version. Startup runs that exact capture's
   `--version` and `--help` probes and requires Bubblewrap 0.11.0+ with
-  `--bind-fd`, `--ro-bind-fd`, and `--argv0`. The executable selected in this
-  node-owned file is node-approved host execution authority; these probes
-  establish interface compatibility, not the provenance of arbitrary bytes.
+  `--args`, `--bind-fd`, `--json-status-fd`, `--ro-bind-fd`, and `--argv0`.
+  The executable selected in this node-owned file is node-approved host
+  execution authority; these probes establish interface compatibility, not
+  the provenance of arbitrary bytes.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
-  `{operator_trusted_keys}`, and `{verified_code}`.
+  `{node_trusted_keys}`, and `{verified_code}`.
 - `filesystem.writable` accepts absolute paths plus `{project}`, `{cwd}`, and
   `{checkpoint_dir}`.
 - `network.mode` is `host` or `isolated`.
 - `environment.allow` entries are exact names, `*`, or prefix patterns ending
   in one `*`.
 - `limits.open_files` is an optional per-spawn file-descriptor limit.
+- `limits.stdout_bytes` and `limits.stderr_bytes` are mandatory positive
+  bounds on bytes retained from each output stream. The node continues
+  draining after a bound is crossed and terminates the supervised workload.
 - `limits.verified_artifact_file_bytes`,
   `limits.verified_artifact_total_bytes`, and
   `limits.verified_artifact_files` are mandatory positive bounds on each exact
@@ -101,8 +107,8 @@ source digest. `ryeos node status` is the narrower local lifecycle probe.
   generation. The aggregate byte limit must be at least the per-file limit.
 
 Missing required sections, malformed YAML, invalid paths or wildcard forms,
-and unsupported values are errors even when disabled. Disabled mode skips only
-backend availability and nested control enforcement.
+and unsupported values are errors even when disabled. Disabled mode skips
+backend availability and OS-confinement controls, not node-owned output caps.
 
 ## Filesystem authority
 
@@ -115,8 +121,10 @@ as its namespace destination.
 Every host mount source is canonicalized for validation. Its destination keeps
 the absolute spelling supplied by the launch context or policy so projects and
 app roots reached through a symlink still occupy the namespace path expected by
-the process. RyeOS checks both canonical-source and lexical-destination
-containment; `..` and symlink aliases cannot escape a granted root. Enforce mode
+the process. Every policy, app, project, working-directory, state, checkpoint,
+socket, bundle, trusted-key, and generated-code namespace destination must be
+an absolute root followed only by normal path components. Parent traversal is
+rejected before Bubblewrap can reinterpret it inside the new root. Enforce mode
 then pins system, policy-selected, identity, socket, bundle, writable, and code
 mount sources with `O_PATH` descriptors and gives Bubblewrap `--bind-fd` or
 `--ro-bind-fd` references. Caller-supplied inherited descriptors are refused.
@@ -133,7 +141,7 @@ The narrow readable placeholders mean:
   when the launch requests callback IPC. The exact placeholder mount is
   required; a surrounding directory is not substituted for it.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
-- `{operator_trusted_keys}` conditionally exposes the node owner's trusted-key
+- `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
   directory. The placeholder name matches the existing launch-envelope root.
 - `{verified_code}` is mandatory for executable-item launches. RyeOS rechecks
   the verified whole-file SHA-256, writes those exact bytes to node-owned
@@ -178,7 +186,10 @@ Enforce mode canonicalizes the command, project, working directory, mount
 sources, and complete constructed environment before spawn. Bubblewrap itself
 receives an empty environment; target variables are installed inside the
 namespace with `--setenv`, so loader controls such as `LD_PRELOAD` do not run
-before isolation. `TMPDIR` is always `/tmp`, backed by a private tmpfs.
+before isolation. The complete Bubblewrap option vector, target environment,
+and target arguments are NUL-separated in an immutable sealed anonymous file;
+the host-visible Bubblewrap command line contains only `--args <fd>`. `TMPDIR`
+is always `/tmp`, backed by a private tmpfs.
 
 The namespace uses a private root and new user, IPC, and UTS namespaces. An
 isolated network policy also creates a network namespace; host mode deliberately
@@ -191,6 +202,14 @@ host mount would let a same-UID workload traverse another process's `root`,
 still use host identifiers, and the sandbox does not claim PID or same-UID
 signal isolation.
 
+Bubblewrap reports the target's host PID through a private
+`--json-status-fd` pipe. Because `--new-session` makes that initial PID the
+target process-group leader, Lillux supervises and terminates both that group
+and the outer Bubblewrap group on timeout, cancellation, output overflow, or a
+wait failure. A descendant that deliberately creates another session remains
+outside this local process-group guarantee; hostile hosted workers additionally
+use `cgroup.kill` at the outer worker boundary.
+
 Configured writable binds are installed first. Read-only policy mounts, the
 verified-code authority mirror and exact artifact, and any non-system command
 are installed afterward, so a broad writable ancestor cannot hide them.
@@ -201,8 +220,11 @@ run from the same synthetic read-only namespace. `/usr`, `/bin`, `/lib`, and
 surface is pinned separately, `/dev` is created by Bubblewrap, `/proc` is empty,
 and `/tmp` is private tmpfs.
 
-`limits.open_files` becomes `RLIMIT_NOFILE` before exec. When a request already
-has a lower cap, the lower value wins. Any validation, mount, backend, or limit
+`limits.open_files` becomes `RLIMIT_NOFILE` before exec. Output is retained only
+up to `limits.stdout_bytes` and `limits.stderr_bytes`; pipes continue to be
+drained so the child cannot deadlock, and overflow terminates the supervised
+workload with an explicit truncated-output result. When a request already has
+a lower cap, the lower value wins. Any validation, mount, backend, or limit
 failure refuses the spawn.
 
 ## Launch coverage
@@ -227,7 +249,7 @@ execution workspaces; their lifelines are retained for the whole subprocess.
 `ryeos node doctor` uses the production policy loader. Disabled mode reports a
 healthy inactive opt-out without requiring Bubblewrap. Enforce mode verifies
 backend availability and capture digest, and reports filesystem, network,
-environment, open-file, and verified-artifact-limit posture.
+environment, open-file, captured-output, and verified-artifact-limit posture.
 
 The published container runs the default disabled profile without extra
 capabilities. Enforce mode requires unprivileged Bubblewrap 0.11.0 or newer

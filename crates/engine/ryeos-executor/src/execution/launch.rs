@@ -442,17 +442,13 @@ pub fn materialize_native_executor(
 
     let triple = host_triple();
 
-    // Iterate every bundle root that ships a manifest, and use the
-    // first one whose manifest contains the requested executor. This
-    // matches the kind/parser-discovery model: each bundle owns a
-    // disjoint slice of the executor namespace (core ships utility
-    // bins like `ryeos-core-tools`; standard ships runtime drivers like
-    // `ryeos-directive-runtime`). Picking the first manifest blindly
-    // would cause core to shadow standard for runtimes that only
-    // standard ships.
+    // Iterate every bundle root that ships a manifest. A requested native
+    // executor must resolve from exactly one root: even if admission was
+    // bypassed, root ordering must never decide which executable runs.
     let mut tried_roots: Vec<PathBuf> = Vec::new();
     let mut last_resolution_error: Option<String> = None;
     let mut resolved_with: Option<(
+        PathBuf,
         lillux::cas::CasStore,
         ryeos_engine::executor_resolution::ResolvedExecutor,
         ryeos_engine::executor_resolution::VerifiedExecutorManifestRef,
@@ -564,8 +560,17 @@ pub fn materialize_native_executor(
             |h| cas.get_object(h).map_err(|e| e.to_string()),
         ) {
             Ok(resolved) => {
-                resolved_with = Some((cas, resolved, verified_ref));
-                break;
+                if let Some((first_root, ..)) = &resolved_with {
+                    return Err(MaterializationError::ResolutionFailed {
+                        executor_ref: bare.to_string(),
+                        detail: format!(
+                            "native executor identity `bin/{triple}/{bare}` is published by both {} and {}; bundle root order cannot select an executor",
+                            first_root.display(),
+                            system_root.display(),
+                        ),
+                    });
+                }
+                resolved_with = Some((system_root.clone(), cas, resolved, verified_ref));
             }
             Err(
                 error @ ryeos_engine::executor_resolution::ExecutorResolutionError::NotInManifest {
@@ -594,7 +599,7 @@ pub fn materialize_native_executor(
         });
     }
 
-    let (cas, resolved, verified_ref) =
+    let (_bundle_root, cas, resolved, verified_ref) =
         resolved_with.ok_or_else(|| MaterializationError::ResolutionFailed {
             executor_ref: bare.to_string(),
             detail: last_resolution_error.unwrap_or_else(|| {
@@ -781,11 +786,11 @@ fn extract_model_spec_from_resolved(
 /// Build a `VerifiedLoader` over the same root ordering the spawned
 /// runtime will see. This ensures the daemon's preflight resolve
 /// produces the same answer the runtime would get. Trust context is
-/// the explicit operator trusted-keys dir plus the project root —
+/// the explicit node trusted-keys dir plus the project root —
 /// matching the engine trust store's sources, not the bundle roots.
 fn build_verified_loader_for_thread(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
-    operator_trusted_keys_dir: &Path,
+    node_trusted_keys_dir: &Path,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
         .ordered
@@ -814,7 +819,7 @@ fn build_verified_loader_for_thread(
     Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
         project_root,
         bundle_roots,
-        operator_trusted_keys_dir,
+        node_trusted_keys_dir,
     ))
 }
 
@@ -825,13 +830,13 @@ fn build_verified_loader_for_thread(
 pub fn resolve_provider_preflight(
     composed: &ryeos_engine::resolution::KindComposedView,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
-    operator_trusted_keys_dir: &Path,
+    node_trusted_keys_dir: &Path,
 ) -> Result<ProviderPreflight, MaterializationError> {
     let header = ryeos_runtime::model_resolution::DirectiveModelHeader {
         model: extract_model_spec_from_resolved(composed)
             .map_err(|e| MaterializationError::Internal(e.to_string()))?,
     };
-    let loader = build_verified_loader_for_thread(engine_roots, operator_trusted_keys_dir)
+    let loader = build_verified_loader_for_thread(engine_roots, node_trusted_keys_dir)
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
     let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(&header, &loader)
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
@@ -1292,8 +1297,8 @@ async fn run_claimed_thread_row_inner(
             project_path.display()
         )
     })?;
-    let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-    let config_loader = build_verified_loader_for_thread(&engine_roots, &operator_trusted_keys_dir)
+    let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let config_loader = build_verified_loader_for_thread(&engine_roots, &node_trusted_keys_dir)
         .context("building verified loader for execution limits config")?;
     let limits_config = load_limits_config_from_loader(&config_loader).with_context(|| {
         format!(
@@ -1511,11 +1516,14 @@ async fn run_claimed_thread_row_inner(
     // minted from the *composed* `requires` block: for directives the
     // extends-chain composer has already narrowed a child against its parent, so
     // a child can never request more than the parent template. The signed
-    // bundle manifest remains the final upper bound (checked inside the minter).
+    // node-trusted installed bundle manifest remains the final upper bound
+    // (checked inside the minter).
     let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
         resolution.composed.composed.get("requires"),
         &resolved.resolved_item,
-        &engine.trust_store,
+        resolution.effective_trust_class,
+        &engine.bundle_roots,
+        &engine.node_trust_store,
     )
     .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
 
@@ -1836,7 +1844,7 @@ async fn run_claimed_thread_row_inner(
         Some(resolve_provider_preflight(
             &resolution.composed,
             &engine_roots,
-            &operator_trusted_keys_dir,
+            &node_trusted_keys_dir,
         )?)
     } else {
         None
@@ -1933,7 +1941,7 @@ async fn run_claimed_thread_row_inner(
         EnvelopeRoots {
             project_root: project_path.to_path_buf(),
             bundle_roots,
-            operator_trusted_keys_dir,
+            node_trusted_keys_dir,
             // Deliberate runtime state-root override, carried so the runtime
             // can target its state writes (thread state, transcripts, thread
             // knowledge) away from the source project.
@@ -3668,6 +3676,76 @@ mod tests {
         // before any run-set is computed.
         let parent = caps(&["ryeos.execute.tool.other"]);
         assert!(apply_policy(&[], &[], hybrid(&parent), CHILD_EXEC).is_err());
+    }
+
+    fn write_materializer_fixture(
+        bundle_root: &Path,
+        bare_name: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> String {
+        let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
+        let cas = lillux::cas::CasStore::new(ai_dir.join("objects"));
+        let blob_hash = cas.store_blob(b"not reached by duplicate check").unwrap();
+        let item_ref = format!("bin/{}/{bare_name}", host_triple());
+        let item_source = serde_json::json!({
+            "kind": "item_source",
+            "item_ref": item_ref,
+            "content_blob_hash": blob_hash,
+            "integrity": format!("sha256:{blob_hash}"),
+            "mode": 0o755,
+        });
+        let item_source_hash = cas.store_object(&item_source).unwrap();
+        let manifest = serde_json::json!({
+            "kind": "source_manifest",
+            "item_source_hashes": {
+                item_ref: item_source_hash,
+            },
+        });
+        let manifest_hash = cas.store_object(&manifest).unwrap();
+        let ref_path = ai_dir.join(BUNDLE_MANIFEST_REF);
+        std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+        let signed_ref = lillux::signature::sign_content(
+            &format!(
+                "{}\n{manifest_hash}\n",
+                ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN,
+            ),
+            signing_key,
+            "#",
+            None,
+        );
+        std::fs::write(ref_path, signed_ref).unwrap();
+
+        lillux::signature::compute_fingerprint(&signing_key.verifying_key())
+    }
+
+    #[test]
+    fn materializer_rejects_duplicate_native_executor_instead_of_first_root_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let key = lillux::crypto::SigningKey::from_bytes(&[71u8; 32]);
+        let fingerprint = write_materializer_fixture(&first, "shared-executor", &key);
+        write_materializer_fixture(&second, "shared-executor", &key);
+        let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint,
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+
+        let error = materialize_native_executor(
+            &[first.clone(), second.clone()],
+            "native:shared-executor",
+            tmp.path(),
+            &trust_store,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+        )
+        .expect_err("root order must not select between duplicate executor identities");
+        let message = error.to_string();
+        assert!(message.contains("published by both"));
+        assert!(message.contains(&first.display().to_string()));
+        assert!(message.contains(&second.display().to_string()));
     }
 
     #[test]

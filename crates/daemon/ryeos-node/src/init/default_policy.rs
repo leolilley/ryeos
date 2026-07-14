@@ -13,7 +13,7 @@ filesystem:
     - "{node_public_identity}"
     - "{daemon_socket}"
     - "{bundle_roots}"
-    - "{operator_trusted_keys}"
+    - "{node_trusted_keys}"
     - "{verified_code}"
   writable:
     - "{project}"
@@ -25,6 +25,8 @@ environment:
     - "*"
 limits:
   open_files: 1024
+  stdout_bytes: 8388608
+  stderr_bytes: 8388608
   verified_artifact_file_bytes: 67108864
   verified_artifact_total_bytes: 268435456
   verified_artifact_files: 4096
@@ -132,7 +134,7 @@ mod tests {
                 "{node_public_identity}".to_string(),
                 "{daemon_socket}".to_string(),
                 "{bundle_roots}".to_string(),
-                "{operator_trusted_keys}".to_string(),
+                "{node_trusted_keys}".to_string(),
                 "{verified_code}".to_string(),
             ]
         );
@@ -146,6 +148,8 @@ mod tests {
         );
         assert_eq!(policy.environment.allow, vec!["*".to_string()]);
         assert_eq!(policy.limits.open_files, Some(1024));
+        assert_eq!(policy.limits.stdout_bytes, 8_388_608);
+        assert_eq!(policy.limits.stderr_bytes, 8_388_608);
         assert_eq!(policy.limits.verified_artifact_file_bytes, 67_108_864);
         assert_eq!(policy.limits.verified_artifact_total_bytes, 268_435_456);
         assert_eq!(policy.limits.verified_artifact_files, 4_096);

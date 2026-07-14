@@ -40,7 +40,7 @@ pub struct EngineContext {
     pub sandbox_state_root: Option<PathBuf>,
     pub sandbox_checkpoint_dir: Option<PathBuf>,
     pub sandbox_bundle_roots: Vec<PathBuf>,
-    pub sandbox_operator_trusted_keys_dir: Option<PathBuf>,
+    pub sandbox_node_trusted_keys_dir: Option<PathBuf>,
     pub sandbox_verified_code: Vec<crate::sandbox::SandboxVerifiedCode>,
     pub thread_id: String,
     pub chain_root_id: String,

@@ -21,5 +21,6 @@ pub fn to_lillux_request(spec: &SubprocessSpec) -> lillux::SubprocessRequest {
         timeout: spec.timeout.as_secs_f64(),
         limits: None,
         inherited_fds: Vec::new(),
+        supervised_status: None,
     }
 }

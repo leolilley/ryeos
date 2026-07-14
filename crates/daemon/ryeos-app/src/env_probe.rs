@@ -182,6 +182,7 @@ fn run_probe(
         timeout: IMPORT_TIMEOUT_SECS,
         limits: None,
         inherited_fds: Vec::new(),
+        supervised_status: None,
     };
     let request = match sandbox.apply(request, sandbox_context) {
         Ok(request) => request,
@@ -313,7 +314,7 @@ mod tests {
                 state_root: None,
                 checkpoint_dir: None,
                 bundle_roots: &[],
-                operator_trusted_keys_dir: None,
+                node_trusted_keys_dir: None,
                 verified_code: &[],
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",

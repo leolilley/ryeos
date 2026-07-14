@@ -85,7 +85,7 @@ pub struct PublishReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_rebuild_skip_reason: Option<String>,
     /// Path to the generated + signed `.ai/manifest.yaml`.
-    pub manifest_generated: Option<PathBuf>,
+    pub manifest_generated: PathBuf,
     /// Whether the manifest was actually rewritten.
     pub manifest_changed: bool,
     /// Path to the emitted `PUBLISHER_TRUST.toml`.
@@ -101,13 +101,44 @@ pub struct PublishReport {
 }
 
 pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
-    if !opts.bundle_source.is_dir() {
+    // Every phase authors a private sibling copy. Only a fully signed, flushed
+    // generation is exchanged into the public bundle path, so a late failure
+    // cannot expose a half-cleaned CAS or a mixture of old and new signatures.
+    let live_root = opts.bundle_source.clone();
+    let effective_bundle_name = match opts.name.as_deref() {
+        Some(name) => name.to_string(),
+        None => live_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("bundle_source path has no UTF-8 directory name"))?,
+    };
+    super::publisher_transaction::with_staged_bundle_generation(&live_root, |staging| {
+        let registry_roots = registry_roots_for_staging(&live_root, staging, &opts.registry_roots);
+        let mut report = run_publish_in_place(
+            opts,
+            staging,
+            &registry_roots,
+            &effective_bundle_name,
+        )?;
+        remap_publish_report_paths(&mut report, staging, &live_root);
+        Ok(report)
+    })
+}
+
+fn run_publish_in_place(
+    opts: &PublishOptions,
+    bundle_source: &Path,
+    registry_roots: &[PathBuf],
+    effective_bundle_name: &str,
+) -> Result<PublishReport> {
+    if !bundle_source.is_dir() {
         bail!(
             "bundle_source is not a directory: {}",
-            opts.bundle_source.display()
+            bundle_source.display()
         );
     }
-    let ai_dir = opts.bundle_source.join(ryeos_engine::AI_DIR);
+    let ai_dir = bundle_source.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
         bail!("bundle_source has no .ai/ at {}", ai_dir.display());
     }
@@ -116,12 +147,12 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     // Removes CAS blobs, ref pointers, and binary sidecars. Does NOT strip
     // signatures or delete manifest.yaml — both are handled idempotently
     // by their respective signing phases.
-    clean_derived_cas(&opts.bundle_source)?;
+    clean_derived_cas(bundle_source)?;
 
     // ── Phase 1: bootstrap-sign kind schemas + parser + handler descriptors ──
     // Idempotent: skips files already validly signed by the current key.
     let (bootstrap_validated, bootstrap_signed) =
-        bootstrap_sign_kinds_and_parsers(&opts.bundle_source, &opts.signing_key)?;
+        bootstrap_sign_kinds_and_parsers(bundle_source, &opts.signing_key)?;
 
     // ── Phase 2: rebuild CAS manifest ──
     let bin_root = ai_dir.join("bin");
@@ -129,7 +160,7 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     {
         (
             Some(
-                build_bundle::rebuild_bundle_manifest(&opts.bundle_source, &opts.signing_key)
+                build_bundle::rebuild_bundle_manifest_in_place(bundle_source, &opts.signing_key)
                     .context("rebuild-manifest phase failed")?,
             ),
             false,
@@ -152,8 +183,8 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
 
     // ── Phase 3: sign every other signable item ──
     let mut sign_report = sign_bundle::sign_bundle_items_with_trust(
-        &opts.bundle_source,
-        &opts.registry_roots,
+        bundle_source,
+        registry_roots,
         &opts.signing_key,
         opts.base_trust_store.as_ref(),
     )
@@ -245,24 +276,19 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     }
 
     // ── Phase 4: generate + sign bundle manifest (idempotent) ──
-    let (manifest_generated, manifest_changed) = match generate_and_sign_manifest(
+    let (manifest_generated, manifest_changed) = generate_and_sign_manifest(
         &ai_dir,
-        &opts.bundle_source,
-        opts.name.as_deref(),
+        bundle_source,
+        Some(effective_bundle_name),
         &opts.signing_key,
     )
-    .context("manifest generation phase failed")?
-    {
-        Some((path, changed)) => (Some(path), changed),
-        None => (None, false),
-    };
+    .context("manifest generation phase failed")?;
 
     // ── Phase 5: emit publisher trust doc (idempotent) ──
     // Suppressed on a partial publish: a trust doc is a clean-release artifact
     // and must not be emitted when items were skipped.
     let (publisher_trust_doc, publisher_trust_doc_changed) = if opts.emit_trust_doc && !partial {
-        let result =
-            write_publisher_trust_doc(&opts.bundle_source, &opts.signing_key, &opts.owner)?;
+        let result = write_publisher_trust_doc(bundle_source, &opts.signing_key, &opts.owner)?;
         (Some(result.0), result.1)
     } else {
         if opts.emit_trust_doc && partial {
@@ -277,7 +303,7 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         lillux::signature::compute_fingerprint(&opts.signing_key.verifying_key());
 
     Ok(PublishReport {
-        bundle_source: opts.bundle_source.clone(),
+        bundle_source: bundle_source.to_path_buf(),
         author_fingerprint,
         bootstrap_validated,
         bootstrap_signed,
@@ -292,6 +318,63 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         partial,
         skipped_unsignable,
     })
+}
+
+/// Redirect registry roots that live inside the bundle being published to the
+/// staged generation. In particular, core publishes with itself as its kind
+/// and parser registry; reading the live root here would mix generations.
+fn registry_roots_for_staging(
+    live_root: &Path,
+    staging: &Path,
+    registry_roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let canonical_live = fs::canonicalize(live_root).ok();
+    registry_roots
+        .iter()
+        .map(|root| {
+            let relative = canonical_live.as_ref().and_then(|live| {
+                fs::canonicalize(root)
+                    .ok()
+                    .and_then(|canonical| canonical.strip_prefix(live).ok().map(Path::to_path_buf))
+            });
+            match relative {
+                Some(relative) => staging.join(relative),
+                None if root == live_root => staging.to_path_buf(),
+                None => root.clone(),
+            }
+        })
+        .collect()
+}
+
+fn remap_publish_report_paths(report: &mut PublishReport, staging: &Path, live_root: &Path) {
+    fn remap(path: &Path, staging: &Path, live_root: &Path) -> PathBuf {
+        path.strip_prefix(staging)
+            .map(|relative| live_root.join(relative))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    let staged = staging.to_string_lossy();
+    let live = live_root.to_string_lossy();
+    report.bundle_source = live_root.to_path_buf();
+    report.manifest_generated = remap(&report.manifest_generated, staging, live_root);
+    report.publisher_trust_doc = report
+        .publisher_trust_doc
+        .as_deref()
+        .map(|path| remap(path, staging, live_root));
+    if let Some(reason) = &mut report.binary_rebuild_skip_reason {
+        *reason = reason.replace(staged.as_ref(), live.as_ref());
+    }
+    for outcome in report
+        .sign_report
+        .validated
+        .iter_mut()
+        .chain(report.sign_report.signed.iter_mut())
+        .chain(report.sign_report.failed.iter_mut())
+    {
+        if let Some(error) = &mut outcome.error {
+            *error = error.replace(staged.as_ref(), live.as_ref());
+        }
+    }
 }
 
 /// Bootstrap-sign kind schemas, parser descriptors, and handler descriptors.
@@ -523,8 +606,9 @@ fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
 /// signature for the newly materialized body, no write occurs.
 ///
 /// Returns `(Some((path, changed)))` where `changed` reflects whether
-/// the file was actually written. Returns `None` if no `manifest.source.yaml`
-/// exists (manifests are optional for third-party bundles).
+/// the file was actually written. A publishable bundle must carry a regular
+/// `.ai/manifest.source.yaml`; missing or linked sources fail without deleting
+/// any previously generated manifest.
 /// Inputs the namespace lint needs from the manifest source: the effective
 /// bundle id items are checked against, and the declared config shadows their
 /// observed foreign-namespace items are verified against.
@@ -728,16 +812,15 @@ pub fn generate_and_sign_manifest(
     bundle_source: &Path,
     name_override: Option<&str>,
     signing_key: &SigningKey,
-) -> Result<Option<(PathBuf, bool)>> {
+) -> Result<(PathBuf, bool)> {
     let source_path = ai_dir.join("manifest.source.yaml");
-    if !source_path.exists() {
-        // No source manifest — clean up any stale generated manifest.
-        let target = ai_dir.join("manifest.yaml");
-        if target.is_file() {
-            fs::remove_file(&target)
-                .with_context(|| format!("remove stale manifest {}", target.display()))?;
-        }
-        return Ok(None);
+    let source_metadata = fs::symlink_metadata(&source_path)
+        .with_context(|| format!("inspect required manifest source {}", source_path.display()))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_file() {
+        bail!(
+            "required manifest source {} must be a regular non-symlink file",
+            source_path.display()
+        );
     }
 
     let bundle_name = match name_override {
@@ -767,7 +850,7 @@ pub fn generate_and_sign_manifest(
                 name = %manifest.name,
                 "manifest unchanged — skipping write"
             );
-            return Ok(Some((target, false)));
+            return Ok((target, false));
         }
     }
 
@@ -781,7 +864,7 @@ pub fn generate_and_sign_manifest(
         "generated + signed bundle manifest (changed)"
     );
 
-    Ok(Some((target, true)))
+    Ok((target, true))
 }
 
 /// Write `<bundle_source>/PUBLISHER_TRUST.toml` — the universal trust

@@ -609,6 +609,12 @@ pub fn load_node_config_two_phase(
         .load_bundle_section()
         .context("Phase 1: failed to load bundle section from node config")?;
 
+    // Signed registration syntax alone is not enough to boot safely. Require
+    // every installed manifest and the complete dependency/provider graph to
+    // validate before any registry is constructed from these roots.
+    ryeos_app::engine_init::validate_installed_bundle_plan(app_root, &bundle_records)
+        .context("Phase 1: installed bundle graph admission failed")?;
+
     let effective_bundle_roots: Vec<PathBuf> =
         bundle_records.iter().map(|b| b.path.clone()).collect();
 

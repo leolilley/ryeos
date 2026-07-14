@@ -8,7 +8,6 @@
 //! install is aborted and the partial directory is cleaned up.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -18,6 +17,10 @@ use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+
+const REMOTE_OBJECT_BATCH_DECLARED_BYTES: u64 = 8 * 1024 * 1024;
+const REMOTE_OBJECT_BATCH_MAX_HASHES: usize = 256;
+const REMOTE_OBJECT_RESPONSE_MAX_BYTES: usize = 48 * 1024 * 1024;
 
 fn default_remote() -> String {
     "default".to_string()
@@ -78,6 +81,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         )
     ) && transaction.target().is_dir()
     {
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        tracing::info!(
+            bundle = %req.bundle_name,
+            engine_cache_generation = new_gen,
+            "recovered remote bundle install: bumped engine cache generation"
+        );
         return Ok(serde_json::json!({
             "bundle_name": req.bundle_name,
             "path": transaction.target(),
@@ -105,109 +114,52 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         bail!("remote bundle '{}' has no files", req.bundle_name);
     }
 
-    // 2. Collect all hashes and fetch from remote CAS.
-    let hashes: Vec<String> = entries.iter().map(|entry| entry.hash.clone()).collect();
-
-    // Use the typed objects_get response for reliable blob decoding.
-    let get_resp = client.objects_get(&hashes).await?;
-
-    // Index CAS entries by hash for quick lookup.
-    let mut blob_data: HashMap<String, Vec<u8>> = HashMap::new();
-    for entry in &get_resp.entries {
-        if entry.kind == "blob" {
-            if let Some(ref b64) = entry.data {
-                let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64)
-                    .with_context(|| format!("decode blob {}", entry.hash))?;
-                blob_data.insert(entry.hash.clone(), bytes);
-            }
-        }
-    }
-
-    // 3. Fail-closed: verify ALL blobs are present before materializing.
-    let mut missing: Vec<String> = Vec::new();
-    for entry in &entries {
-        if !blob_data.contains_key(&entry.hash) {
-            missing.push(format!("{} (hash={})", entry.path, entry.hash));
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "remote bundle '{}' has {} missing blob(s); aborting install: {}",
-            req.bundle_name,
-            missing.len(),
-            missing.join(", ")
-        );
-    }
-    for entry in &entries {
-        let bytes = blob_data
-            .get(&entry.hash)
-            .expect("missing blobs were rejected above");
-        let actual_size = u64::try_from(bytes.len()).context("remote blob size exceeds u64")?;
-        if actual_size != entry.size {
-            bail!(
-                "remote bundle entry '{}' declared size {} but fetched {} bytes",
-                entry.path,
-                entry.size,
-                actual_size
-            );
-        }
-        let actual_hash = lillux::cas::sha256_hex(bytes);
-        if actual_hash != entry.hash {
-            bail!(
-                "remote bundle entry '{}' content hash mismatch: expected {}, found {}",
-                entry.path,
-                entry.hash,
-                actual_hash
-            );
-        }
-    }
-
-    // 4. Materialize and verify a hidden generation, then expose the complete
-    // tree with one durable rename.
+    // 2. Materialize a hidden generation in bounded CAS batches. No response
+    // or decoded bundle-wide blob map is retained: at most one bounded batch
+    // is live, and any missing/malformed blob removes the hidden generation.
     std::fs::create_dir_all(&bundles_root)
         .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
     let staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
     let node_config_root = state.config.runtime_root().config();
-    let installed_dependency_roots: Vec<PathBuf> =
-        ryeos_bundle::installed::load_installed_bundle_records(&state.config.app_root)
-            .context("preflight: load installed bundle registrations")?
-            .into_iter()
-            .filter(|record| record.name != req.bundle_name)
-            .map(|record| record.bundle_root)
-            .collect();
-    let ((files_installed, total_bytes), canonical_target) = (|| {
-        if local_target.exists() {
-            bail!(
-                "bundle '{}' appeared during remote install at {}",
-                req.bundle_name,
-                local_target.display()
-            );
-        }
-        if staging.exists() {
-            std::fs::remove_dir_all(&staging)
-                .with_context(|| format!("remove stale staging {}", staging.display()))?;
-        }
-        std::fs::create_dir(&staging)
-            .with_context(|| format!("create staging dir {}", staging.display()))?;
-        let counts = materialize_files(&entries, &blob_data, &staging).map_err(|error| {
-            let _ = std::fs::remove_dir_all(&staging);
-            error
-        })?;
-        if let Err(error) = ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
-            &staging,
+    if local_target.exists() {
+        bail!(
+            "bundle '{}' appeared during remote install at {}",
+            req.bundle_name,
+            local_target.display()
+        );
+    }
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .with_context(|| format!("remove stale staging {}", staging.display()))?;
+    }
+    std::fs::create_dir(&staging)
+        .with_context(|| format!("create staging dir {}", staging.display()))?;
+
+    let staged_result: Result<((usize, u64), std::path::PathBuf)> = async {
+        let counts = fetch_and_materialize_files(&client, &entries, &staging).await?;
+        if let Err(error) = crate::handlers::bundle_install::admit_completed_staging(
+            &state.config.app_root,
             &req.bundle_name,
-            &installed_dependency_roots,
+            &staging,
+            false,
             &node_config_root,
+            &state.engine.node_trust_store,
         ) {
-            let _ = std::fs::remove_dir_all(&staging);
             bail!(
-                "preflight verification failed for bundle '{}': {}",
+                "prospective admission failed for bundle '{}': {}",
                 req.bundle_name,
                 error
             );
         }
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        if local_target.exists() {
+            bail!(
+                "bundle '{}' appeared before remote activation at {}",
+                req.bundle_name,
+                local_target.display()
+            );
+        }
         let registration = serde_json::json!({ "kind": "node", "path": local_target });
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
@@ -220,9 +172,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             .canonicalize()
             .context("canonicalize installed bundle path")?;
         Ok((counts, canonical))
-    })()?;
+    }
+    .await;
+    let ((files_installed, total_bytes), canonical_target) = match staged_result {
+        Ok(result) => result,
+        Err(error) => {
+            if staging.exists() {
+                if let Err(cleanup_error) = std::fs::remove_dir_all(&staging) {
+                    tracing::warn!(
+                        path = %staging.display(),
+                        error = %cleanup_error,
+                        "failed to remove rejected remote bundle staging tree"
+                    );
+                }
+            }
+            return Err(error);
+        }
+    };
 
-    // 5. Write signed node-config bundle registration.
+    // 3. Write signed node-config bundle registration.
 
     transaction
         .commit_present(state.identity.signing_key())
@@ -244,35 +212,129 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }))
 }
 
-/// Materialize all blob entries to the target directory.
-/// Returns (files_installed, total_bytes) on success.
-fn materialize_files(
+/// Fetch and materialize all unique blobs in bounded batches. Reused hashes
+/// are fetched once and may materialize at multiple declared paths.
+async fn fetch_and_materialize_files(
+    client: &RemoteClient,
     entries: &[BundleExportEntry],
-    blob_data: &HashMap<String, Vec<u8>>,
     local_target: &std::path::Path,
 ) -> Result<(usize, u64)> {
+    let (uses_by_hash, batches) = build_blob_fetch_batches(entries)?;
     let mut files_installed = 0usize;
     let mut total_bytes: u64 = 0;
 
-    for entry in entries {
-        let bytes = blob_data
-            .get(&entry.hash)
-            .ok_or_else(|| anyhow::anyhow!("blob {} missing after pre-check", entry.hash))?;
-
-        let file_path = local_target.join(&entry.path);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create dir {}", parent.display()))?;
+    for hashes in batches {
+        let response = client
+            .objects_get_with_response_limit(&hashes, REMOTE_OBJECT_RESPONSE_MAX_BYTES)
+            .await
+            .context("fetch bounded remote bundle blob batch")?;
+        let mut blob_data = HashMap::with_capacity(response.entries.len());
+        for response_entry in response.entries {
+            if response_entry.kind != "blob" {
+                continue;
+            }
+            let encoded = response_entry
+                .data
+                .as_deref()
+                .context("remote blob response omitted base64 data")?;
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                .with_context(|| format!("decode blob {}", response_entry.hash))?;
+            blob_data.insert(response_entry.hash, bytes);
         }
-        materialize_regular_file(&file_path, bytes, entry.mode)?;
 
-        total_bytes = total_bytes
-            .checked_add(entry.size)
-            .context("materialized bundle size overflow")?;
-        files_installed += 1;
+        for hash in hashes {
+            let entry_indices = uses_by_hash
+                .get(&hash)
+                .with_context(|| format!("missing local export uses for blob {hash}"))?;
+            let bytes = blob_data.get(&hash).ok_or_else(|| {
+                anyhow::anyhow!("remote bundle CAS returned non-blob or missing entry for {hash}")
+            })?;
+            let actual_size = u64::try_from(bytes.len()).context("remote blob size exceeds u64")?;
+            let actual_hash = lillux::cas::sha256_hex(bytes);
+            if actual_hash != hash {
+                bail!(
+                    "remote bundle blob content hash mismatch: expected {}, found {}",
+                    hash,
+                    actual_hash
+                );
+            }
+
+            for index in entry_indices {
+                let entry = &entries[*index];
+                if actual_size != entry.size {
+                    bail!(
+                        "remote bundle entry '{}' declared size {} but fetched {} bytes",
+                        entry.path,
+                        entry.size,
+                        actual_size
+                    );
+                }
+                let file_path = local_target.join(&entry.path);
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("create dir {}", parent.display()))?;
+                }
+                materialize_regular_file(&file_path, bytes, entry.mode)?;
+                total_bytes = total_bytes
+                    .checked_add(entry.size)
+                    .context("materialized bundle size overflow")?;
+                files_installed += 1;
+            }
+        }
     }
 
     Ok((files_installed, total_bytes))
+}
+
+fn build_blob_fetch_batches(
+    entries: &[BundleExportEntry],
+) -> Result<(HashMap<String, Vec<usize>>, Vec<Vec<String>>)> {
+    let mut uses_by_hash: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut ordered_hashes: Vec<(String, u64)> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        match uses_by_hash.get_mut(&entry.hash) {
+            Some(indices) => {
+                let first = &entries[indices[0]];
+                if first.size != entry.size {
+                    bail!(
+                        "remote bundle reuses hash {} with conflicting sizes {} and {}",
+                        entry.hash,
+                        first.size,
+                        entry.size
+                    );
+                }
+                indices.push(index);
+            }
+            None => {
+                uses_by_hash.insert(entry.hash.clone(), vec![index]);
+                ordered_hashes.push((entry.hash.clone(), entry.size));
+            }
+        }
+    }
+
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = 0u64;
+    for (hash, size) in ordered_hashes {
+        let next_bytes = current_bytes
+            .checked_add(size)
+            .context("remote bundle batch size overflow")?;
+        if !current.is_empty()
+            && (current.len() >= REMOTE_OBJECT_BATCH_MAX_HASHES
+                || next_bytes > REMOTE_OBJECT_BATCH_DECLARED_BYTES)
+        {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current_bytes = current_bytes
+            .checked_add(size)
+            .context("remote bundle batch size overflow")?;
+        current.push(hash);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok((uses_by_hash, batches))
 }
 
 fn validate_export_response(
@@ -293,8 +355,23 @@ fn validate_export_response(
             response.entries.len()
         );
     }
+    if response.entries.len() > super::bundle_export::MAX_EXPORTED_BUNDLE_FILES {
+        bail!(
+            "remote bundle export contains {} files; maximum is {}",
+            response.entries.len(),
+            super::bundle_export::MAX_EXPORTED_BUNDLE_FILES
+        );
+    }
+    if response.total_bytes > super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES {
+        bail!(
+            "remote bundle export declares {} bytes; maximum is {}",
+            response.total_bytes,
+            super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES
+        );
+    }
 
     let mut paths = HashSet::with_capacity(response.entries.len());
+    let mut directories = HashSet::new();
     let mut declared_total = 0u64;
     for entry in &response.entries {
         if entry.kind != super::bundle_export::EXPORTED_BUNDLE_ENTRY_KIND_FILE {
@@ -302,6 +379,13 @@ fn validate_export_response(
                 "remote bundle export entry '{}' has unsupported kind '{}'; only regular files are accepted",
                 entry.path,
                 entry.kind
+            );
+        }
+        if entry.path.len() > super::bundle_export::MAX_EXPORTED_BUNDLE_PATH_BYTES {
+            bail!(
+                "remote bundle export entry path exceeds {} bytes: {}",
+                super::bundle_export::MAX_EXPORTED_BUNDLE_PATH_BYTES,
+                entry.path
             );
         }
         ryeos_state::project_sync::validate_safe_relative_path(&entry.path)
@@ -312,10 +396,52 @@ fn validate_export_response(
                 entry.path
             );
         }
+        let components = entry.path.split('/').collect::<Vec<_>>();
+        if components.len() > super::bundle_export::MAX_EXPORTED_BUNDLE_DEPTH + 1 {
+            bail!(
+                "remote bundle export path '{}' exceeds maximum tree depth of {}",
+                entry.path,
+                super::bundle_export::MAX_EXPORTED_BUNDLE_DEPTH
+            );
+        }
+        let mut directory = String::new();
+        for component in &components[..components.len().saturating_sub(1)] {
+            if !directory.is_empty() {
+                directory.push('/');
+            }
+            directory.push_str(component);
+            if paths.contains(directory.as_str()) {
+                bail!(
+                    "remote bundle export path '{}' traverses file entry '{}'",
+                    entry.path,
+                    directory
+                );
+            }
+            if directories.insert(directory.clone())
+                && directories.len() + paths.len() >= super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
+            {
+                bail!(
+                    "remote bundle export exceeds maximum of {} materialized files/directories",
+                    super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
+                );
+            }
+        }
+        if directories.contains(entry.path.as_str()) {
+            bail!(
+                "remote bundle export file entry '{}' conflicts with an existing directory path",
+                entry.path
+            );
+        }
         if !paths.insert(entry.path.clone()) {
             bail!(
                 "remote bundle export contains duplicate path '{}'",
                 entry.path
+            );
+        }
+        if directories.len() + paths.len() > super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES {
+            bail!(
+                "remote bundle export exceeds maximum of {} materialized files/directories",
+                super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
             );
         }
         if !lillux::cas::valid_hash(&entry.hash) {
@@ -325,10 +451,24 @@ fn validate_export_response(
                 entry.hash
             );
         }
+        if entry.size > super::bundle_export::MAX_EXPORTED_BUNDLE_FILE_BYTES {
+            bail!(
+                "remote bundle export entry '{}' declares {} bytes; per-file maximum is {}",
+                entry.path,
+                entry.size,
+                super::bundle_export::MAX_EXPORTED_BUNDLE_FILE_BYTES
+            );
+        }
         validate_unix_file_mode(entry.mode, &entry.path)?;
         declared_total = declared_total
             .checked_add(entry.size)
             .context("remote bundle export total size overflow")?;
+        if declared_total > super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES {
+            bail!(
+                "remote bundle export entries exceed maximum total size of {} bytes",
+                super::bundle_export::MAX_EXPORTED_BUNDLE_TOTAL_BYTES
+            );
+        }
     }
     if declared_total != response.total_bytes {
         bail!(
@@ -399,3 +539,77 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, hash_byte: u8, size: u64) -> BundleExportEntry {
+        BundleExportEntry {
+            kind: super::super::bundle_export::EXPORTED_BUNDLE_ENTRY_KIND_FILE.to_string(),
+            path: path.to_string(),
+            hash: format!("{hash_byte:02x}").repeat(32),
+            size,
+            mode: 0o644,
+        }
+    }
+
+    fn response(entries: Vec<BundleExportEntry>) -> BundleExportResponse {
+        BundleExportResponse {
+            bundle_name: "demo".to_string(),
+            _bundle_path: "/remote/demo".to_string(),
+            file_count: entries.len(),
+            total_bytes: entries.iter().map(|entry| entry.size).sum(),
+            entries,
+        }
+    }
+
+    #[test]
+    fn export_validation_rejects_per_file_limit() {
+        let response = response(vec![entry(
+            "large.bin",
+            1,
+            super::super::bundle_export::MAX_EXPORTED_BUNDLE_FILE_BYTES + 1,
+        )]);
+        assert!(validate_export_response(&response, "demo").is_err());
+    }
+
+    #[test]
+    fn export_validation_rejects_path_limit() {
+        let path = "a".repeat(super::super::bundle_export::MAX_EXPORTED_BUNDLE_PATH_BYTES + 1);
+        let response = response(vec![entry(&path, 1, 1)]);
+        assert!(validate_export_response(&response, "demo").is_err());
+    }
+
+    #[test]
+    fn export_validation_rejects_excessive_tree_depth() {
+        let mut components = vec![
+            "directory";
+            super::super::bundle_export::MAX_EXPORTED_BUNDLE_DEPTH + 1
+        ];
+        components.push("file");
+        let path = components.join("/");
+        let response = response(vec![entry(&path, 1, 1)]);
+        assert!(validate_export_response(&response, "demo").is_err());
+    }
+
+    #[test]
+    fn export_validation_rejects_file_directory_collision() {
+        let response = response(vec![entry("a", 1, 1), entry("a/b", 2, 1)]);
+        assert!(validate_export_response(&response, "demo").is_err());
+    }
+
+    #[test]
+    fn fetch_batches_deduplicate_blob_hashes() {
+        let entries = vec![entry("a", 1, 4), entry("b", 1, 4), entry("c", 2, 4)];
+        let (uses, batches) = build_blob_fetch_batches(&entries).unwrap();
+        assert_eq!(uses.get(&entries[0].hash).unwrap(), &vec![0, 1]);
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn fetch_batches_reject_conflicting_sizes_for_same_hash() {
+        let entries = vec![entry("a", 1, 4), entry("b", 1, 5)];
+        assert!(build_blob_fetch_batches(&entries).is_err());
+    }
+}

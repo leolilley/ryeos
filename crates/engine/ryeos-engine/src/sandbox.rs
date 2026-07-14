@@ -80,6 +80,8 @@ pub struct SandboxEnvironmentPolicy {
 #[serde(deny_unknown_fields)]
 pub struct SandboxLimitsPolicy {
     pub open_files: Option<u64>,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
     pub verified_artifact_file_bytes: u64,
     pub verified_artifact_total_bytes: u64,
     pub verified_artifact_files: u64,
@@ -510,7 +512,7 @@ pub struct SandboxLaunchContext<'a> {
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,
     pub bundle_roots: &'a [PathBuf],
-    pub operator_trusted_keys_dir: Option<&'a Path>,
+    pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [SandboxVerifiedCode],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
@@ -568,12 +570,7 @@ impl SandboxRuntime {
     /// The socket itself is resolved only for launches that request callback
     /// IPC, because the listener may not exist yet at policy-load time.
     pub fn load_for_daemon(app_root: &Path, daemon_socket: &Path) -> Result<Self, EngineError> {
-        if !daemon_socket.is_absolute() {
-            return Err(refused(format!(
-                "daemon socket path must be absolute: {}",
-                daemon_socket.display()
-            )));
-        }
+        validate_namespace_destination("daemon socket", daemon_socket)?;
         let socket_parent = daemon_socket.parent().ok_or_else(|| {
             refused(format!(
                 "daemon socket path has no parent: {}",
@@ -591,8 +588,9 @@ impl SandboxRuntime {
     }
 
     fn load_inner(app_root: &Path, daemon_socket: Option<PathBuf>) -> Result<Self, EngineError> {
+        validate_namespace_destination("app root", app_root)?;
         // Bind the policy bytes and all later authority checks to one canonical
-        // app-root identity. The operator spelling remains the namespace
+        // app-root identity. The supplied spelling remains the namespace
         // destination, but it is never used as the host-side authority root.
         let runtime_app_root = canonicalize_context_mount("app root", app_root)?;
         validate_existing_directory_tree_without_symlinks(
@@ -678,13 +676,39 @@ impl SandboxRuntime {
             )));
         }
         if self.state == SandboxRuntimeState::Disabled {
-            // Opt-out is deliberately exact: no namespace, mount, environment,
-            // path, descriptor, or limit rewriting occurs in disabled mode.
+            // Opt-out disables Bubblewrap and OS confinement, not daemon-memory
+            // safety. Retained output remains bounded by the immutable node
+            // policy, with any lower caller limit preserved.
+            let mut request = request;
+            let requested = request.limits.unwrap_or_default();
+            request.limits = Some(lillux::SubprocessLimits {
+                max_open_files: requested.max_open_files,
+                max_stdout_bytes: Some(
+                    requested
+                        .max_stdout_bytes
+                        .map_or(self.inspection.limits.stdout_bytes, |limit| {
+                            limit.min(self.inspection.limits.stdout_bytes)
+                        }),
+                ),
+                max_stderr_bytes: Some(
+                    requested
+                        .max_stderr_bytes
+                        .map_or(self.inspection.limits.stderr_bytes, |limit| {
+                            limit.min(self.inspection.limits.stderr_bytes)
+                        }),
+                ),
+            });
             return Ok(request);
         }
         if !request.inherited_fds.is_empty() {
             return Err(refused(
                 "enforced sandbox launches cannot inherit caller-supplied file descriptors"
+                    .to_string(),
+            ));
+        }
+        if request.supervised_status.is_some() {
+            return Err(refused(
+                "enforced sandbox launches cannot inherit caller-supplied process supervision"
                     .to_string(),
             ));
         }
@@ -709,13 +733,32 @@ impl SandboxRuntime {
             timeout,
             limits,
             mut inherited_fds,
+            supervised_status,
         } = request;
+        debug_assert!(supervised_status.is_none());
 
         let project_destination = context.project_path.to_path_buf();
         let cwd_destination = cwd
             .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| project_destination.clone());
+        validate_namespace_destination("project", &project_destination)?;
+        validate_namespace_destination("working directory", &cwd_destination)?;
+        if let Some(path) = context.state_root {
+            validate_namespace_destination("state root", path)?;
+        }
+        if let Some(path) = context.checkpoint_dir {
+            validate_namespace_destination("checkpoint directory", path)?;
+        }
+        for root in context.bundle_roots {
+            validate_namespace_destination("bundle root", root)?;
+        }
+        if let Some(path) = context.node_trusted_keys_dir {
+            validate_namespace_destination("node trusted-keys directory", path)?;
+        }
+        if let Some(path) = self.app_root_destination.as_deref() {
+            validate_namespace_destination("app root", path)?;
+        }
         let canonical_project = canonicalize_context_mount("project", &project_destination)?;
         let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
 
@@ -934,6 +977,9 @@ impl SandboxRuntime {
             .iter()
             .find(|(name, _)| name == "RYEOSD_SOCKET_PATH")
             .map(|(_, value)| PathBuf::from(value));
+        if let Some(path) = requested_daemon_socket.as_deref() {
+            validate_namespace_destination("requested daemon socket", path)?;
+        }
         let canonical_requested_daemon_socket = requested_daemon_socket
             .as_deref()
             .map(|requested| {
@@ -971,7 +1017,7 @@ impl SandboxRuntime {
                     self.daemon_socket.as_deref(),
                     requested_daemon_socket.as_deref(),
                     context.bundle_roots,
-                    context.operator_trusted_keys_dir,
+                    context.node_trusted_keys_dir,
                     &verified_code_mounts,
                 )
             })
@@ -985,6 +1031,12 @@ impl SandboxRuntime {
                 .then_with(|| left.source.cmp(&right.source))
         });
         readable_mounts.dedup();
+        for mount in &writable_mounts {
+            validate_namespace_destination("writable mount", &mount.destination)?;
+        }
+        for mount in &readable_mounts {
+            validate_namespace_destination("readable mount", &mount.destination)?;
+        }
         for required in &verified_code_mounts {
             if !readable_mounts.iter().any(|mount| mount == required) {
                 return Err(refused(format!(
@@ -1046,9 +1098,19 @@ impl SandboxRuntime {
                 cwd_destination.display()
             )));
         }
+        validate_namespace_destination("command", &command_path)?;
+        let status = lillux::bubblewrap_status_pipe().map_err(|reason| {
+            refused(format!(
+                "Bubblewrap process supervision cannot be initialized: {reason}"
+            ))
+        })?;
+        let status_fd = status.writer_fd().to_string();
+        inherited_fds.push(status.writer);
         let mut sandbox_args = vec![
             "--die-with-parent".to_string(),
             "--new-session".to_string(),
+            "--json-status-fd".to_string(),
+            status_fd,
             "--clearenv".to_string(),
             "--unshare-user".to_string(),
             "--unshare-ipc".to_string(),
@@ -1194,6 +1256,9 @@ impl SandboxRuntime {
         sandbox_args.push("--".to_string());
         sandbox_args.push(command_path.to_string_lossy().into_owned());
         sandbox_args.append(&mut args);
+        let bubblewrap_args_handle = seal_bubblewrap_args(&sandbox_args)?;
+        let bubblewrap_args_fd = mount_fd_arg(&bubblewrap_args_handle);
+        inherited_fds.push(bubblewrap_args_handle);
 
         let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
         let effective_open_files = match (self.inspection.limits.open_files, requested_open_files) {
@@ -1202,15 +1267,27 @@ impl SandboxRuntime {
             (None, Some(requested)) => Some(requested),
             (None, None) => None,
         };
-        let limits = effective_open_files
-            .map(|open_files| lillux::SubprocessLimits {
-                max_open_files: Some(open_files),
-            })
-            .or(limits);
+        let effective_stdout_bytes = limits
+            .as_ref()
+            .and_then(|limits| limits.max_stdout_bytes)
+            .map_or(self.inspection.limits.stdout_bytes, |requested| {
+                requested.min(self.inspection.limits.stdout_bytes)
+            });
+        let effective_stderr_bytes = limits
+            .as_ref()
+            .and_then(|limits| limits.max_stderr_bytes)
+            .map_or(self.inspection.limits.stderr_bytes, |requested| {
+                requested.min(self.inspection.limits.stderr_bytes)
+            });
+        let limits = Some(lillux::SubprocessLimits {
+            max_open_files: effective_open_files,
+            max_stdout_bytes: Some(effective_stdout_bytes),
+            max_stderr_bytes: Some(effective_stderr_bytes),
+        });
 
         Ok(lillux::SubprocessRequest {
             cmd: format!("/proc/self/fd/{}", mount_fd_arg(backend_handle)),
-            args: sandbox_args,
+            args: vec!["--args".to_string(), bubblewrap_args_fd],
             cwd: Some(canonical_cwd.to_string_lossy().into_owned()),
             // Never expose the target environment to Bubblewrap's own dynamic
             // loader. `--clearenv`/`--setenv` constructs it inside the sandbox.
@@ -1219,6 +1296,7 @@ impl SandboxRuntime {
             timeout,
             limits,
             inherited_fds,
+            supervised_status: Some(status.reader),
         })
     }
 
@@ -1447,7 +1525,7 @@ impl Default for SandboxRuntime {
                         "{node_public_identity}".to_string(),
                         "{daemon_socket}".to_string(),
                         "{bundle_roots}".to_string(),
-                        "{operator_trusted_keys}".to_string(),
+                        "{node_trusted_keys}".to_string(),
                         "{verified_code}".to_string(),
                     ],
                     writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],
@@ -1460,6 +1538,8 @@ impl Default for SandboxRuntime {
                 },
                 limits: SandboxLimitsPolicy {
                     open_files: Some(1024),
+                    stdout_bytes: 8_388_608,
+                    stderr_bytes: 8_388_608,
                     verified_artifact_file_bytes: 67_108_864,
                     verified_artifact_total_bytes: 268_435_456,
                     verified_artifact_files: 4_096,
@@ -1550,6 +1630,7 @@ fn probe_bubblewrap_backend(handle: &Arc<std::fs::File>) -> Result<String, Engin
             timeout: 5.0,
             limits: None,
             inherited_fds: vec![handle.clone()],
+            supervised_status: None,
         })
     };
 
@@ -1584,7 +1665,13 @@ fn probe_bubblewrap_backend(handle: &Arc<std::fs::File>) -> Result<String, Engin
     let help_tokens = help
         .split_whitespace()
         .collect::<std::collections::HashSet<_>>();
-    for required in ["--bind-fd", "--ro-bind-fd", "--argv0"] {
+    for required in [
+        "--args",
+        "--bind-fd",
+        "--json-status-fd",
+        "--ro-bind-fd",
+        "--argv0",
+    ] {
         if !help_tokens.contains(required) {
             return Err(refused(format!(
                 "captured sandbox backend does not support required option {required}"
@@ -1677,29 +1764,26 @@ fn validate_policy_semantics(policy: &SandboxPolicy) -> Result<(), EngineError> 
         )));
     }
     for configured in &policy.filesystem.readable {
-        if configured != "{project}"
-            && configured != "{cwd}"
-            && configured != "{node_public_identity}"
-            && configured != "{daemon_socket}"
-            && configured != "{bundle_roots}"
-            && configured != "{operator_trusted_keys}"
-            && configured != "{verified_code}"
-            && !Path::new(configured).is_absolute()
-        {
-            return Err(refused(format!(
-                "sandbox readable path `{configured}` must be absolute or use {{project}}/{{cwd}}/{{node_public_identity}}/{{daemon_socket}}/{{bundle_roots}}/{{operator_trusted_keys}}/{{verified_code}}"
-            )));
+        let is_placeholder = matches!(
+            configured.as_str(),
+            "{project}"
+                | "{cwd}"
+                | "{node_public_identity}"
+                | "{daemon_socket}"
+                | "{bundle_roots}"
+                | "{node_trusted_keys}"
+                | "{verified_code}"
+        );
+        if !is_placeholder {
+            validate_namespace_destination("readable policy path", Path::new(configured))?;
         }
     }
     for configured in &policy.filesystem.writable {
-        if configured != "{project}"
-            && configured != "{cwd}"
-            && configured != "{checkpoint_dir}"
-            && !Path::new(configured).is_absolute()
-        {
-            return Err(refused(format!(
-                "sandbox writable path `{configured}` must be absolute or use {{project}}/{{cwd}}/{{checkpoint_dir}}"
-            )));
+        if !matches!(
+            configured.as_str(),
+            "{project}" | "{cwd}" | "{checkpoint_dir}"
+        ) {
+            validate_namespace_destination("writable policy path", Path::new(configured))?;
         }
     }
     for allowed in &policy.environment.allow {
@@ -1719,6 +1803,16 @@ fn validate_policy_semantics(policy: &SandboxPolicy) -> Result<(), EngineError> 
 }
 
 fn validate_artifact_limits(policy: &SandboxLimitsPolicy) -> Result<(), EngineError> {
+    if policy.stdout_bytes == 0 {
+        return Err(refused(
+            "sandbox stdout byte limit must be greater than zero".to_string(),
+        ));
+    }
+    if policy.stderr_bytes == 0 {
+        return Err(refused(
+            "sandbox stderr byte limit must be greater than zero".to_string(),
+        ));
+    }
     if policy.verified_artifact_file_bytes == 0 {
         return Err(refused(
             "sandbox verified-artifact per-file byte limit must be greater than zero".to_string(),
@@ -1739,14 +1833,14 @@ fn validate_artifact_limits(policy: &SandboxLimitsPolicy) -> Result<(), EngineEr
 }
 
 fn validate_enforced_limits(policy: &SandboxLimitsPolicy) -> Result<(), EngineError> {
-    let limits = policy
-        .open_files
-        .map(|open_files| lillux::SubprocessLimits {
-            max_open_files: Some(open_files),
-        });
-    lillux::validate_subprocess_limits(limits.as_ref()).map_err(|reason| {
+    let limits = lillux::SubprocessLimits {
+        max_open_files: policy.open_files,
+        max_stdout_bytes: Some(policy.stdout_bytes),
+        max_stderr_bytes: Some(policy.stderr_bytes),
+    };
+    lillux::validate_subprocess_limits(Some(&limits)).map_err(|reason| {
         refused(format!(
-            "sandbox open-file limit is not enforceable: {reason}"
+            "sandbox subprocess limits are not enforceable: {reason}"
         ))
     })
 }
@@ -2249,6 +2343,95 @@ fn mount_fd_arg(handle: &Arc<std::fs::File>) -> String {
     }
 }
 
+/// Serialize Bubblewrap's complete option vector into an immutable anonymous
+/// file. The host process command line then contains only `--args <fd>`;
+/// target arguments and `--setenv` values never appear in `/proc/*/cmdline`.
+fn seal_bubblewrap_args(args: &[String]) -> Result<Arc<std::fs::File>, EngineError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = args;
+        return Err(refused(
+            "fd-backed Bubblewrap arguments are supported only on Linux".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::{Seek as _, Write as _};
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let mut fd = unsafe {
+            libc::memfd_create(
+                c"ryeos-bwrap-args".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        if fd < 0 {
+            return Err(refused(format!(
+                "Bubblewrap argument memfd cannot be created: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if fd <= libc::STDERR_FILENO {
+            let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+            let duplicate_error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            if duplicated < 0 {
+                return Err(refused(format!(
+                    "Bubblewrap argument descriptor cannot be moved above stdio: {duplicate_error}"
+                )));
+            }
+            fd = duplicated;
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        for (index, argument) in args.iter().enumerate() {
+            if argument.as_bytes().contains(&0) {
+                return Err(refused(format!(
+                    "Bubblewrap argument {index} contains an interior NUL"
+                )));
+            }
+            file.write_all(argument.as_bytes()).map_err(|error| {
+                refused(format!(
+                    "Bubblewrap argument {index} cannot be written to its private descriptor: {error}"
+                ))
+            })?;
+            file.write_all(&[0]).map_err(|error| {
+                refused(format!(
+                    "Bubblewrap argument {index} terminator cannot be written to its private descriptor: {error}"
+                ))
+            })?;
+        }
+        file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+            refused(format!(
+                "Bubblewrap argument descriptor cannot be rewound: {error}"
+            ))
+        })?;
+        let required_seals =
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, required_seals) } < 0 {
+            return Err(refused(format!(
+                "Bubblewrap argument descriptor cannot be sealed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let observed_seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+        if observed_seals < 0 {
+            return Err(refused(format!(
+                "Bubblewrap argument descriptor seals cannot be verified: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if observed_seals & required_seals != required_seals {
+            return Err(refused(format!(
+                "Bubblewrap argument descriptor is missing required seals (observed {observed_seals:#x})"
+            )));
+        }
+        Ok(Arc::new(file))
+    }
+}
+
 fn open_policy_file(source: &Path) -> Result<std::fs::File, EngineError> {
     let source_metadata =
         std::fs::symlink_metadata(source).map_err(|error| EngineError::SandboxPolicyRefused {
@@ -2369,7 +2552,7 @@ fn resolve_readable_mounts(
     daemon_socket: Option<&Path>,
     requested_daemon_socket: Option<&Path>,
     bundle_roots: &[PathBuf],
-    operator_trusted_keys_dir: Option<&Path>,
+    node_trusted_keys_dir: Option<&Path>,
     verified_code_mounts: &[ReadableMount],
 ) -> Result<Vec<ReadableMount>, EngineError> {
     if configured == "{node_public_identity}" {
@@ -2504,12 +2687,12 @@ fn resolve_readable_mounts(
             .collect();
     }
 
-    if configured == "{operator_trusted_keys}" {
-        let Some(destination) = operator_trusted_keys_dir else {
+    if configured == "{node_trusted_keys}" {
+        let Some(destination) = node_trusted_keys_dir else {
             return Ok(Vec::new());
         };
-        let source = canonicalize_context_mount("operator trusted-keys directory", destination)?;
-        let source_handle = pin_mount_source("operator trusted-keys directory", &source)?;
+        let source = canonicalize_context_mount("node trusted-keys directory", destination)?;
+        let source_handle = pin_mount_source("node trusted-keys directory", &source)?;
         return Ok(vec![ReadableMount {
             source,
             destination: destination.to_path_buf(),
@@ -2554,6 +2737,40 @@ fn canonicalize_context_mount(kind: &str, path: &Path) -> Result<PathBuf, Engine
         )));
     }
     canonicalize_launch_path(kind, path)
+}
+
+/// Require a path spelling that Bubblewrap cannot reinterpret through `.` or
+/// `..` while constructing its new root. Host-side authority checks use
+/// canonical sources, but namespace destinations deliberately retain their
+/// configured spelling, so every destination must cross this lexical gate.
+fn validate_namespace_destination(kind: &str, path: &Path) -> Result<(), EngineError> {
+    use std::path::Component;
+
+    let path_text = path.to_str().ok_or_else(|| {
+        refused(format!(
+            "sandbox {kind} namespace destination is not valid UTF-8: {}",
+            path.display()
+        ))
+    })?;
+    if path_text.contains('\0') {
+        return Err(refused(format!(
+            "sandbox {kind} namespace destination contains an interior NUL"
+        )));
+    }
+    let mut components = path.components();
+    #[cfg(windows)]
+    let root_is_valid = matches!(components.next(), Some(Component::Prefix(_)))
+        && matches!(components.next(), Some(Component::RootDir));
+    #[cfg(not(windows))]
+    let root_is_valid = matches!(components.next(), Some(Component::RootDir));
+    let remainder_is_normal = components.all(|component| matches!(component, Component::Normal(_)));
+    if !root_is_valid || !remainder_is_normal {
+        return Err(refused(format!(
+            "sandbox {kind} namespace destination must contain only an absolute root followed by normal path components: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn validate_thread_path_component(thread_id: &str) -> Result<(), EngineError> {
@@ -2685,7 +2902,7 @@ mod tests {
 
     fn policy_yaml(mode: &str, executable: &Path) -> String {
         format!(
-            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  readable: []\n  writable: [\"{{project}}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"PATH\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  readable: []\n  writable: [\"{{project}}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"PATH\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             executable.display()
         )
     }
@@ -2705,7 +2922,38 @@ mod tests {
             timeout: 1.0,
             limits: None,
             inherited_fds: Vec::new(),
+            supervised_status: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn bubblewrap_args(request: &lillux::SubprocessRequest) -> Vec<String> {
+        use std::io::{Read as _, Seek as _};
+        use std::os::fd::AsRawFd as _;
+
+        assert_eq!(request.args.first().map(String::as_str), Some("--args"));
+        let args_fd = request
+            .args
+            .get(1)
+            .expect("Bubblewrap --args descriptor")
+            .parse::<i32>()
+            .expect("numeric Bubblewrap --args descriptor");
+        let args_file = request
+            .inherited_fds
+            .iter()
+            .find(|file| file.as_raw_fd() == args_fd)
+            .expect("inherited Bubblewrap --args descriptor");
+        let mut args_file = args_file.try_clone().unwrap();
+        args_file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut encoded = Vec::new();
+        args_file.read_to_end(&mut encoded).unwrap();
+        assert_eq!(encoded.last(), Some(&0));
+        let mut encoded_args = encoded
+            .split(|byte| *byte == 0)
+            .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(encoded_args.pop().as_deref(), Some(""));
+        encoded_args
     }
 
     #[test]
@@ -2806,7 +3054,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_apply_is_an_exact_noop() {
+    fn disabled_apply_skips_confinement_but_applies_output_bounds() {
         let runtime = SandboxRuntime::default();
         let project = tempfile::tempdir().unwrap();
         let original = request(project.path());
@@ -2819,7 +3067,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -2829,7 +3077,16 @@ mod tests {
 
         assert_eq!(applied.cmd, "/bin/sh");
         assert_eq!(applied.args, ["-c", "true"]);
-        assert!(applied.limits.is_none());
+        let limits = applied.limits.expect("disabled mode still bounds output");
+        assert_eq!(limits.max_open_files, None);
+        assert_eq!(
+            limits.max_stdout_bytes,
+            Some(runtime.inspection().limits.stdout_bytes)
+        );
+        assert_eq!(
+            limits.max_stderr_bytes,
+            Some(runtime.inspection().limits.stderr_bytes)
+        );
     }
 
     #[test]
@@ -2852,7 +3109,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -2877,27 +3134,119 @@ mod tests {
             .captured_version
             .as_deref()
             .is_some_and(|version| !version.is_empty()));
-        assert!(applied.args.iter().any(|arg| arg == "--unshare-user"));
-        assert!(applied.args.iter().any(|arg| arg == "--unshare-ipc"));
-        assert!(applied.args.iter().any(|arg| arg == "--unshare-uts"));
-        assert!(applied.args.iter().any(|arg| arg == "--unshare-net"));
-        assert!(applied.args.iter().any(|arg| arg == "--clearenv"));
-        assert!(applied
-            .args
+        let bubblewrap_args = bubblewrap_args(&applied);
+        assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-user"));
+        assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-ipc"));
+        assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-uts"));
+        assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(bubblewrap_args.iter().any(|arg| arg == "--clearenv"));
+        assert!(bubblewrap_args
+            .windows(2)
+            .any(|args| args[0] == "--json-status-fd" && args[1].parse::<i32>().is_ok()));
+        assert!(bubblewrap_args
             .windows(3)
             .any(|args| args == ["--setenv", "PATH", "/usr/bin"]));
         assert!(applied.envs.is_empty());
+        assert!(applied.supervised_status.is_some());
         assert_eq!(
             applied.limits,
             Some(lillux::SubprocessLimits {
                 max_open_files: Some(128),
+                max_stdout_bytes: Some(8_388_608),
+                max_stderr_bytes: Some(8_388_608),
             })
         );
     }
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn enforced_runtime_keeps_the_stricter_existing_open_file_limit() {
+    fn enforced_runtime_keeps_target_secrets_out_of_the_host_command_line() {
+        use std::os::fd::AsRawFd as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("allow: [\"PATH\"]", "allow: [\"PATH\", \"SECRET_TOKEN\"]");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+        let mut subprocess = request(project.path());
+        subprocess.args.push("argument-secret".to_string());
+        subprocess
+            .envs
+            .push(("SECRET_TOKEN".to_string(), "environment-secret".to_string()));
+
+        let applied = runtime
+            .apply(
+                subprocess,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        assert_eq!(applied.args.first().map(String::as_str), Some("--args"));
+        assert_eq!(applied.args.len(), 2);
+        assert!(!applied.args.iter().any(|arg| arg.contains("secret")));
+        let hidden_args = bubblewrap_args(&applied);
+        assert!(hidden_args.iter().any(|arg| arg == "argument-secret"));
+        assert!(hidden_args.iter().any(|arg| arg == "environment-secret"));
+
+        let args_fd = applied.args[1].parse::<i32>().unwrap();
+        let args_file = applied
+            .inherited_fds
+            .iter()
+            .find(|file| file.as_raw_fd() == args_fd)
+            .unwrap();
+        let seals = unsafe { libc::fcntl(args_file.as_raw_fd(), libc::F_GET_SEALS) };
+        let required =
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        assert_eq!(seals & required, required);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforced_runtime_rejects_nul_in_a_target_argument() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+        let mut subprocess = request(project.path());
+        subprocess.args.push("bad\0argument".to_string());
+
+        let error = runtime
+            .apply(
+                subprocess,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("interior NUL"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforced_runtime_keeps_stricter_existing_subprocess_limits() {
         let app_root = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         write_policy(
@@ -2908,6 +3257,8 @@ mod tests {
         let mut request = request(project.path());
         request.limits = Some(lillux::SubprocessLimits {
             max_open_files: Some(64),
+            max_stdout_bytes: Some(1_024),
+            max_stderr_bytes: Some(2_048),
         });
 
         let applied = runtime
@@ -2919,7 +3270,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -2931,6 +3282,8 @@ mod tests {
             applied.limits,
             Some(lillux::SubprocessLimits {
                 max_open_files: Some(64),
+                max_stdout_bytes: Some(1_024),
+                max_stderr_bytes: Some(2_048),
             })
         );
     }
@@ -2958,7 +3311,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -2966,8 +3319,8 @@ mod tests {
             )
             .unwrap();
 
-        let tmpdir_bindings = applied
-            .args
+        let bubblewrap_args = bubblewrap_args(&applied);
+        let tmpdir_bindings = bubblewrap_args
             .windows(3)
             .filter(|args| args[0] == "--setenv" && args[1] == "TMPDIR")
             .collect::<Vec<_>>();
@@ -2995,7 +3348,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3004,7 +3357,8 @@ mod tests {
             .unwrap();
 
         let project = std::fs::canonicalize(project.path()).unwrap();
-        assert!(applied.args.windows(3).any(|args| {
+        let bubblewrap_args = bubblewrap_args(&applied);
+        assert!(bubblewrap_args.windows(3).any(|args| {
             args[0] == "--ro-bind-fd" && args[2] == project.to_string_lossy().as_ref()
         }));
     }
@@ -3031,7 +3385,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3050,7 +3404,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3084,7 +3438,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3094,8 +3448,8 @@ mod tests {
 
         let public_identity = std::fs::canonicalize(public_identity).unwrap();
         let public_identity = public_identity.to_string_lossy();
-        assert!(applied
-            .args
+        let bubblewrap_args = bubblewrap_args(&applied);
+        assert!(bubblewrap_args
             .windows(3)
             .any(|args| { args[0] == "--ro-bind-fd" && args[2] == public_identity.as_ref() }));
     }
@@ -3125,7 +3479,7 @@ mod tests {
                 state_root: None,
                 checkpoint_dir: None,
                 bundle_roots: &[],
-                operator_trusted_keys_dir: None,
+                node_trusted_keys_dir: None,
                 verified_code: &[],
                 item_ref: "tool:test/probe",
                 thread_id: "T-test",
@@ -3171,7 +3525,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3179,7 +3533,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(applied.args.windows(3).any(|args| {
+        let bubblewrap_args = bubblewrap_args(&applied);
+        assert!(bubblewrap_args.windows(3).any(|args| {
             args[0] == "--ro-bind-fd" && args[2] == socket.to_string_lossy().as_ref()
         }));
     }
@@ -3203,7 +3558,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3236,7 +3591,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_schema_rejects_unsupported_versions_and_unknown_limit_fields() {
+    fn strict_schema_rejects_unsupported_unknown_and_zero_limits() {
         let app_root = tempfile::tempdir().unwrap();
         let unsupported =
             policy_yaml("disabled", Path::new("/missing")).replacen("version: 1", "version: 99", 1);
@@ -3249,6 +3604,78 @@ mod tests {
         write_policy(app_root.path(), &unknown);
         let error = SandboxRuntime::load(app_root.path()).unwrap_err();
         assert!(error.to_string().contains("unknown field"));
+
+        let zero_output = policy_yaml("disabled", Path::new("/missing"))
+            .replace("  stdout_bytes: 8388608", "  stdout_bytes: 0");
+        write_policy(app_root.path(), &zero_output);
+        let error = SandboxRuntime::load(app_root.path()).unwrap_err();
+        assert!(error.to_string().contains("stdout byte limit"));
+    }
+
+    #[test]
+    fn namespace_destinations_reject_relative_and_parent_components() {
+        validate_namespace_destination("test", Path::new("/safe/normal/path")).unwrap();
+
+        for unsafe_path in ["relative/path", "/safe/../usr"] {
+            let error = validate_namespace_destination("test", Path::new(unsafe_path)).unwrap_err();
+            assert!(error.to_string().contains("normal path components"));
+        }
+    }
+
+    #[test]
+    fn policy_literal_with_parent_traversal_is_refused_while_disabled() {
+        let app_root = tempfile::tempdir().unwrap();
+        let policy = policy_yaml("disabled", Path::new("/definitely/missing-bwrap"))
+            .replace("writable: [\"{project}\"]", "writable: [\"/safe/../usr\"]");
+        write_policy(app_root.path(), &policy);
+
+        let error = SandboxRuntime::load(app_root.path()).unwrap_err();
+
+        assert!(error.to_string().contains("normal path components"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", unix))]
+    fn project_destination_with_symlink_and_parent_traversal_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let paths = tempfile::tempdir().unwrap();
+        let deep = paths.path().join("host/a/b");
+        let canonical_project = paths.path().join("host/target");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(&canonical_project).unwrap();
+        let alias = paths.path().join("alias");
+        symlink(&deep, &alias).unwrap();
+        let lexical_project = alias.join("../../target");
+        assert_eq!(
+            std::fs::canonicalize(&lexical_project).unwrap(),
+            std::fs::canonicalize(&canonical_project).unwrap()
+        );
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let error = runtime
+            .apply(
+                request(&lexical_project),
+                SandboxLaunchContext {
+                    project_path: &lexical_project,
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("normal path components"));
     }
 
     #[test]
@@ -3270,7 +3697,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3278,7 +3705,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(!applied.args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(!bubblewrap_args(&applied)
+            .iter()
+            .any(|arg| arg == "--unshare-net"));
     }
 
     #[test]
@@ -3309,7 +3738,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &verified,
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3323,27 +3752,24 @@ mod tests {
         let namespace_root = PathBuf::from(VERIFIED_CODE_SANDBOX_ROOT).join(authority_id);
         let destination = namespace_root.join("entry.py");
         let destination_text = destination.to_string_lossy();
-        assert!(applied
-            .args
+        let bubblewrap_args = bubblewrap_args(&applied);
+        assert!(bubblewrap_args
             .iter()
             .any(|arg| arg == destination_text.as_ref()));
 
-        let writable_index = applied
-            .args
+        let writable_index = bubblewrap_args
             .windows(3)
             .position(|args| {
                 args[0] == "--bind-fd" && args[2] == project.path().to_string_lossy().as_ref()
             })
             .unwrap();
-        let mirror_index = applied
-            .args
+        let mirror_index = bubblewrap_args
             .windows(3)
             .position(|args| {
                 args[0] == "--ro-bind-fd" && args[2] == namespace_root.to_string_lossy().as_ref()
             })
             .unwrap();
-        let artifact_index = applied
-            .args
+        let artifact_index = bubblewrap_args
             .windows(3)
             .position(|args| args[0] == "--ro-bind-fd" && args[2] == destination_text.as_ref())
             .unwrap();
@@ -3377,7 +3803,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &verified,
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3415,7 +3841,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &verified,
                     item_ref: "tool:test/probe",
                     thread_id: "T-test",
@@ -3446,7 +3872,7 @@ mod tests {
                     state_root: None,
                     checkpoint_dir: None,
                     bundle_roots: &[],
-                    operator_trusted_keys_dir: None,
+                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     item_ref: "tool:test/probe",
                     thread_id: "../T-test",

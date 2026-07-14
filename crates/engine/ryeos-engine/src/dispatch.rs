@@ -120,6 +120,9 @@ impl DebugCapture {
             "env_keys": self.env_keys,
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
+            "output_limit_exceeded": result.output_limit_exceeded.map(|limit| limit.as_str()),
+            "stdout_truncated": result.stdout_truncated,
+            "stderr_truncated": result.stderr_truncated,
             "duration_ms": result.duration_ms,
             "stdout": truncate_for_error(&result.stdout, DEBUG_STDIO_CAP),
             "stderr": truncate_for_error(&result.stderr, DEBUG_STDIO_CAP),
@@ -156,11 +159,34 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         timeout: spec.timeout_secs as f64,
         limits: None,
         inherited_fds: Vec::new(),
+        supervised_status: None,
     })
 }
 
 /// Translate a Lillux SubprocessResult into an ExecutionCompletion.
 fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
+    if let Some(exceeded) = result.output_limit_exceeded {
+        return ExecutionCompletion {
+            status: ThreadTerminalStatus::Failed,
+            outcome_code: Some(format!("output_limit:{}", exceeded.as_str())),
+            result: None,
+            error: Some(serde_json::json!({
+                "message": "subprocess exceeded a node-owned output retention limit",
+                "stream": exceeded.as_str(),
+                "stdout": truncate_for_error(&result.stdout, 2000),
+                "stderr": truncate_for_error(&result.stderr, 2000),
+                "stdout_truncated": result.stdout_truncated,
+                "stderr_truncated": result.stderr_truncated,
+            })),
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: Some(serde_json::json!({
+                "duration_ms": result.duration_ms,
+                "pid": result.pid,
+            })),
+        };
+    }
     if result.timed_out {
         return ExecutionCompletion {
             status: ThreadTerminalStatus::Killed,
@@ -300,7 +326,10 @@ fn result_reports_failure(parsed: &Value) -> bool {
 }
 
 /// A spawned but not-yet-completed execution.
-/// The daemon can inspect pid/pgid before calling `wait()`.
+/// The daemon can inspect the supervised command's host pid/pgid before
+/// calling `wait()`. Under RyeOS strict these are Bubblewrap's reported target
+/// identity, not the outer launcher, so durable cancellation reaches the
+/// workload group directly.
 pub struct SpawnedExecution {
     pub pid: u32,
     pub pgid: i64,
@@ -324,7 +353,8 @@ impl SpawnedExecution {
 }
 
 /// Spawn a plan's subprocess without waiting for completion.
-/// Returns the SpawnedExecution handle with pid/pgid accessible immediately.
+/// Returns the SpawnedExecution handle after any trusted-launcher status
+/// handshake, with the supervised command pid/pgid accessible immediately.
 pub fn spawn_plan(
     plan: &ExecutionPlan,
     ctx: &EngineContext,
@@ -411,7 +441,7 @@ fn sandbox_plan_request(
             state_root: ctx.sandbox_state_root.as_deref(),
             checkpoint_dir: ctx.sandbox_checkpoint_dir.as_deref(),
             bundle_roots: &ctx.sandbox_bundle_roots,
-            operator_trusted_keys_dir: ctx.sandbox_operator_trusted_keys_dir.as_deref(),
+            node_trusted_keys_dir: ctx.sandbox_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
             item_ref,
             thread_id: &ctx.thread_id,
@@ -490,7 +520,7 @@ mod tests {
         fs::create_dir_all(&policy_dir).unwrap();
         fs::write(
             policy_dir.join("sandbox.yaml"),
-            "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /definitely/missing-bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /definitely/missing-bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
         let sandbox = std::sync::Arc::new(crate::sandbox::SandboxRuntime::load(&app_root).unwrap());
@@ -501,7 +531,7 @@ mod tests {
             sandbox_state_root: None,
             sandbox_checkpoint_dir: None,
             sandbox_bundle_roots: Vec::new(),
-            sandbox_operator_trusted_keys_dir: None,
+            sandbox_node_trusted_keys_dir: None,
             sandbox_verified_code: Vec::new(),
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
@@ -687,6 +717,30 @@ mod tests {
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Failed);
         assert!(completion.error.is_some());
+    }
+
+    #[test]
+    fn output_limit_maps_to_a_distinct_failed_outcome() {
+        let completion = translate_result(lillux::SubprocessResult {
+            success: false,
+            stdout: "retained".to_string(),
+            stderr: "node limit exceeded".to_string(),
+            exit_code: -1,
+            duration_ms: 12.0,
+            pid: 42,
+            timed_out: false,
+            output_limit_exceeded: Some(lillux::OutputLimitExceeded::Stdout),
+            stdout_truncated: true,
+            stderr_truncated: false,
+        });
+
+        assert_eq!(completion.status, ThreadTerminalStatus::Failed);
+        assert_eq!(
+            completion.outcome_code.as_deref(),
+            Some("output_limit:stdout")
+        );
+        assert_eq!(completion.error.as_ref().unwrap()["stream"], "stdout");
+        assert_eq!(completion.error.as_ref().unwrap()["stdout_truncated"], true);
     }
 
     /// A tool that logs its real error to stderr and returns
@@ -910,7 +964,7 @@ mod tests {
         let mut ctx = test_engine_context();
         fs::write(
             ctx.app_root.join(".ai/node/sandbox.yaml"),
-            "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
         ctx.sandbox =

@@ -285,6 +285,7 @@ pub async fn run(
             timeout: 60.0,
             limits: None,
             inherited_fds: Vec::new(),
+            supervised_status: None,
         };
         let item_ref = format!("runtime:{target_kind}");
         let subprocess_request = state
@@ -297,7 +298,7 @@ pub async fn run(
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     bundle_roots: &bundle_roots,
-                    operator_trusted_keys_dir: Some(
+                    node_trusted_keys_dir: Some(
                         &state.config.runtime_root().trusted_keys_dir(),
                     ),
                     verified_code: &sandbox_verified_code,

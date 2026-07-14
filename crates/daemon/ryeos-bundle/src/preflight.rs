@@ -145,6 +145,28 @@ pub fn preflight_verify_bundle_in_context(
     Ok(())
 }
 
+/// Verify a candidate bundle whose prospective installed name may differ from
+/// its source directory name.
+///
+/// Install planning supplies the name explicitly so manifest identity is
+/// checked against the requested registration name while retaining the source
+/// freshness check used for author trees.
+pub fn preflight_verify_named_bundle_in_context(
+    source_path: &Path,
+    expected_bundle_name: &str,
+    dependency_bundle_roots: &[PathBuf],
+    node_config_root: &Path,
+) -> Result<()> {
+    let _report = preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        node_config_root,
+        Some(expected_bundle_name),
+        true,
+    )?;
+    Ok(())
+}
+
 /// Re-verify a completed install staging tree using the final bundle identity.
 ///
 /// Staging directories deliberately have temporary filesystem names, so the
@@ -161,6 +183,7 @@ pub fn preflight_verify_bundle_staging_in_context(
         dependency_bundle_roots,
         node_config_root,
         Some(expected_bundle_name),
+        false,
     )?;
     Ok(())
 }
@@ -183,6 +206,7 @@ pub fn preflight_verify_bundle_report_in_context(
         dependency_bundle_roots,
         node_config_root,
         None,
+        true,
     )
 }
 
@@ -192,6 +216,7 @@ fn preflight_verify_bundle_in_context_inner(
     dependency_bundle_roots: &[PathBuf],
     node_config_root: &Path,
     expected_bundle_name: Option<&str>,
+    check_source_mtime: bool,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     validate_regular_tree(&ai_dir).with_context(|| {
@@ -259,10 +284,12 @@ fn preflight_verify_bundle_in_context_inner(
             &mut seen_roots,
         );
     }
-    // Candidate bundle being verified (last, so installed content takes precedence).
+    // The candidate is a prospective installed bundle and therefore receives
+    // bundle trust semantics during admission. It is last so dependency
+    // content retains the same deterministic precedence as boot.
     push_unique(
         source_path.to_path_buf(),
-        ryeos_engine::resolution::TrustClass::TrustedProject,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
         &mut parser_search_roots,
         &mut seen_roots,
     );
@@ -446,7 +473,7 @@ fn preflight_verify_bundle_in_context_inner(
             source_path,
             expected_bundle_name,
             &trust_store,
-            false,
+            check_source_mtime,
         ),
         None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
     }
@@ -495,7 +522,12 @@ fn verify_manifest_signature_for_bundle_name(
     let manifest_path = ai_dir.join("manifest.yaml");
     let manifest_meta = match fs::symlink_metadata(&manifest_path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "bundle '{}' has no regular signed .ai/manifest.yaml; installable bundles require a published manifest",
+                expected_bundle_name
+            )
+        }
         Err(e) => {
             return Err(e).with_context(|| format!("stat manifest {}", manifest_path.display()));
         }
@@ -2157,13 +2189,11 @@ system_source_caps:
     }
 
     #[test]
-    fn verify_manifest_passes_without_manifest() {
+    fn verify_manifest_rejects_missing_manifest() {
         let layout = BundleLayout::new("test-bundle");
         let ts = layout.trust_store();
-        assert!(
-            verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok(),
-            "no manifest should pass (optional)"
-        );
+        let error = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        assert!(error.to_string().contains("has no regular signed"));
     }
 
     fn add_real_preflight_fixture(

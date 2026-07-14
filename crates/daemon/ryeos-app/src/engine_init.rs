@@ -24,6 +24,7 @@ use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
+use crate::node_config::BundleRecord;
 
 /// Build the native engine from daemon configuration (Model B).
 ///
@@ -96,19 +97,7 @@ pub fn build_engine_for_roots(
     //    app_root is NOT a root — it contains node state, not content.
     let bundle_roots: Vec<PathBuf> = bundle_roots.to_vec();
 
-    // 3. Collect kind schema search roots from all bundle roots.
-    let mut schema_roots = Vec::new();
-
-    for root in &bundle_roots {
-        let kinds_dir = root
-            .join(ryeos_engine::AI_DIR)
-            .join(ryeos_engine::KIND_SCHEMAS_DIR);
-        if kinds_dir.is_dir() {
-            schema_roots.push(kinds_dir);
-        }
-    }
-
-    // 4. Load two deliberately separate trust snapshots. Installed bundle
+    // 3. Load two deliberately separate trust snapshots. Installed bundle
     // executable/bootstrap authority is node-only. Project keys and a
     // caller-scoped overlay may authorize project items, but can never expand
     // the node's executable or registry authority.
@@ -152,150 +141,17 @@ pub fn build_engine_for_roots(
         }
     };
 
-    // Re-admit every installed executable set on each engine bootstrap.
-    // Install preflight protects activation; this catches post-install drift,
-    // manual bundle registration, missing/extra executables or sidecars, and
-    // changed CAS authorization material before any registry can select it.
-    for bundle_root in &bundle_roots {
-        ryeos_engine::binary_resolver::verify_bundle_executor_manifest(
-            bundle_root,
-            &node_trust_store,
-        )
-        .with_context(|| {
-            format!(
-                "installed bundle executor admission failed for {}",
-                bundle_root.display()
-            )
-        })?;
-    }
-
-    // 5. Load kind registry from filesystem (requires trust store for verification)
-    let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set app_root or RYEOS_APP_ROOT to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
-    } else {
-        KindRegistry::load_base(&schema_roots, &node_trust_store)
-            .context("failed to load kind schemas")?
-    };
-
-    if !kinds.is_empty() {
-        tracing::info!(
-            count = kinds.len(),
-            roots = schema_roots.len(),
-            kinds = %kinds.kinds().collect::<Vec<_>>().join(", "),
-            "loaded kind schemas"
-        );
-    }
-
-    // 6. Load parser tool descriptors using the same search roots as
-    //    the kind schemas.
-    let parser_search_roots: Vec<PathBuf> = bundle_roots.clone();
-    let (parser_tools, parser_duplicates) =
-        ParserRegistry::load_base(&parser_search_roots, &node_trust_store, &kinds)
-            .context("failed to load parser tool descriptors")?;
-    tracing::info!(
-        count = parser_tools.len(),
-        duplicates = parser_duplicates.len(),
-        "loaded parser tool descriptors"
-    );
-
-    // 7. Load handler registry from bundle roots. Hard-error on any
-    //    failure: parser+composer dispatch routes through this registry,
-    //    and silently degrading to an empty registry produces confusing
-    //    "parser not registered" failures downstream instead of pointing
-    //    at the real load problem (no signed descriptors, bad manifest,
-    //    untrusted publisher, etc.).
-    // Build a tier-tagged root list. Bundle roots are TrustedBundle.
-    // Registries that record a
-    // per-item trust class derive it from the originating root tier.
-    let tagged_roots: Vec<(PathBuf, TrustClass)> = bundle_roots
-        .iter()
-        .map(|r| (r.clone(), TrustClass::TrustedBundle))
-        .collect();
-
-    let handler_registry = HandlerRegistry::load_base(&tagged_roots, &node_trust_store)
-        .context("failed to load handler descriptors from bundle roots")?;
-    tracing::info!(
-        count = handler_registry.iter().count(),
-        "loaded handler descriptors"
-    );
-    let handler_registry = std::sync::Arc::new(handler_registry);
-
-    // 7b. Load protocol registry from bundle roots. Hard-error on any
-    //     failure: dispatch routes through protocol descriptors for
-    //     subprocess wire contracts, and silently degrading to an empty
-    //     registry produces confusing errors downstream.
-    let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, &node_trust_store)
-        .context("failed to load protocol descriptors from bundle roots")?;
-    tracing::info!(
-        count = protocol_registry.iter().count(),
-        "loaded protocol descriptors"
-    );
-
-    // 8. Derive the per-kind composer registry data-drivenly from
-    //    the loaded kind schemas (each schema declares its
-    //    `composer:` handler ref; the engine never names a kind in
-    //    Rust). Composer dispatch resolves through the same
-    //    `HandlerRegistry` that parser dispatch uses — composers and
-    //    parsers are both subprocess handlers.
-    let composers = ComposerRegistry::from_kinds(&kinds, &handler_registry)
-        .context("failed to derive composer registry from kind schemas")?;
-
-    // 9b. Validate that every Subprocess terminator's protocol_ref
-    //     resolves in the protocol registry. Unresolved refs are a
-    //     hard boot error — the daemon cannot dispatch a kind whose
-    //     protocol is unknown.
-    validate_terminator_refs(&kinds, &protocol_registry)
-        .context("terminator→protocol ref validation failed")?;
-
-    // 9c. Cross-registry boot validation: every parser ref a kind extension
-    //    cites must resolve to a known descriptor + handler + valid config,
-    //    every kind's declared composer handler ref must resolve and its
-    //    composer_config must pass the handler's subprocess validation,
-    //    and every registered composer must point at a known kind. Collect
-    //    ALL issues, then bail with a single block listing them.
-    if let Err(issues) = validate_boot(
-        &kinds,
-        &parser_tools,
-        &handler_registry,
-        &composers,
-        &parser_duplicates,
-    ) {
-        let mut msg = String::from("boot validation failed:\n");
-        for issue in &issues {
-            msg.push_str(&format!("  - {issue:?}\n"));
-        }
-        anyhow::bail!("{msg}");
-    }
-
-    // 9d. Protocol builder validation: exercise every protocol descriptor
-    //    with synthetic inputs to catch descriptor regressions (unknown
-    //    env sources, duplicate keys, stdin-serialize failures) at boot
-    //    time. Also verifies runtime/streaming_tool kind↔protocol coupling.
-    if let Err(issues) = validate_protocol_builder(&kinds, &protocol_registry) {
-        let mut msg = String::from("protocol builder validation failed:\n");
-        for issue in &issues {
-            msg.push_str(&format!("  - {issue:?}\n"));
-        }
-        anyhow::bail!("{msg}");
-    }
-
-    // 10. Build parser dispatcher and construct the engine, persisting
-    //     the SAME `composers` instance used by boot validation. The
-    //     launcher reads the registry back off the engine — there is
-    //     no second construction site that could drift.
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, handler_registry);
-
-    // Scan every bundle root for verified
-    // `kind: runtime` YAMLs. Fail-closed on any verification error or
-    // multi-default conflict — runtime catalog drift is a startup-time
-    // problem, not a per-request one.
-    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &node_trust_store, &kinds)
-        .context("failed to build runtime registry")?;
-    tracing::info!(
-        count = runtimes.all().count(),
-        roots = tagged_roots.len(),
-        "loaded runtime registry"
-    );
+    // 4. Admit the exact installed root set through the same registry and
+    // executable checks used by prospective install/replace admission. Keeping
+    // this as one constructor prevents install from accepting a generation
+    // that the next engine build or daemon restart would reject.
+    let NodeBundleAdmission {
+        kinds,
+        parser_dispatcher,
+        composers,
+        protocol_registry,
+        runtimes,
+    } = build_node_bundle_admission(&bundle_roots, &node_trust_store)?;
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
@@ -308,6 +164,177 @@ pub fn build_engine_for_roots(
         )?);
 
     Ok(engine)
+}
+
+/// Admit a prospective node bundle-root set without constructing an Engine.
+///
+/// Install and replace handlers call this against the exact post-operation
+/// graph before activation. Daemon boot calls the same private constructor and
+/// consumes the admitted registries, so the two admission surfaces cannot
+/// silently drift.
+pub fn admit_node_bundle_roots(
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+) -> Result<()> {
+    build_node_bundle_admission(bundle_roots, node_trust_store).map(|_| ())
+}
+
+/// Verify that the signed node bundle registrations and installed manifests
+/// form one valid dependency/provider graph before boot consumes their roots.
+///
+/// `BootstrapLoader` retains node-only registration fields such as command
+/// grants, while `ryeos-bundle` performs the signed-manifest and BundlePlan
+/// checks. Comparing both views prevents startup from validating one registry
+/// generation and constructing the engine from another.
+pub fn validate_installed_bundle_plan(
+    app_root: &std::path::Path,
+    bundle_records: &[BundleRecord],
+) -> Result<ryeos_bundle::plan::BundlePlan> {
+    let installed = ryeos_bundle::installed::load_installed_plan_inputs(app_root)
+        .context("load signed installed bundle manifests")?;
+    if installed.len() != bundle_records.len() {
+        anyhow::bail!(
+            "installed bundle registry views disagree: node config loaded {} record(s), manifest planner loaded {}",
+            bundle_records.len(),
+            installed.len()
+        );
+    }
+
+    for record in bundle_records {
+        let planned = installed
+            .iter()
+            .find(|input| input.name == record.name)
+            .with_context(|| {
+                format!(
+                    "installed bundle '{}' is absent from the signed manifest-planner view",
+                    record.name
+                )
+            })?;
+        if planned.source.root_path() != &record.path {
+            anyhow::bail!(
+                "installed bundle '{}' registry path mismatch: node config resolved {}, manifest planner resolved {}",
+                record.name,
+                record.path.display(),
+                planned.source.root_path().display()
+            );
+        }
+    }
+
+    ryeos_bundle::plan::build_plan(
+        ryeos_bundle::plan::BundlePlanMode::VerifyInstalled,
+        &[],
+        &installed,
+    )
+    .context("validate installed bundle dependency/provider graph")
+}
+
+struct NodeBundleAdmission {
+    kinds: KindRegistry,
+    parser_dispatcher: ParserDispatcher,
+    composers: ComposerRegistry,
+    protocol_registry: ProtocolRegistry,
+    runtimes: RuntimeRegistry,
+}
+
+fn build_node_bundle_admission(
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+) -> Result<NodeBundleAdmission> {
+    if bundle_roots.is_empty() {
+        anyhow::bail!("prospective node bundle set is empty");
+    }
+
+    let schema_roots: Vec<PathBuf> = bundle_roots
+        .iter()
+        .map(|root| {
+            root.join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::KIND_SCHEMAS_DIR)
+        })
+        .filter(|root| root.is_dir())
+        .collect();
+
+    ryeos_engine::binary_resolver::verify_bundle_executor_manifests(
+        bundle_roots,
+        node_trust_store,
+    )
+    .context("node bundle executor admission failed")?;
+
+    let kinds = if schema_roots.is_empty() {
+        anyhow::bail!(
+            "no kind schema roots found in prospective node bundle set under {}/{}",
+            ryeos_engine::AI_DIR,
+            ryeos_engine::KIND_SCHEMAS_DIR
+        );
+    } else {
+        KindRegistry::load_base(&schema_roots, node_trust_store)
+            .context("failed to load kind schemas")?
+    };
+    tracing::info!(
+        count = kinds.len(),
+        roots = schema_roots.len(),
+        kinds = %kinds.kinds().collect::<Vec<_>>().join(", "),
+        "admitted kind schemas"
+    );
+
+    let (parser_tools, parser_duplicates) =
+        ParserRegistry::load_base(bundle_roots, node_trust_store, &kinds)
+            .context("failed to load parser tool descriptors")?;
+    tracing::info!(
+        count = parser_tools.len(),
+        duplicates = parser_duplicates.len(),
+        "admitted parser tool descriptors"
+    );
+
+    let tagged_roots: Vec<(PathBuf, TrustClass)> = bundle_roots
+        .iter()
+        .map(|root| (root.clone(), TrustClass::TrustedBundle))
+        .collect();
+    let handler_registry = HandlerRegistry::load_base(&tagged_roots, node_trust_store)
+        .context("failed to load handler descriptors from bundle roots")?;
+    let handler_registry = std::sync::Arc::new(handler_registry);
+    let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, node_trust_store)
+        .context("failed to load protocol descriptors from bundle roots")?;
+    let composers = ComposerRegistry::from_kinds(&kinds, &handler_registry)
+        .context("failed to derive composer registry from kind schemas")?;
+
+    validate_terminator_refs(&kinds, &protocol_registry)
+        .context("terminator→protocol ref validation failed")?;
+    if let Err(issues) = validate_boot(
+        &kinds,
+        &parser_tools,
+        &handler_registry,
+        &composers,
+        &parser_duplicates,
+    ) {
+        let mut message = String::from("prospective node boot validation failed:\n");
+        for issue in &issues {
+            message.push_str(&format!("  - {issue:?}\n"));
+        }
+        anyhow::bail!("{message}");
+    }
+    if let Err(issues) = validate_protocol_builder(&kinds, &protocol_registry) {
+        let mut message = String::from("prospective protocol builder validation failed:\n");
+        for issue in &issues {
+            message.push_str(&format!("  - {issue:?}\n"));
+        }
+        anyhow::bail!("{message}");
+    }
+
+    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, node_trust_store, &kinds)
+        .context("failed to build runtime registry")?;
+    tracing::info!(
+        runtimes = runtimes.all().count(),
+        roots = tagged_roots.len(),
+        "prospective node bundle set admitted"
+    );
+
+    Ok(NodeBundleAdmission {
+        kinds,
+        parser_dispatcher: ParserDispatcher::new(parser_tools, handler_registry),
+        composers,
+        protocol_registry,
+        runtimes,
+    })
 }
 
 /// Build `HostEnvBindings` from the resolved daemon config's

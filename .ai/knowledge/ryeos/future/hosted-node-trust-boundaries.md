@@ -4,7 +4,7 @@ category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.3.0"
+version: "0.4.0"
 description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around the implemented node-owned process sandbox.
 tags:
   - hosted-node
@@ -20,7 +20,8 @@ tags:
 The node-owned RyeOS strict process sandbox is implemented as optional
 groundwork. It gives RyeOS one immutable, node-owned launch boundary where
 verified code identity, descriptor-pinned filesystem authority, environment,
-network posture, and enforceable per-process limits meet. That is the right
+network posture, bounded stdout/stderr retention, target-process-group
+supervision, and enforceable per-process limits meet. That is the right
 foundation for hosted execution because later isolation can wrap or further
 narrow one explicit boundary instead of finding and replacing scattered spawn
 paths.
@@ -72,14 +73,15 @@ Bubblewrap policy into the whole tenancy model:
 signed request + node admission
   -> principal/job execution authority
   -> RyeOS strict inner sandbox
-       exact entry bytes, fd-pinned mounts, narrow env/network/filesystem
+       exact entry bytes, fd-pinned mounts, narrow env/network/filesystem,
+       bounded stdout/stderr, and target/wrapper process-group supervision
   -> per-principal or per-job cgroup v2
        CPU, memory, process count, workload-lifetime kill, and eventually I/O
        accounting/limits
   -> outer worker boundary selected by threat model
        dedicated worker process/user, VM, or microVM
-  -> bounded node-side output/event supervision
-       capped capture or private spooling independent of guest output rate
+  -> hosted event supervision and optional private output spooling
+       event caps plus larger node-private output retention where required
   -> principal-scoped storage, secrets, network policy, audit, and GC
 ```
 
@@ -87,8 +89,10 @@ The outer worker owns the kernel-level containment decision. RyeOS strict owns
 the inner application boundary: which verified executable is allowed to run and
 which resources are presented to it. Cgroups own exhaustion, accounting, and
 authoritative whole-workload teardown even when descendants create new process
-groups or sessions. The node launch supervisor owns bounded stdout, stderr, and
-event retention because guest memory limits do not cover daemon-owned buffers.
+groups or sessions. The current node launch supervisor owns bounded stdout and
+stderr retention because guest memory limits do not cover daemon-owned buffers;
+hosted event-stream limits and optional private output spooling remain future
+work.
 Principal storage, secret, and network layers own cross-tenant data authority.
 None of those layers should be inferred from an item-authored sandbox profile.
 

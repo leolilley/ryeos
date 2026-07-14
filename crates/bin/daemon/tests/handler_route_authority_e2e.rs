@@ -46,7 +46,7 @@ fn sandbox_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let node = root.join(".ai/node");
     fs::create_dir_all(&node).unwrap();
-    fs::write(node.join("sandbox.yaml"), "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    fs::write(node.join("sandbox.yaml"), "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
     root
 }
 
@@ -240,7 +240,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         sandbox_state_root: None,
         sandbox_checkpoint_dir: None,
         sandbox_bundle_roots: Vec::new(),
-        sandbox_operator_trusted_keys_dir: None,
+        sandbox_node_trusted_keys_dir: None,
         sandbox_verified_code: vec![ryeos_engine::sandbox::SandboxVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),

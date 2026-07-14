@@ -394,7 +394,7 @@ mod tests {
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
-                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
                 state_root: None,
             },
             request: EnvelopeRequest {

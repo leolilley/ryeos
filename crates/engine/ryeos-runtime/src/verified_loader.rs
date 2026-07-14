@@ -77,15 +77,15 @@ pub struct TrustStore {
 
 impl TrustStore {
     /// Load trust from the project's trusted-keys dir plus the
-    /// operator's trusted-keys dir (`<app_root>/.ai/config/keys/trusted`,
+    /// node's trusted-keys dir (`<app_root>/.ai/config/keys/trusted`,
     /// passed explicitly by the caller — the daemon for preflight, the
     /// launch envelope for runtimes). Bundle roots are NOT a trust
     /// authority: a bundle cannot ship keys that vouch for itself.
-    pub fn load(project_root: &Path, operator_trusted_keys_dir: &Path) -> Self {
+    pub fn load(project_root: &Path, node_trusted_keys_dir: &Path) -> Self {
         let mut keys = HashMap::new();
 
         let project_trusted_dir = project_root.join(".ai/config/keys/trusted");
-        for dir in [project_trusted_dir.as_path(), operator_trusted_keys_dir] {
+        for dir in [project_trusted_dir.as_path(), node_trusted_keys_dir] {
             if !dir.is_dir() {
                 continue;
             }
@@ -248,14 +248,14 @@ pub struct ScannedItem {
 impl VerifiedLoader {
     /// `bundle_roots` are CONFIG search roots only (configs ship in
     /// bundles); trust comes exclusively from the project root and the
-    /// explicit operator trusted-keys dir. No hidden env reads here —
+    /// explicit node trusted-keys dir. No hidden env reads here —
     /// the caller owns the trust context.
     pub fn new(
         project_root: PathBuf,
         bundle_roots: Vec<PathBuf>,
-        operator_trusted_keys_dir: &Path,
+        node_trusted_keys_dir: &Path,
     ) -> Self {
-        let trust_store = TrustStore::load(&project_root, operator_trusted_keys_dir);
+        let trust_store = TrustStore::load(&project_root, node_trusted_keys_dir);
         Self {
             project_root,
             bundle_roots,
@@ -699,7 +699,7 @@ mod tests {
         p
     }
 
-    /// Operator trusted-keys dir for tests that don't exercise operator
+    /// Node trusted-keys dir for tests that don't exercise operator
     /// trust. Nonexistent path — `TrustStore::load` skips non-dirs.
     fn no_operator_trust() -> PathBuf {
         PathBuf::from("/nonexistent-operator-trust")

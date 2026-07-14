@@ -9,8 +9,9 @@ pub mod time;
 pub mod vault;
 
 pub use exec::{
-    configure_inherited_fds, configure_subprocess_limits, validate_subprocess_limits,
-    RunningProcess, SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
+    bubblewrap_status_pipe, configure_inherited_fds, configure_subprocess_limits,
+    validate_subprocess_limits, BubblewrapStatusPipe, OutputLimitExceeded, RunningProcess,
+    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult, SupervisedProcessStatus,
 };
 
 pub use atomic_fs::{

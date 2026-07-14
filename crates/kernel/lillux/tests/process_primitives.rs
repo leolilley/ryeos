@@ -11,8 +11,9 @@
 #![cfg(unix)]
 
 use lillux::{
-    configure_subprocess_limits, is_alive, kill, run, spawn, spawn_detached,
-    validate_subprocess_limits, SubprocessLimits, SubprocessRequest,
+    bubblewrap_status_pipe, configure_subprocess_limits, is_alive, kill, run, spawn,
+    spawn_detached, validate_subprocess_limits, OutputLimitExceeded, SubprocessLimits,
+    SubprocessRequest,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -27,6 +28,7 @@ fn sh(args: &[&str]) -> SubprocessRequest {
         timeout: 30.0,
         limits: None,
         inherited_fds: Vec::new(),
+        supervised_status: None,
     }
 }
 
@@ -68,6 +70,7 @@ fn run_installs_max_open_files_before_exec() {
     let mut request = sh(&["-c", "ulimit -n"]);
     request.limits = Some(SubprocessLimits {
         max_open_files: Some(64),
+        ..SubprocessLimits::default()
     });
 
     let result = run(request);
@@ -80,6 +83,7 @@ fn run_installs_max_open_files_before_exec() {
 fn configure_limits_applies_to_an_arbitrary_command() {
     let limits = SubprocessLimits {
         max_open_files: Some(64),
+        ..SubprocessLimits::default()
     };
     let mut command = std::process::Command::new("/bin/sh");
     command.args(["-c", "ulimit -n"]);
@@ -95,6 +99,7 @@ fn configure_limits_applies_to_an_arbitrary_command() {
 fn validation_is_side_effect_free_and_rejects_an_unbounded_limit() {
     let limits = SubprocessLimits {
         max_open_files: Some(u64::MAX),
+        ..SubprocessLimits::default()
     };
 
     let error = validate_subprocess_limits(Some(&limits)).unwrap_err();
@@ -107,6 +112,7 @@ fn spawn_rejects_an_unbounded_open_file_limit_before_fork() {
     let mut request = sh(&["-c", "true"]);
     request.limits = Some(SubprocessLimits {
         max_open_files: Some(u64::MAX),
+        ..SubprocessLimits::default()
     });
 
     let Err(result) = spawn(request) else {
@@ -167,6 +173,138 @@ fn run_times_out_and_terminates() {
         r.stderr.contains("timed out"),
         "stderr must explain the timeout; got: {}",
         r.stderr
+    );
+}
+
+#[test]
+fn normal_completion_cleans_up_background_group_members() {
+    let mut request = sh(&["-c", "sleep 30 & printf %s $!"]);
+    request.envs = path_env();
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    let background_pid: u32 = result.stdout.parse().expect("background pid");
+    for _ in 0..50 {
+        if !is_alive(background_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(background_pid),
+        "background group member survived synchronous completion"
+    );
+}
+
+// ── bounded daemon-side output retention ──────────────────────────────
+
+#[test]
+fn stdout_limit_is_an_explicit_failed_outcome() {
+    let mut request = sh(&["-c", "printf 0123456789"]);
+    request.limits = Some(SubprocessLimits {
+        max_stdout_bytes: Some(5),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run(request);
+
+    assert!(!result.success);
+    assert!(!result.timed_out);
+    assert_eq!(
+        result.output_limit_exceeded,
+        Some(OutputLimitExceeded::Stdout)
+    );
+    assert!(result.stdout_truncated);
+    assert!(!result.stderr_truncated);
+    assert_eq!(result.stdout, "01234");
+    assert!(result.stderr.contains("output retention limit"));
+}
+
+#[test]
+fn output_overflow_terminates_a_continuously_writing_group() {
+    let mut request = sh(&["-c", "while :; do printf 0123456789; done"]);
+    request.timeout = 10.0;
+    request.limits = Some(SubprocessLimits {
+        max_stdout_bytes: Some(1024),
+        ..SubprocessLimits::default()
+    });
+    let started = std::time::Instant::now();
+
+    let result = run(request);
+
+    assert_eq!(
+        result.output_limit_exceeded,
+        Some(OutputLimitExceeded::Stdout)
+    );
+    assert!(result.stdout_truncated);
+    assert_eq!(result.stdout.len(), 1024);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "output overflow must terminate before the ordinary timeout"
+    );
+}
+
+// ── trusted-launcher target identity supervision ──────────────────────
+
+#[cfg(target_os = "linux")]
+fn bubblewrap_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
+    let status = bubblewrap_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "setsid /bin/sh -c '{script}' & target=$!; \
+         printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.timeout = timeout;
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+    request
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn reported_target_group_is_exposed_and_killed_on_timeout() {
+    let running = spawn(bubblewrap_protocol_shell("sleep 30", 0.25)).expect("spawn");
+    let target_pid = running.pid;
+
+    assert_eq!(running.pgid, target_pid as i64);
+    let result = running.wait();
+
+    assert!(result.timed_out, "stderr: {}", result.stderr);
+    assert_eq!(result.pid, target_pid);
+    for _ in 0..50 {
+        if !is_alive(target_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(target_pid),
+        "reported target survived timeout cleanup"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
+    let status = bubblewrap_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!("printf 'not-json\\n' >&{status_fd}; sleep 30");
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("malformed trusted-launcher status must refuse the spawn");
+    };
+
+    assert!(
+        result.stderr.contains("invalid JSON status document"),
+        "{}",
+        result.stderr
     );
 }
 

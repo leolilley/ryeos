@@ -1923,12 +1923,12 @@ pub async fn run_existing_detached(
                     ))
                 })?;
 
-                let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+                let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
                 Some(
                     crate::execution::launch::resolve_provider_preflight(
                         &resolution.composed,
                         &engine_roots,
-                        &operator_trusted_keys_dir,
+                        &node_trusted_keys_dir,
                     )
                     .map_err(|e| {
                         guard.fail_thread("preflight_failed");

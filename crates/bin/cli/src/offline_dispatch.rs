@@ -576,6 +576,7 @@ fn exec_tool(
                 timeout: timeout as f64,
                 limits: None,
                 inherited_fds: Vec::new(),
+                supervised_status: None,
             },
             ryeos_engine::sandbox::SandboxLaunchContext {
                 project_path: Path::new(project_path),
@@ -583,7 +584,7 @@ fn exec_tool(
                 state_root: None,
                 checkpoint_dir: None,
                 bundle_roots: std::slice::from_ref(bundle_root),
-                operator_trusted_keys_dir: Some(
+                node_trusted_keys_dir: Some(
                     &app_root
                         .join(ryeos_engine::AI_DIR)
                         .join("config/keys/trusted"),
@@ -916,6 +917,7 @@ mod tests {
     fn inherited_exec_rejects_invalid_limits_before_spawn() {
         let limits = lillux::SubprocessLimits {
             max_open_files: Some(u64::MAX),
+            ..lillux::SubprocessLimits::default()
         };
 
         let error = exec_inherited(
@@ -1021,7 +1023,7 @@ mod tests {
                 "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\n\
                  filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n\
                  network:\n  mode: isolated\nenvironment:\n  allow:\n    - \"*\"\n\
-                 limits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+                 limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             )
             .unwrap();
             std::fs::write(node_identity_dir.join("public-identity.json"), "{}").unwrap();

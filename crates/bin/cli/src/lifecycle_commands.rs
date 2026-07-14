@@ -727,6 +727,12 @@ fn inspect_sandbox_policy(app_root: &std::path::Path) -> Result<SandboxPolicyIns
                         None
                     }
                 },
+                "captured_output": {
+                    "stdout_bytes": inspection.limits.stdout_bytes,
+                    "stderr_bytes": inspection.limits.stderr_bytes,
+                    "status": "enforced_while_draining",
+                    "runtime_mechanism": "bounded stdout/stderr retention with continued draining and workload termination on overflow",
+                },
                 "verified_artifacts": {
                     "file_bytes": inspection.limits.verified_artifact_file_bytes,
                     "total_bytes": inspection.limits.verified_artifact_total_bytes,
@@ -980,7 +986,7 @@ mod tests {
             .map(|limit| format!("  open_files: {limit}\n"))
             .unwrap_or_else(|| "  open_files: null\n".to_string());
         format!(
-            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             backend.display(),
         )
     }
@@ -991,6 +997,7 @@ mod tests {
             .find(|max_open_files| {
                 lillux::validate_subprocess_limits(Some(&lillux::SubprocessLimits {
                     max_open_files: Some(*max_open_files),
+                    ..lillux::SubprocessLimits::default()
                 }))
                 .is_ok()
             })

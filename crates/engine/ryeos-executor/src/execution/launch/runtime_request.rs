@@ -150,7 +150,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
                 state_root,
                 checkpoint_dir,
                 bundle_roots: &envelope.roots.bundle_roots,
-                operator_trusted_keys_dir: Some(&envelope.roots.operator_trusted_keys_dir),
+                node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
                 verified_code: std::slice::from_ref(verified_command),
                 item_ref: &envelope.resolution.root.resolved_ref,
                 thread_id,
@@ -161,18 +161,40 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
     drop(workspace_lifeline);
 
     if !result.success {
-        return Ok(runtime_failure_result(&result.stderr, result.timed_out));
+        return Ok(runtime_failure_result(
+            &result.stderr,
+            result.timed_out,
+            result.output_limit_exceeded.map(|limit| limit.as_str()),
+        ));
     }
 
     decode_runtime_stdout(&result.stdout)
 }
 
-fn runtime_failure_result(stderr: &str, timed_out: bool) -> RuntimeResult {
+fn runtime_failure_result(
+    stderr: &str,
+    timed_out: bool,
+    output_limit: Option<&str>,
+) -> RuntimeResult {
     RuntimeResult {
         success: false,
-        status: if timed_out { "timed_out" } else { "failed" }.to_string(),
+        status: if output_limit.is_some() {
+            "failed"
+        } else if timed_out {
+            "timed_out"
+        } else {
+            "failed"
+        }
+        .to_string(),
         thread_id: String::new(),
-        result: Some(json!(stderr)),
+        result: Some(match output_limit {
+            Some(stream) => json!({
+                "code": format!("output_limit:{stream}"),
+                "message": stderr,
+                "stream": stream,
+            }),
+            None => json!(stderr),
+        }),
         outputs: Value::Null,
         cost: None,
         warnings: Vec::new(),
@@ -195,7 +217,7 @@ mod tests {
 
     #[test]
     fn subprocess_failure_preserves_stderr_and_failed_status() {
-        let result = runtime_failure_result("permission denied", false);
+        let result = runtime_failure_result("permission denied", false, None);
 
         assert!(!result.success);
         assert_eq!(result.status, "failed");
@@ -205,7 +227,22 @@ mod tests {
 
     #[test]
     fn subprocess_timeout_uses_timed_out_status() {
-        assert_eq!(runtime_failure_result("deadline", true).status, "timed_out");
+        assert_eq!(
+            runtime_failure_result("deadline", true, None).status,
+            "timed_out"
+        );
+    }
+
+    #[test]
+    fn subprocess_output_limit_preserves_the_explicit_reason() {
+        let result = runtime_failure_result("retention exceeded", false, Some("stdout"));
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.result.as_ref().unwrap()["code"],
+            "output_limit:stdout"
+        );
+        assert_eq!(result.result.as_ref().unwrap()["stream"], "stdout");
     }
 
     #[test]

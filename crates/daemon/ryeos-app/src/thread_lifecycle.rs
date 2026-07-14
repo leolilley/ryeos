@@ -2450,7 +2450,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
         .collect();
-    let sandbox_operator_trusted_keys_dir = app_root
+    let sandbox_node_trusted_keys_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("config/keys/trusted");
     let sandbox_verified_code = plan
@@ -2474,7 +2474,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         sandbox_state_root: state_root.map(std::path::Path::to_path_buf),
         sandbox_checkpoint_dir: allocated_checkpoint_dir.clone(),
         sandbox_bundle_roots,
-        sandbox_operator_trusted_keys_dir: Some(sandbox_operator_trusted_keys_dir),
+        sandbox_node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
         sandbox_verified_code,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
