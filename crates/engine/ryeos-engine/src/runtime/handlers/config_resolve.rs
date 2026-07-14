@@ -173,7 +173,7 @@ impl RuntimeHandler for ConfigResolveHandler {
                 let Some(ev) = policy.get_runtime_param(ek) else {
                     continue;
                 };
-                if param_already_present(&ctx.params, &ek) {
+                if param_already_present(&ctx.params, ek) {
                     caller_won_keys.push(ek.clone());
                     continue;
                 }
@@ -181,7 +181,7 @@ impl RuntimeHandler for ConfigResolveHandler {
                 if let Some(source) = policy.source_for(ek) {
                     injected_sources.push(format!("{ek}:{}", source.describe()));
                 }
-                insert_param(&mut ctx.params, &ek, ev);
+                insert_param(&mut ctx.params, ek, ev);
             }
             tracing::info!(
                 root_item_ref = %ctx.chain[0].resolved_ref,

@@ -57,6 +57,10 @@ use serde::{Deserialize, Serialize};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 
+mod default_policy;
+
+use default_policy::materialize_node_defaults;
+
 /// SHA-256 fingerprint of the official publisher Ed25519 public key.
 ///
 /// This is the long-lived release key under which all official `core` and
@@ -316,44 +320,41 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
+        let transaction =
+            ryeos_app::bundle_transaction::BundleTransaction::acquire(&opts.app_root, name)?;
+        transaction.reconcile(&node_key)?;
+        let grants = command_registration_grants
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let registration = bundle_registration_value(&target, &grants);
 
         if target.exists() {
-            // Bundle already installed — replace atomically.
+            // Bundle already installed. Registration continues to name the
+            // same canonical path, so publish it before the atomic tree
+            // exchange; every observable generation remains registered.
             verify_bundle_structure(&target)?;
-
-            replace_bundle(source_path, &target).with_context(|| {
-                format!(
-                    "atomic replace {}: {} -> {}",
-                    name,
-                    source_path.display(),
-                    target.display()
-                )
-            })?;
-
-            // Re-write the signed registration unconditionally. This keeps init
-            // aligned with the installed-registration loader's structured,
-            // fail-closed semantics instead of preserving malformed-but-signed
-            // old records.
-            let node_dir = opts.app_root.join(ryeos_engine::AI_DIR).join("node");
-            let grants = command_registration_grants
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
-            write_node_bundle_registration(
-                &node_dir,
-                name,
-                &target.canonicalize()?,
-                &grants,
-                &node_key,
-            )
-            .with_context(|| format!("rewrite node/bundles/{}.yaml", name))?;
+            replace_bundle(source_path, &target, &transaction, registration.clone()).with_context(
+                || {
+                    format!(
+                        "atomic replace {}: {} -> {}",
+                        name,
+                        source_path.display(),
+                        target.display()
+                    )
+                },
+            )?;
         } else {
-            let grants = command_registration_grants
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
-            install_bundle(&opts.app_root, name, source_path, &grants, &node_key, true)?;
+            install_bundle(
+                &opts.app_root,
+                name,
+                source_path,
+                true,
+                &transaction,
+                registration.clone(),
+            )?;
         }
+        transaction.commit_present(&node_key)?;
 
         bundles_installed.push(name.clone());
     }
@@ -368,55 +369,23 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
     let vault_secret_path = vault_dir.join("private_key.pem");
     let vault_public_path = vault_dir.join("public_key.pem");
-    let vault_sk = if vault_secret_path.exists() {
-        lillux::vault::read_secret_key(&vault_secret_path)
-            .with_context(|| format!("load vault key {}", vault_secret_path.display()))?
-    } else {
-        let sk = lillux::vault::VaultSecretKey::generate();
-        lillux::vault::write_secret_key(&vault_secret_path, &sk)
-            .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
-        sk
-    };
+    let vault_sk = lillux::with_exclusive_file_lock(&vault_secret_path, || {
+        if vault_secret_path.exists() {
+            lillux::vault::read_secret_key(&vault_secret_path)
+                .with_context(|| format!("load vault key {}", vault_secret_path.display()))
+        } else {
+            let sk = lillux::vault::VaultSecretKey::generate();
+            lillux::vault::write_secret_key(&vault_secret_path, &sk)
+                .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
+            Ok(sk)
+        }
+    })
+    .with_context(|| format!("initialize vault key {}", vault_secret_path.display()))?;
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
-    // ── 8b. Default ingest ignore config ──
-    let ignore_dir = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("ingest");
-    let ignore_path = ignore_dir.join("ignore.yaml");
-    if !ignore_path.exists() {
-        fs::create_dir_all(&ignore_dir)
-            .with_context(|| format!("create ingest dir {}", ignore_dir.display()))?;
-        let builtin = ryeos_app::ignore::builtin_patterns();
-        let patterns_yaml = builtin
-            .iter()
-            .map(|p| format!("  - {:?}", p))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!("patterns:\n{}\n", patterns_yaml);
-        fs::write(&ignore_path, content)
-            .with_context(|| format!("write ignore config {}", ignore_path.display()))?;
-    }
-
-    // ── 8c. Generated sync-policy discovery file ──
-    // A read-only window on the effective sync policy: deployable surfaces and
-    // the two code-enforced floors, pointing at ignore.yaml as the one editable
-    // input. Regenerated (overwritten) on every init so it tracks the binary.
-    let sync_dir = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("sync");
-    fs::create_dir_all(&sync_dir)
-        .with_context(|| format!("create sync dir {}", sync_dir.display()))?;
-    let policy_path = sync_dir.join("policy.yaml");
-    let policy_yaml =
-        ryeos_state::project_sync::render_effective_sync_policy_yaml(".ai/node/ingest/ignore.yaml");
-    fs::write(&policy_path, policy_yaml)
-        .with_context(|| format!("write sync policy {}", policy_path.display()))?;
+    // ── 8b. Node-owned default policies ──
+    materialize_node_defaults(&opts.app_root)?;
 
     // ── 9. Post-init trust verification ──
     let post_trust =
@@ -898,12 +867,14 @@ fn verify_bundle_structure(target: &Path) -> Result<()> {
 ///
 /// Instead of copying on top (which leaves stale files), this:
 /// 1. Copies source to a staging directory
-/// 2. Moves old bundle to `.backup.prev`
-/// 3. Moves staging to final location
-/// 4. Cleans up `.backup.prev` (only needed for rollback during step 3)
-///
-/// If step 3 fails, the old bundle is still at `.backup.prev` for recovery.
-fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
+/// 2. Atomically exchanges staging with the installed path
+/// 3. Removes the old generation now located at staging
+fn replace_bundle(
+    source: &Path,
+    target: &Path,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+    registration: serde_json::Value,
+) -> Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| anyhow!("bundle path has no parent"))?;
@@ -913,41 +884,37 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
         .to_string_lossy();
 
     let staging = parent.join(format!(".{name}.staging"));
-    let backup = parent.join(format!("{name}.backup.prev"));
-
-    // Clean up any leftover staging from a previous failed attempt
-    if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .with_context(|| format!("clean up stale staging {}", staging.display()))?;
-    }
-
-    // 1. Copy source to staging
-    copy_dir_recursive(source, &staging)
-        .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
-
-    // 2. Move old to backup (one generation)
-    if target.exists() {
-        if backup.exists() {
-            // Clean up previous backup
-            fs::remove_dir_all(&backup)
-                .with_context(|| format!("remove old backup {}", backup.display()))?;
+    (|| {
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .with_context(|| format!("clean up stale staging {}", staging.display()))?;
         }
-        fs::rename(target, &backup)
-            .with_context(|| format!("backup {} -> {}", target.display(), backup.display()))?;
-    }
-
-    // 3. Move staging to final
-    fs::rename(&staging, target)
-        .with_context(|| format!("swap {} -> {}", staging.display(), target.display()))?;
-
-    // 4. Clean up backup — only needed for rollback during step 3,
-    //    which has now succeeded. Leaving it around causes the CLI
-    //    dispatcher and help scanners to pick up stale aliases.
-    if backup.exists() {
-        let _ = fs::remove_dir_all(&backup);
-    }
-
-    Ok(())
+        copy_dir_recursive(source, &staging)
+            .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::Replace,
+            &staging,
+            registration,
+        )?;
+        lillux::atomic_exchange_paths(target, &staging).with_context(|| {
+            format!(
+                "atomically exchange installed bundle {} with {}",
+                target.display(),
+                staging.display()
+            )
+        })?;
+        transaction.mark_activated()?;
+        if let Err(error) = lillux::remove_dir_all_durable(&staging) {
+            tracing::warn!(
+                path = %staging.display(),
+                error = %error,
+                "bundle replacement committed but previous generation cleanup failed"
+            );
+        }
+        Ok(())
+    })()
 }
 
 /// Install a bundle by copy + signed `kind: node` registration.
@@ -961,9 +928,9 @@ fn install_bundle(
     app_root: &Path,
     name: &str,
     source: &Path,
-    command_registration_caps: &[String],
-    node_key: &SigningKey,
     skip_preflight: bool,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+    registration: serde_json::Value,
 ) -> Result<PathBuf> {
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     if !skip_preflight {
@@ -993,58 +960,55 @@ fn install_bundle(
         .join(ryeos_engine::AI_DIR)
         .join("bundles")
         .join(name);
-    fs::create_dir_all(target.parent().unwrap())
+    let parent = target
+        .parent()
+        .context("bundle install target has no parent")?;
+    fs::create_dir_all(parent)
         .with_context(|| format!("create bundles parent for {}", target.display()))?;
-    copy_dir_recursive(source, &target)
-        .with_context(|| format!("copy {} to {}", name, target.display()))?;
+    let staging = parent.join(format!(".{name}.staging"));
+    (|| {
+        if target.exists() {
+            bail!(
+                "bundle target appeared during install: {}",
+                target.display()
+            );
+        }
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .with_context(|| format!("remove stale staging {}", staging.display()))?;
+        }
+        copy_dir_recursive(source, &staging)
+            .with_context(|| format!("stage {} at {}", name, staging.display()))?;
+        lillux::sync_tree_durable(&staging)
+            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        transaction.begin_present(
+            ryeos_app::bundle_transaction::BundleOperation::Install,
+            &staging,
+            registration,
+        )?;
+        lillux::rename_path_durable(&staging, &target)
+            .with_context(|| format!("activate {} at {}", name, target.display()))?;
+        transaction.mark_activated()
+    })()?;
     let canonical = target
         .canonicalize()
         .with_context(|| format!("canonicalize {} install path", name))?;
 
-    // Write signed kind: node bundle registration record.
-    let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
-    write_node_bundle_registration(
-        &node_dir,
-        name,
-        &canonical,
-        command_registration_caps,
-        node_key,
-    )?;
-
     Ok(canonical)
 }
 
-/// Write a signed `kind: node` bundle registration record.
-///
-/// Mirrors what `bundle.install` does in the daemon, but uses the local
-/// node signing key rather than the daemon's identity (they're the same
-/// key when both paths run on the same node).
-fn write_node_bundle_registration(
-    node_dir: &Path,
-    name: &str,
+fn bundle_registration_value(
     path: &Path,
     command_registration_caps: &[String],
-    node_key: &SigningKey,
-) -> Result<()> {
-    let bundles_dir = node_dir.join("bundles");
-    fs::create_dir_all(&bundles_dir)
-        .with_context(|| format!("create node bundles dir {}", bundles_dir.display()))?;
-    let mut body = format!("kind: node\npath: {}\n", path.display());
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "kind": "node",
+        "path": path,
+    });
     if !command_registration_caps.is_empty() {
-        body.push_str("command_registration_caps:\n");
-        for cap in command_registration_caps {
-            body.push_str("  - ");
-            body.push_str(cap);
-            body.push('\n');
-        }
+        value["command_registration_caps"] = serde_json::json!(command_registration_caps);
     }
-    let signed = lillux::signature::sign_content(&body, node_key, "#", None);
-    let target = bundles_dir.join(format!("{name}.yaml"));
-    let tmp = target.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
-    fs::rename(&tmp, &target)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
-    Ok(())
+    value
 }
 
 /// Recursive directory copy with symlink preservation (Unix only).

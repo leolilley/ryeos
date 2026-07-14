@@ -1,0 +1,16 @@
+# ryeos:signed:2026-07-14T01:49:10Z:93172c2a33bb910a530204049d413b7debda04cf229c778f6ba17c38fb302101:O8V8FN4iuID2F4vUIVyysbiNrFpBSaTcN/vRbVBUbeCQPyVer8JwG/mVJZ4D9wuU4yGdI4+3D+MqPwHu9tGpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/events/chain
+path: /ui/events/chain/{chain_root_id}
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 0
+  concurrent_max: 64
+response:
+  mode: event_stream
+  source: browser_chain_tail
+  source_config:
+    chain_root_id: "${path.chain_root_id}"
+    keep_alive_secs: 15

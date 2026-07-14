@@ -2,6 +2,7 @@
 name = "ryeos-client-base"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "Renderer-neutral client model, layout, views, text surfaces, scene primitives"
 
 [dependencies]

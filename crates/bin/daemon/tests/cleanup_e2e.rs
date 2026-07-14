@@ -26,10 +26,10 @@ use common::{run_service_standalone_fresh, ryeos_binary, ryeosd_binary, DaemonHa
 // ── Test 1: live /execute over TCP ─────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn live_execute_service_system_status_over_tcp() {
+async fn live_execute_service_node_status_over_tcp() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
-        .post_execute("service:system/status", ".", serde_json::json!({}))
+        .post_execute("service:node/status", ".", serde_json::json!({}))
         .await
         .expect("post /execute");
     assert!(status.is_success(), "status was {status}, body={body}");
@@ -40,8 +40,8 @@ async fn live_execute_service_system_status_over_tcp() {
 // ── Test 2: standalone run-service ─────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn standalone_run_service_system_status() {
-    let (out, _sd, _us) = run_service_standalone_fresh("service:system/status", None)
+async fn standalone_run_service_node_status() {
+    let (out, _sd, _us) = run_service_standalone_fresh("service:node/status", None)
         .await
         .expect("run-service");
     assert!(
@@ -62,7 +62,7 @@ async fn cli_daemon_up_uses_execute() {
 
     let out = tokio::process::Command::new(&ryeos)
         .arg("execute")
-        .arg("service:system/status")
+        .arg("service:node/status")
         .env("RYEOS_APP_ROOT", &h.state_path)
         .env("RYEOSD_BIN", ryeosd_binary())
         .env("HOME", h.user_space.path())
@@ -100,7 +100,7 @@ async fn cli_initialized_but_stopped_suggests_start() {
     let ryeos = ryeos_binary();
     let out = tokio::process::Command::new(&ryeos)
         .arg("execute")
-        .arg("service:system/status")
+        .arg("service:node/status")
         .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
         .output()
@@ -183,7 +183,7 @@ async fn cli_execute_defaults_project_path_to_dot() {
     // endpoint. The daemon resolves via its command registry. The app root
     // locates daemon metadata and the operator signing key.
     let out = tokio::process::Command::new(&ryeos)
-        .arg("status") // alias → service:system/status, no --project-path
+        .arg("status") // alias → service:node/status, no --project-path
         .env("RYEOS_APP_ROOT", &h.state_path)
         .env("HOME", h.user_space.path())
         .output()
@@ -376,7 +376,7 @@ async fn direct_daemon_start_on_fresh_state_creates_no_runtime_state() {
 
 // ── Test 9: UDS namespace rejects service methods (Gate 3 daemon-spawn) ──
 //   The bare UDS server must only expose health/lifecycle control and `runtime.*`
-//   methods. A service method like `system/status` must get "unknown_method".
+//   methods. A service method like `node/status` must get "unknown_method".
 //   This closes the TODO at cleanup_invariants.rs:171.
 
 #[tokio::test(flavor = "multi_thread")]
@@ -394,7 +394,7 @@ async fn uds_namespace_rejects_service_methods() {
 
     let request = serde_json::json!({
         "request_id": 1u64,
-        "method": "system/status",
+        "method": "node/status",
         "params": {}
     });
     let payload = rmp_serde::to_vec(&request).expect("encode rpc request");
@@ -419,7 +419,7 @@ async fn uds_namespace_rejects_service_methods() {
 
     assert!(
         response.get("error").is_some(),
-        "UDS should reject 'system/status' with an error, got: {response}"
+        "UDS should reject 'node/status' with an error, got: {response}"
     );
     let error = &response["error"];
     assert_eq!(
@@ -428,7 +428,7 @@ async fn uds_namespace_rejects_service_methods() {
     );
     let msg = error["message"].as_str().unwrap_or("").to_lowercase();
     assert!(
-        msg.contains("unknown") || msg.contains("system/status"),
+        msg.contains("unknown") || msg.contains("node/status"),
         "error message should mention unknown method, got: {}",
         error["message"]
     );
@@ -549,7 +549,7 @@ async fn daemon_startup_proves_bundle_yamls_parse() {
     // bootstrap and the self-check. Every bundle YAML in the system bundle
     // was loaded and verified. Verify the daemon is actually healthy.
     let (status, body) = h
-        .post_execute("service:system/status", ".", serde_json::json!({}))
+        .post_execute("service:node/status", ".", serde_json::json!({}))
         .await
         .expect("post /execute");
     assert!(

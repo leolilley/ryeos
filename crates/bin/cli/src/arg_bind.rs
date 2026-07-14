@@ -26,6 +26,7 @@ pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
 ///
 /// Handles three forms:
 /// - `--input <file>` — reads file as JSON
+///
 /// Descriptor-declared parameter short-circuits, shared by the daemon
 /// and offline dispatch paths so the two cannot drift:
 /// - `--input <file|->` is honored only when the command's

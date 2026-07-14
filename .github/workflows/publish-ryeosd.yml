@@ -16,53 +16,143 @@ on:
 
 permissions:
   contents: read
-  packages: write
-  id-token: write   # for cosign keyless signing
+
+concurrency:
+  group: ryeos-release-publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  qualify:
+    name: Qualify release source
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      build_date: ${{ steps.release.outputs.build_date }}
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
-      - name: Resolve version
-        id: ver
+      - name: Install checksum-pinned workflow and shell linters
+        run: ./scripts/ci/install-static-linters.sh "$RUNNER_TEMP/ryeos-linters"
+
+      - name: Check workflows and release/install shell
+        run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
+
+      - name: Resolve and validate version
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="${{ inputs.version }}"
-          fi
+          VERSION="$(scripts/release/resolve-version.sh \
+            "$EVENT_NAME" "$REF_NAME" "$REQUESTED_VERSION")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
+      - name: Check release version resolver cases
+        run: ./scripts/release/test-resolve-version.sh
+
       - name: Resolve and verify source revision
         id: source
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           git fetch --force --tags
           SOURCE_SHA="$(git rev-parse HEAD)"
-          VERSION="${{ steps.ver.outputs.version }}"
           TAG="v${VERSION}"
-          TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+          if ! TAG_COMMIT="$(git rev-parse --verify "${TAG}^{commit}")"; then
+            echo "::error::Release tag $TAG does not exist"
+            exit 1
+          fi
+          if [ "$SOURCE_SHA" != "$TAG_COMMIT" ]; then
+            echo "::error::Release source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
+            exit 1
+          fi
 
           echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "Source SHA: $SOURCE_SHA"
           echo "Tag commit: $TAG_COMMIT"
 
-          if [ "$SOURCE_SHA" != "$TAG_COMMIT" ]; then
-            echo "::error::Release image source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check Clippy policy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check dependency advisories, licenses, and sources
+        run: cargo deny check
+
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run release qualification gate
+        env:
+          GATE_BUILD_JOBS: 2
+          GATE_TEST_THREADS: 2
+        run: ./scripts/gate.sh --refresh-bundles
+
+  publish:
+    name: Publish qualified images
+    needs: qualify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # for cosign keyless signing
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.qualify.outputs.source_sha }}
+
+      - name: Verify qualified source revision
+        env:
+          EXPECTED_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          if [ "$SOURCE_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Publish source $SOURCE_SHA differs from qualified source $EXPECTED_SHA"
             exit 1
           fi
 
       - name: Assert publisher key secret exists
+        env:
+          PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         run: |
-          test -n "${{ secrets.RYEOS_PUBLISHER_KEY }}" || \
+          test -n "$PUBLISHER_KEY" || \
             { echo "ERROR: RYEOS_PUBLISHER_KEY secret is not set"; exit 1; }
 
       - name: Verify publisher key matches OFFICIAL_PUBLISHER_FP
+        env:
+          PUBLISHER_KEY: ${{ secrets.RYEOS_PUBLISHER_KEY }}
         run: |
           # Extract the compiled-in fingerprint from source (may span 2 lines).
           EXPECTED=$(grep -A1 'OFFICIAL_PUBLISHER_FP.*&str' \
@@ -71,15 +161,16 @@ jobs:
           echo "Compiled-in OFFICIAL_PUBLISHER_FP: $EXPECTED"
 
           # Write the secret to a temp file so openssl can read it.
-          echo "${{ secrets.RYEOS_PUBLISHER_KEY }}" > /tmp/publisher-key.pem
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s\n' "$PUBLISHER_KEY" > "$KEY_FILE"
 
           # Compute the fingerprint: sha256 of the raw 32-byte Ed25519
           # verifying key (last 32 bytes of the DER-encoded public key).
-          ACTUAL=$(openssl pkey -in /tmp/publisher-key.pem -pubout -outform DER 2>/dev/null \
+          ACTUAL=$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null \
             | tail -c 32 \
             | sha256sum \
             | cut -d' ' -f1)
-          rm -f /tmp/publisher-key.pem
           echo "Secret key fingerprint:          $ACTUAL"
 
           if [ "$EXPECTED" != "$ACTUAL" ]; then
@@ -92,20 +183,13 @@ jobs:
           echo "Publisher key fingerprint matches."
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build standard image for verification
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile.standard
@@ -122,17 +206,18 @@ jobs:
           # the in-container git fallback can't resolve the SHA) and onto the
           # image as OCI labels via the Dockerfile ARGs.
           build-args: |
-            VCS_REF=${{ steps.source.outputs.sha }}
-            BUILD_DATE=${{ steps.ver.outputs.build_date }}
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
           tags: |
             ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
       - name: Verify standard image provenance
+        env:
+          EXPECTED: ${{ needs.qualify.outputs.source_sha }}
         run: |
           IMG="ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}"
-          EXPECTED="${{ steps.source.outputs.sha }}"
 
           ACTUAL="$(docker run --rm --entrypoint /usr/local/bin/ryeosd "$IMG" build-info --revision)"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
@@ -146,37 +231,12 @@ jobs:
             exit 1
           fi
 
-      - name: Tag and push verified standard image
-        id: push-standard
-        run: |
-          SRC="ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}"
-          VERSION_TAG="ghcr.io/leolilley/ryeos-standard:${{ steps.ver.outputs.version }}"
-          LATEST_TAG="ghcr.io/leolilley/ryeos-standard:latest"
-
-          docker tag "$SRC" "$VERSION_TAG"
-          docker tag "$SRC" "$LATEST_TAG"
-          docker push "$VERSION_TAG"
-          docker push "$LATEST_TAG"
-
-          DIGEST="$(docker buildx imagetools inspect "$VERSION_TAG" --format '{{ json .Manifest.Digest }}' | tr -d '"')"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Cosign sign image (keyless)
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-        run: |
-          cosign sign --yes \
-            ghcr.io/leolilley/ryeos-standard@${{ steps.push-standard.outputs.digest }}
-
       # ── central-host image: standard + central-auth + web ──
       # Base for app-hosting nodes (e.g. tv-tracker) that host their own
       # central-auth realm and use rye/web/search. Same build/verify/push/sign
       # flow as the standard image above.
       - name: Build central-host image for verification
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile.central-host
@@ -190,17 +250,18 @@ jobs:
           cache-from: type=gha,scope=ryeos-release-image
           cache-to: type=gha,scope=ryeos-release-image,mode=max
           build-args: |
-            VCS_REF=${{ steps.source.outputs.sha }}
-            BUILD_DATE=${{ steps.ver.outputs.build_date }}
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
           tags: |
             ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
       - name: Verify central-host image provenance
+        env:
+          EXPECTED: ${{ needs.qualify.outputs.source_sha }}
         run: |
           IMG="ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}"
-          EXPECTED="${{ steps.source.outputs.sha }}"
 
           ACTUAL="$(docker run --rm --entrypoint /usr/local/bin/ryeosd "$IMG" build-info --revision)"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
@@ -214,24 +275,201 @@ jobs:
             exit 1
           fi
 
-      - name: Tag and push verified central-host image
-        id: push-central-host
+      - name: Smoke standard image lifecycle and sandbox
+        env:
+          IMG: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
         run: |
-          SRC="ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}"
-          VERSION_TAG="ghcr.io/leolilley/ryeos-central-host:${{ steps.ver.outputs.version }}"
-          LATEST_TAG="ghcr.io/leolilley/ryeos-central-host:latest"
+          VOLUME="ryeos-release-${{ github.run_id }}"
+          CONTAINER="ryeos-release-${{ github.run_id }}"
+          cleanup() {
+            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+            docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$VOLUME"
+          docker run -d --name "$CONTAINER" \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v "$VOLUME:/data" \
+            "$IMG"
+          for attempt in $(seq 1 60); do
+            if docker exec "$CONTAINER" ryeos node status >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs "$CONTAINER"
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec --workdir /tmp "$CONTAINER" \
+            ryeos execute tool:ryeos/core/identity/public_key
+          docker restart "$CONTAINER"
+          for attempt in $(seq 1 60); do
+            if docker exec "$CONTAINER" ryeos node status >/dev/null 2>&1; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              docker logs "$CONTAINER"
+              exit 1
+            fi
+            sleep 1
+          done
 
-          docker tag "$SRC" "$VERSION_TAG"
-          docker tag "$SRC" "$LATEST_TAG"
-          docker push "$VERSION_TAG"
-          docker push "$LATEST_TAG"
+      - name: Scan standard image for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          exit-code: 1
 
-          DIGEST="$(docker buildx imagetools inspect "$VERSION_TAG" --format '{{ json .Manifest.Digest }}' | tr -d '"')"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Scan central-host image for known vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
+          format: table
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          exit-code: 1
+
+      # Registry credentials are deliberately unavailable until every release
+      # image has been built and its embedded provenance has been verified.
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse overwrite of immutable version tags
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+        run: |
+          for image in ryeos-standard ryeos-central-host; do
+            tag="ghcr.io/leolilley/${image}:${VERSION}"
+            if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
+              echo "::error::Immutable release tag already exists: $tag"
+              exit 1
+            fi
+          done
+
+      # The pre-login images above exist only for local qualification. These
+      # are the final registry builds and the sole source of release digests.
+      - name: Build and push attested immutable standard version
+        id: push-standard
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile.standard
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
+          build-args: |
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+          tags: ghcr.io/leolilley/ryeos-standard:${{ needs.qualify.outputs.version }}
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+
+      - name: Build and push attested immutable central-host version
+        id: push-central-host
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile.central-host
+          platforms: linux/amd64
+          push: true
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
+          build-args: |
+            VCS_REF=${{ needs.qualify.outputs.source_sha }}
+            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
+          tags: ghcr.io/leolilley/ryeos-central-host:${{ needs.qualify.outputs.version }}
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Cosign sign standard image (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          DIGEST: ${{ steps.push-standard.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
 
       - name: Cosign sign central-host image (keyless)
         env:
           COSIGN_EXPERIMENTAL: "true"
+          DIGEST: ${{ steps.push-central-host.outputs.digest }}
         run: |
-          cosign sign --yes \
-            ghcr.io/leolilley/ryeos-central-host@${{ steps.push-central-host.outputs.digest }}
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
+
+      - name: Verify standard signature and build attestations
+        env:
+          DIGEST: ${{ steps.push-standard.outputs.digest }}
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          IMAGE="ghcr.io/leolilley/ryeos-standard@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$IMAGE"
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .Provenance }}' > provenance.json
+          jq -e 'type == "object" and length > 0' provenance.json
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.. | strings | select(. == $sha)' provenance.json
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .SBOM }}' > sbom.json
+          jq -e 'type == "object" and length > 0' sbom.json
+
+      - name: Verify central-host signature and build attestations
+        env:
+          DIGEST: ${{ steps.push-central-host.outputs.digest }}
+          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+        run: |
+          IMAGE="ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$CERTIFICATE_IDENTITY" \
+            --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+            "$IMAGE"
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .Provenance }}' > provenance.json
+          jq -e 'type == "object" and length > 0' provenance.json
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.. | strings | select(. == $sha)' provenance.json
+          docker buildx imagetools inspect "$IMAGE" \
+            --format '{{ json .SBOM }}' > sbom.json
+          jq -e 'type == "object" and length > 0' sbom.json
+
+      # Mutable tags move only after both immutable artifacts have passed
+      # provenance verification, publication, and signing.
+      - name: Promote verified images to latest
+        env:
+          STANDARD_DIGEST: ${{ steps.push-standard.outputs.digest }}
+          CENTRAL_DIGEST: ${{ steps.push-central-host.outputs.digest }}
+        run: |
+          docker buildx imagetools create \
+            --tag ghcr.io/leolilley/ryeos-standard:latest \
+            "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}"
+          docker buildx imagetools create \
+            --tag ghcr.io/leolilley/ryeos-central-host:latest \
+            "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}"

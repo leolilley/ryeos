@@ -161,7 +161,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     subject_hash: subject_hash.clone(),
                     policy: req.policy.clone(),
                     expected_issuer: expected_issuer.clone(),
-                    expected_key: expected_key.clone(),
+                    expected_key,
                     expected_attestation_hash: Some(head.target_hash.clone()),
                     source_peer: Some(remote_cfg.name.clone()),
                     job_id: Some(ids.job_id.clone()),

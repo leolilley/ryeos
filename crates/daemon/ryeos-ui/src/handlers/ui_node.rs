@@ -74,7 +74,7 @@ pub async fn handle_activity(
     };
     let usage = state.state_store.node_usage_totals_since(&since_iso)?;
 
-    let window = if window_hours % 24 == 0 {
+    let window = if window_hours.is_multiple_of(24) {
         format!("{}d", window_hours / 24)
     } else {
         format!("{window_hours}h")

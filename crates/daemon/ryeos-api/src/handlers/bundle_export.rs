@@ -33,7 +33,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         .iter()
         .find(|b| b.name == req.bundle_name)
         .map(|b| b.path.clone())
-        .ok_or_else(|| HandlerError::NotFound)?;
+        .ok_or(HandlerError::NotFound)?;
 
     if !bundle_path.is_dir() {
         return Err(HandlerError::Internal(format!(

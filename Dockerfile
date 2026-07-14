@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 #
-# ryeosd-full — daemon + bundles composed image (Tier 1 distribution).
-# Published to ghcr.io/leolilley/ryeosd-full:<version> by .github/workflows/publish-ryeosd.yml.
+# Local full daemon + bundles composition image. Release publication uses the
+# explicitly scoped Dockerfile.standard and Dockerfile.central-host images.
 
 # ── Stage 1: Build all binaries + publish bundles ──
-FROM rust:1.95-slim AS builder
+FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev ca-certificates && \
@@ -35,18 +35,19 @@ RUN --mount=type=secret,id=publisher-key \
 # ── Stage 2: Runtime image ──
 # Keep the runtime Debian generation compatible with the Rust builder image;
 # rust:1.95-slim currently links binaries requiring GLIBC_2.39+.
-FROM debian:trixie-slim
+FROM node:22-trixie-slim@sha256:4228fca437e45714a3ebd1d4ecd1dcc583cf79f5a940aa025e286b472d93b67c AS node-runtime
+
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 # Node 22 for TS-authored project tools (e.g. backend-client.js), and Python
 # for the bundled python/function and python/script runtimes. Include venv/pip
 # so project images can install their own Python tool dependencies without
 # rebuilding the RyeOS base from scratch.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg python3 python3-venv python3-pip && \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    apt-get purge -y curl gnupg && apt-get autoremove -y && \
+        bubblewrap ca-certificates python3 python3-venv python3-pip && \
     rm -rf /var/lib/apt/lists/*
+
+COPY --from=node-runtime /usr/local/ /usr/local/
 
 WORKDIR /app
 
@@ -80,5 +81,8 @@ LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.host-triple="x86_64-unknown-linux-gnu"
 LABEL io.ryeos.bundle-protocol="1.0"
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

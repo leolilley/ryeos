@@ -1,4 +1,4 @@
-//! `system.status` — daemon health snapshot.
+//! `node.status` — daemon health snapshot.
 
 use std::sync::Arc;
 
@@ -18,8 +18,8 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:system/status",
-    endpoint: "system.status",
+    service_ref: "service:node/status",
+    endpoint: "node.status",
     availability: ServiceAvailability::Both,
     required_caps: &[],
     handler: |params, _ctx, state| {

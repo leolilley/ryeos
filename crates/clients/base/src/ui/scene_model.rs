@@ -5,8 +5,15 @@ use crate::atlas::{
     AtlasItemInput, AtlasProjectionVm, AtlasUiStateVm, NamespaceAtlasVm,
 };
 
-use super::event::RyeOsAction;
+use super::event::RyeOsUiIntent;
 use super::view_model::RyeOsTone;
+
+/// The scene's design cadence: one animation step per this many
+/// milliseconds of wall clock. The breathe curve (16 steps ≈ 2s), sweep
+/// periods, and light cycles are all tuned against it, and animating
+/// clients derive their fast tick from it so the sampled clock and the
+/// declared pacing cannot drift apart.
+pub const SCENE_FRAME_MS: u64 = 72;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsSceneModel {
@@ -67,7 +74,7 @@ pub struct RyeOsSceneObjectVm {
     pub label: Option<String>,
     pub tone: RyeOsTone,
     pub selected: bool,
-    pub action: Option<RyeOsAction>,
+    pub intent: Option<RyeOsUiIntent>,
     /// Named glyph ramp the renderer draws this object's cells from
     /// (`"diamond"` for facet geometry; absent = the default dot ramp).
     /// A ramp NAME is generic widget vocabulary like a tone — which
@@ -244,7 +251,7 @@ pub fn build_scene_model(
     file_space: Option<&super::dto::RyeOsFileSpaceDto>,
 ) -> RyeOsSceneModel {
     let mut scene = RyeOsSceneModel {
-        generation: core.generation,
+        generation: core.scene_frame(),
         ..RyeOsSceneModel::default()
     };
     scene.objects.push(scene_object(
@@ -387,7 +394,7 @@ pub fn build_scene_model(
                 tone_for_topology(&node.kind, node.missing, node.trust.as_ref()),
             );
             object.opacity = if node.missing { 0.45 } else { 0.86 };
-            object.action = Some(RyeOsAction::InspectSummary {
+            object.intent = Some(RyeOsUiIntent::InspectSummary {
                 title: format!("Topology: {label}"),
                 detail,
             });
@@ -418,7 +425,7 @@ pub fn build_scene_model(
                 RyeOsTone::Neutral,
             );
             object.opacity = 0.34;
-            object.action = Some(RyeOsAction::InspectSummary {
+            object.intent = Some(RyeOsUiIntent::InspectSummary {
                 title: format!("Topology edge: {label}"),
                 detail: serde_json::json!({
                     "id": edge.id,
@@ -485,7 +492,7 @@ pub fn build_scene_model(
 
         if atlas.active_projection == AtlasProjectionVm::AiSpace {
             scene.atlas = Some(build_namespace_atlas(AtlasInput {
-                generation: core.generation,
+                generation: core.scene_frame(),
                 root_label: ".ai".to_string(),
                 items: items
                     .items
@@ -527,7 +534,7 @@ pub fn build_scene_model(
                 )
             });
         scene.atlas = Some(build_file_space_atlas(AtlasFileSpaceInput {
-            generation: core.generation,
+            generation: core.scene_frame(),
             root_label: "File Space".to_string(),
             root: file_space
                 .map(|file_space| file_space.root.clone())
@@ -839,7 +846,7 @@ fn scene_object(
         label,
         tone,
         selected: false,
-        action: None,
+        intent: None,
         glyph: None,
         end: None,
         shape: None,
@@ -995,7 +1002,7 @@ mod tests {
     #[test]
     fn scene_model_includes_namespace_atlas_for_items() {
         let mut core = RyeOsCore::default();
-        core.generation = 42;
+        core.runtime.now_ms = 42 * SCENE_FRAME_MS;
         core.data.items = Some(RyeOsItemsDto {
             items: vec![
                 RyeOsItemDto {
@@ -1030,7 +1037,7 @@ mod tests {
         let stack_node = atlas
             .nodes
             .iter()
-            .find(|node| node.namespace_key == "rye/core/create_tool")
+            .find(|node| node.namespace_key == "ryeos/core/create_tool")
             .expect("projected stack");
         assert_eq!(stack_node.stack.len(), 2);
     }
@@ -1038,7 +1045,7 @@ mod tests {
     #[test]
     fn per_tile_items_override_the_shared_dataset() {
         let mut core = RyeOsCore::default();
-        core.generation = 7;
+        core.runtime.now_ms = 7 * SCENE_FRAME_MS;
         // Shared/global dataset: one namespace.
         core.data.items = Some(RyeOsItemsDto {
             items: vec![RyeOsItemDto {
@@ -1115,7 +1122,7 @@ mod tests {
         assert_eq!(node.kind, RyeOsSceneObjectKind::ItemCluster);
         assert_eq!(node.label.as_deref(), Some("run"));
         assert_eq!(node.tone, RyeOsTone::Good);
-        let Some(RyeOsAction::InspectSummary { detail, .. }) = &node.action else {
+        let Some(RyeOsUiIntent::InspectSummary { detail, .. }) = &node.intent else {
             panic!("topology node should inspect summary")
         };
         assert_eq!(detail["status"]["executable"], true);
@@ -1167,7 +1174,7 @@ mod tests {
         assert_eq!(edge.kind, RyeOsSceneObjectKind::Link);
         assert_eq!(edge.label.as_deref(), Some("uses"));
         assert!(edge.scale[0] > 0.2);
-        let Some(RyeOsAction::InspectSummary { detail, .. }) = &edge.action else {
+        let Some(RyeOsUiIntent::InspectSummary { detail, .. }) = &edge.intent else {
             panic!("topology edge should inspect summary")
         };
         assert_eq!(detail["source"]["field"], "context");

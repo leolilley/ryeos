@@ -1,6 +1,7 @@
-# ryeos:signed:2026-06-11T05:13:13Z:bb4077126cd9b6690ded2d0b0588b77ebe186889ffd8c783607cc01255c7a466:b5PMh7FR7O9/HttuyXmyLs/cpUK+nypR7uYO3O3zrmUaMfkQJv8sH1XWyqRVC1UuqxuH4SBqX2t7ndTVl6uGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T01:34:56Z:db9fe9064a3e20a380fe52eab95aa32e766d3080182e8e2ff1c1ee6b93a450ff:TnqBJktgpO24dT4rqs/SEK3RScbDOq7ZwCxSAl5Buk5NgGLT9RcQCHblqGLptOWMT5cy1o7c7jz0vqOKJ+VTCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: project.status
+record_thread: false
 required_caps: ["ryeos.execute.service.project/status"]
 schema:
   project_path: string

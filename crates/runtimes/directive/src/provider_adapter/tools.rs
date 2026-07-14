@@ -93,7 +93,7 @@ pub fn filter_tools_by_caps<'a>(
 /// production `ToolSchema` is built from an `ItemDescriptor` whose
 /// `item_id` is already a canonical ref (`kind:bare_id`); see
 /// `ryeos_engine::inventory::build_descriptor_for_ref` and the
-/// synthesised lifecycle tools in `runner::build_directive_return_tool`.
+/// synthesised lifecycle tools in `runner::request_context`.
 /// A bare-id slipping in here means an upstream invariant has been
 /// violated — silently falling back to a kind-less cap would mask the
 /// bug and reintroduce the filter/enforcer disagreement this helper

@@ -7,7 +7,10 @@ RyeOS is portable verified execution.
 (_RYE Your Execution_.)
 
 Work in RyeOS — a tool run, a multi-step workflow, a scheduled job — is
-data: signed, content-addressed, durable. Because it is data, it can prove
+data: signed, content-addressed, durable. Durability here means the explicit
+[filesystem and recovery contract](docs/architecture/filesystem-durability.md),
+not cross-filesystem transactions or identical guarantees on every platform.
+Because it is data, it can prove
 what it is, who authorized it, and what it actually did. And because it is
 data, it can move: to another machine, across a restart, into the future.
 A run whose process dies resumes from its own record. Work pushed to
@@ -155,7 +158,11 @@ ryeos node status
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
 into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. `ryeos start` launches `ryeosd`.
+vault material, and writes node configuration. The package installs Bubblewrap,
+which RyeOS requires for fail-closed subprocess sandboxing on Linux. `ryeos
+start` launches `ryeosd`. See the
+[execution sandbox contract](docs/security/execution-sandbox.md) before
+tightening the node-owned policy.
 
 The user lifecycle surface is intentionally small:
 
@@ -178,9 +185,33 @@ docker pull ghcr.io/leolilley/ryeos-standard:latest
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
-so keys, trust, and runtime state survive redeploys.
+so keys, trust, and runtime state survive redeploys. Bubblewrap needs namespace
+operations that Docker's default profile blocks. Run the image with the
+documented capability and seccomp settings, and keep `/data` on a named volume:
+
+```bash
+docker volume create ryeos-data
+docker run -d --name ryeos \
+  --cap-add SYS_ADMIN \
+  --security-opt seccomp=unconfined \
+  -p 8000:8000 \
+  -v ryeos-data:/data \
+  ghcr.io/leolilley/ryeos-standard:latest
+docker exec ryeos ryeos node status
+```
+
+The release gate exercises init, daemon readiness, an actual sandboxed signed
+tool, and restart recovery with this deployment profile. Back up the
+`ryeos-data` volume before upgrades; it contains node identity, trust, vault,
+and durable execution state.
 
 ### From source
+
+Source installs require Bubblewrap (`bwrap`) for fail-closed subprocess
+sandboxing. Install it before running the installer, for example `sudo pacman
+-S bubblewrap` on Arch, `sudo apt install bubblewrap` on Debian/Ubuntu, or
+`sudo dnf install bubblewrap` on Fedora. The installer checks this prerequisite
+before building or changing the installed node.
 
 ```bash
 git clone https://github.com/leolilley/ryeos.git
@@ -194,6 +225,47 @@ the local packaged layout and initializes the user system space. It does not
 refresh bundle artifacts by default. Use
 `scripts/pkg/install-local-direct.sh --populate` only when bundle-owned binaries,
 CAS manifests, or signed bundle outputs actually need to be regenerated.
+
+## Five-minute first run
+
+After installation, initialize the local system space and start the node:
+
+```bash
+ryeos init
+ryeos start
+ryeos node status
+```
+
+Open either operator surface from a project directory:
+
+```bash
+cd /path/to/project
+ryeos tui
+# or
+ryeos web
+```
+
+Run a signed example and inspect its durable thread:
+
+```bash
+ryeos execute directive:ryeos/examples/continuing_research
+ryeos thread list
+ryeos thread tail <thread-id>
+```
+
+To exercise the core recovery guarantee, stop and restart the node while the
+example is active, then inspect the same thread and its continuation chain:
+
+```bash
+ryeos stop
+ryeos start
+ryeos thread get <thread-id>
+ryeos thread chain <thread-id>
+```
+
+If startup fails, `ryeos node doctor` performs the offline lifecycle and state
+checks. The terminal and browser clients are projections over the same durable
+threads; closing either client does not cancel the underlying work.
 
 ## Using RyeOS from an AI client
 
@@ -276,7 +348,7 @@ projection of its thread's durable state.
 
 | Path                           | Purpose                                                                             |
 | ------------------------------ | ----------------------------------------------------------------------------------- |
-| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support.    |
+| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](docs/architecture/filesystem-durability.md). |
 | `crates/engine/ryeos-engine`   | Item resolution, composition, policy facts, and execution planning.                 |
 | `crates/engine/ryeos-executor` | Execution dispatch and runtime integration.                                         |
 | `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, and UI assets.   |

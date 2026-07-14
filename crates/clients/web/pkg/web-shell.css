@@ -14,6 +14,7 @@
   --ryeos-good-rgb: 142, 192, 124;
   --ryeos-good-strong: #b8bb26;
   --ryeos-danger: #fb4934;
+  --ryeos-danger-rgb: 251, 73, 52;
   --bg: var(--ryeos-bg);
   --bg1: var(--ryeos-panel-2);
   --bg2: var(--ryeos-shadow);
@@ -130,7 +131,7 @@ body {
   white-space: pre;
 }
 
-/* RyeOS RyeOs ----------------------------------------------------------- */
+/* RyeOS ---------------------------------------------------------------- */
 .ryeos-app {
   min-height: 100vh;
   display: grid;
@@ -676,7 +677,7 @@ body {
 .ryeos-section dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0; }
 .ryeos-section dt { color: var(--ryeos-muted); text-transform: uppercase; font-size: 0.76rem; }
 .ryeos-section dd { margin: 0; overflow-wrap: anywhere; }
-.ryeos-section-action {
+.ryeos-section-intent {
   margin-top: 14px;
   border: 1px solid rgba(var(--ryeos-accent-rgb), 0.55);
   background: rgba(var(--ryeos-accent-rgb), 0.12);
@@ -685,11 +686,11 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
-.ryeos-section-action:hover {
+.ryeos-section-intent:hover {
   background: var(--ryeos-accent);
   color: var(--ryeos-bg);
 }
-.ryeos-section-action:active {
+.ryeos-section-intent:active {
   transform: translate(2px, 2px);
 }
 
@@ -738,6 +739,28 @@ body {
 .ryeos-row strong,
 .ryeos-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ryeos-row small { color: var(--ryeos-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+
+@keyframes ryeos-change-decay {
+  0% { filter: brightness(1.45); background-color: rgba(var(--motion-rgb), 0.2); }
+  100% { filter: brightness(1); background-color: transparent; }
+}
+@keyframes ryeos-breathe {
+  0%, 100% { filter: brightness(0.92); }
+  50% { filter: brightness(1.16); }
+}
+@keyframes ryeos-swell {
+  0%, 100% { filter: brightness(0.96); }
+  50% { filter: brightness(1.08); }
+}
+.changed {
+  --motion-rgb: var(--ryeos-accent-rgb);
+  animation: ryeos-change-decay 1.2s ease-out both;
+}
+.changed-good { --motion-rgb: var(--ryeos-good-rgb); }
+.changed-warn { --motion-rgb: var(--ryeos-warn-rgb); }
+.changed-danger { --motion-rgb: var(--ryeos-danger-rgb); }
+.motion-breathe:not(.changed) { animation: ryeos-breathe 1.35s ease-in-out infinite; }
+.motion-swell:not(.changed) { animation: ryeos-swell 2.4s ease-in-out infinite; }
 
 /* Table widget: aligned cells under column headers with a leading tone-glyph
    gutter. Header and rows share the same grid template so cells line up under
@@ -1034,13 +1057,13 @@ body,
   white-space: nowrap;
 }
 
-.ryeos-tile-actions {
+.ryeos-tile-intents {
   display: flex;
   gap: 5px;
   align-items: center;
 }
 
-.ryeos-tile-action {
+.ryeos-tile-intent {
   width: 24px;
   height: 24px;
   display: grid;
@@ -1053,11 +1076,11 @@ body,
   padding: 0;
 }
 
-.ryeos-tile-action:hover {
+.ryeos-tile-intent:hover {
   border-color: var(--ryeos-accent);
   color: var(--ryeos-warn);
 }
-.ryeos-tile-action:active {
+.ryeos-tile-intent:active {
   transform: translate(2px, 2px);
 }
 
@@ -1416,7 +1439,7 @@ body,
   text-transform: uppercase;
 }
 
-.ryeos-home-actions {
+.ryeos-home-items {
   display: flex;
   gap: 14px;
   align-items: stretch;
@@ -2072,6 +2095,23 @@ body,
 .ryeos-timeline-pair.good span { color: var(--ryeos-good); }
 .ryeos-timeline-pair.warn span { color: var(--ryeos-warn); }
 .ryeos-timeline-pair.danger span { color: var(--ryeos-danger); }
+.ryeos-timeline-block.arrived,
+.ryeos-timeline-line.arrived,
+.ryeos-timeline-pair.arrived {
+  animation: ryeos-change-decay 1.2s ease-out both;
+}
+.ryeos-timeline-block.good.arrived,
+.ryeos-timeline-line.good.arrived,
+.ryeos-timeline-pair.good.arrived { --motion-rgb: var(--ryeos-good-rgb); }
+.ryeos-timeline-block.warn.arrived,
+.ryeos-timeline-line.warn.arrived,
+.ryeos-timeline-pair.warn.arrived { --motion-rgb: var(--ryeos-warn-rgb); }
+.ryeos-timeline-block.danger.arrived,
+.ryeos-timeline-line.danger.arrived,
+.ryeos-timeline-pair.danger.arrived { --motion-rgb: var(--ryeos-danger-rgb); }
+.ryeos-timeline-block.accent.arrived,
+.ryeos-timeline-line.accent.arrived,
+.ryeos-timeline-pair.accent.arrived { --motion-rgb: var(--ryeos-accent-rgb); }
 
 .ryeos-timeline-separator {
   color: var(--ryeos-muted);
@@ -2217,7 +2257,7 @@ body,
 }
 
 .ryeos-tile-chrome small,
-.ryeos-tile-actions {
+.ryeos-tile-intents {
   display: none;
 }
 
@@ -2473,3 +2513,17 @@ body,
 
 .ryeos-backdrop-text.accent { color: var(--ryeos-accent, #d65d0e); }
 .ryeos-backdrop-text.good { color: var(--ryeos-good, #8ec07c); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .ryeos-backdrop-dot,
+  .ryeos-backdrop-shard {
+    transition: none !important;
+  }
+}

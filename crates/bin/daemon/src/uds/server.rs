@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 
+#[cfg(test)]
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::bundle_event_service::{
     BundleEventAppendParams, BundleEventReadChainParams, BundleEventScanParams, BundleEventService,
@@ -23,46 +23,20 @@ use ryeos_app::thread_lifecycle::{
     ThreadMarkRunningParams,
 };
 
+mod routing;
+mod transport;
+
+pub(crate) use routing::dispatch;
+
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await.context("uds accept failed")?;
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, state).await {
+            if let Err(err) = transport::handle_connection(stream, state).await {
                 tracing::warn!(error = %err, "uds connection error");
             }
         });
-    }
-}
-
-async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
-    loop {
-        let Some(frame) = read_frame(&mut stream).await? else {
-            return Ok(());
-        };
-
-        let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
-
-        // INFO so the ndjson sink records span NEW/CLOSE per request — a
-        // request that arrives and never closes is then attributable by
-        // method + request_id + thread_id from the trace alone. Entered via
-        // `instrument` (not a held `enter()` guard, which detaches from the
-        // task across `.await`).
-        let span = tracing::info_span!(
-            "uds:request",
-            method = %request.method,
-            request_id = %request.request_id,
-            thread_id = tracing::field::Empty,
-        );
-        // Opportunistically record thread_id when present in params.
-        if let Some(tid) = request.params.get("thread_id").and_then(|v| v.as_str()) {
-            span.record("thread_id", tid);
-        }
-
-        let response = tracing::Instrument::instrument(dispatch(request, &state), span).await;
-
-        let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
-        write_frame(&mut stream, &encoded).await?;
     }
 }
 
@@ -79,43 +53,6 @@ fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(filtered)
         }
         other => other.clone(),
-    }
-}
-
-pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
-    match request.method.as_str() {
-        // ── daemon health (lightweight, only ungated method) ─────────
-        "system.health" => RpcResponse::ok(request.request_id, json!({ "status": "ok" })),
-
-        // ── local lifecycle control (local UDS only, no public HTTP surface) ─
-        "lifecycle.status" => RpcResponse::ok(
-            request.request_id,
-            json!({
-                "status": "running",
-                "pid": std::process::id(),
-                "version": env!("CARGO_PKG_VERSION"),
-                "started_at": &state.started_at_iso,
-                "bind": state.config.bind.to_string(),
-                "uds_path": state.config.uds_path.display().to_string(),
-                "app_root": state.config.app_root.display().to_string(),
-            }),
-        ),
-        "lifecycle.shutdown" => {
-            crate::request_shutdown();
-            RpcResponse::ok(request.request_id, json!({ "accepted": true }))
-        }
-
-        // ── runtime callbacks (token-gated, used by runtimes) ───────
-        other if other.starts_with("runtime.") => rpc_result(
-            request.request_id,
-            dispatch_runtime_method(other, &request.params, state).await,
-        ),
-
-        other => RpcResponse::err(
-            request.request_id,
-            "unknown_method",
-            format!("unknown rpc method: {other}"),
-        ),
     }
 }
 
@@ -357,8 +294,32 @@ fn handle_attach_process(
     // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
     // probe instead of treating the thread as dead.
     params.pgid = ryeos_app::process::pgid_of(params.pid);
-    serde_json::to_value(state.threads.attach_process(&params)?)
-        .context("failed to encode runtime.attach_process result")
+    let attached = match state.threads.attach_process(&params) {
+        Ok(thread) => thread,
+        Err(error) => {
+            if params.pgid > 0 {
+                let _ = ryeos_app::process::hard_kill_process_group(params.pgid);
+            }
+            return Err(error)
+                .context("runtime.attach_process refused; spawned process group killed");
+        }
+    };
+    if state
+        .state_store
+        .launch_window_is_cancelled(&attached.chain_root_id)?
+    {
+        let report = ryeos_app::cascade::signal_thread(
+            &state.state_store,
+            &attached.thread_id,
+            ryeos_app::cascade::CascadeMode::Graceful,
+        );
+        tracing::info!(
+            thread_id = %attached.thread_id,
+            report = %report,
+            "late follow-child process attachment observed cancellation tombstone"
+        );
+    }
+    serde_json::to_value(attached).context("failed to encode runtime.attach_process result")
 }
 
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
@@ -802,14 +763,14 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode)
-        {
-            Ok(report) => tracing::info!(
-                thread_id = %thread_id,
-                command_type = %command_type,
-                report = %report,
-                "cancel/kill signalled target and descendants"
-            ),
+        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode) {
+            Ok((report, cancelled_roots)) => {
+                for root in cancelled_roots {
+                    ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
+                }
+                tracing::info!(thread_id = %thread_id, command_type = %command_type,
+                    report = %report, "cancel/kill signalled target and descendants");
+            }
             Err(e) => tracing::warn!(
                 thread_id = %thread_id,
                 command_type = %command_type,
@@ -905,55 +866,6 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
     serde_json::to_value(facets_map).context("failed to encode facets")
 }
 
-fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {
-    match result {
-        Ok(value) => RpcResponse::ok(request_id, value),
-        // `{:#}` walks the anyhow cause chain, so a deep failure (e.g. a serde
-        // decode error under "invalid <method> params") surfaces its root cause
-        // to the caller instead of only the top-level context line.
-        Err(err) => RpcResponse::err(request_id, "request_failed", format!("{err:#}")),
-    }
-}
-
-const MAX_FRAME_SIZE: u32 = 10 * 1024 * 1024; // 10 MB
-
-async fn read_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
-    let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(err).context("failed to read rpc frame length"),
-    }
-
-    let frame_len = u32::from_be_bytes(len_buf);
-    if frame_len > MAX_FRAME_SIZE {
-        return Err(anyhow!(
-            "frame too large: {} bytes (max {})",
-            frame_len,
-            MAX_FRAME_SIZE
-        ));
-    }
-    let mut frame = vec![0u8; frame_len as usize];
-    stream
-        .read_exact(&mut frame)
-        .await
-        .context("failed to read rpc frame body")?;
-    Ok(Some(frame))
-}
-
-async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
-    let len = (bytes.len() as u32).to_be_bytes();
-    stream
-        .write_all(&len)
-        .await
-        .context("failed to write rpc frame length")?;
-    stream
-        .write_all(bytes)
-        .await
-        .context("failed to write rpc frame body")?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +912,7 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
+            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
 
@@ -1106,6 +1019,7 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some("user:test".to_string()),
+            project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
         }
@@ -1160,7 +1074,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         for method in [
             // V5.2 removed catalog methods
-            "system.status",
+            "node.status",
             "identity.public_key",
             "threads.get",
             "threads.list",
@@ -1361,6 +1275,7 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
+            project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
         }
@@ -1433,17 +1348,25 @@ mod tests {
                 graph_run_id: "g".to_string(),
                 step_count: 0,
                 frontier_id: None,
+                fanout: false,
+                expected_children: 1,
             })
             .unwrap();
-        state
-            .state_store
-            .set_follow_child(wk, child, child)
-            .unwrap();
+        set_test_follow_child(state, wk, child);
         state
             .state_store
             .set_follow_parent_successor(wk, successor)
             .unwrap();
         state.state_store.mark_follow_waiting(wk).unwrap();
+    }
+
+    fn set_test_follow_child(state: &AppState, follow_key: &str, child: &str) {
+        let item_ref = "graph:test";
+        let hash = ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &json!(null), None);
+        state
+            .state_store
+            .set_follow_child(follow_key, 0, item_ref, &hash, child, child)
+            .unwrap();
     }
 
     fn finalize_child(
@@ -1746,8 +1669,9 @@ mod tests {
         // The synthesized envelope is a VISIBLE degraded FAILURE (so the parent
         // resumes into on_error, not a silent empty success), and carries the
         // persisted child status/result for diagnostics.
-        let env = waiter
+        let env = waiter.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("recovered waiter must carry a terminal envelope");
         assert_eq!(
             env["success"],
@@ -1794,8 +1718,9 @@ mod tests {
             ryeos_app::runtime_db::follow_phase::READY,
             "cancelling the child must ready the parent's waiter"
         );
-        let env = waiter
+        let env = waiter.children[0]
             .terminal_envelope
+            .as_ref()
             .expect("cancelled child must store a terminal envelope");
         assert_eq!(
             env["success"],
@@ -1870,7 +1795,7 @@ mod tests {
             "the child's own terminal readies the waiter"
         );
         assert_eq!(
-            waiter.child_terminal_thread_id.as_deref(),
+            waiter.children[0].terminal_thread_id.as_deref(),
             Some("Cfollow"),
             "the recorded terminal is the child, not the auxiliary"
         );
@@ -1896,12 +1821,11 @@ mod tests {
                 graph_run_id: "g".to_string(),
                 step_count: 0,
                 frontier_id: None,
+                fanout: false,
+                expected_children: 1,
             })
             .unwrap();
-        state
-            .state_store
-            .set_follow_child("wk-res", "Cres", "Cres")
-            .unwrap();
+        set_test_follow_child(&state, "wk-res", "Cres");
         state
             .state_store
             .set_follow_parent_successor("wk-res", "S")
@@ -1952,12 +1876,11 @@ mod tests {
                 graph_run_id: "g".to_string(),
                 step_count: 0,
                 frontier_id: None,
+                fanout: false,
+                expected_children: 1,
             })
             .unwrap();
-        state
-            .state_store
-            .set_follow_child("wk-res2", "Cnc", "Cnc")
-            .unwrap();
+        set_test_follow_child(&state, "wk-res2", "Cnc");
 
         let actions = crate::reconcile::reconcile_follow(&state).unwrap();
         assert!(
@@ -2126,7 +2049,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.terminal_envelope.expect("degraded envelope stored");
+        let env = w.children[0]
+            .terminal_envelope
+            .as_ref()
+            .expect("degraded envelope stored");
         assert_eq!(env["success"], json!(false));
         assert_eq!(env["status"], json!("failed"));
         assert_eq!(
@@ -2180,7 +2106,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.terminal_envelope.expect("canonical envelope stored");
+        let env = w.children[0]
+            .terminal_envelope
+            .as_ref()
+            .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
         assert_eq!(env["warnings"], json!(["w1"]));
@@ -2206,7 +2135,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::WAITING);
-        assert!(w.terminal_envelope.is_none());
+        assert!(w.children[0].terminal_envelope.is_none());
     }
 
     #[tokio::test]
@@ -2255,7 +2184,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        let env = w.terminal_envelope.expect("canonical envelope stored");
+        let env = w.children[0]
+            .terminal_envelope
+            .as_ref()
+            .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
         assert_eq!(env["result"], json!("directive_return"));
         assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));
@@ -3430,8 +3362,11 @@ mod tests {
         .await;
         let err = rpc_err(&resp);
         assert!(
-            err.message.contains("deny-all") && err.message.contains("no effective_caps"),
-            "expected UDS boundary deny-all from empty callback caps, got: {err:?}"
+            err.code == "missing_cap"
+                && err.message.contains(
+                    "missing required capability: ryeos.execute.directive.ryeos/agent/core/base"
+                ),
+            "expected UDS boundary missing-cap denial from empty callback caps, got: {err:?}"
         );
     }
 
@@ -3746,6 +3681,7 @@ mod tests {
                     origin_site_id: "site:test".to_string(),
                     upstream_thread_id: Some("T-pred".to_string()),
                     requested_by: Some("user:test".to_string()),
+                    project_root: None,
                     usage_subject: None,
                     usage_subject_asserted_by: None,
                 },

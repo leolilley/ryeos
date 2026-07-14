@@ -5,8 +5,14 @@
 
 use anyhow::Context;
 use rusqlite::OptionalExtension;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::projection::ProjectionDb;
+
+/// Stay below SQLite's conservative host-parameter ceiling regardless of the
+/// connection's compile-time `MAX_VARIABLE_NUMBER`.
+const THREAD_ID_QUERY_BATCH: usize = 500;
 
 // ============= Row types =============
 
@@ -23,6 +29,7 @@ pub struct ThreadRow {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -43,6 +50,7 @@ impl ThreadRow {
             origin_site_id: row.get("origin_site_id")?,
             upstream_thread_id: row.get("upstream_thread_id")?,
             requested_by: row.get("requested_by")?,
+            project_root: row.get("project_root")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             started_at: row.get("started_at")?,
@@ -290,7 +298,7 @@ impl UsageSummaryRow {
 const THREAD_COLUMNS: &str = r#"
     thread_id, chain_root_id, kind, status,
     item_ref, executor_ref, launch_mode,
-    current_site_id, origin_site_id, upstream_thread_id, requested_by,
+    current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
     created_at, updated_at, started_at, finished_at
 "#;
 
@@ -300,6 +308,40 @@ pub fn get_thread(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Option<T
     stmt.query_row([thread_id], ThreadRow::from_row)
         .optional()
         .context("query get_thread")
+}
+
+/// Fetch selected projected thread rows in bounded batches.
+pub fn get_threads_many(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+) -> anyhow::Result<Vec<ThreadRow>> {
+    let mut threads = Vec::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        if placeholders.is_empty() {
+            continue;
+        }
+        let sql =
+            format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id IN ({placeholders})");
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare get_threads_many")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(batch.iter()),
+                ThreadRow::from_row,
+            )
+            .context("query get_threads_many")?;
+        threads.extend(
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("read get_threads_many rows")?,
+        );
+    }
+    Ok(threads)
 }
 
 pub fn list_threads_by_chain(
@@ -401,6 +443,11 @@ pub struct ThreadListFilter {
     /// Keep only ACTIVE (non-terminal) threads — the agent's live cognition,
     /// what the one key is running now rather than the settled history.
     pub active_only: bool,
+    /// Exclude item refs beginning with any of these prefixes. Exclusions are
+    /// applied in SQL before ordering and limit.
+    pub exclude_item_prefixes: Vec<String>,
+    /// Exact local project scope. Unattributed rows do not match.
+    pub project_root: Option<PathBuf>,
 }
 
 pub fn list_threads_sorted(
@@ -491,6 +538,24 @@ pub fn list_threads_query(
         for status in TERMINAL_STATUSES.iter() {
             params.push(status);
         }
+    }
+    for prefix in &filter.exclude_item_prefixes {
+        if prefix.is_empty() {
+            continue;
+        }
+        // Keep the literal, case-sensitive semantics of Rust starts_with;
+        // LIKE would interpret '%' and '_' in an authored prefix as wildcards.
+        conditions.push("substr(item_ref, 1, length(?)) != ?");
+        params.push(prefix);
+        params.push(prefix);
+    }
+    let project_root = filter
+        .project_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    if let Some(project_root) = &project_root {
+        conditions.push("project_root = ?");
+        params.push(project_root);
     }
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -690,6 +755,46 @@ pub fn continuation_successor(
         .map(|s| s.to_string()))
 }
 
+/// Raw batch counterpart to [`continuation_successor`]. JSON decoding is left
+/// to the caller so it can happen after releasing an outer store lock.
+pub fn continuation_successor_payloads(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut payloads = HashMap::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT thread_id, payload FROM events \
+             WHERE event_type = 'thread_continued' AND thread_id IN ({placeholders}) \
+             ORDER BY thread_id, thread_seq DESC"
+        );
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare continuation_successors")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .context("query continuation_successors")?;
+        for row in rows {
+            let (thread_id, payload) = row.context("read continuation_successors row")?;
+            if payloads.contains_key(&thread_id) {
+                continue;
+            }
+            payloads.insert(thread_id, payload);
+        }
+    }
+    Ok(payloads)
+}
+
 /// The `successor_request_fingerprint` recorded in the source's `thread_continued`
 /// payload, if any. Used to dedup operator double-submits: a follow-up whose
 /// fingerprint matches the recorded one resolves to the existing successor; a
@@ -777,7 +882,9 @@ impl ContinuationReasonMarker {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    /// Parse a reserved marker string; `None` for anything caller-supplied
+    /// (deliberately not `std::str::FromStr` — absence is the common case).
+    pub fn parse_marker(value: &str) -> Option<Self> {
         match value {
             "operator_follow_up" => Some(Self::OperatorFollowUp),
             "graph_follow_resume" => Some(Self::GraphFollowResume),
@@ -789,9 +896,13 @@ impl ContinuationReasonMarker {
     /// paths scrub these from caller-supplied reasons so a runtime cannot forge
     /// an operator reset or a depth-exempt follow edge.
     pub fn is_reserved_str(value: &str) -> bool {
-        Self::from_str(value).is_some()
+        Self::parse_marker(value).is_some()
     }
 }
+
+/// `(successor_thread_id, reason, request_fingerprint)` — the tuple
+/// [`continuation_edge`] yields.
+pub type ContinuationEdge = (String, Option<String>, Option<String>);
 
 /// The continuation EDGE on a source's `thread_continued` payload, if any:
 /// `(successor_thread_id, reason, request_fingerprint)`. The fingerprint is
@@ -802,7 +913,7 @@ impl ContinuationReasonMarker {
 pub fn continuation_edge(
     db: &ProjectionDb,
     thread_id: &str,
-) -> anyhow::Result<Option<(String, Option<String>, Option<String>)>> {
+) -> anyhow::Result<Option<ContinuationEdge>> {
     let payload: Option<Vec<u8>> = db
         .connection()
         .query_row(
@@ -988,6 +1099,41 @@ pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<Face
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// Fetch all facets for a selected thread page in one indexed query.
+pub fn get_facets_many(db: &ProjectionDb, thread_ids: &[String]) -> anyhow::Result<Vec<FacetRow>> {
+    if thread_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut facets = Vec::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT thread_id, key, value FROM thread_facets \
+             WHERE thread_id IN ({placeholders}) ORDER BY thread_id, key"
+        );
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare get_facets_many")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(batch.iter()), FacetRow::from_row)
+            .context("query get_facets_many")?;
+        for row in rows {
+            match row {
+                Ok(facet) => facets.push(facet),
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "skipping malformed thread facet row"
+                ),
+            }
+        }
+    }
+    Ok(facets)
+}
+
 /// A graph thread's current node: the `(node, step)` of its latest
 /// `graph_step_started` event. A cheap per-thread "where is it right now" for a
 /// live fleet overview — a single indexed row read, not a full-trace replay.
@@ -1025,6 +1171,51 @@ pub fn current_graph_node(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as u32;
     Ok(node.map(|n| (n, step)))
+}
+
+/// Latest graph-step payload per selected thread, fetched in bounded grouped
+/// queries. Callers decode after releasing any outer store lock.
+pub fn current_graph_node_payloads(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut payloads = HashMap::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT e.thread_id, e.payload FROM events e \
+             INNER JOIN ( \
+                 SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
+                 WHERE event_type = '{}' AND thread_id IN ({placeholders}) \
+                 GROUP BY thread_id \
+             ) latest \
+               ON latest.thread_id = e.thread_id \
+              AND latest.thread_seq = e.thread_seq \
+             WHERE e.event_type = '{}'",
+            crate::event_types::GRAPH_STEP_STARTED,
+            crate::event_types::GRAPH_STEP_STARTED,
+        );
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare current_graph_nodes")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .context("query current_graph_nodes")?;
+        for row in rows {
+            let (thread_id, payload) = row.context("read current_graph_nodes row")?;
+            payloads.insert(thread_id, payload);
+        }
+    }
+    Ok(payloads)
 }
 
 const THREAD_USAGE_LATEST_COLUMNS: &str = r#"

@@ -150,12 +150,11 @@ pub async fn push_project(
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("objects");
-    let local_cas = CasStore::new(local_cas_root.clone());
+    let local_cas = CasStore::new(local_cas_root);
 
     let mut items: HashMap<String, String> = HashMap::new();
     ingest_for_push(
         &local_cas,
-        &local_cas_root,
         project_path,
         project_path,
         &mut items,
@@ -449,7 +448,6 @@ fn executable_mode(path: &Path) -> Option<u32> {
 /// Walk a project directory and ingest files for push.
 fn ingest_for_push(
     cas: &CasStore,
-    cas_root: &Path,
     root: &Path,
     dir: &Path,
     items: &mut HashMap<String, String>,
@@ -480,7 +478,7 @@ fn ingest_for_push(
         }
 
         if path.is_dir() {
-            ingest_for_push(cas, cas_root, root, &path, items, ignore)?;
+            ingest_for_push(cas, root, &path, items, ignore)?;
         } else if path.is_file() {
             let bytes = std::fs::read(&path)?;
             let blob_hash = cas.store_blob(&bytes)?;

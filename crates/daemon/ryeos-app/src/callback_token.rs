@@ -105,6 +105,9 @@ impl CallbackCapabilityStore {
         )
     }
 
+    // One argument per capability field; eleven call sites across five
+    // crates bind them positionally — restructure with a compiler, not here.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_with_context(
         &self,
         thread_id: &str,
@@ -771,7 +774,7 @@ mod tests {
             launch_token_ttl(Some(u64::MAX)),
             Duration::from_secs(MAX_LAUNCH_TTL_SECS)
         );
-        assert!(MAX_LAUNCH_TTL_SECS > 3600);
+        const _: () = assert!(MAX_LAUNCH_TTL_SECS > 3600);
     }
 
     #[test]

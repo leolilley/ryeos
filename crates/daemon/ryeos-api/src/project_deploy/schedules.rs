@@ -31,12 +31,13 @@ enum ScheduleAction {
     Create(DesiredSchedule),
     Update {
         desired: DesiredSchedule,
-        existing: ScheduleSpecRecord,
+        /// Boxed: the full spec record dwarfs `Create`'s payload.
+        existing: Box<ScheduleSpecRecord>,
         adopt_manual: bool,
     },
     DeleteMissing {
         schedule_id: String,
-        existing: ScheduleSpecRecord,
+        existing: Box<ScheduleSpecRecord>,
     },
 }
 
@@ -153,7 +154,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
                 )?;
                 actions.push(ScheduleAction::Update {
                     desired: desired_schedule.clone(),
-                    existing,
+                    existing: Box::new(existing),
                     adopt_manual,
                 });
             }
@@ -188,7 +189,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
         )?;
         actions.push(ScheduleAction::DeleteMissing {
             schedule_id: schedule_id.clone(),
-            existing,
+            existing: Box::new(existing),
         });
     }
 
@@ -1019,7 +1020,7 @@ impl ScheduleReconcileTx {
                     if let Some(parent) = yaml_path.parent() {
                         let _ = fs::create_dir_all(parent);
                     }
-                    let _ = lillux::cas::atomic_write(&yaml_path, bytes);
+                    let _ = lillux::atomic_write(&yaml_path, bytes);
                 }
                 None => {
                     if yaml_path.exists() {

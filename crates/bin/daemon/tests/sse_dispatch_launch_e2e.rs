@@ -606,6 +606,7 @@ fn sse_dispatch_launch_collision() {
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,
         requested_by: Some("fp:test-collision".to_string()),
+        project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
     };

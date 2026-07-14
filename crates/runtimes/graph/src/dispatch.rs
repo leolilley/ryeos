@@ -40,6 +40,26 @@ pub struct ActionFailure {
     /// Cost reported by a native child before it failed. `None` for
     /// subprocess failures and transport failures (no child cost exists).
     pub cost: Option<RuntimeCost>,
+    /// Whether the same authored action is eligible for another attempt.
+    /// Executed leaf failures default false; callback dispatch classification is
+    /// carried by [`ActionDispatchError`] before an envelope exists.
+    pub retryable: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{diagnostic}")]
+pub struct ActionDispatchError {
+    pub diagnostic: String,
+    pub retryable: bool,
+}
+
+impl From<anyhow::Error> for ActionDispatchError {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            diagnostic: format!("{error:#}"),
+            retryable: false,
+        }
+    }
 }
 
 /// A successful leaf dispatch: the graph-visible result plus optional
@@ -97,7 +117,7 @@ pub async fn dispatch_action(
     thread_id: &str,
     project_path: &str,
     _exec_ctx: Option<&ExecutionContext>,
-) -> anyhow::Result<ActionOutcome> {
+) -> Result<ActionOutcome, ActionDispatchError> {
     let action = action.clone();
 
     let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -155,7 +175,10 @@ pub async fn dispatch_action(
     let response = client
         .dispatch_action(request)
         .await
-        .map_err(|e| anyhow::anyhow!("dispatch failed: {e}"))?;
+        .map_err(|error| ActionDispatchError {
+            diagnostic: format!("dispatch failed: {error}"),
+            retryable: error.retryable(),
+        })?;
 
     // The typed callback contract puts the leaf-dispatcher value in
     // `response.result`; the wrapping `thread` snapshot is for audit
@@ -202,6 +225,7 @@ pub async fn dispatch_action(
                          continuing child under daemon-managed follow"
                     ),
                     cost: success.cost,
+                    retryable: false,
                 }));
             }
             Ok(ActionOutcome::Success(success))
@@ -243,21 +267,7 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
         && obj.contains_key("status")
         && (obj.contains_key("outputs") || obj.contains_key("warnings"));
     if is_native {
-        let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        return if ok {
-            ActionOutcome::Success(ActionSuccess {
-                result: native_success_value(obj),
-                cost: parse_native_cost(obj),
-                child_thread_id: None,
-            })
-        } else {
-            // A failed native child (e.g. a directive that burned tokens
-            // then errored) still reports `cost` — preserve it.
-            ActionOutcome::Failure(ActionFailure {
-                diagnostic: describe_native_failure(obj),
-                cost: parse_native_cost(obj),
-            })
-        };
+        return classify_native_runtime_object(obj);
     }
 
     // Subprocess envelope: discriminated by `outcome_code`.
@@ -269,12 +279,49 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
             ActionOutcome::Failure(ActionFailure {
                 diagnostic: describe_subprocess_failure(obj),
                 cost: None,
+                retryable: false,
             })
         };
     }
 
     // Has `result` but no envelope markers — bare tool data.
     ActionOutcome::Success(ActionSuccess::bare(value))
+}
+
+/// Classify an envelope received through the daemon-managed follow contract.
+///
+/// Unlike an arbitrary tool result, a follow result is known to be a native
+/// runtime envelope. The daemon's cohort join projection retains the required
+/// `success`, `status`, and `result` fields but may omit empty `outputs` and
+/// `warnings`, so it must not use the conservative bare-value discriminator in
+/// [`classify_envelope`].
+pub(crate) fn classify_follow_envelope(value: Value) -> ActionOutcome {
+    let Some(obj) = value.as_object() else {
+        return ActionOutcome::Success(ActionSuccess::bare(value));
+    };
+    if obj.contains_key("success") && obj.contains_key("status") && obj.contains_key("result") {
+        return classify_native_runtime_object(obj);
+    }
+    classify_envelope(value)
+}
+
+fn classify_native_runtime_object(obj: &serde_json::Map<String, Value>) -> ActionOutcome {
+    let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
+    if ok {
+        ActionOutcome::Success(ActionSuccess {
+            result: native_success_value(obj),
+            cost: parse_native_cost(obj),
+            child_thread_id: None,
+        })
+    } else {
+        // A failed native child (e.g. a directive that burned tokens then
+        // errored) still reports `cost` — preserve it.
+        ActionOutcome::Failure(ActionFailure {
+            diagnostic: describe_native_failure(obj),
+            cost: parse_native_cost(obj),
+            retryable: false,
+        })
+    }
 }
 
 fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {

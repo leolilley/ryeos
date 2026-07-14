@@ -15,6 +15,44 @@ pub const THREAD_KILLED: &str = "thread_killed";
 pub const THREAD_TIMED_OUT: &str = "thread_timed_out";
 pub const THREAD_CONTINUED: &str = "thread_continued";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadOutcomeKind {
+    Success,
+    Failure,
+}
+
+/// Terminal classification for a thread lifecycle event. The one
+/// authority: clients must consume this, never re-type the sets.
+pub fn thread_terminal_outcome(event_type: &str) -> Option<ThreadOutcomeKind> {
+    match event_type {
+        THREAD_COMPLETED | THREAD_CONTINUED => Some(ThreadOutcomeKind::Success),
+        THREAD_FAILED | THREAD_CANCELLED | THREAD_KILLED | THREAD_TIMED_OUT => {
+            Some(ThreadOutcomeKind::Failure)
+        }
+        _ => None,
+    }
+}
+
+/// Whether an `outcome_code` names a failed run. Lives beside the event
+/// vocabulary so outcome words have a single home.
+pub fn outcome_code_is_failure(code: &str) -> bool {
+    if let Some(suffix) = code.strip_prefix("exit:") {
+        return suffix != "0";
+    }
+    matches!(
+        code,
+        "failure"
+            | "failed"
+            | "error"
+            | "cancelled"
+            | "canceled"
+            | "timeout"
+            | "timed_out"
+            | "nonzero"
+            | "not_ok"
+    )
+}
+
 pub const EDGE_RECORDED: &str = "edge_recorded";
 pub const CHILD_THREAD_SPAWNED: &str = "child_thread_spawned";
 pub const CONTINUATION_REQUESTED: &str = "continuation_requested";
@@ -57,8 +95,8 @@ pub const PROVIDER_RETRY: &str = "provider_retry";
 pub const COST_UNTRACKED: &str = "cost_untracked";
 pub const THREAD_USAGE: &str = "thread_usage";
 
-/// Generic domain-event channel: one engine event carrying a namespaced `kind`
-/// + free `payload`, emitted by the runtime on behalf of a tool/directive
-/// result. Content declares the kinds and styles them via view-yaml
-/// `projections.event_kinds`; the engine stays domain-agnostic.
+/// Generic domain-event channel: one engine event carrying a namespaced
+/// `kind` plus a free `payload`, emitted by the runtime on behalf of a
+/// tool/directive result. Content declares the kinds and styles them via
+/// view-yaml `projections.event_kinds`; the engine stays domain-agnostic.
 pub const MILESTONE: &str = "milestone";

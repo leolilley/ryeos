@@ -40,7 +40,7 @@ pub enum OfflineDispatchOutcome {
 /// Returns `Ok(None)` if the command is not offline-capable (caller should fall
 /// through to daemon dispatch). Returns `Err` if the command is offline-capable
 /// but something went wrong.
-pub fn try_offline_dispatch(
+pub async fn try_offline_dispatch(
     argv: &[String],
     app_root: &Path,
     project_path: &str,
@@ -84,14 +84,28 @@ pub fn try_offline_dispatch(
     })?;
 
     // 4. Boot engine (lazy — only reached when we know we have a match)
-    let engine = boot_engine(app_root, project_path, &bundle_roots)?;
+    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        ..Default::default()
+    })
+    .map_err(local_err)?;
+    let engine = boot_engine(&node_config, project_path, &bundle_roots)?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
     let tail = &argv[matched.consumed..];
 
     if has_launch_binary_ref(&item.composed_value) {
-        return exec_client(&engine, item, &matched.command, tail, project_path).map(Some);
+        return exec_client(
+            &engine,
+            item,
+            &matched.command,
+            tail,
+            app_root,
+            project_path,
+        )
+        .await
+        .map(Some);
     }
 
     if has_service_offline_dispatch(&item.composed_value) {
@@ -102,14 +116,22 @@ pub fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
-        )
-        .map(|result| result.map(|outcome| outcome));
+            node_config.sandbox_enabled,
+        );
     }
 
     if has_tool_command(&item.composed_value) {
         let params = bind_params_minimal(tail, &matched.command, project_path)?;
-        return exec_tool(&engine, &item, execute_ref, params, app_root, project_path)
-            .map(|result| result.map(OfflineDispatchOutcome::Json));
+        return exec_tool(
+            &engine,
+            &item,
+            execute_ref,
+            params,
+            app_root,
+            project_path,
+            node_config.sandbox_enabled,
+        )
+        .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
 
     Ok(None)
@@ -120,16 +142,10 @@ pub fn try_offline_dispatch(
 // ---------------------------------------------------------------------------
 
 fn boot_engine(
-    app_root: &Path,
+    config: &ryeos_app::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
-
     let project_root = if project_path == "." {
         None
     } else {
@@ -137,7 +153,7 @@ fn boot_engine(
     };
 
     ryeos_app::engine_init::build_engine_for_roots(
-        &config,
+        config,
         bundle_roots,
         project_root.as_deref(),
         None, // no trust overlay
@@ -210,14 +226,19 @@ fn has_tool_command(value: &Value) -> bool {
 // Client dispatch
 // ---------------------------------------------------------------------------
 
-fn exec_client(
+async fn exec_client(
     engine: &ryeos_engine::engine::Engine,
     item: EffectiveItem,
     command_def: &CommandDef,
     tail: &[String],
+    app_root: &Path,
     project_path: &str,
 ) -> Result<OfflineDispatchOutcome, CliError> {
     let item_ref = item.canonical_ref.clone();
+
+    if client_requires_daemon(&item.composed_value) {
+        crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    }
 
     let launch = item
         .composed_value
@@ -301,6 +322,14 @@ fn exec_client(
     Ok(OfflineDispatchOutcome::Silent)
 }
 
+fn client_requires_daemon(value: &Value) -> bool {
+    value
+        .get("capabilities")
+        .and_then(|v| v.get("requires_daemon"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn client_args_from_launch(
     launch: &Value,
     command_def: &CommandDef,
@@ -363,6 +392,7 @@ fn exec_tool(
     params: Value,
     app_root: &Path,
     project_path: &str,
+    sandbox_enabled: bool,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
     let executor_id = item
@@ -455,7 +485,7 @@ fn exec_tool(
 
     let cwd = match config.get("cwd").and_then(|v| v.as_str()) {
         Some(cwd) => Some(expand_template(cwd, &params_json, project_path)?),
-        None => Some(std::env::current_dir()?.to_string_lossy().into_owned()),
+        None => Some(project_path.to_string()),
     };
 
     let inherit_stdio = config
@@ -490,25 +520,45 @@ fn exec_tool(
 
     envs.push(("RYEOS_APP_ROOT".to_string(), app_root.display().to_string()));
 
+    if inherit_env {
+        for (key, value) in std::env::vars() {
+            if !envs.iter().any(|(configured, _)| configured == &key) {
+                envs.push((key, value));
+            }
+        }
+    }
+
+    let request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+        lillux::SubprocessRequest {
+            cmd: resolved.absolute_path.to_string_lossy().into_owned(),
+            args,
+            cwd,
+            envs,
+            stdin_data,
+            timeout: timeout as f64,
+        },
+        sandbox_enabled,
+        app_root,
+        Path::new(project_path),
+        tool_ref_str,
+        "offline-cli",
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("offline tool sandbox refused execution: {error}"),
+    })?;
+
     if inherit_stdio {
         return exec_inherited(
             tool_ref_str,
-            &resolved.absolute_path,
-            &args,
-            cwd.as_deref(),
-            &envs,
-            inherit_env,
+            Path::new(&request.cmd),
+            &request.args,
+            request.cwd.as_deref(),
+            &request.envs,
+            false,
         );
     }
 
-    let result = lillux::run(lillux::SubprocessRequest {
-        cmd: resolved.absolute_path.to_string_lossy().into_owned(),
-        args,
-        cwd,
-        envs,
-        stdin_data,
-        timeout: timeout as f64,
-    });
+    let result = lillux::run(request);
 
     if !result.success {
         return Err(CliError::Local {
@@ -536,6 +586,7 @@ fn dispatch_service(
     tail: &[String],
     app_root: &Path,
     project_path: &str,
+    sandbox_enabled: bool,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
     let availability = item
@@ -617,6 +668,7 @@ fn dispatch_service(
         params,
         app_root,
         project_path,
+        sandbox_enabled,
     )
     .map(|result| result.map(OfflineDispatchOutcome::Json))
 }
@@ -1005,6 +1057,13 @@ mod tests {
                 .join("node")
                 .join("identity");
             std::fs::create_dir_all(&node_identity_dir).unwrap();
+            std::fs::write(
+                node_identity_dir.parent().unwrap().join("sandbox.yaml"),
+                "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\n\
+                 writable_paths:\n  - \"{project}\"\nallowed_env:\n  - \"*\"\n\
+                 max_open_files: 128\nmax_processes: 32\n",
+            )
+            .unwrap();
             let pem = key.to_pkcs8_pem(Default::default()).unwrap();
             std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
             let dev_trust = std::fs::read_to_string(
@@ -1388,7 +1447,14 @@ else:
     ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
         let snapshot =
             crate::node_descriptors::load_verified_snapshot(app_root).map_err(local_err)?;
-        try_offline_dispatch(argv, app_root, project_path, &snapshot)
+        tokio::runtime::Runtime::new()
+            .expect("create test runtime")
+            .block_on(try_offline_dispatch(
+                argv,
+                app_root,
+                project_path,
+                &snapshot,
+            ))
     }
 
     #[test]

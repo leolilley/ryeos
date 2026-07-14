@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use ryeos_state::chain::SnapshotUpdate;
+use ryeos_state::chain::{ChainLock, SnapshotUpdate};
 use ryeos_state::objects::thread_snapshot::ThreadStatus;
 use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
@@ -15,9 +15,14 @@ use ryeos_state::signer::Signer;
 use ryeos_state::StateDb;
 use ryeos_state::UsageSubject;
 
+use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
+
+mod projection_access;
+
+use projection_access::committed_value;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -78,6 +83,7 @@ pub struct NewThreadRecord {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<PathBuf>,
     pub usage_subject: Option<UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
 }
@@ -127,6 +133,13 @@ pub struct ThreadEdgeRecord {
     pub metadata: Option<Value>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ServiceChainRetirement {
+    pub candidate_chains: usize,
+    pub retired_chains: usize,
+    pub deleted_rows: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ThreadListItem {
     pub thread_id: String,
@@ -146,8 +159,25 @@ pub struct ThreadListItem {
     /// threads only (mirrors `ThreadDetail`).
     pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Auxiliary facts for one thread-list page, loaded under one store lock and
+/// grouped in memory. Keeps the UI list path from reacquiring the global store
+/// mutex and rerunning projection queries for every row.
+#[derive(Debug, Default)]
+pub struct ThreadListEnrichment {
+    pub follow_waiters: Vec<runtime_db::FollowWaiter>,
+    pub facets: HashMap<String, Vec<(String, String)>>,
+    pub current_graph_nodes: HashMap<String, (String, u32)>,
+}
+
+#[derive(Debug, Default)]
+pub struct FollowParentListSnapshot {
+    pub waiters: Vec<runtime_db::FollowWaiter>,
+    pub parents: Vec<ThreadListItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -178,6 +208,7 @@ pub struct ThreadDetail {
     /// payloads. `None` for a thread that has not been continued.
     pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -208,6 +239,7 @@ struct Inner {
 
 pub struct StateStore {
     inner: Mutex<Inner>,
+    projection_health: Arc<ThreadProjectionHealth>,
 }
 
 impl std::fmt::Debug for StateStore {
@@ -234,6 +266,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         origin_site_id: thread.origin_site_id.clone(),
         upstream_thread_id: thread.upstream_thread_id.clone(),
         requested_by: thread.requested_by.clone(),
+        project_root: thread.project_root.clone(),
         base_project_snapshot_hash: None,
         result_project_snapshot_hash: None,
         created_at: now.clone(),
@@ -367,9 +400,13 @@ fn append_events_locked(
 
     if !durable_events.is_empty() {
         let te = convert_events(&durable_events, chain_root_id, thread_id);
-        let result =
-            g.state_db
-                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?;
+        let result = committed_value(g.state_db.append_events(
+            chain_root_id,
+            thread_id,
+            te,
+            vec![],
+            g.signer.as_ref(),
+        )?);
         for (idx, record) in durable_indices
             .into_iter()
             .zip(persisted_from_append(&result, &durable_events))
@@ -405,7 +442,11 @@ impl StateStore {
         std::fs::create_dir_all(&runtime_state_dir)
             .context("failed to create runtime_state_dir directory")?;
 
-        let state_db = StateDb::open(&runtime_state_dir)?;
+        let projection_health = Arc::new(ThreadProjectionHealth::default());
+        let state_db = StateDb::open_with_projection_repair_sink(
+            &runtime_state_dir,
+            projection_health.clone(),
+        )?;
         let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
 
         Ok(Self {
@@ -415,6 +456,7 @@ impl StateStore {
                 signer,
                 write_barrier,
             }),
+            projection_health,
         })
     }
 
@@ -439,19 +481,31 @@ impl StateStore {
         f(&g.state_db)
     }
 
-    /// Run a closure with access to the projection database.
-    pub fn with_projection<F, T>(&self, f: F) -> Result<T>
-    where
-        F: FnOnce(&ryeos_state::ProjectionDb) -> Result<T>,
-    {
-        let g = self.lock()?;
-        f(g.state_db.projection())
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
+        let started = std::time::Instant::now();
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))?;
+        let waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(100) {
+            tracing::warn!(
+                wait_ms = waited.as_millis() as u64,
+                "StateStore lock acquisition was delayed"
+            );
+        }
+        Ok(guard)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
-        self.inner
-            .lock()
-            .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
+    fn warn_slow_lock_hold(operation: &'static str, started: std::time::Instant) {
+        let held = started.elapsed();
+        if held >= std::time::Duration::from_millis(100) {
+            tracing::warn!(
+                operation,
+                hold_ms = held.as_millis() as u64,
+                "StateStore lock was held by a slow operation"
+            );
+        }
     }
 
     /// Acquire a write permit from the write barrier.
@@ -479,11 +533,17 @@ impl StateStore {
         let snapshot = build_snapshot(thread);
 
         if thread.thread_id == thread.chain_root_id {
-            g.state_db
-                .create_chain(&thread.thread_id, snapshot, g.signer.as_ref())?;
+            committed_value(g.state_db.create_chain(
+                &thread.thread_id,
+                snapshot,
+                g.signer.as_ref(),
+            )?);
         } else {
-            g.state_db
-                .add_thread(&thread.chain_root_id, snapshot, g.signer.as_ref())?;
+            committed_value(g.state_db.add_thread(
+                &thread.chain_root_id,
+                snapshot,
+                g.signer.as_ref(),
+            )?);
         }
 
         g.runtime_db
@@ -518,13 +578,13 @@ impl StateStore {
             &thread.chain_root_id,
             &thread.thread_id,
         );
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread.chain_root_id,
             &thread.thread_id,
             te,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         Ok(persisted_from_append(&result, &[create_event]))
     }
@@ -574,12 +634,12 @@ impl StateStore {
         };
         let events_to_append = vec![create_event, branch_event];
         let te = convert_events(&events_to_append, &thread.chain_root_id, &thread.thread_id);
-        let result = g.state_db.add_thread_with_events(
+        let result = committed_value(g.state_db.add_thread_with_events(
             &thread.chain_root_id,
             build_snapshot(thread),
             te,
             g.signer.as_ref(),
-        )?;
+        )?);
 
         g.runtime_db
             .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
@@ -638,6 +698,7 @@ impl StateStore {
             origin_site_id: thread_row.origin_site_id.clone(),
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
+            project_root: thread_row.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: base_project_snapshot_hash.map(String::from),
             result_project_snapshot_hash: None,
             created_at: thread_row.created_at.clone(),
@@ -671,13 +732,13 @@ impl StateStore {
             &thread_row.chain_root_id,
             thread_id,
         );
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![snapshot_update],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         Ok(persisted_from_append(&result, &[event]))
     }
@@ -758,6 +819,7 @@ impl StateStore {
             origin_site_id: thread_row.origin_site_id.clone(),
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
+            project_root: thread_row.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
             created_at: thread_row.created_at.clone(),
@@ -830,13 +892,13 @@ impl StateStore {
         });
 
         let te = convert_events(&events_to_append, &thread_row.chain_root_id, thread_id);
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![snapshot_update],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         Ok(persisted_from_append(&result, &events_to_append))
     }
@@ -914,6 +976,7 @@ impl StateStore {
                 origin_site_id: source_row.origin_site_id.clone(),
                 upstream_thread_id: source_row.upstream_thread_id.clone(),
                 requested_by: source_row.requested_by.clone(),
+                project_root: source_row.project_root.as_ref().map(PathBuf::from),
                 base_project_snapshot_hash: None,
                 result_project_snapshot_hash: None,
                 created_at: source_row.created_at.clone(),
@@ -942,8 +1005,11 @@ impl StateStore {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        g.state_db
-            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+        committed_value(g.state_db.add_thread(
+            chain_root_id,
+            successor_snapshot,
+            g.signer.as_ref(),
+        )?);
 
         g.runtime_db
             .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
@@ -965,13 +1031,13 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events(
             chain_root_id,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -988,13 +1054,13 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
@@ -1173,8 +1239,11 @@ impl StateStore {
 
         // State-db successor snapshot (creates the upstream edge).
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        g.state_db
-            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+        committed_value(g.state_db.add_thread(
+            chain_root_id,
+            successor_snapshot,
+            g.signer.as_ref(),
+        )?);
 
         // Settle the source to `continued` (running by the check above) in the
         // same append as its `thread_continued` event — the final state change.
@@ -1193,6 +1262,7 @@ impl StateStore {
             origin_site_id: source_row.origin_site_id.clone(),
             upstream_thread_id: source_row.upstream_thread_id.clone(),
             requested_by: source_row.requested_by.clone(),
+            project_root: source_row.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
             created_at: source_row.created_at.clone(),
@@ -1228,7 +1298,7 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events(
             chain_root_id,
             source_thread_id,
             ste,
@@ -1237,7 +1307,7 @@ impl StateStore {
                 new_snapshot: source_snapshot,
             }],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -1253,13 +1323,13 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
@@ -1354,6 +1424,7 @@ impl StateStore {
                 origin_site_id: source_row.origin_site_id.clone(),
                 upstream_thread_id: source_row.upstream_thread_id.clone(),
                 requested_by: source_row.requested_by.clone(),
+                project_root: source_row.project_root.as_ref().map(PathBuf::from),
                 base_project_snapshot_hash: None,
                 result_project_snapshot_hash: None,
                 created_at: source_row.created_at.clone(),
@@ -1401,8 +1472,11 @@ impl StateStore {
         }
 
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        g.state_db
-            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+        committed_value(g.state_db.add_thread(
+            chain_root_id,
+            successor_snapshot,
+            g.signer.as_ref(),
+        )?);
 
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
@@ -1418,13 +1492,13 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events(
             chain_root_id,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -1440,13 +1514,13 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
@@ -1510,12 +1584,107 @@ impl StateStore {
             upstream_thread_id: thread_row.upstream_thread_id,
             successor_thread_id,
             requested_by: thread_row.requested_by,
+            project_root: thread_row.project_root,
             created_at: thread_row.created_at,
             updated_at: thread_row.updated_at,
             started_at: thread_row.started_at,
             finished_at: thread_row.finished_at,
             runtime,
         }))
+    }
+
+    pub fn touch_seat_lease(
+        &self,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("seat thread {thread_id} does not exist"))?;
+        if thread.kind != "seat_session"
+            || thread.status != "running"
+            || thread.requested_by.as_deref() != Some(owner)
+            || thread.item_ref != surface
+        {
+            bail!("seat thread {thread_id} is not a matching running owned seat");
+        }
+        if !g
+            .runtime_db
+            .touch_seat_lease(thread_id, owner, surface, client_ref)?
+        {
+            bail!("seat thread {thread_id} is being reaped");
+        }
+        Ok(())
+    }
+
+    pub fn touch_existing_seat_lease(&self, thread_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.touch_existing_seat_lease(thread_id)
+    }
+
+    pub fn remove_seat_lease(&self, thread_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.remove_seat_lease(thread_id)
+    }
+
+    pub fn expired_seat_leases(&self, cutoff_ms: i64) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.expired_seat_leases(cutoff_ms)
+    }
+
+    pub fn claim_expired_seat_lease(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.claim_expired_seat_lease(thread_id, cutoff_ms)
+    }
+
+    pub fn retire_service_chains_before(
+        &self,
+        cutoff: &str,
+        dry_run: bool,
+    ) -> Result<ServiceChainRetirement> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let candidates = g.state_db.terminal_service_chain_candidates(cutoff)?;
+        let mut result = ServiceChainRetirement {
+            candidate_chains: candidates.len(),
+            ..Default::default()
+        };
+        for chain_root_id in candidates {
+            if !g
+                .state_db
+                .terminal_service_chain_is_retirable(&chain_root_id, cutoff)?
+                || g.runtime_db.chain_has_live_state(&chain_root_id)?
+            {
+                continue;
+            }
+            if dry_run {
+                result.retired_chains += 1;
+                continue;
+            }
+            // Serialize head removal with every append/import writer, then
+            // repeat the terminal/age/runtime checks under that lock. A writer
+            // which published a new head before us makes the chain recent; a
+            // writer behind us cannot publish until the ref is gone.
+            let _chain_lock = ChainLock::acquire(g.state_db.refs_root(), &chain_root_id)?;
+            if !g
+                .state_db
+                .terminal_service_chain_is_retirable(&chain_root_id, cutoff)?
+                || g.runtime_db.chain_has_live_state(&chain_root_id)?
+            {
+                continue;
+            }
+            // Ref first: a crash after this point leaves no live CAS root. The
+            // remaining runtime/projection cleanup is idempotent.
+            g.state_db.remove_chain_head_ref(&chain_root_id)?;
+            result.deleted_rows += g.runtime_db.delete_chain_runtime(&chain_root_id)?;
+            result.deleted_rows += g.state_db.delete_chain_projection(&chain_root_id)?;
+            result.retired_chains += 1;
+        }
+        Ok(result)
     }
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
@@ -1612,13 +1781,13 @@ impl StateStore {
             &thread_row.chain_root_id,
             thread_id,
         );
-        let result = g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![],
             g.signer.as_ref(),
-        )?;
+        )?);
 
         let persisted = persisted_from_append(&result, &[event]);
 
@@ -1640,9 +1809,13 @@ impl StateStore {
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows = queries::list_threads(g.state_db.projection(), limit)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let rows = queries::list_threads(g.state_db.projection(), limit)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// List threads with optional principal filtering.
@@ -1655,10 +1828,14 @@ impl StateStore {
         limit: usize,
         filter_principal: Option<&str>,
     ) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows =
-            queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let rows =
+                queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// As [`Self::list_threads_filtered`] but with an explicit
@@ -1670,10 +1847,18 @@ impl StateStore {
         filter_principal: Option<&str>,
         sort: queries::ThreadSort,
     ) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows =
-            queries::list_threads_sorted(g.state_db.projection(), limit, filter_principal, sort)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let rows = queries::list_threads_sorted(
+                g.state_db.projection(),
+                limit,
+                filter_principal,
+                sort,
+            )?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
@@ -1706,24 +1891,51 @@ impl StateStore {
         filter: &queries::ThreadListFilter,
         sort: queries::ThreadSort,
     ) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows =
-            queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let rows = queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            Self::warn_slow_lock_hold("list_threads_query", hold_started);
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// Project thread rows into `ThreadListItem`s, resolving each terminal
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list
     /// paths.
-    fn rows_to_list_items(g: &Inner, rows: Vec<queries::ThreadRow>) -> Result<Vec<ThreadListItem>> {
+    fn continuation_payloads_for_rows(
+        g: &Inner,
+        rows: &[queries::ThreadRow],
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        let terminal_thread_ids = rows
+            .iter()
+            .filter(|row| is_terminal_status(&row.status))
+            .map(|row| row.thread_id.clone())
+            .collect::<Vec<_>>();
+        queries::continuation_successor_payloads(g.state_db.projection(), &terminal_thread_ids)
+    }
+
+    fn rows_to_list_items(
+        rows: Vec<queries::ThreadRow>,
+        successor_payloads: HashMap<String, Vec<u8>>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let mut successors = HashMap::new();
+        for (thread_id, payload) in successor_payloads {
+            let value: serde_json::Value = serde_json::from_slice(&payload)
+                .context("parse thread_continued payload for thread-list enrichment")?;
+            if let Some(successor) = value
+                .get("successor_thread_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                successors.insert(thread_id, successor.to_string());
+            }
+        }
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
-            let successor_thread_id = if is_terminal_status(&row.status) {
-                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
-            } else {
-                None
-            };
+            let successor_thread_id = successors.remove(&row.thread_id);
             items.push(ThreadListItem {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -1736,11 +1948,118 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             });
         }
         Ok(items)
+    }
+
+    /// Load the non-thread-row facts used to decorate one list page. Facets,
+    /// current graph nodes, and live follow waiters share one outer store lock
+    /// instead of relocking the store for every row.
+    pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
+        let (facet_rows, graph_node_payloads, follow_waiters) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let result = (
+                queries::get_facets_many(g.state_db.projection(), thread_ids)?,
+                queries::current_graph_node_payloads(g.state_db.projection(), thread_ids)?,
+                g.runtime_db.list_follow_waiters()?,
+            );
+            Self::warn_slow_lock_hold("thread_list_enrichment", hold_started);
+            result
+        };
+        Ok(Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+        ))
+    }
+
+    pub fn thread_list_enrichment_with_waiters(
+        &self,
+        thread_ids: &[String],
+        follow_waiters: Vec<runtime_db::FollowWaiter>,
+    ) -> Result<ThreadListEnrichment> {
+        let (facet_rows, graph_node_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let result = (
+                queries::get_facets_many(g.state_db.projection(), thread_ids)?,
+                queries::current_graph_node_payloads(g.state_db.projection(), thread_ids)?,
+            );
+            Self::warn_slow_lock_hold("thread_list_enrichment_with_waiters", hold_started);
+            result
+        };
+        Ok(Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+        ))
+    }
+
+    fn assemble_thread_list_enrichment(
+        facet_rows: Vec<queries::FacetRow>,
+        graph_node_payloads: HashMap<String, Vec<u8>>,
+        follow_waiters: Vec<runtime_db::FollowWaiter>,
+    ) -> ThreadListEnrichment {
+        let mut facets: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for row in facet_rows {
+            facets
+                .entry(row.thread_id)
+                .or_default()
+                .push((row.key, String::from_utf8_lossy(&row.value).to_string()));
+        }
+        let mut current_graph_nodes = HashMap::new();
+        for (thread_id, payload) in graph_node_payloads {
+            let payload: serde_json::Value = match serde_json::from_slice(&payload) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(
+                        %thread_id,
+                        %error,
+                        "ignoring malformed graph_step_started payload in thread-list enrichment"
+                    );
+                    continue;
+                }
+            };
+            let Some(node) = payload.get("node").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let step = payload
+                .get("step")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            current_graph_nodes.insert(thread_id, (node.to_string(), step));
+        }
+        ThreadListEnrichment {
+            follow_waiters,
+            facets,
+            current_graph_nodes,
+        }
+    }
+
+    /// One consistent runtime waiter snapshot plus its projected suspended
+    /// parents. Parent rows are fetched in bounded batches under the same store
+    /// lock, avoiding one lock/query cycle per waiter.
+    pub fn follow_parent_list_snapshot(&self) -> Result<FollowParentListSnapshot> {
+        let (waiters, rows, successor_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let waiters = g.runtime_db.list_follow_waiters()?;
+            let parent_ids = waiters
+                .iter()
+                .map(|waiter| waiter.parent_thread_id.clone())
+                .collect::<Vec<_>>();
+            let rows = queries::get_threads_many(g.state_db.projection(), &parent_ids)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            Self::warn_slow_lock_hold("follow_parent_list_snapshot", hold_started);
+            (waiters, rows, payloads)
+        };
+        let parents = Self::rows_to_list_items(rows, successor_payloads)?;
+        Ok(FollowParentListSnapshot { waiters, parents })
     }
 
     pub fn summarize_usage_by_subject(
@@ -1778,6 +2097,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -1816,6 +2136,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -1872,6 +2193,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -1936,7 +2258,17 @@ impl StateStore {
                     pgid,
                     "skipping attach_process — thread already terminal"
                 );
-                return Ok(());
+                anyhow::bail!(
+                    "refusing to attach process {pid}/{pgid} to terminal thread {thread_id} ({})",
+                    thread.status
+                );
+            }
+            if g.runtime_db
+                .launch_window_is_cancelled(&thread.chain_root_id)?
+            {
+                anyhow::bail!(
+                    "refusing to attach process {pid}/{pgid} to cancelled launch-window member {thread_id}"
+                );
             }
         }
         g.runtime_db
@@ -1997,12 +2329,30 @@ impl StateStore {
     pub fn set_follow_child(
         &self,
         follow_key: &str,
+        item_index: u32,
+        item_ref: &str,
+        spec_hash: &str,
         child_thread_id: &str,
         child_chain_root_id: &str,
     ) -> Result<()> {
         let g = self.lock()?;
-        g.runtime_db
-            .set_follow_child(follow_key, child_thread_id, child_chain_root_id)
+        g.runtime_db.set_follow_child(
+            follow_key,
+            item_index,
+            item_ref,
+            spec_hash,
+            child_thread_id,
+            child_chain_root_id,
+        )
+    }
+
+    pub fn get_follow_child(
+        &self,
+        follow_key: &str,
+        item_index: u32,
+    ) -> Result<Option<runtime_db::FollowWaiterChild>> {
+        let g = self.lock()?;
+        g.runtime_db.get_follow_child(follow_key, item_index)
     }
 
     pub fn set_follow_parent_successor(
@@ -2165,10 +2515,7 @@ impl StateStore {
     /// has no events yet.
     pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
         let g = self.lock()?;
-        Ok(queries::chain_head_thread(
-            g.state_db.projection(),
-            chain_root_id,
-        )?)
+        queries::chain_head_thread(g.state_db.projection(), chain_root_id)
     }
 
     pub fn replay_events(
@@ -2348,6 +2695,20 @@ impl StateStore {
             .launch_window_admit(window_key, global_live_limit, now_ms)
     }
 
+    /// Repair membership without admitting it; used when launch metadata proves
+    /// the child was originally windowed but the membership write was lost.
+    pub fn launch_window_insert_only(
+        &self,
+        child_chain_root_id: &str,
+        window_key: &str,
+        width: u32,
+        now_ms: i64,
+    ) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .launch_window_insert(child_chain_root_id, window_key, width, now_ms)
+    }
+
     /// Release a window slot for a chain that reached a hard terminal and
     /// admit the window's next queued members (returned for launching).
     pub fn launch_window_release(
@@ -2364,6 +2725,42 @@ impl StateStore {
     pub fn launch_window_is_queued(&self, child_chain_root_id: &str) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db.launch_window_is_queued(child_chain_root_id)
+    }
+
+    pub fn launch_window_cancel_queued(
+        &self,
+        chain_roots: &[String],
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let mut g = self.lock()?;
+        g.runtime_db
+            .launch_window_cancel_queued(chain_roots, now_ms)
+    }
+
+    pub fn launch_window_cancel_members(
+        &self,
+        chain_roots: &[String],
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        self.lock()?
+            .runtime_db
+            .launch_window_cancel_members(chain_roots, now_ms)
+    }
+
+    pub fn launch_window_is_cancelled(&self, chain_root: &str) -> Result<bool> {
+        self.lock()?
+            .runtime_db
+            .launch_window_is_cancelled(chain_root)
+    }
+
+    pub fn list_cancelled_window_members(&self) -> Result<Vec<String>> {
+        self.lock()?.runtime_db.launch_window_cancelled_members()
+    }
+
+    pub fn discard_window_member(&self, chain_root: &str) -> Result<()> {
+        self.lock()?
+            .runtime_db
+            .launch_window_discard_member(chain_root)
     }
 
     pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {
@@ -2517,6 +2914,24 @@ mod tests {
         .expect("state store")
     }
 
+    #[test]
+    fn direct_projection_access_fails_closed_while_repair_is_pending() {
+        let store = test_store();
+        ryeos_state::ProjectionRepairSink::request_repair(
+            &*store.projection_health(),
+            ryeos_state::ProjectionRepairRequest {
+                chain_root_id: "T-root".into(),
+                committed_head_hash: "head".into(),
+                operation: "append_events",
+                error: "projection failed".into(),
+            },
+        );
+        let error = store
+            .with_projection(|_| Ok(()))
+            .expect_err("stale projection read must fail");
+        assert!(error.to_string().contains("not current"));
+    }
+
     fn thread_record(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         NewThreadRecord {
             thread_id: thread_id.to_string(),
@@ -2529,6 +2944,7 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some("fp:test".to_string()),
+            project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
         }

@@ -25,6 +25,10 @@ use serde_json::{json, Value};
 use super::LaunchAugmentationError;
 
 /// Run the `ComposeContextPositions` augmentation.
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     decl: &LaunchAugmentationDecl,
     resolution: &mut ResolutionOutput,
@@ -159,6 +163,12 @@ pub async fn run(
             origin_site_id: plan_ctx.origin_site_id.clone(),
             upstream_thread_id: Some(parent_thread_id.to_string()),
             requested_by: Some(principal_fingerprint.to_string()),
+            project_root: match &plan_ctx.project_context {
+                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
+                    Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+                }
+                _ => None,
+            },
             usage_subject: None,
             usage_subject_asserted_by: None,
         })
@@ -254,22 +264,30 @@ pub async fn run(
         );
         let envs = ryeos_app::process::build_subprocess_envs_with_roots(
             &std::collections::BTreeMap::new(),
-            &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
+            &[("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
             roots,
         )
         .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
-        let result = tokio::task::spawn_blocking(move || {
-            lillux::run(lillux::SubprocessRequest {
-                cmd: executor_path_str,
-                args: vec![],
-                cwd: None,
-                envs,
-                stdin_data: Some(stdin_data),
-                timeout: 60.0,
-            })
-        })
-        .await
-        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
+        let subprocess_request = lillux::SubprocessRequest {
+            cmd: executor_path_str,
+            args: vec![],
+            cwd: Some(project_path.to_string_lossy().into_owned()),
+            envs,
+            stdin_data: Some(stdin_data),
+            timeout: 60.0,
+        };
+        let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+            subprocess_request,
+            state.config.sandbox_enabled,
+            &state.config.app_root,
+            project_path,
+            &format!("runtime:{target_kind}"),
+            &child_thread_id,
+        )
+        .map_err(|error| LaunchAugmentationError::Threads(format!("sandbox: {error}")))?;
+        let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
+            .await
+            .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
 
         if !result.success {
             return Err(LaunchAugmentationError::ChildBootstrap {
@@ -296,7 +314,7 @@ pub async fn run(
             return Err(LaunchAugmentationError::ChildFailed {
                 kind: target_kind.clone(),
                 method: target_method.clone(),
-                error: batch_result.error,
+                error: batch_result.error.map(Box::new),
             });
         }
 
@@ -453,9 +471,9 @@ fn write_empty(resolution: &mut ResolutionOutput, output_derived: &str, meta_out
         .insert(meta_output_derived.to_string(), json!({}));
 }
 
-fn rendered_output_object<'a>(
-    output: &'a Value,
-) -> Result<&'a serde_json::Map<String, Value>, LaunchAugmentationError> {
+fn rendered_output_object(
+    output: &Value,
+) -> Result<&serde_json::Map<String, Value>, LaunchAugmentationError> {
     output
         .get("rendered")
         .and_then(|v| v.as_object())

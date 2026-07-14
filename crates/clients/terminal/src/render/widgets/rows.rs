@@ -2,13 +2,14 @@
 //! full-width selection.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::text_surface::{Style, TextSurface};
-use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm, RyeOsTone};
+use ryeos_client_base::text_surface::TextSurface;
+use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, letterspace, truncate};
 use super::super::theme::{
-    mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT,
+    active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
+    tone_style, ACCENT,
 };
 
 pub fn draw_rows(
@@ -51,7 +52,12 @@ pub fn draw_rows(
             style_fg()
         };
         style = active_pulse_style(style, row.tone, now_ms);
-        style = shimmer_style(style, row.changed_at_ms, now_ms);
+        style = shimmer_style(
+        style,
+        row.changed_at_ms,
+        row.changed_tone.map(|tone| tone_style(tone).fg).unwrap_or(ACCENT),
+        now_ms,
+    );
         fill_line(surface, rect.x as usize, y, width, style);
         let glyph_style = if row.selected {
             style
@@ -104,33 +110,9 @@ pub fn draw_rows(
     }
 }
 
-fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style {
-    let Some(changed_at_ms) = changed_at_ms else {
-        return style;
-    };
-    let age = now_ms.saturating_sub(changed_at_ms);
-    if age >= 1_200 {
-        return style;
-    }
-    let weight = 0.35 * (1.0 - age as f32 / 1_200.0);
-    style.fg(mix_toward(style.fg, ACCENT, weight))
-}
-
-fn active_pulse_style(style: Style, tone: RyeOsTone, now_ms: u64) -> Style {
-    if tone != RyeOsTone::Accent {
-        return style;
-    }
-    let phase = (now_ms / 180) % 8;
-    let wave = match phase {
-        0 | 7 => 0.08,
-        1 | 6 => 0.14,
-        2 | 5 => 0.20,
-        _ => 0.26,
-    };
-    style.fg(mix_toward(style.fg, ACCENT, wave))
-}
-
-fn draw_detail(
+/// One `field: value` detail line under a row, shared by the rows and table
+/// widgets so the label-width math cannot fork between them again.
+pub(super) fn draw_detail(
     surface: &mut TextSurface,
     left: usize,
     y: usize,

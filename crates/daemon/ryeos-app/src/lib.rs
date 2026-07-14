@@ -5,6 +5,7 @@
 
 pub mod build_info;
 pub mod bundle_event_service;
+pub mod bundle_transaction;
 pub mod callback_token;
 pub mod cascade;
 pub mod command_hub;
@@ -31,6 +32,8 @@ pub mod live_input_queue;
 pub mod node_config;
 pub mod principal;
 pub mod process;
+pub mod projection_health;
+pub mod projection_repair;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_db;

@@ -1,7 +1,7 @@
 //! Terminal renderer for the shared RyeOs view model.
 //!
 //! This is intentionally a renderer only: it consumes `RyeOsViewModel`
-//! and emits a terminal `TextSurface`. RyeOs state, actions, and
+//! and emits a terminal `TextSurface`. RyeOs state, intents, and
 //! effects remain in `ryeos-client-base` so terminal and web share the
 //! same product semantics.
 //!
@@ -50,7 +50,9 @@ impl RyeOsTerminalRenderer {
         height: u16,
     ) -> std::io::Result<()> {
         let surface = build_surface(vm, width as usize, height as usize);
-        render_text::render_text_surface(stdout, &surface, &mut self.prev, 0, 0)
+        render_text::render_text_surface(stdout, &surface, self.prev.as_ref(), 0, 0)?;
+        self.prev = Some(surface);
+        Ok(())
     }
 }
 
@@ -132,7 +134,7 @@ fn draw_layout_node(
             tile_id,
             focused,
             title,
-            actions,
+            intents,
             view,
             chrome_hidden,
             background_transparent,
@@ -150,7 +152,7 @@ fn draw_layout_node(
                     tile_id,
                     *focused,
                     title,
-                    actions.len(),
+                    intents.len(),
                     view,
                     input.as_ref(),
                     border,
@@ -225,6 +227,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
     if let RyeOsViewVm::Timeline {
         entries,
         entry_indents,
+        entry_arrived_at_ms,
         selected,
         entry_expandable,
         entry_expanded,
@@ -236,11 +239,15 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
             surface,
             rect,
             entries,
-            entry_indents,
+            widgets::timeline::TimelineEntryMeta {
+                indents: entry_indents,
+                arrived_at_ms: entry_arrived_at_ms,
+                expandable: entry_expandable,
+                expanded: entry_expanded,
+                details: entry_details,
+            },
             *selected,
-            entry_expandable,
-            entry_expanded,
-            entry_details,
+            now_ms,
         );
         return;
     }
@@ -255,7 +262,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
         return;
     }
     if let RyeOsViewVm::Sections { sections, .. } = view {
-        widgets::sections::draw_sections(surface, rect, sections);
+        widgets::sections::draw_sections(surface, rect, sections, now_ms);
         return;
     }
     if let RyeOsViewVm::Table { columns, rows, .. } = view {
@@ -477,9 +484,9 @@ mod tests {
             cells
         };
         let mut core = empty_center_core();
-        core.generation = 0;
+        core.runtime.now_ms = 0;
         let a = styled(&build_surface(&build_view_model(&core), 96, 28));
-        core.generation = 1;
+        core.runtime.now_ms = ryeos_client_base::ui::scene_model::SCENE_FRAME_MS;
         let b = styled(&build_surface(&build_view_model(&core), 96, 28));
         assert_ne!(a, b, "the backdrop renders differently across generations");
     }

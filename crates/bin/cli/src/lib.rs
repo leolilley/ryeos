@@ -3,6 +3,7 @@
 // Public surface for integration tests.
 
 pub mod arg_bind;
+pub mod daemon_preflight;
 pub mod effective_metadata;
 pub mod error;
 pub mod exit;

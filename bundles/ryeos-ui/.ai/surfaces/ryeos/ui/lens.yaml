@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-07T04:10:29Z:9693f198e32f01db4b6e521fee82410d2b06da1761fe16bc63a7f252d37aa338:bls5svqwZPzqlS9g4YNXcZPbJq+8/IGd0IC4Kx5liWFrqam/TwgJTKm/qetjFQVkhaJ4ya9L4b2k3/aq8eu/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:19Z:797cd808b9af93c359f5a2e8763f7814e4280a959377544ed198bc682ad5f332:Mkp7A05bp8hDz3MRV/OmJPoaVTIZ1YIz77bWxryqPy6NoWoPf4xt/XS2Sjmj68962SzXZgNuaScXU456l1h5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 version: "1.0.0"
 description: >-
@@ -34,21 +33,32 @@ style:
 
 backdrop: view:ryeos/backdrop/prism-shards
 
-# The full lens set — swap the single center lens to reach any of these.
+# The full lens set as the launcher's tree — each group a foldable header,
+# every view under it launchable. Ctrl+←/→ cycles the flattened declared
+# order. Views no group lists still surface: the engine appends them under
+# path-derived groups, so nothing is unreachable.
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/projects/list
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
-  - view:ryeos/node/events
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/graph/topology
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+      - view:ryeos/thread/transcript
+      - view:ryeos/threads/detail
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/graph/topology
+      - view:ryeos/commands/grammar
 
 overlays:
   views:
@@ -71,7 +81,7 @@ overlays:
   shortcuts:
     title: Shortcuts
     widget: table
-    columns: [Keys, Action]
+    columns: [Keys, Intent]
     source: { ref: "runtime:shortcuts" }
     hint: "type to filter shortcuts · esc to close"
 

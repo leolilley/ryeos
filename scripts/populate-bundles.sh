@@ -212,7 +212,6 @@ STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
 BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
 RYEOS_UI_BIN="$RYEOS_UI/.ai/bin/$TRIPLE"
-HOSTED_NODE_BIN="$HOSTED_NODE/.ai/bin/$TRIPLE"
 
 # Bin dirs for exactly the bin-managed bundles this set builds.
 for BUNDLE_DIR in "${BUNDLE_DIRS[@]}"; do
@@ -226,7 +225,7 @@ case "$BUNDLE_SET" in
   full)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-browser-tools \
-          ryeos-ui-terminal ryeos-ui-web)
+          ryeos-client-terminal ryeos-client-web)
     ;;
   central-host)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \

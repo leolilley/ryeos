@@ -22,6 +22,14 @@ use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams
 use ryeos_app::vault::VaultReadError;
 use ryeos_runtime::events::RuntimeEventType;
 
+mod runtime_request;
+mod terminal;
+
+use runtime_request::{spawn_runtime, SpawnRuntimeParams};
+use terminal::{
+    fallback_finalization, is_runtime_terminal_status, normalize_runtime_terminal_status,
+};
+
 /// Typed error for native executor materialization failures.
 ///
 /// Raised by [`resolve_native_executor_path`] when the bundle CAS
@@ -235,6 +243,30 @@ pub enum BuildAndLaunchError {
     CapabilityRejected { reason: String },
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
+}
+
+impl BuildAndLaunchError {
+    /// Whether a launch failure is an infrastructure interruption that is safe
+    /// to re-drive without changing the authored execution. Keep this deliberately
+    /// narrow: capability, secret, materialization, and unknown failures are
+    /// deterministic until proven otherwise.
+    fn retryable_launch_interruption(&self) -> bool {
+        match self {
+            Self::Internal(error) => error.chain().any(|cause| {
+                cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(
+                        io.kind(),
+                        std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                    )
+                })
+            }),
+            Self::Materialization(_)
+            | Self::MissingSecrets { .. }
+            | Self::CapabilityRejected { .. } => false,
+        }
+    }
 }
 
 impl From<serde_json::Error> for BuildAndLaunchError {
@@ -1776,6 +1808,7 @@ async fn run_claimed_thread_row_inner(
         .as_ref()
         .and_then(|preflight| preflight.env_var.clone());
     let app_root_owned = state.config.app_root.clone();
+    let sandbox_enabled = state.config.sandbox_enabled;
     let cas_root_owned = state.config.app_root.join("cas");
     let checkpoint_dir_owned = checkpoint_dir.clone();
     // Execution starts at the exec boundary inside the blocking task, and the
@@ -1816,6 +1849,7 @@ async fn run_claimed_thread_row_inner(
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
             app_root: &app_root_owned,
+            sandbox_enabled,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
             // A machine continuation of a replay-aware kind resumes from the
@@ -1895,63 +1929,10 @@ async fn run_claimed_thread_row_inner(
         if terminal_status == "failed" && state.state_store.thread_has_kill_command(&thread_id)? {
             terminal_status = "killed";
         }
-        let terminal_error = if terminal_status == "completed" {
-            None
-        } else {
-            Some(json!({
-                "reason": "runtime_exited_without_callback_finalization",
-                "runtime_status": runtime_result.status.clone(),
-                "result": runtime_result.result.clone(),
-            }))
-        };
-        let final_cost =
-            runtime_result
-                .cost
-                .as_ref()
-                .map(|cost| ryeos_engine::contracts::FinalCost {
-                    turns: 0,
-                    input_tokens: cost.input_tokens as i64,
-                    output_tokens: cost.output_tokens as i64,
-                    spend: cost.total_usd,
-                    provider: None,
-                    basis: cost.basis.clone(),
-                    metadata: None,
-                });
-        // Build the canonical managed envelope from the parsed RuntimeResult
-        // (outputs/warnings/raw cost) BEFORE the params move `terminal_error`, so
-        // a followed child finalized on this executor-supervised fallback preserves
-        // its structured return to the parent's resume — same shape live dispatch
-        // returns.
-        let raw_cost = runtime_result
-            .cost
-            .as_ref()
-            .and_then(|c| serde_json::to_value(c).ok());
-        let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
-            terminal_status,
-            runtime_result.result.as_ref(),
-            terminal_error.as_ref(),
-            raw_cost.as_ref(),
-            &runtime_result.outputs,
-            &runtime_result.warnings,
-        );
-        let finalized = state.threads.finalize_thread_with_managed_envelope(
-            &ThreadFinalizeParams {
-                thread_id: thread_id.clone(),
-                status: terminal_status.to_string(),
-                outcome_code: if terminal_status == "completed" {
-                    Some("success".to_string())
-                } else {
-                    Some(terminal_status.to_string())
-                },
-                result: runtime_result.result.clone(),
-                error: terminal_error,
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost,
-                summary_json: None,
-            },
-            managed_envelope,
-        )?;
+        let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
+        let finalized = state
+            .threads
+            .finalize_thread_with_managed_envelope(&fallback.params, fallback.managed_envelope)?;
         // Live parent-resume kick: a followed child finalized on this fallback
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
         // to `ready`, so wake the parent now instead of waiting for a restart.
@@ -2529,13 +2510,24 @@ async fn launch_claimed_follow_child(
             thread.chain_root_id
         )));
     }
-    let identity = state
+    let metadata = state
         .state_store
         .get_launch_metadata(&thread_id)?
-        .and_then(|m| m.resume_context)
         .ok_or_else(|| {
             anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
         })?;
+    let persisted_parent_context =
+        metadata
+            .follow_parent_context
+            .map(|p| crate::dispatch::ParentExecutionContext {
+                parent_thread_id: p.parent_thread_id,
+                hard_limits: p.hard_limits,
+                depth: p.depth,
+            });
+    let identity = metadata.resume_context.ok_or_else(|| {
+        anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
+    })?;
+    let parent_context = parent_context.or(persisted_parent_context);
 
     let mut params =
         crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
@@ -2598,8 +2590,8 @@ async fn launch_claimed_follow_child(
             // Fresh launch, not a checkpoint resume.
             checkpoint_resume_mode: CheckpointResumeMode::None,
             // Clamp the child to the parent's hard limits + launch at parent depth
-            // + 1 on the hot path; `None` on reconcile (root behavior), exactly like
-            // a normal callback-dispatched native-resume child.
+            // + 1 on the hot path; reconcile reconstructs the persisted parent
+            // execution context below rather than silently granting root limits.
             parent_execution_context: parent_context.as_ref(),
         },
         thread,
@@ -2656,6 +2648,37 @@ pub async fn launch_follow_child(
             return Err(e.into());
         }
     };
+
+    // Cancellation tombstones are checked after claiming, so admission and an
+    // ancestor cancel cannot race into a spawn. Finalize this never-launched row
+    // and wake its own follow chain immediately.
+    if state
+        .state_store
+        .launch_window_is_cancelled(&thread.chain_root_id)?
+    {
+        let chain_root = thread.chain_root_id.clone();
+        let cancelled =
+            state
+                .threads
+                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                    thread_id: thread.thread_id.clone(),
+                    status: "cancelled".into(),
+                    outcome_code: Some("cancelled".into()),
+                    result: None,
+                    error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+                    metadata: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    summary_json: None,
+                });
+        let _ = state
+            .state_store
+            .release_thread_launch_claim(child_id, &claim_id);
+        cancelled?;
+        state.state_store.discard_window_member(&chain_root)?;
+        kick_follow_resume_if_ready(&state, &chain_root);
+        return Ok(SuccessorLaunchOutcome::Skipped("cancelled"));
+    }
 
     // A terminal row is already done (a duplicate trigger or a stale-lease reclaim
     // of a settled child) — release and skip without finalizing.
@@ -3066,6 +3089,19 @@ pub async fn launch_follow_resume_successor(
         // not-created branch below).
         Ok(skipped) => Ok(skipped),
         Err(e) => {
+            // A transient filesystem/CAS interruption leaves the successor
+            // `created` and the waiter `resuming`. Preserve both so the periodic
+            // follow reconciler can safely re-drive the idempotent checkpoint
+            // splice and launch. Deterministic defects still terminalize below.
+            if e.retryable_launch_interruption() {
+                tracing::warn!(
+                    follow_key,
+                    successor_id,
+                    error = %e,
+                    "follow-resume launch interrupted; leaving waiter for reconcile"
+                );
+                return Err(e);
+            }
             // A failed parent-resume finalizes the successor. If THIS parent chain is
             // itself the child of an OUTER follow (nested follow), that finalize flips
             // the outer waiter to ready — so kick it. The follow-resume successor
@@ -3080,6 +3116,34 @@ pub async fn launch_follow_resume_successor(
             Err(e)
         }
     }
+}
+
+fn follow_resume_payload(fanout: bool, envelopes: Vec<Value>) -> Value {
+    if !fanout {
+        return envelopes.into_iter().next().unwrap_or(Value::Null);
+    }
+    let statuses: Vec<String> = envelopes
+        .iter()
+        .map(|envelope| {
+            if ryeos_runtime::envelope::envelope_succeeded(envelope) {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            }
+        })
+        .collect();
+    let failed = statuses
+        .iter()
+        .filter(|status| status.as_str() == "failed")
+        .count();
+    let expected = envelopes.len();
+    json!({
+        "fanout": true,
+        "items": envelopes,
+        "statuses": statuses,
+        "failed": failed,
+        "expected": expected,
+    })
 }
 
 async fn launch_follow_resume_claimed(
@@ -3113,12 +3177,23 @@ async fn launch_follow_resume_claimed(
         return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
     }
 
-    let terminal_envelope = waiter.terminal_envelope.clone().ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "follow-resume: waiter {} has no terminal envelope",
-            waiter.follow_key
-        ))
-    })?;
+    let mut envelopes = Vec::with_capacity(waiter.expected_children as usize);
+    for index in 0..waiter.expected_children {
+        let child = state
+            .state_store
+            .get_follow_child(&waiter.follow_key, index)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "follow-resume: missing child index {index}"
+                ))
+            })?;
+        envelopes.push(child.terminal_envelope.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: child index {index} has no terminal envelope"
+            ))
+        })?);
+    }
+    let terminal_envelope = follow_resume_payload(waiter.fanout, envelopes);
 
     // Mark resuming (ready→resuming; idempotent on resuming) BEFORE mutating the
     // successor's checkpoint, so a crash mid-resume is re-driven by reconcile.
@@ -3153,192 +3228,6 @@ async fn launch_follow_resume_claimed(
     launch_claimed_successor(state, successor, SuccessorMode::Follow)
         .await
         .map(SuccessorLaunchOutcome::Launched)
-}
-
-struct SpawnRuntimeParams<'a> {
-    descriptor: &'a ryeos_engine::protocols::ProtocolDescriptor,
-    binary: &'a str,
-    project_path: &'a Path,
-    envelope: &'a LaunchEnvelope,
-    timeout_secs: u64,
-    callback: &'a EnvelopeCallback,
-    thread_id: &'a str,
-    vault_bindings: &'a [(String, String)],
-    provider_secret_name: Option<&'a str>,
-    thread_auth_token: &'a str,
-    roots: ryeos_app::env_contract::DaemonRootEnv,
-    app_root: &'a Path,
-    cas_root: &'a Path,
-    /// Daemon-allocated checkpoint dir for a replay-aware (`native_resume`)
-    /// runtime; `Some` injects `RYEOS_CHECKPOINT_DIR` so the runtime writes
-    /// restart-safe state. `None` for runtimes that declare no `native_resume`.
-    checkpoint_dir: Option<&'a Path>,
-    /// Inject `RYEOS_RESUME=1` so a replay-aware runtime loads its checkpoint
-    /// instead of cold-starting.
-    is_resume: bool,
-}
-
-fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
-    let SpawnRuntimeParams {
-        descriptor,
-        binary,
-        project_path,
-        envelope,
-        timeout_secs,
-        callback,
-        thread_id,
-        vault_bindings,
-        provider_secret_name,
-        thread_auth_token,
-        roots,
-        app_root,
-        cas_root,
-        checkpoint_dir,
-        is_resume,
-    } = params;
-    let secret_map: std::collections::BTreeMap<String, String> =
-        vault_bindings.iter().cloned().collect();
-
-    // Use the protocol builder to produce the SubprocessSpec.
-    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
-        .expect("hardcoded runtime:spawn ref is valid");
-    let callback_bindings = ryeos_engine::protocols::CallbackBindings {
-        socket_path: callback.socket_path.to_string_lossy().to_string(),
-        token: callback.token.clone(),
-    };
-    let build_request = ryeos_engine::protocols::BuildRequest {
-        item_ref: &item_ref,
-        binary_path: Path::new(binary),
-        args: &[
-            "--project-path".to_string(),
-            project_path.to_string_lossy().to_string(),
-        ],
-        cwd: project_path,
-        project_path,
-        thread_id,
-        callback: Some(&callback_bindings),
-        vault_bindings,
-        launch_envelope: Some(envelope),
-        timeout: std::time::Duration::from_secs(timeout_secs),
-        acting_principal: "", // not needed for env injection in runtime path
-        cas_root,
-        app_root,
-        thread_auth_token,
-    };
-
-    let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)
-        .map_err(|e| anyhow::anyhow!("builder failed: {e}"))?;
-
-    let protocol_bindings = spec.env.iter().map(|(key, value)| {
-        let source = descriptor
-            .env_injections
-            .iter()
-            .find(|injection| injection.name == *key)
-            .map(|injection| injection.source)
-            .ok_or_else(|| anyhow::anyhow!("protocol builder emitted undeclared env `{key}`"))?;
-        Ok(ryeos_app::env_contract::EnvBinding::new(
-            key.clone(),
-            value.clone(),
-            ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection { source },
-        ))
-    });
-    let mut protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
-    // Replay-aware runtimes: surface the daemon-allocated checkpoint dir (and the
-    // resume flag) so the runtime writes / reloads restart-safe state via
-    // `ryeos_runtime::CheckpointWriter`.
-    if let Some(ckpt) = checkpoint_dir {
-        protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
-            "RYEOS_CHECKPOINT_DIR",
-            ckpt.display().to_string(),
-            ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
-        ));
-        if is_resume {
-            protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
-                "RYEOS_RESUME",
-                "1",
-                ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
-            ));
-        }
-    }
-
-    let declared_secret_bindings = secret_map
-        .iter()
-        .filter(|(key, _)| Some(key.as_str()) != provider_secret_name)
-        .map(|(key, value)| (key.clone(), value.clone()));
-    let provider_secret_bindings = secret_map
-        .iter()
-        .filter(|(key, _)| Some(key.as_str()) == provider_secret_name)
-        .map(|(key, value)| (key.clone(), value.clone()));
-    spec.env = ryeos_app::env_contract::EnvContractBuilder::new()
-        .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
-            (
-                key.to_string_lossy().into_owned(),
-                value.to_string_lossy().into_owned(),
-            )
-        }))?
-        .with_daemon_roots(roots)?
-        .with_bindings(
-            ryeos_app::env_contract::EnvSourceKind::DeclaredSecret,
-            declared_secret_bindings,
-        )?
-        .with_bindings(
-            ryeos_app::env_contract::EnvSourceKind::ProviderSecret,
-            provider_secret_bindings,
-        )?
-        .with_typed_bindings(protocol_bindings)?
-        .build();
-
-    // sandbox_wrap is identity today; the sandbox wave fills it in.
-    let spec = ryeos_engine::subprocess_spec::sandbox_wrap(spec)
-        .map_err(|e| anyhow::anyhow!("sandbox_wrap failed: {e}"))?;
-
-    let request = super::lillux_bridge::to_lillux_request(&spec);
-    let result = lillux::run(request);
-
-    if !result.success {
-        return Ok(RuntimeResult {
-            success: false,
-            status: if result.timed_out {
-                "timed_out".to_string()
-            } else {
-                "failed".to_string()
-            },
-            thread_id: String::new(),
-            result: Some(json!(result.stderr.clone())),
-            outputs: Value::Null,
-            cost: None,
-            warnings: Vec::new(),
-        });
-    }
-
-    serde_json::from_str(&result.stdout).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to parse runtime stdout: {}\nstdout: {}",
-            e,
-            &result.stdout[..result.stdout.len().min(500)]
-        )
-    })
-}
-
-fn is_runtime_terminal_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-    )
-}
-
-fn normalize_runtime_terminal_status(status: &str) -> &'static str {
-    match status {
-        "completed" => "completed",
-        "cancelled" => "cancelled",
-        "killed" => "killed",
-        "timed_out" => "timed_out",
-        "continued" => "continued",
-        // RuntimeResult historically used "errored" internally. The thread
-        // lifecycle vocabulary uses "failed" for that terminal state.
-        "failed" | "errored" => "failed",
-        _ => "failed",
-    }
 }
 
 fn parent_limits_from_context(
@@ -3735,24 +3624,6 @@ mod tests {
         let err = BuildAndLaunchError::from(io_err);
         let msg = format!("{err}");
         assert!(msg.contains("file gone"));
-    }
-
-    #[test]
-    fn runtime_terminal_status_normalization_matches_thread_vocabulary() {
-        assert_eq!(normalize_runtime_terminal_status("completed"), "completed");
-        assert_eq!(normalize_runtime_terminal_status("timed_out"), "timed_out");
-        assert_eq!(normalize_runtime_terminal_status("cancelled"), "cancelled");
-        assert_eq!(normalize_runtime_terminal_status("errored"), "failed");
-        assert_eq!(normalize_runtime_terminal_status("unexpected"), "failed");
-    }
-
-    #[test]
-    fn runtime_terminal_status_detection_rejects_running_states() {
-        assert!(is_runtime_terminal_status("completed"));
-        assert!(is_runtime_terminal_status("failed"));
-        assert!(is_runtime_terminal_status("timed_out"));
-        assert!(!is_runtime_terminal_status("created"));
-        assert!(!is_runtime_terminal_status("running"));
     }
 
     #[test]

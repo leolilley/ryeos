@@ -204,35 +204,15 @@ pub fn read_secret_key(path: &Path) -> Result<VaultSecretKey> {
 pub fn write_secret_key(path: &Path, sk: &VaultSecretKey) -> Result<()> {
     let mut body = encode_secret_key(sk);
     body.push('\n');
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::atomic_write_private(path, body.as_bytes())
+        .with_context(|| format!("write private key {}", path.display()))
 }
 
 /// Atomically write a vault public key.
 pub fn write_public_key(path: &Path, pk: &VaultPublicKey) -> Result<()> {
     let body = encode_public_key(pk) + "\n";
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body.as_bytes()).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::atomic_write(path, body.as_bytes())
+        .with_context(|| format!("write public key {}", path.display()))
 }
 
 /// Read a public key from a file.

@@ -55,6 +55,7 @@ mod integration_tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: upstream.map(|s| s.to_string()),
             requested_by: Some("user:test".to_string()),
+            project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
         }
@@ -69,7 +70,18 @@ mod integration_tests {
             graph_run_id: "gr-1".to_string(),
             step_count: 0,
             frontier_id: None,
+            fanout: false,
+            expected_children: 1,
         }
+    }
+
+    fn set_follow_child(store: &StateStore, follow_key: &str, child: &str, root: &str) {
+        let item_ref = "test/item";
+        let spec_hash =
+            ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &serde_json::json!({}), None);
+        store
+            .set_follow_child(follow_key, 0, item_ref, &spec_hash, child, root)
+            .unwrap();
     }
 
     #[test]
@@ -89,16 +101,42 @@ mod integration_tests {
     }
 
     #[test]
+    fn follow_reserve_rejects_cohort_size_conflict() {
+        let (_tmp, store) = setup_state_store();
+        store.reserve_follow(&follow_seed("size-conflict")).unwrap();
+
+        let mut conflicting = follow_seed("size-conflict");
+        conflicting.fanout = true;
+        conflicting.expected_children = 2;
+        assert!(store.reserve_follow(&conflicting).is_err());
+
+        let waiter = store
+            .get_follow_waiter_by_key("size-conflict")
+            .unwrap()
+            .unwrap();
+        assert!(!waiter.fanout);
+        assert_eq!(waiter.expected_children, 1);
+    }
+
+    #[test]
     fn follow_set_child_refuses_overwrite() {
         let (_tmp, store) = setup_state_store();
         store.reserve_follow(&follow_seed("k1")).unwrap();
-        store.set_follow_child("k1", "C", "C").unwrap();
+        set_follow_child(&store, "k1", "C", "C");
         // Idempotent: the identical child is a no-op.
-        store.set_follow_child("k1", "C", "C").unwrap();
+        set_follow_child(&store, "k1", "C", "C");
         // A different child would strand the original → refused.
-        assert!(store.set_follow_child("k1", "C2", "C2").is_err());
+        let hash = ryeos_app::runtime_db::follow_child_spec_hash(
+            "test/item",
+            &serde_json::json!({}),
+            None,
+        );
+        assert!(store
+            .set_follow_child("k1", 0, "test/item", &hash, "C2", "C2")
+            .is_err());
         let w = store.get_follow_waiter_by_key("k1").unwrap().unwrap();
-        assert_eq!(w.child_thread_id.as_deref(), Some("C"));
+        assert_eq!(w.children.len(), 1);
+        assert_eq!(w.children[0].child_thread_id, "C");
     }
 
     #[test]
@@ -116,7 +154,7 @@ mod integration_tests {
         store.reserve_follow(&follow_seed("k3")).unwrap();
         // Neither child nor successor recorded → cannot mark waiting.
         assert!(store.mark_follow_waiting("k3").is_err());
-        store.set_follow_child("k3", "C", "C").unwrap();
+        set_follow_child(&store, "k3", "C", "C");
         // Child but no successor → still cannot.
         assert!(store.mark_follow_waiting("k3").is_err());
         store.set_follow_parent_successor("k3", "S").unwrap();
@@ -133,7 +171,7 @@ mod integration_tests {
     fn follow_child_terminal_transitions_waiting_to_ready_once() {
         let (_tmp, store) = setup_state_store();
         store.reserve_follow(&follow_seed("k4")).unwrap();
-        store.set_follow_child("k4", "C", "Croot").unwrap();
+        set_follow_child(&store, "k4", "C", "Croot");
         store.set_follow_parent_successor("k4", "S").unwrap();
         store.mark_follow_waiting("k4").unwrap();
 
@@ -145,7 +183,7 @@ mod integration_tests {
         assert!(first);
         let w = store.get_follow_waiter_by_key("k4").unwrap().unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
-        assert_eq!(w.child_terminal_status.as_deref(), Some("completed"));
+        assert_eq!(w.children[0].terminal_status.as_deref(), Some("completed"));
         // Duplicate identical terminal is a no-op (already ready) → false.
         let second = store
             .mark_follow_child_terminal("Croot", "C", "completed", &envelope)
@@ -211,7 +249,7 @@ mod integration_tests {
         store
             .create_thread(&make_thread("C", "C", "graph", "test/graph", None))
             .unwrap();
-        store.set_follow_child("P/gr-1/node-a/0", "C", "C").unwrap();
+        set_follow_child(&store, "P/gr-1/node-a/0", "C", "C");
         // Parent follow-resume successor: created (not launched), settles parent.
         store
             .create_follow_resume_successor(
@@ -231,7 +269,8 @@ mod integration_tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::WAITING);
-        assert_eq!(w.child_thread_id.as_deref(), Some("C"));
+        assert_eq!(w.children.len(), 1);
+        assert_eq!(w.children[0].child_thread_id, "C");
         assert_eq!(w.parent_successor_thread_id.as_deref(), Some("S"));
         // Child is a fresh root.
         let child = store.get_thread("C").unwrap().unwrap();
@@ -254,7 +293,7 @@ mod integration_tests {
             .unwrap();
         seed_continuable(&store, "P", "graph");
         store.reserve_follow(&follow_seed("k")).unwrap();
-        store.set_follow_child("k", "C", "C").unwrap();
+        set_follow_child(&store, "k", "C", "C");
         // A prior attempt created the follow-resume successor (parent now
         // continued) but crashed before recording it on the waiter.
         store
@@ -1592,7 +1631,7 @@ mod integration_tests {
     // ── Cancel / attach_process status guard tests ────────────────
 
     #[test]
-    fn attach_process_skips_terminal_thread() {
+    fn attach_process_rejects_terminal_thread() {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread(
@@ -1620,18 +1659,20 @@ mod integration_tests {
             .finalize_thread("T-skip-attach", &finalize)
             .expect("finalize");
 
-        // attach_thread_process should succeed but NOT write stale PGID.
-        store
+        let error = store
             .attach_thread_process(
                 "T-skip-attach",
                 99999,
                 99999,
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
-            .expect("attach_process on terminal thread should succeed (no-op)");
+            .expect_err("attach_process on a terminal thread must fail loudly");
+        assert_eq!(
+            error.to_string(),
+            "refusing to attach process 99999/99999 to terminal thread T-skip-attach (cancelled)"
+        );
 
-        // Verify PGID was NOT written — the thread is terminal, attach
-        // should have been skipped.
+        // Verify the rejected attachment did not write a stale PGID.
         let detail = store
             .get_thread("T-skip-attach")
             .expect("get_thread")

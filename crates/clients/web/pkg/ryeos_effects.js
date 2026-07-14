@@ -1,4 +1,4 @@
-export async function runEffect(effect) {
+export async function runEffect(effect, invocationContext = {}) {
   const kind = effect.kind;
   switch (kind.type) {
     case "fetch_dimension":
@@ -20,7 +20,7 @@ export async function runEffect(effect) {
         kind: kind.kind,
       })));
     case "fetch_source": {
-      const resp = await postJson("/ui/api/actions/invoke", { command_id: kind.source_ref, args: kind.params ?? {} });
+      const resp = await dispatchInvocation(kind.source_ref, kind.params ?? {}, invocationContext);
       return result(effect, "source_data", resp?.result?.result ?? resp?.result ?? resp);
     }
     case "list_files":
@@ -34,26 +34,31 @@ export async function runEffect(effect) {
       }));
     case "read_file":
       return result(effect, "file_read", await fileJson("/ui/api/ryeos-ui/files/read", kind));
-    case "invoke_action":
-      return result(effect, "action_invocation", await postJson("/ui/api/actions/invoke", {
-        command_id: kind.command_id,
-        args: kind.args ?? {},
-      }));
+    case "dispatch_invocation":
+      return result(effect, "invocation_dispatch", await dispatchInvocation(kind.item_ref, kind.params ?? {}, invocationContext));
     case "submit_thread_command":
       // Steer the head thread through the shared control channel (session lane).
-      return result(effect, "thread_command_submitted", await postJson("/ui/api/actions/invoke", {
-        command_id: "service:commands/submit",
-        args: { thread_id: kind.thread_id, command_type: kind.command_type },
-      }));
+      return result(effect, "thread_command_submitted", await dispatchInvocation(
+        "service:commands/submit",
+        { thread_id: kind.thread_id, command_type: kind.command_type },
+        invocationContext,
+      ));
     case "invoke": {
       // One daemon path, session-authed: refs and tokens both dispatch
-      // through actions/invoke (read_only + caps enforced server-side).
+      // through invocations/dispatch (read_only + caps enforced server-side).
       const target = kind.target || {};
       const body =
         target.form === "tokens"
-          ? { command_id: "service:commands/dispatch", args: { tokens: target.tokens, ...(kind.params ?? {}) } }
-          : { command_id: target.item_ref, args: kind.params ?? {} };
-      const resp = await postJson("/ui/api/actions/invoke", body);
+          ? {
+              itemRef: "service:commands/dispatch",
+              params: {
+                project_path: "",
+                tokens: target.tokens,
+                arguments: kind.params ?? {},
+              },
+            }
+          : { itemRef: target.item_ref, params: kind.params ?? {} };
+      const resp = await dispatchInvocation(body.itemRef, body.params, invocationContext);
       // execute envelope: resp.result = { thread: {...}, result: <contract> }
       const inner = resp?.result?.result ?? resp?.result ?? resp;
       return result(effect, "invoked", inner);
@@ -117,6 +122,34 @@ export function failedResultFor(effect, error) {
   };
 }
 
+export async function applyUiIntent(intent, payload = {}, options = {}) {
+  return postJson("/ui/api/intents/apply", {
+    intent,
+    payload,
+    target_session_id: options.targetSessionId,
+    request_id: options.requestId,
+  });
+}
+
+function bindInvocationContext(params, context) {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return params;
+  const bound = { ...params };
+  for (const [name, value] of Object.entries(context || {})) {
+    if (!Object.hasOwn(bound, name)) continue;
+    if (bound[name] !== "" && bound[name] !== null) continue;
+    if (value === undefined || value === null || value === "") continue;
+    bound[name] = value;
+  }
+  return bound;
+}
+
+async function dispatchInvocation(itemRef, params = {}, context = {}) {
+  return postJson("/ui/api/invocations/dispatch", {
+    target: { kind: "ref", ref: itemRef },
+    params: bindInvocationContext(params, context),
+  });
+}
+
 function result(effect, kind, data) {
   return { id: effect.id, ok: true, kind, data };
 }
@@ -133,7 +166,7 @@ function resultKindFor(effect) {
   if (type === "list_files") return "files_list";
   if (type === "fetch_file_space") return "file_space";
   if (type === "read_file") return "file_read";
-  if (type === "invoke_action") return "action_invocation";
+  if (type === "dispatch_invocation") return "invocation_dispatch";
   if (type === "submit_thread_command") return "thread_command_submitted";
   if (type === "invoke") return "invoked";
   return "browser_only";

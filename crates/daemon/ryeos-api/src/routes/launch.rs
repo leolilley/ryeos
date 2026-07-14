@@ -107,6 +107,10 @@ impl Default for DispatchLaunchOptions {
 /// `options` carries launch-mode, target-site, validate-only, and
 /// op/inputs overrides. When `Default::default()` is used, the
 /// behavior is identical to the previous hard-coded defaults.
+// Execution plumbing: each argument is a distinct leg of the launch's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_dispatch_launch(
     state: &AppState,
     item_ref: crate::routes::parsed_ref::ParsedItemRef,
@@ -237,6 +241,7 @@ pub(crate) fn spawn_dispatch_launch(
                                 origin_site_id: origin_site_id_for_failure_row.clone(),
                                 upstream_thread_id: None,
                                 requested_by: Some(principal_id.clone()),
+                                project_root: None,
                                 usage_subject: usage_subject_for_failure_row.clone(),
                                 usage_subject_asserted_by:
                                     usage_subject_asserted_by_for_failure_row.clone(),
@@ -303,7 +308,7 @@ mod tests {
         let opts = DispatchLaunchOptions::default();
         assert_eq!(opts.launch_mode, "inline");
         assert_eq!(opts.target_site_id, None);
-        assert_eq!(opts.validate_only, false);
+        assert!(!opts.validate_only);
         assert!(opts.call.is_none());
     }
 

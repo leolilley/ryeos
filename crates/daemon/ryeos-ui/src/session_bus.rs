@@ -81,10 +81,7 @@ impl SessionBus {
         let mut inner = self.inner.lock().unwrap();
 
         // Store in replay ring.
-        let ring = inner
-            .rings
-            .entry(session_id.to_string())
-            .or_insert_with(Vec::new);
+        let ring = inner.rings.entry(session_id.to_string()).or_default();
         ring.push(RingEntry {
             id: id.clone(),
             envelope: envelope.clone(),

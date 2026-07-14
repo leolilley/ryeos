@@ -496,7 +496,7 @@ impl SchedulerDb {
                     requester_fingerprint, capabilities, lateness_grace_secs
              FROM schedule_specs WHERE schedule_id = ?1",
         )?;
-        stmt.query_row(params![schedule_id], |row| row_to_spec(row))
+        stmt.query_row(params![schedule_id], row_to_spec)
             .optional()
             .map_err(Into::into)
     }
@@ -510,7 +510,7 @@ impl SchedulerDb {
                     requester_fingerprint, capabilities, lateness_grace_secs
              FROM schedule_specs WHERE enabled = 1",
         )?;
-        let rows = stmt.query_map([], |row| row_to_spec(row))?;
+        let rows = stmt.query_map([], row_to_spec)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -538,10 +538,10 @@ impl SchedulerDb {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows: Vec<ScheduleSpecRecord> = if let Some(st) = schedule_type {
-            stmt.query_map(params![st], |row| row_to_spec(row))?
+            stmt.query_map(params![st], row_to_spec)?
                 .collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map([], |row| row_to_spec(row))?
+            stmt.query_map([], row_to_spec)?
                 .collect::<Result<Vec<_>, _>>()?
         };
         Ok(rows)
@@ -594,7 +594,7 @@ impl SchedulerDb {
             .map(|v| v as &dyn rusqlite::ToSql)
             .collect();
         let rows: Vec<ScheduleSpecRecord> = stmt
-            .query_map(params.as_slice(), |row| row_to_spec(row))?
+            .query_map(params.as_slice(), row_to_spec)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -638,7 +638,7 @@ impl SchedulerDb {
                     last_evaluated_at, updated_at
              FROM schedule_cursors WHERE schedule_id = ?1",
         )?;
-        stmt.query_row(params![schedule_id], |row| row_to_cursor(row))
+        stmt.query_row(params![schedule_id], row_to_cursor)
             .optional()
             .map_err(Into::into)
     }
@@ -667,7 +667,7 @@ impl SchedulerDb {
             .iter()
             .map(|id| id as &dyn rusqlite::ToSql)
             .collect();
-        let rows = stmt.query_map(params.as_slice(), |row| row_to_cursor(row))?;
+        let rows = stmt.query_map(params.as_slice(), row_to_cursor)?;
         let mut map = std::collections::HashMap::new();
         for row in rows {
             let rec = row?;
@@ -857,7 +857,7 @@ impl SchedulerDb {
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE fire_id = ?1",
         )?;
-        stmt.query_row(params![fire_id], |row| row_to_fire(row))
+        stmt.query_row(params![fire_id], row_to_fire)
             .optional()
             .map_err(Into::into)
     }
@@ -913,7 +913,7 @@ impl SchedulerDb {
             .iter()
             .map(|id| id as &dyn rusqlite::ToSql)
             .collect();
-        let rows = stmt.query_map(params.as_slice(), |row| row_to_fire(row))?;
+        let rows = stmt.query_map(params.as_slice(), row_to_fire)?;
         let mut map = std::collections::HashMap::new();
         for row in rows {
             let rec = row?;
@@ -931,7 +931,7 @@ impl SchedulerDb {
              WHERE schedule_id = ?1
              ORDER BY scheduled_at DESC LIMIT 1",
         )?;
-        stmt.query_row(params![schedule_id], |row| row_to_fire(row))
+        stmt.query_row(params![schedule_id], row_to_fire)
             .optional()
             .map_err(Into::into)
     }
@@ -943,7 +943,7 @@ impl SchedulerDb {
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE status = 'dispatched'",
         )?;
-        let rows = stmt.query_map([], |row| row_to_fire(row))?;
+        let rows = stmt.query_map([], row_to_fire)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -960,7 +960,7 @@ impl SchedulerDb {
              WHERE schedule_id = ?1 AND status = 'dispatched'
              ORDER BY scheduled_at DESC LIMIT 1",
         )?;
-        stmt.query_row(params![schedule_id], |row| row_to_fire(row))
+        stmt.query_row(params![schedule_id], row_to_fire)
             .optional()
             .map_err(Into::into)
     }
@@ -973,7 +973,7 @@ impl SchedulerDb {
              FROM schedule_fires
              WHERE thread_id = ?1 AND status = 'dispatched'",
         )?;
-        stmt.query_row(params![thread_id], |row| row_to_fire(row))
+        stmt.query_row(params![thread_id], row_to_fire)
             .optional()
             .map_err(Into::into)
     }
@@ -989,7 +989,7 @@ impl SchedulerDb {
              FROM schedule_fires
              WHERE status = 'dispatched' AND fired_at IS NOT NULL AND fired_at < ?1",
         )?;
-        let rows = stmt.query_map(params![cutoff], |row| row_to_fire(row))?;
+        let rows = stmt.query_map(params![cutoff], row_to_fire)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1069,7 +1069,7 @@ impl SchedulerDb {
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(params![schedule_id, limit as i64], |row| row_to_fire(row))?
+            stmt.query_map(params![schedule_id, limit as i64], row_to_fire)?
                 .collect::<Result<Vec<_>, _>>()?
         };
         Ok((fires, total))
@@ -1135,7 +1135,7 @@ fn get_fire_conn(conn: &Connection, fire_id: &str) -> Result<Option<FireRecord>>
                 status, trigger_reason, outcome, signer_fingerprint
          FROM schedule_fires WHERE fire_id = ?1",
     )?;
-    stmt.query_row(params![fire_id], |row| row_to_fire(row))
+    stmt.query_row(params![fire_id], row_to_fire)
         .optional()
         .map_err(Into::into)
 }
@@ -1148,7 +1148,7 @@ fn get_spec_conn(conn: &Connection, schedule_id: &str) -> Result<Option<Schedule
                 requester_fingerprint, capabilities, lateness_grace_secs
          FROM schedule_specs WHERE schedule_id = ?1",
     )?;
-    stmt.query_row(params![schedule_id], |row| row_to_spec(row))
+    stmt.query_row(params![schedule_id], row_to_spec)
         .optional()
         .map_err(Into::into)
 }
@@ -1161,7 +1161,7 @@ fn get_last_fire_conn(conn: &Connection, schedule_id: &str) -> Result<Option<Fir
          WHERE schedule_id = ?1
          ORDER BY scheduled_at DESC LIMIT 1",
     )?;
-    stmt.query_row(params![schedule_id], |row| row_to_fire(row))
+    stmt.query_row(params![schedule_id], row_to_fire)
         .optional()
         .map_err(Into::into)
 }

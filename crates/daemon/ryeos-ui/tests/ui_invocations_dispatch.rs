@@ -1,4 +1,4 @@
-// Tests for `ui.actions.invoke` handler.
+// Tests for `ui.invocations.dispatch` handler.
 
 mod test_state;
 use test_state::build_test_state;
@@ -29,7 +29,7 @@ fn read_only_context() -> LaunchContext {
 }
 
 #[tokio::test]
-async fn unknown_command_dispatched_to_session_bus() {
+async fn arbitrary_event_targets_are_rejected() {
     let (_tmp, state) = build_test_state();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
@@ -42,24 +42,26 @@ async fn unknown_command_dispatched_to_session_bus() {
         false,
     );
 
-    let result = (ryeos_ui::handlers::ui_actions_invoke::DESCRIPTOR.handler)(
+    let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "command_id": "custom.action",
-            "args": { "key": "val" }
+            "target": { "kind": "ref", "ref": "custom.event" },
+            "params": { "key": "val" }
         }),
         ctx,
         Arc::new(state.clone()),
     )
-    .await
-    .expect("should succeed");
+    .await;
 
-    assert_eq!(result["status"], "dispatched");
-    assert_eq!(result["command_id"], "custom.action");
-    assert!(result["invocation_id"].is_string());
+    assert!(result.is_err(), "arbitrary UI event dispatch should fail");
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("canonical ref"),
+        "expected canonical ref message, got: {msg}"
+    );
 }
 
 #[tokio::test]
-async fn read_only_session_rejects_action() {
+async fn read_only_session_rejects_nonlocal_invocation() {
     let (_tmp, state) = build_test_state();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
@@ -72,16 +74,19 @@ async fn read_only_session_rejects_action() {
         false,
     );
 
-    let result = (ryeos_ui::handlers::ui_actions_invoke::DESCRIPTOR.handler)(
+    let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "command_id": "some.action",
+            "target": { "kind": "ref", "ref": "service:commands/submit" },
         }),
         ctx,
         Arc::new(state),
     )
     .await;
 
-    assert!(result.is_err(), "read-only should reject actions");
+    assert!(
+        result.is_err(),
+        "read-only should reject nonlocal invocations"
+    );
     let msg = format!("{:#}", result.unwrap_err());
     assert!(
         msg.contains("read-only"),
@@ -95,9 +100,10 @@ async fn session_cookie_required() {
 
     let ctx = HandlerContext::anonymous();
 
-    let result = (ryeos_ui::handlers::ui_actions_invoke::DESCRIPTOR.handler)(
+    let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "command_id": "some.action",
+            "target": { "kind": "ref", "ref": "service:ui/seat/close" },
+            "params": { "thread_id": "T-1" }
         }),
         ctx,
         Arc::new(state),
@@ -113,7 +119,7 @@ async fn session_cookie_required() {
 }
 
 #[tokio::test]
-async fn action_publishes_to_session_bus() {
+async fn session_local_invocation_publishes_to_session_bus() {
     let (_tmp, state) = build_test_state();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
@@ -132,10 +138,10 @@ async fn action_publishes_to_session_bus() {
         false,
     );
 
-    let result = (ryeos_ui::handlers::ui_actions_invoke::DESCRIPTOR.handler)(
+    let result = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "command_id": "test.action",
-            "args": { "foo": "bar" }
+            "target": { "kind": "ref", "ref": "service:ui/seat/open" },
+            "params": { "surface_ref": "surface:ryeos/ui/base" }
         }),
         ctx,
         Arc::new(state),
@@ -151,8 +157,8 @@ async fn action_publishes_to_session_bus() {
         .expect("timeout")
         .expect("recv error");
 
-    assert_eq!(event.event_type, "action.invoked");
-    assert_eq!(event.payload["command_id"], "test.action");
+    assert_eq!(event.event_type, "invocation.dispatched");
+    assert_eq!(event.payload["target"]["kind"], "ref");
+    assert_eq!(event.payload["target"]["ref"], "service:ui/seat/open");
     assert_eq!(event.payload["invocation_id"], invocation_id);
-    assert_eq!(event.payload["args"]["foo"], "bar");
 }

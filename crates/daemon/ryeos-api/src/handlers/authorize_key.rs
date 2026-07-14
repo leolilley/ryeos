@@ -236,7 +236,7 @@ mod tests {
         // Grammar layer accepts "*" — wildcard policy lives elsewhere.
         assert!(validate_scope_pattern("*").is_ok());
         // The handler's step-6 check rejects any list containing a wildcard.
-        let normalized = vec![
+        let normalized = [
             "ryeos.execute.service.bundle/install".to_string(),
             "*".to_string(),
         ];

@@ -13,6 +13,7 @@ export function overlayDialog(state, shell) {
   const dialog = el("section", "ryeos-command-dialog");
   dialog.setAttribute("role", "dialog");
   dialog.setAttribute("aria-label", state.title || "Open RyeOS tile");
+  dialog.setAttribute("aria-modal", "true");
 
   const input = document.createElement("input");
   input.type = "search";
@@ -20,6 +21,11 @@ export function overlayDialog(state, shell) {
   input.autocomplete = "off";
   input.spellcheck = false;
   input.value = state.query || "";
+  input.setAttribute("aria-label", state.title || "Search RyeOS commands");
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-controls", "ryeos-command-listbox");
+  input.setAttribute("aria-expanded", "true");
+  if (choices.length > 0) input.setAttribute("aria-activedescendant", `ryeos-command-option-${selected}`);
   input.setAttribute("data-ryeos-overlay-input", "");
   input.addEventListener("input", () => shell.setOverlayQuery?.(input.value));
   input.addEventListener("keydown", (event) => {
@@ -39,6 +45,8 @@ export function overlayDialog(state, shell) {
   });
 
   const list = el("div", "ryeos-command-list");
+  list.id = "ryeos-command-listbox";
+  list.setAttribute("role", "listbox");
   if (choices.length === 0) {
     const empty = el("div", "ryeos-command-empty");
     empty.textContent = "No matches.";
@@ -47,6 +55,9 @@ export function overlayDialog(state, shell) {
   choices.forEach((item, index) => {
     const row = el("button", `ryeos-command-choice${index === selected ? " selected" : ""}`);
     row.type = "button";
+    row.id = `ryeos-command-option-${index}`;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", index === selected ? "true" : "false");
     row.disabled = item.enabled === false;
     row.append(
       textEl("strong", item.label || item.primary || "View"),
@@ -54,8 +65,8 @@ export function overlayDialog(state, shell) {
     );
     row.addEventListener("click", () => {
       if (item.enabled === false) return;
-      if (item.action && shell.dispatchUi) {
-        shell.dispatchUi({ type: "activate", action: item.action });
+      if (item.intent && shell.dispatchUi) {
+        shell.dispatchUi({ type: "activate", intent: item.intent });
         shell.closeOverlay?.();
       } else {
         shell.chooseOverlay?.(false);
@@ -68,6 +79,20 @@ export function overlayDialog(state, shell) {
   hint.className = "ryeos-command-hint";
   dialog.append(input, list, hint);
   overlay.append(dialog);
+  overlay.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const focusable = [...dialog.querySelectorAll('input, button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
   overlay.addEventListener("mousedown", (event) => {
     if (event.target === overlay) shell.closeOverlay?.();
   });

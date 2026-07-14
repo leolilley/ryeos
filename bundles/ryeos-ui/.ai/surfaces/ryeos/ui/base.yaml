@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-08T06:03:18Z:83a512c246eb7d0020e6aa0a0be16afa9e4c12d14827605f9b043d095d87c9f9:cb4zdKUFzFZiyDi5qh8GCYZMNFcfVGGAut/o5x/zZ/5oQqXuA/3Ngxc0yR1/Vw/qrITMXv0EE6oTstcy33RNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-13T01:54:18Z:f8d1a0f027befd65a13a0bdd049be1007e93c17f77412d0aa3d3da412f066de0:2vfNhAzjMZB/6TvpXNlhpEhmMOChQyY45FN0UoCw1qmmGYHvX+RLCpia6sVO3/Qg3qLkFS8fXV0SyIXEIasXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 version: "1.0.0"
 description: RyeOS UI home space
@@ -10,8 +9,9 @@ tiling:
   stack: { arrange: horizontal }
   insert: end
 
-tiles:
-  - "view:ryeos/backdrop/splash"
+# The base center starts empty — the backdrop scene (below) fills it
+# until the operator opens a lens.
+tiles: []
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
@@ -25,18 +25,26 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/projects/list
-  - view:ryeos/project/files
-  - view:ryeos/project/items
-  - view:ryeos/project/schedules
-  - view:ryeos/items/space
-  - view:ryeos/node/events
-  - view:ryeos/node/remotes
-  - view:ryeos/node/bundles
-  - view:ryeos/node/gc
-  - view:ryeos/commands/grammar
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+      - view:ryeos/thread/transcript
+      - view:ryeos/threads/detail
+  - group: Project
+    views:
+      - view:ryeos/project/files
+      - view:ryeos/project/items
+      - view:ryeos/project/schedules
+      - view:ryeos/items/space
+  - group: Node
+    views:
+      - view:ryeos/projects/list
+      - view:ryeos/node/events
+      - view:ryeos/node/remotes
+      - view:ryeos/node/bundles
+      - view:ryeos/node/gc
+      - view:ryeos/commands/grammar
 
 overlays:
   views:
@@ -59,7 +67,7 @@ overlays:
   shortcuts:
     title: Shortcuts
     widget: table
-    columns: [Keys, Action]
+    columns: [Keys, Intent]
     source: { ref: "runtime:shortcuts" }
     hint: "type to filter shortcuts · esc to close"
 

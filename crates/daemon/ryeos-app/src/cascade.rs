@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 use ryeos_engine::contracts::CancellationMode;
 
 use crate::process::signal_process_group;
+use crate::state::AppState;
 use crate::state_store::StateStore;
+use crate::thread_lifecycle::ThreadFinalizeParams;
 
 /// How hard to stop a thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,94 @@ pub fn cascade_descendants(
         .collect())
 }
 
+/// Cancel durable descendants that have not yet been admitted. Membership is
+/// tombstoned as one store operation before lifecycle finalization, preventing
+/// admission across crashes (and deliberately admitting no replacements).
+pub fn cancel_queued_descendants(
+    state: &AppState,
+    root_thread_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
+    // Admission is only a durable marker, not proof of a spawn. Include admitted
+    // members only while the authoritative row is still created with no live pgid.
+    let mut cancellable = Vec::new();
+    for root in descendants {
+        let Some(thread) = state.state_store.get_thread(&root)? else {
+            continue;
+        };
+        if thread.status == "created"
+            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
+        {
+            cancellable.push(root);
+        }
+    }
+    let removed = state
+        .state_store
+        .launch_window_cancel_members(&cancellable, lillux::time::timestamp_millis())?;
+    for chain_root in &removed {
+        let Some(thread) = state.state_store.get_thread(chain_root)? else {
+            state.state_store.discard_window_member(chain_root)?;
+            continue;
+        };
+        let launch_in_flight = state
+            .state_store
+            .get_launch_claim(&thread.thread_id)?
+            .is_some_and(|claim| claim.lease_expires_at_ms > lillux::time::timestamp_millis());
+        if launch_in_flight {
+            // The launcher owns the sole spawn authorization. Keep the tombstone
+            // durable and let attach_process observe it; never finalize a row
+            // while that launcher may be between spawn and ledger attachment.
+            continue;
+        }
+        if !crate::state_store::is_terminal_status(&thread.status) {
+            state.threads.finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread.thread_id,
+                status: "cancelled".to_string(),
+                outcome_code: Some("cancelled".to_string()),
+                result: None,
+                error: Some(json!({"reason": "ancestor_cancelled_before_launch"})),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })?;
+        }
+        state.state_store.discard_window_member(chain_root)?;
+    }
+    Ok(removed)
+}
+
+pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
+    for root in state.state_store.list_cancelled_window_members()? {
+        let Some(thread) = state.state_store.get_thread(&root)? else {
+            state.state_store.discard_window_member(&root)?;
+            continue;
+        };
+        // Never settle a process-bearing descendant here: it must remain on the
+        // normal signal cascade and let its launcher observe process termination.
+        if !crate::state_store::is_terminal_status(&thread.status)
+            && thread.status == "created"
+            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
+        {
+            state.threads.finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread.thread_id.clone(),
+                status: "cancelled".into(),
+                outcome_code: Some("cancelled".into()),
+                result: None,
+                error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })?;
+        }
+        if crate::state_store::is_terminal_status(&thread.status) || thread.status == "created" {
+            state.state_store.discard_window_member(&root)?;
+        }
+    }
+    Ok(())
+}
+
 /// Signal one thread's process group per `mode`, resolving its CURRENT pgid at
 /// signal time. Returns a report value and NEVER errors: a missing/unreadable
 /// row, a terminal thread, or an absent/non-positive pgid each yields a skip
@@ -120,13 +210,17 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
 /// operator and runtime control paths stop the target itself — not only its
 /// children.
 pub fn stop_thread_and_descendants(
-    store: &StateStore,
+    state: &AppState,
     thread_id: &str,
     mode: CascadeMode,
-) -> anyhow::Result<Value> {
-    let target = signal_thread(store, thread_id, mode);
-    let descendants = cascade_descendants(store, thread_id, mode)?;
-    Ok(json!({ "target": target, "descendants": descendants }))
+) -> anyhow::Result<(Value, Vec<String>)> {
+    let queued = cancel_queued_descendants(state, thread_id)?;
+    let target = signal_thread(&state.state_store, thread_id, mode);
+    let descendants = cascade_descendants(&state.state_store, thread_id, mode)?;
+    Ok((
+        json!({ "target": target, "descendants": descendants, "queued": queued }),
+        queued,
+    ))
 }
 
 #[cfg(test)]

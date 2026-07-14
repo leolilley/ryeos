@@ -55,9 +55,9 @@ pub enum RyeOsEffectKind {
         root: String,
         path: String,
     },
-    InvokeAction {
-        command_id: String,
-        args: serde_json::Value,
+    DispatchInvocation {
+        item_ref: String,
+        params: serde_json::Value,
     },
     /// Submit a typed thread-control command (continue/cancel/kill/interrupt)
     /// to a thread through the shared control channel. Semantic intent only:
@@ -76,7 +76,7 @@ pub enum RyeOsEffectKind {
         target: InvokeRef,
         params: Value,
         /// Whether this invocation launches/continues a conversation (`Launch`)
-        /// or is a discrete service/command action (`Service`). Recorded at
+        /// or is a discrete service/command intent (`Service`). Recorded at
         /// ISSUE time from the emit site — each site knows which it is — so the
         /// result handler branches on intent, never on the target ref. A
         /// `Service` result refreshes and preserves the input; a `Launch`
@@ -134,7 +134,7 @@ pub enum RyeOsEffectResultKind {
     FilesList,
     FileSpace,
     FileRead,
-    ActionInvocation,
+    InvocationDispatch,
     ThreadCommandSubmitted,
     Invoked,
     SourceData,
@@ -142,7 +142,7 @@ pub enum RyeOsEffectResultKind {
 }
 
 /// Whether a generic invocation launches/continues a conversation or is a
-/// discrete service/command action. Set at the emit site (each site knows its
+/// discrete service/command intent. Set at the emit site (each site knows its
 /// own intent); the result handler branches on this rather than sniffing the
 /// target ref — the structural facts (`route_seq`/`ratchet`) are ambiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +151,7 @@ pub enum InvokeIntent {
     /// Launches or continues a conversation (the routed foot input); the result
     /// runs the delivery/ratchet tower.
     Launch,
-    /// A discrete service or command action (row-management affordances); the
+    /// A discrete service or command intent (row-management affordances); the
     /// result refreshes the affected surface and preserves the input.
     Service,
 }

@@ -323,7 +323,7 @@ pub struct AsLaunchedResolutionDigest {
 /// `references` and `referenced_items` carry lateral graph provenance
 /// for kinds that declare `resolve_references`. Trust folding is a
 /// policy decision: `ResolutionOutput.effective_trust_class` folds root
-/// + ancestors; reference consumers inspect reference node/edge trust
+/// and ancestors; reference consumers inspect reference node/edge trust
 /// explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-06T12:24:56Z:aa1dad9c20f7e96586d64068b3bcf14f945198dc9e7f1f101d61a06c7cfff62b:TYDyxdclUMRAcKT9rW9Cy9mrldipkoYDKiNk6+lVJZZYm8YLt7xWgWrB6mRP3iU2VCYk4pxQ5eODXhveZsoIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-13T10:38:44Z:19eb22ad51f0de5459fd81a17191e6101ff38c4f3d63bb6190fb629120525600:QEHiYrQIU6temEgTxvurZTjsS5eftTsqXTnOOHQZ/fsrt7x14DWsSJYuEC6zddap28MVYGV6v18xDa40KBaZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
+title: Transcript
 version: "1.0.0"
 description: >-
   Full event braid transcript for the input route's conversation chain. This is
@@ -16,9 +16,9 @@ source:
 projections:
   expand:
     fields:
+      - payload.payload.key
+      - payload.payload.value
       - event_type
-      - thread_id
-      - chain_root_id
       - chain_seq
       - payload.graph_run_id
       - payload.node
@@ -32,6 +32,10 @@ projections:
       - payload.uri
       - payload.content_hash
   event_kinds:
+    seat.facet:
+      primary: payload.payload.key
+      meta: event_type
+      role: boundary
     cognition_out:
       primary: payload.content
       role: flow

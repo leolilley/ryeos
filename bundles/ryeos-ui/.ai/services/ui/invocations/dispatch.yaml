@@ -1,0 +1,8 @@
+# ryeos:signed:2026-07-09T02:58:36Z:f49264ab1d24a7476d3e7954ddc8cc4d1998d74a9e9f644be59a4115d1294cd0:hGMFoipcT3lrXhNlhy9t4ofy+6kNIeggST8QGT8uAqbeTfqqmU4aC/ajcHfjLqd+2tI/lV2YIHLBwusa5aoKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: invocations/dispatch
+version: "1.0.0"
+description: Dispatch already-lowered executable refs from a Rye OS UI session.
+endpoint: ui.invocations.dispatch
+availability: daemon_only
+required_caps: []

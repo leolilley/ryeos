@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod arg_bind;
+mod daemon_preflight;
 mod dispatcher;
 mod effective_metadata;
 mod error;
@@ -10,6 +11,7 @@ mod help;
 mod lifecycle_commands;
 mod node_descriptors;
 mod offline_dispatch;
+mod presenter;
 mod project_resolve;
 #[cfg(test)]
 mod test_env;

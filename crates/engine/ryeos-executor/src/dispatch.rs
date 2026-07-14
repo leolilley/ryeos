@@ -66,6 +66,13 @@ use crate::executor::{
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 
+mod subprocess_policy;
+pub(crate) use subprocess_policy::strip_binary_ref_prefix;
+pub use subprocess_policy::PreparedManagedLaunch;
+use subprocess_policy::{
+    enforce_runtime_caps, prepare_managed_launch, require_terminal_executor_id,
+};
+
 /// Trusted parent execution context carried out-of-band through schema-driven
 /// dispatch.
 ///
@@ -272,6 +279,14 @@ pub(crate) fn resolve_dispatch_hop(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
 ) -> Result<VerifiedHop, DispatchError> {
+    resolve_dispatch_hop_with_verified(current_ref, ctx, None)
+}
+
+fn resolve_dispatch_hop_with_verified(
+    current_ref: &CanonicalRef,
+    ctx: &ExecutionContext,
+    preverified: Option<VerifiedItem>,
+) -> Result<VerifiedHop, DispatchError> {
     // **B4 fast-path**: if the schema for the ref's kind already
     // declares "no execution block" (config, V5.3 knowledge, …),
     // short-circuit to NotRootExecutable BEFORE attempting engine
@@ -292,27 +307,40 @@ pub(crate) fn resolve_dispatch_hop(
     // for runtime refs — engine.resolve produces content_hash,
     // source_path, and audit data for ALL kinds including runtime.
     // Verification failure is a hard error at the hop boundary.
-    let verified: Option<VerifiedItem> = match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
-        Ok(resolved) => {
-            let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
-                DispatchError::InvalidRef(
-                    current_ref.to_string(),
-                    format!("verification failed: {e}"),
-                )
-            })?;
-            tracing::debug!(
-                item_ref = %current_ref,
-                trust_class = ?v.trust_class,
-                "hop verified"
-            );
-            Some(v)
+    let verified: Option<VerifiedItem> = if let Some(verified) = preverified {
+        if verified.resolved.canonical_ref != *current_ref {
+            return Err(DispatchError::InvalidRef(
+                current_ref.to_string(),
+                format!(
+                    "preverified item ref mismatch: verified '{}'",
+                    verified.resolved.canonical_ref
+                ),
+            ));
         }
-        Err(_) => {
-            // Resolution failed — the ref may not exist on disk. This
-            // is not necessarily fatal: the schema lookup below will
-            // produce a clearer error (SchemaMisconfigured enumerating
-            // available kinds) if the kind has no items at all.
-            None
+        Some(verified)
+    } else {
+        match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
+            Ok(resolved) => {
+                let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
+                    DispatchError::InvalidRef(
+                        current_ref.to_string(),
+                        format!("verification failed: {e}"),
+                    )
+                })?;
+                tracing::debug!(
+                    item_ref = %current_ref,
+                    trust_class = ?v.trust_class,
+                    "hop verified"
+                );
+                Some(v)
+            }
+            Err(_) => {
+                // Resolution failed — the ref may not exist on disk. This
+                // is not necessarily fatal: the schema lookup below will
+                // produce a clearer error (SchemaMisconfigured enumerating
+                // available kinds) if the kind has no items at all.
+                None
+            }
         }
     };
 
@@ -324,7 +352,6 @@ pub(crate) fn resolve_dispatch_hop(
     // **P1.1**: extract thread_profile from the schema's execution
     // block at every hop — even non-terminator hops. The dispatch loop
     // captures this from the first hop as the root subject profile.
-    let thread_profile: Option<String>;
 
     let schema = ctx.engine.kinds.get(&schema_kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
@@ -346,7 +373,7 @@ pub(crate) fn resolve_dispatch_hop(
                 detail: "schema has no `execution:` block".into(),
             })?;
 
-    thread_profile = exec.thread_profile.as_ref().map(|tp| tp.name.clone());
+    let thread_profile: Option<String> = exec.thread_profile.as_ref().map(|tp| tp.name.clone());
 
     // **P1.4**: for runtime-kind refs, also look up the runtime
     // registry. This provides binary_ref, required_caps, and the
@@ -1005,6 +1032,10 @@ fn verified_loader_for_method_runtime(
     ))
 }
 
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_method(
     kind: &str,
     method_name: &str,
@@ -1135,6 +1166,12 @@ pub(crate) async fn dispatch_method(
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(request.acting_principal.to_string()),
+            project_root: Some(
+                request
+                    .project_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| request.project_path.to_path_buf()),
+            ),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         })
@@ -1275,19 +1312,27 @@ pub(crate) async fn dispatch_method(
             &per_spawn,
             roots,
         )
-        .map_err(|e| DispatchError::Internal(e.into()))?;
-        let result = tokio::task::spawn_blocking(move || {
-            lillux::run(lillux::SubprocessRequest {
-                cmd: executor_path_str,
-                args: vec![],
-                cwd: None,
-                envs,
-                stdin_data: Some(stdin_data),
-                timeout: 120.0,
-            })
-        })
-        .await
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+        .map_err(DispatchError::Internal)?;
+        let subprocess_request = lillux::SubprocessRequest {
+            cmd: executor_path_str,
+            args: vec![],
+            cwd: Some(request.project_path.to_string_lossy().into_owned()),
+            envs,
+            stdin_data: Some(stdin_data),
+            timeout: 120.0,
+        };
+        let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+            subprocess_request,
+            state.config.sandbox_enabled,
+            &state.config.app_root,
+            request.project_path,
+            &canonical_ref.to_string(),
+            &thread_id,
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
+            .await
+            .map_err(|e| DispatchError::Internal(e.into()))?;
 
         // Process the runtime result. On failure, return `Err` and let the
         // cleanup below finalize the thread; on success the runtime already
@@ -1495,6 +1540,8 @@ pub(crate) fn finalize_params(
 pub async fn dispatch_service(
     item_ref: &str,
     thread_profile: &str,
+    verified: Option<VerifiedItem>,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -1529,45 +1576,42 @@ pub async fn dispatch_service(
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
         } => {
-            let verified = service_executor::resolve_and_verify(
-                &ctx.engine,
-                &ctx.plan_ctx,
-                item_ref,
-                Some("service"),
-            )
-            .map_err(|e| {
-                match e.downcast_ref::<ryeos_engine::error::EngineError>() {
-                    // The service item YAML is absent from every search
-                    // space — the bundle shipping it is not installed.
-                    // Surface the installed-bundle list instead of an
-                    // opaque 500 so a remote operator can repair the
-                    // deployment without source-level debugging.
-                    Some(ryeos_engine::error::EngineError::ItemNotFound {
-                        searched_spaces,
-                        ..
-                    }) => {
-                        let mut installed_bundles: Vec<String> = state
-                            .node_config
-                            .bundles
-                            .iter()
-                            .map(|b| b.name.clone())
-                            .collect();
-                        installed_bundles.sort();
-                        DispatchError::ServiceNotInstalled {
-                            service_ref: item_ref.to_string(),
-                            installed_bundles,
-                            searched_spaces: searched_spaces.clone(),
+            let verified = match verified {
+                Some(verified) => verified,
+                None => service_executor::resolve_and_verify(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    item_ref,
+                    Some("service"),
+                )
+                .map_err(|e| {
+                    match e.downcast_ref::<ryeos_engine::error::EngineError>() {
+                        // The service item YAML is absent from every search
+                        // space — the bundle shipping it is not installed.
+                        // Surface the installed-bundle list instead of an
+                        // opaque 500 so a remote operator can repair the
+                        // deployment without source-level debugging.
+                        Some(ryeos_engine::error::EngineError::ItemNotFound {
+                            searched_spaces,
+                            ..
+                        }) => {
+                            let mut installed_bundles: Vec<String> = state
+                                .node_config
+                                .bundles
+                                .iter()
+                                .map(|b| b.name.clone())
+                                .collect();
+                            installed_bundles.sort();
+                            DispatchError::ServiceNotInstalled {
+                                service_ref: item_ref.to_string(),
+                                installed_bundles,
+                                searched_spaces: searched_spaces.clone(),
+                            }
                         }
+                        _ => DispatchError::Internal(e),
                     }
-                    _ => DispatchError::Internal(e),
-                }
-            })?;
-            let params = service_params_with_project_path(
-                request.params.clone(),
-                &verified,
-                request.project_path,
-            );
-
+                })?,
+            };
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
             // handler body must NEVER be reached because it will fail on
@@ -1601,11 +1645,12 @@ pub async fn dispatch_service(
             let result: ServiceExecutionResult = service_executor::execute_service_verified(
                 verified,
                 item_ref,
-                params,
+                request.params.clone(),
                 ExecutionMode::Live,
                 ctx,
                 state,
                 None,
+                local_handler_context,
             )
             .await
             // `execute_service_verified` maps a handler's typed `HandlerError`
@@ -1616,7 +1661,8 @@ pub async fn dispatch_service(
             .map_err(|e| e.downcast::<DispatchError>().unwrap_or_else(DispatchError::Internal))?;
             let envelope = serde_json::json!({
                 "thread": {
-                    "thread_id": result.audit_thread_id,
+                    "thread_id": result.invocation_id,
+                    "recorded": result.recorded,
                     "kind": thread_profile,
                     "item_ref": item_ref,
                     "status": "completed",
@@ -1637,61 +1683,6 @@ pub async fn dispatch_service(
 }
 
 // ── Unified subprocess terminator ─────────────────────────────────────
-
-/// Strip the `bin/<triple>/` prefix from a runtime YAML's `binary_ref`.
-pub(crate) fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, DispatchError> {
-    let parts: Vec<&str> = binary_ref.split('/').collect();
-    if parts.len() < 3 || parts[0] != "bin" || parts[1].is_empty() || parts[2].is_empty() {
-        return Err(DispatchError::SchemaMisconfigured {
-            kind: ROOT_KIND_RUNTIME.into(),
-            detail: format!(
-                "runtime binary_ref '{binary_ref}' has unexpected shape; expected 'bin/<triple>/<binary>'"
-            ),
-        });
-    }
-    Ok(parts[2..].join("/"))
-}
-
-/// Terminal-path executor gate, shared by the terminal subprocess dispatcher
-/// and the accepted-launch preflight so they cannot drift. A resolved item on
-/// the terminal (DetachedOk) path that carries no `executor_id` is a bare
-/// terminator and cannot be launched as a root.
-fn require_terminal_executor_id(
-    verified: Option<&VerifiedItem>,
-    item_ref: &str,
-) -> Result<(), DispatchError> {
-    if verified.is_some_and(|item| item.resolved.metadata.executor_id.is_none()) {
-        return Err(DispatchError::RootExecutorMissing {
-            item_ref: item_ref.to_string(),
-            detail: "items with no executor_id, including terminal executors such as `tool:ryeos/core/subprocess/execute`, cannot be launched as root tools. Create a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper."
-                .into(),
-        });
-    }
-    Ok(())
-}
-
-/// **B1**: cap gate factored out for unit testing.
-/// Uses the shared `Authorizer` from `AppState` for wildcard + implication expansion.
-fn enforce_runtime_caps(
-    authorizer: &ryeos_runtime::authorizer::Authorizer,
-    item_ref: &str,
-    required_caps: &[String],
-    caller_scopes: &[String],
-) -> Result<(), DispatchError> {
-    if required_caps.is_empty() {
-        return Ok(());
-    }
-    let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require_all(
-        &required_caps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-    );
-    authorizer
-        .authorize(caller_scopes, &policy)
-        .map_err(|_| DispatchError::InsufficientCaps {
-            runtime: item_ref.to_string(),
-            required: required_caps.to_vec(),
-            caller_scopes: caller_scopes.to_vec(),
-        })
-}
 
 pub(crate) async fn dispatch_subprocess(
     sctx: SubprocessDispatchContext<'_>,
@@ -1788,130 +1779,6 @@ pub(crate) async fn dispatch_subprocess(
             .await
         }
     }
-}
-
-fn service_params_with_project_path(
-    mut params: Value,
-    verified: &ryeos_engine::contracts::VerifiedItem,
-    project_path: &Path,
-) -> Value {
-    if !service_declares_project_path(verified) {
-        return params;
-    }
-    let Some(obj) = params.as_object_mut() else {
-        return params;
-    };
-    let fill_project_path = obj.get("project_path").is_none_or(|value| {
-        value.is_null() || value.as_str().is_some_and(|path| path.trim().is_empty())
-    });
-    if fill_project_path {
-        obj.insert(
-            "project_path".to_string(),
-            Value::String(project_path.to_string_lossy().into_owned()),
-        );
-    }
-    params
-}
-
-fn service_declares_project_path(verified: &ryeos_engine::contracts::VerifiedItem) -> bool {
-    if verified
-        .resolved
-        .metadata
-        .extra
-        .get("schema")
-        .and_then(Value::as_object)
-        .is_some_and(|schema| schema.contains_key("project_path"))
-    {
-        return true;
-    }
-
-    let Ok(content) = std::fs::read_to_string(&verified.resolved.source_path) else {
-        return false;
-    };
-    let body = lillux::signature::strip_signature_lines(&content);
-    let Ok(parsed) = serde_yaml::from_str::<Value>(&body) else {
-        return false;
-    };
-    parsed
-        .get("schema")
-        .and_then(Value::as_object)
-        .is_some_and(|schema| schema.contains_key("project_path"))
-}
-
-/// Resolution + routing outputs for a managed subprocess launch — the "prepare"
-/// half of the managed-subprocess dispatch, with no side effects (no row, no
-/// spawn). Separating prepare from launch lets the operator follow-up path
-/// resolve synchronously, create-or-get the canonical successor row, THEN launch
-/// the pre-created row — instead of pre-minting an id before the row exists.
-pub struct PreparedManagedLaunch {
-    pub resolved: ResolvedExecutionRequest,
-    pub executor_ref: String,
-    pub required_envelope_fields: Vec<String>,
-    pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
-    pub acting_principal: String,
-    pub project_path: std::path::PathBuf,
-}
-
-/// Resolve a managed subprocess launch to a [`PreparedManagedLaunch`] — the
-/// runtime's executor ref, the resolved item (re-resolved if the subject was not
-/// pre-verified by the hop), and the full `ResolvedExecutionRequest`. Pure: walks
-/// the same subject the dispatch hop chain produced and performs no side effects.
-fn prepare_managed_launch(
-    verified_runtime: &ryeos_engine::runtime_registry::VerifiedRuntime,
-    root_subject: Option<RootSubject>,
-    hop_thread_profile: &str,
-    hop_verified: Option<&ryeos_engine::contracts::VerifiedItem>,
-    runtime_ref: &str,
-    ctx: &ExecutionContext,
-    request: &DispatchRequest<'_>,
-) -> Result<PreparedManagedLaunch, DispatchError> {
-    let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
-    let executor_ref = format!("native:{bare}");
-
-    let subject = root_subject.unwrap_or_else(|| RootSubject {
-        item_ref: runtime_ref.to_string(),
-        thread_profile: hop_thread_profile.to_string(),
-        verified: hop_verified.cloned(),
-    });
-
-    let resolved_item: ResolvedItem = match subject.verified {
-        Some(v) => v.resolved,
-        None => {
-            let canonical = CanonicalRef::parse(&subject.item_ref)
-                .map_err(|e| DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string()))?;
-            ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
-                DispatchError::SchemaMisconfigured {
-                    kind: canonical.kind.clone(),
-                    detail: format!("subject resolution failed for '{}': {e}", subject.item_ref),
-                }
-            })?
-        }
-    };
-
-    let resolved = ResolvedExecutionRequest {
-        kind: subject.thread_profile.clone(),
-        item_ref: subject.item_ref.clone(),
-        executor_ref: executor_ref.clone(),
-        launch_mode: "inline".to_string(),
-        current_site_id: ctx.plan_ctx.current_site_id.clone(),
-        origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-        target_site_id: None,
-        requested_by: Some(request.acting_principal.to_string()),
-        usage_subject: request.usage_subject.clone(),
-        usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-        parameters: request.params.clone(),
-        resolved_item,
-        plan_context: ctx.plan_ctx.clone(),
-    };
-
-    Ok(PreparedManagedLaunch {
-        resolved,
-        executor_ref,
-        required_envelope_fields: verified_runtime.yaml.required_envelope_fields.clone(),
-        provenance: request.provenance.clone(),
-        acting_principal: request.acting_principal.to_string(),
-        project_path: request.project_path.to_path_buf(),
-    })
 }
 
 async fn dispatch_managed_subprocess(
@@ -2179,19 +2046,27 @@ async fn dispatch_streaming_subprocess(
         &[],
         roots,
     )
-    .map_err(|e| DispatchError::Internal(e.into()))?;
-    let result = tokio::task::spawn_blocking(move || {
-        lillux::run(lillux::SubprocessRequest {
-            cmd: executor_path_str,
-            args: vec![],
-            cwd: None,
-            envs,
-            stdin_data: Some(stdin_data),
-            timeout: 120.0,
-        })
-    })
-    .await
-    .map_err(|e| DispatchError::Internal(e.into()))?;
+    .map_err(DispatchError::Internal)?;
+    let subprocess_request = lillux::SubprocessRequest {
+        cmd: executor_path_str,
+        args: vec![],
+        cwd: Some(request.project_path.to_string_lossy().into_owned()),
+        envs,
+        stdin_data: Some(stdin_data),
+        timeout: 120.0,
+    };
+    let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
+        subprocess_request,
+        state.config.sandbox_enabled,
+        &state.config.app_root,
+        request.project_path,
+        &item_ref_str,
+        "streaming-tool",
+    )
+    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
+        .await
+        .map_err(|e| DispatchError::Internal(e.into()))?;
 
     if !result.success {
         return Err(DispatchError::SubprocessRunFailed {
@@ -2833,11 +2708,58 @@ pub async fn dispatch(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
+    dispatch_inner(item_ref, None, None, request, ctx, state).await
+}
+
+/// Dispatch an item whose root resolution and verification have already been
+/// completed by the caller. The verified root enters the same schema-driven
+/// hop loop as [`dispatch`]; only the first resolve/verify operation is reused.
+pub async fn dispatch_verified(
+    item_ref: &str,
+    verified: VerifiedItem,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
+    dispatch_inner(item_ref, Some(verified), None, request, ctx, state).await
+}
+
+/// Dispatch an already-verified root while carrying trusted local context for
+/// an in-process handler whose signed item policy requests it. Routing remains
+/// entirely schema-driven; subprocess and method terminators ignore it.
+pub async fn dispatch_verified_with_handler_context(
+    item_ref: &str,
+    verified: VerifiedItem,
+    local_handler_context: ryeos_app::handler_context::HandlerContext,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
+    dispatch_inner(
+        item_ref,
+        Some(verified),
+        Some(local_handler_context),
+        request,
+        ctx,
+        state,
+    )
+    .await
+}
+
+async fn dispatch_inner(
+    item_ref: &str,
+    verified_root: Option<VerifiedItem>,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
     let mut hops: usize = 0;
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
+    let mut verified_root = verified_root;
 
     // Reject a method call (`call.method`/`call.args`) aimed at a kind that
     // does not declare method dispatch. The method selector is control
@@ -2922,7 +2844,7 @@ pub async fn dispatch(
             });
         }
 
-        let hop = resolve_dispatch_hop(&current_ref, ctx)?;
+        let hop = resolve_dispatch_hop_with_verified(&current_ref, ctx, verified_root.take())?;
 
         // Destructure up front so the match on `next` (which moves
         // the terminator out) can't conflict with later borrows. All
@@ -2965,6 +2887,7 @@ pub async fn dispatch(
                     ctx,
                     state,
                     &role,
+                    local_handler_context,
                 )
                 .await;
             }
@@ -3303,6 +3226,7 @@ async fn dispatch_by(
     ctx: &ExecutionContext,
     state: &AppState,
     role: &SubprocessRole,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<Value, DispatchError> {
     let DispatchByParams {
         terminator,
@@ -3338,7 +3262,16 @@ async fn dispatch_by(
                 kind: canonical_ref.kind.clone(),
                 detail: "service terminator has no thread_profile".into(),
             })?;
-            dispatch_service(&canonical_ref.to_string(), &tp, request, ctx, state).await
+            dispatch_service(
+                &canonical_ref.to_string(),
+                &tp,
+                verified,
+                local_handler_context,
+                request,
+                ctx,
+                state,
+            )
+            .await
         }
     }
 }
@@ -3445,7 +3378,7 @@ metadata:
       key: name
 "##;
 
-    fn write_runtime_kind_schema(kinds_dir: &PathBuf) {
+    fn write_runtime_kind_schema(kinds_dir: &Path) {
         let runtime_dir = kinds_dir.join("runtime");
         fs::create_dir_all(&runtime_dir).unwrap();
         let signed =
@@ -3491,130 +3424,6 @@ metadata:
             plan_ctx: test_plan_context(project_path),
             requested_call: None,
         }
-    }
-
-    fn verified_service_with_schema(
-        schema: Option<Value>,
-    ) -> ryeos_engine::contracts::VerifiedItem {
-        let source_path = tempdir().join("status.yaml");
-        fs::write(&source_path, "kind: service\nendpoint: project.status\n").unwrap();
-        let mut extra = std::collections::HashMap::new();
-        if let Some(schema) = schema {
-            extra.insert("schema".to_string(), schema);
-        }
-        let canonical_ref = CanonicalRef::parse("service:project/status").unwrap();
-        ryeos_engine::contracts::VerifiedItem {
-            resolved: ryeos_engine::contracts::ResolvedItem {
-                canonical_ref,
-                kind: "service".into(),
-                source_path,
-                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
-                resolved_from: "system".into(),
-                shadowed: Vec::new(),
-                materialized_project_root: None,
-                content_hash: lillux::cas::sha256_hex(b"test"),
-                signature_header: None,
-                source_format: ryeos_engine::contracts::ResolvedSourceFormat {
-                    extension: ".yaml".into(),
-                    parser: "parser:ryeos/core/yaml/yaml".into(),
-                    signature: ryeos_engine::contracts::SignatureEnvelope {
-                        prefix: "#".into(),
-                        suffix: None,
-                        after_shebang: false,
-                    },
-                },
-                metadata: ryeos_engine::contracts::ItemMetadata {
-                    extra,
-                    ..Default::default()
-                },
-            },
-            signer: None,
-            trust_class: ryeos_engine::contracts::TrustClass::Trusted,
-            pinned_version: None,
-        }
-    }
-
-    fn verified_service_with_body(body: &str) -> ryeos_engine::contracts::VerifiedItem {
-        let source_path = tempdir().join("status.yaml");
-        fs::write(&source_path, body).unwrap();
-        let mut verified = verified_service_with_schema(None);
-        verified.resolved.source_path = source_path;
-        verified
-    }
-
-    #[test]
-    fn service_project_path_is_injected_when_schema_declares_it() {
-        let verified = verified_service_with_schema(Some(json!({
-            "project_path": "string",
-            "provider": "string?"
-        })));
-        let params = service_params_with_project_path(
-            json!({"provider": "zen"}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/tmp/project");
-        assert_eq!(params["provider"], "zen");
-    }
-
-    #[test]
-    fn service_project_path_does_not_override_explicit_param() {
-        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
-        let params = service_params_with_project_path(
-            json!({"project_path": "/explicit"}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/explicit");
-    }
-
-    #[test]
-    fn service_project_path_overwrites_empty_opt_in_param() {
-        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
-        let params = service_params_with_project_path(
-            json!({"project_path": ""}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/tmp/project");
-    }
-
-    #[test]
-    fn service_project_path_overwrites_null_opt_in_param() {
-        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
-        let params = service_params_with_project_path(
-            json!({"project_path": null}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/tmp/project");
-    }
-
-    #[test]
-    fn service_project_path_is_not_injected_without_schema_field() {
-        let verified = verified_service_with_schema(Some(json!({"provider": "string?"})));
-        let params = service_params_with_project_path(
-            json!({"provider": "zen"}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert!(params.get("project_path").is_none());
-    }
-
-    #[test]
-    fn service_project_path_is_injected_from_service_yaml_schema_mapping() {
-        let verified = verified_service_with_body(
-            "# ryeos:signed:test\nkind: service\nendpoint: project.status\nschema:\n  project_path: string\n",
-        );
-        let params =
-            service_params_with_project_path(json!({}), &verified, Path::new("/tmp/project"));
-
-        assert_eq!(params["project_path"], "/tmp/project");
     }
 
     fn write_signed_manifest(ai_dir: &std::path::Path, body: &str) {

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-14T02:18:23Z:525228e09564e3e8a16a356e559649db057b0606ee56cd480fb1cc1ab35c080c:4ICTK4hMzxFBye3ptfKYbV4Guo68cRfJwr1PAZsfX4oF77gmBhYbjxCUoD3s8B47T/Xh4BLASyWgXbRWh312Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.status
+ui_read_only: true
+record_thread: false
+required_caps: []
+description: "Daemon status: version, uptime, bind address, active threads"

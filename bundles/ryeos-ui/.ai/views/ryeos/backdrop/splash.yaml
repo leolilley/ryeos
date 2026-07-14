@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-07T03:16:41Z:bd98f78e8858c453609c1076377ad7a90111a62c5d75a4b18be9a9af6282ce77:49BW36wHlSvNoROflN/f/hPAj2v6JV82D2oOD4dBIm2fY+2Q+G0YUf3IGWC0kJz1X3sL9UJrEG6uMH7d82VLBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:19Z:89b5cba5aacda971a692c4c496313768edc27c4d29800a9ae4dff100256887c1:AHghJ0PM2BBI67zgnw6nWJjGzktiGVJ1gTQUtn5jImh2a1P7CGkhJaLWw/eTZw3gIcdJl+s1Fjo1kRQ8Ao/FDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: backdrop-splash
 version: "1.0.0"
 description: Chrome-less RyeOS splash text rendered as content over the prism backdrop

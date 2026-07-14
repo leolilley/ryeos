@@ -117,7 +117,7 @@ pub async fn pull_results(
 
         // 2. Fetch remote manifest
         let manifest_objs = client
-            .objects_get(&[manifest_hash.clone()])
+            .objects_get(std::slice::from_ref(&manifest_hash))
             .await
             .map_err(PullResultsError::Other)?;
 

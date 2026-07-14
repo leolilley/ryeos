@@ -47,6 +47,10 @@ use ryeos_runtime::events::RuntimeEventType;
 /// request engine — not the root-live-fs fallback. Returns the minted child
 /// thread id; the child runs concurrently, its terminal outcome captured by the
 /// normal thread-terminal path (the parent does not consume it).
+// Execution plumbing: each argument is a distinct leg of the thread's
+// auth/provenance context, threaded verbatim — a struct would rename,
+// not simplify. Restructure with a compiler in the loop, not here.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_detached_child(
     state: &AppState,
     thread_auth: &ThreadAuthState,
@@ -136,6 +140,7 @@ pub async fn spawn_detached_child(
         origin_site_id: parent.origin_site_id.clone(),
         upstream_thread_id: None,
         requested_by: Some(thread_auth.acting_principal.clone()),
+        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
     })?;

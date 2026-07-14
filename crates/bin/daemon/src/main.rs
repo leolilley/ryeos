@@ -147,6 +147,20 @@ async fn main() -> Result<()> {
     process::remove_stale_socket(&config.uds_path)?;
     ensure_runtime_paths(&config)?;
 
+    // Resolve every interrupted bundle tree/registration transaction before
+    // the bootstrap loader consumes installed bundle registrations.
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
+    let repaired_bundles = ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
+        &config.app_root,
+        identity.signing_key(),
+    )?;
+    if !repaired_bundles.is_empty() {
+        tracing::warn!(
+            bundles = ?repaired_bundles,
+            "reconciled interrupted bundle transactions before registry loading"
+        );
+    }
+
     // ── Two-phase node-config bootstrap ──
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
 
@@ -301,8 +315,6 @@ async fn main() -> Result<()> {
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
     )));
-    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
     let runtime_state_dir = config.runtime_state_dir();
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
@@ -465,11 +477,16 @@ async fn main() -> Result<()> {
                                 if ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
                                     &event.event_type,
                                 ) {
+                                    let status = ryeos_api::routes::invokers::stream_helpers::lifecycle_status(
+                                        &event.event_type,
+                                    );
                                     let payload = serde_json::json!({
                                         "kind": "thread",
-                                        "thread_id": event.thread_id,
-                                        "chain_root_id": event.chain_root_id,
-                                        "event_type": event.event_type,
+                                        "thread_id": &event.thread_id,
+                                        "chain_root_id": &event.chain_root_id,
+                                        "event_type": &event.event_type,
+                                        "status": status,
+                                        "updated_at": &event.ts,
                                     });
                                     for session_id in ui.browser_sessions.session_ids() {
                                         ui.session_bus.publish(
@@ -532,6 +549,9 @@ async fn main() -> Result<()> {
     // Follow reconcile actions collected here, dispatched post-listener too: a
     // resumed parent's (or relaunched child's) first callback must not precede a
     // bound listener.
+    // LOAD-BEARING ORDER: settle cancellation tombstones before follow
+    // reconciliation can classify an admitted-but-unlaunched child for relaunch.
+    ryeos_app::cascade::repair_cancelled_window_members(&app_state)?;
     let follow_actions = reconcile::reconcile_follow(&app_state)?;
 
     // Scheduler reload channel — must be created BEFORE the router is built
@@ -594,6 +614,11 @@ async fn main() -> Result<()> {
 
     let uds_state = Arc::new(app_state.clone());
     let uds_task = tokio::spawn(async move { uds::server::serve(uds_listener, uds_state).await });
+
+    let repair_store = app_state.state_store.clone();
+    let mut projection_repair_task = tokio::spawn(async move {
+        ryeos_app::projection_repair::run(repair_store, shutdown_signal()).await
+    });
 
     // HTTP server is started BEFORE dispatching resume intents.
     // A resumed subprocess that prefers RYEOSD_URL over
@@ -764,6 +789,9 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
+                if let Err(err) = ryeos_app::cascade::repair_cancelled_window_members(&st) {
+                    tracing::warn!(error = %err, "cancelled launch-window repair failed");
+                }
                 match reconcile::reconcile_follow(&st) {
                     Ok(actions) => dispatch_follow_actions(&st, actions),
                     Err(err) => {
@@ -810,6 +838,14 @@ async fn main() -> Result<()> {
         result = uds_task => {
             result.context("uds task join failed")??;
         }
+    }
+
+    if tokio::time::timeout(Duration::from_secs(5), &mut projection_repair_task)
+        .await
+        .is_err()
+    {
+        projection_repair_task.abort();
+        let _ = projection_repair_task.await;
     }
 
     // Record a clean, handled shutdown so the next startup can distinguish it
@@ -885,15 +921,15 @@ fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Op
 /// pass and the periodic recovery sweep; every launch is claim-guarded, so
 /// concurrent drives are benign skips.
 fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowReconcileAction>) {
-    for action in actions {
-        let st = state.clone();
-        tokio::spawn(async move {
+    let st = state.clone();
+    tokio::spawn(async move {
+        for action in actions {
             use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
             let (label, outcome) = match action {
                 reconcile::FollowReconcileAction::Resume { follow_key } => {
                     let outcome =
                         ryeos_executor::execution::launch::launch_follow_resume_successor(
-                            st,
+                            st.clone(),
                             &follow_key,
                         )
                         .await;
@@ -901,7 +937,8 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
                 }
                 reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
                     // Reconcile parity: a fresh relaunch, no parent clamp/depth.
-                    let outcome = launch_follow_child(st, &child_thread_id, None, None).await;
+                    let outcome =
+                        launch_follow_child(st.clone(), &child_thread_id, None, None).await;
                     (format!("child-relaunch {child_thread_id}"), outcome)
                 }
             };
@@ -914,8 +951,8 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
                     tracing::error!(action = %label, error = %err, "reconcile: follow action failed");
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 fn drain_running_threads(state: &AppState) {
@@ -1058,14 +1095,19 @@ async fn run_service_standalone(
         state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
             .context("failed to acquire state lock — is the daemon running?")?;
 
+    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
+    ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
+        &config.app_root,
+        identity.signing_key(),
+    )
+    .context("reconcile interrupted bundle transactions")?;
+
     // Two-phase node-config bootstrap (same as daemon-start path)
     let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
     )));
-    let identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
     let services = Arc::new(build_service_registry());
 
     let runtime_state_dir = config.runtime_state_dir();
@@ -1186,7 +1228,8 @@ async fn run_service_standalone(
         endpoint = %result.endpoint,
         trust_class = ?result.trust_class,
         effective_caps = ?result.effective_caps,
-        audit_thread_id = %result.audit_thread_id,
+        invocation_id = %result.invocation_id,
+        recorded = result.recorded,
         "standalone service completed"
     );
 

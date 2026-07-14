@@ -6,7 +6,7 @@
 //! like `{interpreter}` resolve.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -60,9 +60,8 @@ pub enum InterpreterConfig {
         #[serde(default)]
         search_paths: Vec<String>,
         var: Option<String>,
-        /// Bare names tried at the end (resolved by the OS via PATH
-        /// at spawn time). Replaces the old single-value `fallback`
-        /// field with an explicit list.
+        /// Bare names tried at the end and resolved against the engine
+        /// process's PATH before the sandbox boundary.
         #[serde(default)]
         path_candidates: Vec<String>,
     },
@@ -98,15 +97,34 @@ pub fn resolve_interpreter(
                     }
                 }
             }
-            // 3. PATH-resolved bare names
-            if let Some(name) = path_candidates.first() {
-                return Ok(name.clone());
+            // 3. Resolve PATH candidates now. Sandboxed subprocess specs require
+            // an absolute executable and cannot defer lookup to spawn time.
+            for name in path_candidates {
+                if let Some(path) = resolve_path_candidate(name) {
+                    return Ok(path.to_string_lossy().into_owned());
+                }
             }
             Err(EngineError::RuntimeBinaryNotFound {
                 binary: binary.clone(),
             })
         }
     }
+}
+
+fn resolve_path_candidate(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return if candidate.is_file() {
+            std::fs::canonicalize(candidate).ok()
+        } else {
+            None
+        };
+    }
+    let search_path = std::env::var_os("PATH")?;
+    std::env::split_paths(&search_path)
+        .map(|directory| directory.join(candidate))
+        .find(|path| path.is_file())
+        .and_then(|path| std::fs::canonicalize(path).ok())
 }
 
 pub struct EnvConfigHandler;
@@ -292,13 +310,13 @@ mod interpreter_resolution_tests {
     fn falls_back_to_path_candidate_when_no_venv() {
         let root = tempfile::tempdir().unwrap();
         let got = resolve_interpreter(&python_like(None), Some(root.path())).unwrap();
-        assert_eq!(got, "python3");
+        assert_eq!(Path::new(&got), resolve_path_candidate("python3").unwrap());
     }
 
     #[test]
     fn falls_back_to_path_candidate_when_no_project_root() {
         let got = resolve_interpreter(&python_like(None), None).unwrap();
-        assert_eq!(got, "python3");
+        assert_eq!(Path::new(&got), resolve_path_candidate("python3").unwrap());
     }
 
     #[test]

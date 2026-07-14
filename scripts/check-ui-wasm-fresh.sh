@@ -4,9 +4,9 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-cargo build -p ryeos-ui-web --target wasm32-unknown-unknown --lib
+cargo build -p ryeos-client-web --target wasm32-unknown-unknown --lib
 wasm-bindgen \
-  target/wasm32-unknown-unknown/debug/ryeos_ui_web.wasm \
+  target/wasm32-unknown-unknown/debug/ryeos_client_web.wasm \
   --target web \
   --out-dir crates/clients/web/pkg \
   --out-name ryeos_web

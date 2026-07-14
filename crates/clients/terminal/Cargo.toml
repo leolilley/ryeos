@@ -1,7 +1,8 @@
 [package]
-name = "ryeos-ui-terminal"
+name = "ryeos-client-terminal"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "Native terminal TUI for Rye OS"
 
 [[bin]]
@@ -23,7 +24,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
-notify = "7"
+notify = "8.2"
 tracing = { workspace = true }
 unicode-width = "0.2"
 

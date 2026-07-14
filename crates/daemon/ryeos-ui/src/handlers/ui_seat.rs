@@ -121,6 +121,10 @@ pub async fn handle_open(
     let owner = seat_owner(&session);
     let req: OpenRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let surface_ref = req.surface_ref;
+    let client_ref = req
+        .client_ref
+        .unwrap_or_else(|| "client:ryeos/web".to_string());
 
     let existing = state
         .state_store
@@ -130,10 +134,16 @@ pub async fn handle_open(
         .filter(|thread| {
             thread.kind == SEAT_KIND
                 && thread.status == "running"
-                && thread.item_ref == req.surface_ref
+                && thread.item_ref == surface_ref
         })
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
     if let Some(thread) = existing {
+        state.state_store.touch_seat_lease(
+            &thread.thread_id,
+            &owner,
+            &surface_ref,
+            &client_ref,
+        )?;
         return Ok(json!({
             "thread_id": thread.thread_id,
             "chain_root_id": thread.chain_root_id,
@@ -147,19 +157,21 @@ pub async fn handle_open(
         thread_id: thread_id.clone(),
         chain_root_id: thread_id.clone(),
         kind: SEAT_KIND.to_string(),
-        item_ref: req.surface_ref,
-        executor_ref: req
-            .client_ref
-            .unwrap_or_else(|| "client:ryeos/web".to_string()),
+        item_ref: surface_ref.clone(),
+        executor_ref: client_ref.clone(),
         launch_mode: "inline".to_string(),
         current_site_id: site_id.clone(),
         origin_site_id: site_id,
         upstream_thread_id: None,
-        requested_by: Some(owner),
+        requested_by: Some(owner.clone()),
+        project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
     })?;
     state.threads.mark_running(&thread_id)?;
+    state
+        .state_store
+        .touch_seat_lease(&thread_id, &owner, &surface_ref, &client_ref)?;
 
     Ok(json!({
         "thread_id": detail.thread_id,
@@ -197,6 +209,14 @@ pub async fn handle_append(
         ))
         .into());
     }
+    // Renew before appending so presence either defeats the expiry claim or
+    // observes that the reaper already owns the transition.
+    state.state_store.touch_seat_lease(
+        &detail.thread_id,
+        &owner,
+        &detail.item_ref,
+        &detail.executor_ref,
+    )?;
 
     let records: Vec<NewEventRecord> = req
         .events
@@ -214,7 +234,7 @@ pub async fn handle_append(
             HandlerError::BadRequest(
                 "seat session is no longer running; only running seats accept events".into(),
             )
-        })?;
+    })?;
     let last_seq = persisted.iter().map(|r| r.chain_seq).max().unwrap_or(0);
 
     Ok(json!({
@@ -233,6 +253,12 @@ pub async fn handle_replay(
     let req: ReplayRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
     let detail = require_owned_seat(&state, &req.chain_root_id, &owner)?;
+    state.state_store.touch_seat_lease(
+        &detail.thread_id,
+        &owner,
+        &detail.item_ref,
+        &detail.executor_ref,
+    )?;
     let result = state
         .events
         .replay(&ryeos_app::event_store_service::EventReplayParams {
@@ -264,6 +290,7 @@ pub async fn handle_close(
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
     let detail = require_owned_seat(&state, &req.thread_id, &owner)?;
     if detail.status != "running" {
+        state.state_store.remove_seat_lease(&detail.thread_id)?;
         return Ok(json!({ "thread_id": detail.thread_id, "status": detail.status }));
     }
     let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
@@ -277,7 +304,37 @@ pub async fn handle_close(
         final_cost: None,
         summary_json: None,
     })?;
+    state.state_store.remove_seat_lease(&finalized.thread_id)?;
     Ok(json!({ "thread_id": finalized.thread_id, "status": finalized.status }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TouchRequest {
+    thread_id: String,
+}
+
+pub async fn handle_touch(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let session = browser_session(&ctx, &state)?;
+    let owner = seat_owner(&session);
+    let req: TouchRequest = serde_json::from_value(params)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let detail = require_owned_seat(&state, &req.thread_id, &owner)?;
+    if detail.status != "running" {
+        state.state_store.remove_seat_lease(&detail.thread_id)?;
+        return Err(HandlerError::BadRequest("seat session is not running".into()).into());
+    }
+    state.state_store.touch_seat_lease(
+        &detail.thread_id,
+        &owner,
+        &detail.item_ref,
+        &detail.executor_ref,
+    )?;
+    Ok(json!({ "thread_id": detail.thread_id, "touched": true }))
 }
 
 pub static OPEN_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -310,4 +367,12 @@ pub static CLOSE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(handle_close(params, ctx, state)),
+};
+
+pub static TOUCH_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:ui/seat/touch",
+    endpoint: "ui.seat.touch",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &[],
+    handler: |params, ctx, state| Box::pin(handle_touch(params, ctx, state)),
 };

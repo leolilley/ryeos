@@ -15,6 +15,12 @@ pub struct UiState {
     pub session_bus: Arc<SessionBus>,
 }
 
+impl Default for UiState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UiState {
     pub fn new() -> Self {
         Self {

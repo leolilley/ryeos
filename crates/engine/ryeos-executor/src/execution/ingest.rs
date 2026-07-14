@@ -82,7 +82,7 @@ pub fn materialize_item(cas_root: &Path, object_hash: &str, target_path: &Path) 
         .get_blob(blob_hash)?
         .ok_or_else(|| anyhow::anyhow!("blob {blob_hash} not found"))?;
 
-    lillux::cas::atomic_write(target_path, &data)?;
+    lillux::atomic_write(target_path, &data)?;
     Ok(())
 }
 

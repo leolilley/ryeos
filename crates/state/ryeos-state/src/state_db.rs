@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 
@@ -20,14 +20,66 @@ use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
 use crate::projection::{
-    self, AdmissionAttestationRecord, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState,
-    NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    ProjectionDb, ProjectionOpenResult, SyncJobAttemptRecord, SyncJobRecord, SyncJobState,
-    SyncJobUpdate,
+    self, project_committed_chain, AdmissionAttestationRecord, CasEntriesByStateSummary,
+    CasEntryAttribution, CasEntryState, NewAdmissionAttestationRecord, NewCasEntryAttribution,
+    NewSyncJob, NewSyncJobAttempt, ProjectionDb, ProjectionOpenResult, SyncJobAttemptRecord,
+    SyncJobRecord, SyncJobState, SyncJobUpdate,
 };
 use crate::queries;
 use crate::refs::{GenericHeadRef, SignedRef};
 use crate::signer::Signer;
+
+/// State of the rebuildable projection after an authoritative CAS write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionStatus {
+    Current,
+    RepairRequired(ProjectionRepairRequest),
+}
+
+/// A request to repair a projection that fell behind an authoritative head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionRepairRequest {
+    pub chain_root_id: String,
+    pub committed_head_hash: String,
+    pub operation: &'static str,
+    pub error: String,
+}
+
+/// Receives repair requests after authoritative writes have committed.
+///
+/// Implementations must make `request_repair` non-blocking and infallible from
+/// the caller's perspective. Durable queueing can be supplied by the daemon;
+/// the state crate's default sink retains requests for the database lifetime.
+pub trait ProjectionRepairSink: Send + Sync {
+    fn request_repair(&self, request: ProjectionRepairRequest);
+}
+
+#[derive(Debug, Default)]
+struct PendingProjectionRepairs {
+    requests: Mutex<Vec<ProjectionRepairRequest>>,
+}
+
+impl ProjectionRepairSink for PendingProjectionRepairs {
+    fn request_repair(&self, request: ProjectionRepairRequest) {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request);
+    }
+}
+
+/// A successfully committed authoritative write and its projection status.
+#[derive(Debug, Clone)]
+pub struct CommittedWrite<T> {
+    pub value: T,
+    pub projection: ProjectionStatus,
+}
+
+impl<T> CommittedWrite<T> {
+    fn new(value: T, projection: ProjectionStatus) -> Self {
+        Self { value, projection }
+    }
+}
 
 /// High-level state database.
 ///
@@ -39,6 +91,7 @@ pub struct StateDb {
     locators_root: PathBuf,
     projection: ProjectionDb,
     head_cache: Mutex<HeadCache>,
+    projection_repair_sink: Arc<dyn ProjectionRepairSink>,
 }
 
 impl StateDb {
@@ -47,6 +100,17 @@ impl StateDb {
     /// Creates `objects/`, `refs/`, and `locators/` subdirectories and opens
     /// `projection.sqlite3` inside `runtime_state_dir`.
     pub fn open(runtime_state_dir: &Path) -> anyhow::Result<Self> {
+        Self::open_with_projection_repair_sink(
+            runtime_state_dir,
+            Arc::new(PendingProjectionRepairs::default()),
+        )
+    }
+
+    /// Open a state database with a caller-provided projection repair sink.
+    pub fn open_with_projection_repair_sink(
+        runtime_state_dir: &Path,
+        projection_repair_sink: Arc<dyn ProjectionRepairSink>,
+    ) -> anyhow::Result<Self> {
         let cas_root = runtime_state_dir.join("objects");
         let refs_root = runtime_state_dir.join("refs");
         let locators_root = runtime_state_dir.join("locators");
@@ -71,6 +135,18 @@ impl StateDb {
                 events_projected = report.events_projected,
                 "projection rebuilt after schema epoch reset"
             );
+        } else {
+            let report = crate::rebuild::catch_up_projection(&projection, &cas_root, &refs_root)
+                .context("catching projection up to authoritative chain heads")?;
+            if report.chains_updated > 0 {
+                tracing::info!(
+                    chains_checked = report.chains_checked,
+                    chains_updated = report.chains_updated,
+                    threads_restored = report.threads_restored,
+                    events_projected = report.events_projected,
+                    "projection caught up at startup"
+                );
+            }
         }
 
         Ok(Self {
@@ -79,12 +155,42 @@ impl StateDb {
             locators_root,
             projection,
             head_cache: Mutex::new(HeadCache::new()),
+            projection_repair_sink,
         })
+    }
+
+    fn committed_write<T>(
+        &self,
+        value: T,
+        chain_root_id: &str,
+        committed_head_hash: &str,
+        operation: &'static str,
+        projected: anyhow::Result<()>,
+    ) -> CommittedWrite<T> {
+        let projection = match projected {
+            Ok(()) => ProjectionStatus::Current,
+            Err(error) => {
+                let request = ProjectionRepairRequest {
+                    chain_root_id: chain_root_id.to_owned(),
+                    committed_head_hash: committed_head_hash.to_owned(),
+                    operation,
+                    error: format!("{error:#}"),
+                };
+                self.projection_repair_sink.request_repair(request.clone());
+                ProjectionStatus::RepairRequired(request)
+            }
+        };
+        CommittedWrite::new(value, projection)
     }
 
     /// Access the underlying projection database for queries.
     pub fn projection(&self) -> &ProjectionDb {
         &self.projection
+    }
+
+    /// Catch the rebuildable thread projection up to all authoritative heads.
+    pub fn catch_up_projection(&self) -> anyhow::Result<crate::rebuild::CatchUpReport> {
+        crate::rebuild::catch_up_projection(&self.projection, &self.cas_root, &self.refs_root)
     }
 
     /// CAS objects root (`runtime_state_dir/objects`).
@@ -112,23 +218,34 @@ impl StateDb {
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
         signer: &dyn Signer,
-    ) -> anyhow::Result<CreateResult> {
-        let result = {
-            let mut cache = self.head_cache.lock().expect("head_cache lock");
-            chain::create_chain(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                snapshot.clone(),
-                signer,
-                &mut cache,
-            )?
-        };
-
-        projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
-            .context("projection failed after CAS write for create_chain")?;
-
-        Ok(result)
+    ) -> anyhow::Result<CommittedWrite<CreateResult>> {
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::create_chain(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            signer,
+            &mut cache,
+        )?;
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
+                    .context("projecting created thread snapshot")
+            },
+        );
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "create_chain",
+            projected,
+        ))
     }
 
     /// Add a new thread to an existing chain.
@@ -140,23 +257,34 @@ impl StateDb {
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
         signer: &dyn Signer,
-    ) -> anyhow::Result<CreateResult> {
-        let result = {
-            let mut cache = self.head_cache.lock().expect("head_cache lock");
-            chain::add_thread_to_chain(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                snapshot.clone(),
-                signer,
-                &mut cache,
-            )?
-        };
-
-        projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
-            .context("projection failed after CAS write for add_thread")?;
-
-        Ok(result)
+    ) -> anyhow::Result<CommittedWrite<CreateResult>> {
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::add_thread_to_chain(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            signer,
+            &mut cache,
+        )?;
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot(&self.projection, &snapshot, chain_root_id)
+                    .context("projecting added thread snapshot")
+            },
+        );
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "add_thread",
+            projected,
+        ))
     }
 
     /// Append events to a thread in a chain.
@@ -170,50 +298,65 @@ impl StateDb {
         events: Vec<ThreadEvent>,
         snapshot_updates: Vec<SnapshotUpdate>,
         signer: &dyn Signer,
-    ) -> anyhow::Result<AppendResult> {
+    ) -> anyhow::Result<CommittedWrite<AppendResult>> {
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::append_events cannot persist ephemeral events");
         }
 
-        let result = {
-            let mut cache = self.head_cache.lock().expect("head_cache lock");
-            chain::append_events(
-                chain::AppendEventsInput {
-                    cas_root: &self.cas_root,
-                    refs_root: &self.refs_root,
-                    chain_root_id,
-                    thread_id,
-                    events,
-                    snapshot_updates: snapshot_updates.clone(),
-                    signer,
-                },
-                &mut cache,
-            )?
-        };
-
-        for event in &result.events {
-            if event.durability.is_projection_indexed() {
-                projection::project_event(&self.projection, event).with_context(|| {
-                    format!("projection failed for event chain_seq={}", event.chain_seq)
-                })?;
-            }
-        }
-
-        for update in &snapshot_updates {
-            projection::project_thread_snapshot(
-                &self.projection,
-                &update.new_snapshot,
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::append_events(
+            chain::AppendEventsInput {
+                cas_root: &self.cas_root,
+                refs_root: &self.refs_root,
                 chain_root_id,
-            )
-            .with_context(|| {
-                format!(
-                    "projection failed for snapshot update thread_id={}",
-                    update.thread_id
-                )
-            })?;
-        }
+                thread_id,
+                events,
+                snapshot_updates: snapshot_updates.clone(),
+                signer,
+            },
+            &mut cache,
+        )?;
 
-        Ok(result)
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                for event in &result.events {
+                    if event.durability.is_projection_indexed() {
+                        projection::project_event(&self.projection, event).with_context(|| {
+                            format!("projection failed for event chain_seq={}", event.chain_seq)
+                        })?;
+                    }
+                }
+
+                for update in &snapshot_updates {
+                    projection::project_thread_snapshot(
+                        &self.projection,
+                        &update.new_snapshot,
+                        chain_root_id,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "projection failed for snapshot update thread_id={}",
+                            update.thread_id
+                        )
+                    })?;
+                }
+
+                Ok(())
+            },
+        );
+
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "append_events",
+            projected,
+        ))
     }
 
     /// Add a new thread and its initial durable events in one chain-head update.
@@ -226,33 +369,46 @@ impl StateDb {
         snapshot: ThreadSnapshot,
         events: Vec<ThreadEvent>,
         signer: &dyn Signer,
-    ) -> anyhow::Result<AddThreadWithEventsResult> {
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::add_thread_with_events cannot persist ephemeral events");
         }
 
-        let result = {
-            let mut cache = self.head_cache.lock().expect("head_cache lock");
-            chain::add_thread_to_chain_with_events(
-                &self.cas_root,
-                &self.refs_root,
-                chain_root_id,
-                snapshot.clone(),
-                events,
-                signer,
-                &mut cache,
-            )?
-        };
-
-        projection::project_thread_snapshot_with_events(
-            &self.projection,
-            &snapshot,
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::add_thread_to_chain_with_events(
+            &self.cas_root,
+            &self.refs_root,
             chain_root_id,
-            &result.events,
-        )
-        .context("projection failed after CAS write for add_thread_with_events")?;
+            snapshot.clone(),
+            events,
+            signer,
+            &mut cache,
+        )?;
 
-        Ok(result)
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot_with_events_in_transaction(
+                    &self.projection,
+                    &snapshot,
+                    chain_root_id,
+                    &result.events,
+                )
+                .context("projecting thread and initial events")
+            },
+        );
+
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "add_thread_with_events",
+            projected,
+        ))
     }
 
     // ── Project head refs (principal-scoped) ──────────────────────
@@ -321,6 +477,98 @@ impl StateDb {
         name: &str,
     ) -> anyhow::Result<Option<SignedRef>> {
         crate::refs::read_generic_head_ref(&self.refs_root, namespace, name)
+    }
+
+    pub fn terminal_service_chain_candidates(&self, cutoff: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.projection.connection().prepare(
+            "SELECT root.chain_root_id FROM threads root
+             WHERE root.thread_id = root.chain_root_id
+               AND root.kind = 'service_run'
+               AND root.finished_at IS NOT NULL AND root.finished_at < ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM threads member
+                   WHERE member.chain_root_id = root.chain_root_id
+                     AND (
+                       member.status NOT IN ('completed','failed','cancelled','killed','timed_out','continued')
+                       OR member.updated_at >= ?1
+                     )
+               )
+             ORDER BY root.finished_at",
+        )?;
+        let rows = stmt.query_map([cutoff], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn terminal_service_chain_is_retirable(
+        &self,
+        chain_root_id: &str,
+        cutoff: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self.projection.connection().query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM threads root
+                WHERE root.thread_id=?1 AND root.chain_root_id=?1 AND root.kind='service_run'
+                  AND root.finished_at IS NOT NULL AND root.finished_at < ?2
+                  AND NOT EXISTS (
+                    SELECT 1 FROM threads member WHERE member.chain_root_id=?1
+                    AND (
+                      member.status NOT IN ('completed','failed','cancelled','killed','timed_out','continued')
+                      OR member.updated_at >= ?2
+                    )
+                  )
+             )",
+            [chain_root_id, cutoff],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn remove_chain_head_ref(&self, chain_root_id: &str) -> anyhow::Result<bool> {
+        let removed = crate::refs::remove_generic_head_ref(
+            &self.refs_root,
+            "chains",
+            chain_root_id,
+        )?;
+        self.head_cache
+            .lock()
+            .expect("head_cache lock")
+            .invalidate(chain_root_id);
+        Ok(removed)
+    }
+
+    pub fn delete_chain_projection(&self, chain_root_id: &str) -> anyhow::Result<usize> {
+        let conn = self.projection.connection();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let thread_ids = "SELECT thread_id FROM threads WHERE chain_root_id=?1";
+            let mut deleted = 0usize;
+            deleted += conn.execute(
+                &format!("DELETE FROM event_replay_index WHERE thread_id IN ({thread_ids})"),
+                [chain_root_id],
+            )?;
+            deleted += conn.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute("DELETE FROM thread_edges WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute("DELETE FROM thread_results WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute("DELETE FROM thread_artifacts WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute(
+                &format!("DELETE FROM thread_facets WHERE thread_id IN ({thread_ids})"),
+                [chain_root_id],
+            )?;
+            deleted += conn.execute("DELETE FROM thread_usage_latest WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute("DELETE FROM thread_usage_subjects WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute("DELETE FROM projection_meta WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute("DELETE FROM threads WHERE chain_root_id=?1", [chain_root_id])?;
+            Ok::<_, rusqlite::Error>(deleted)
+        })();
+        match result {
+            Ok(deleted) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(deleted)
+            }
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(err.into())
+            }
+        }
     }
 
     /// Advance a namespace-neutral signed head with compare-and-swap semantics.
@@ -567,8 +815,9 @@ mod tests {
         .build();
 
         let result = db.create_chain("T-root", snapshot, &signer).unwrap();
-        assert!(!result.chain_state_hash.is_empty());
-        assert!(!result.snapshot_hash.is_empty());
+        assert_eq!(result.projection, ProjectionStatus::Current);
+        assert!(!result.value.chain_state_hash.is_empty());
+        assert!(!result.value.snapshot_hash.is_empty());
 
         let row = db
             .get_thread("T-root")
@@ -578,6 +827,210 @@ mod tests {
         assert_eq!(row.chain_root_id, "T-root");
         assert_eq!(row.kind, "directive");
         assert_eq!(row.status, "created");
+
+        let meta = db
+            .projection()
+            .get_projection_meta("T-root")
+            .unwrap()
+            .expect("successful projection must advance its cursor");
+        assert_eq!(meta.indexed_chain_state_hash, result.value.chain_state_hash);
+    }
+
+    #[test]
+    fn projection_commit_is_idempotent_at_committed_cursor() {
+        let (_dir, db) = open_temp();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        let committed = db.create_chain("T-root", snapshot, &signer).unwrap();
+        let cache = db.head_cache.lock().unwrap();
+
+        project_committed_chain(
+            db.projection(),
+            &cache,
+            "T-root",
+            &committed.value.chain_state_hash,
+            || anyhow::bail!("idempotent projection must not replay rows"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn projection_cursor_conflict_rolls_back_without_projecting_rows() {
+        let (_dir, db) = open_temp();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+        let conflicting_hash = "f".repeat(64);
+        db.projection()
+            .update_projection_meta(&crate::projection::ProjectionMeta {
+                chain_root_id: "T-root".to_string(),
+                indexed_chain_state_hash: conflicting_hash.clone(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .unwrap();
+        let before: i64 = db
+            .projection()
+            .connection()
+            .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let event =
+            crate::objects::thread_event::NewEvent::new("T-root", "T-root", "cursor_conflict_test")
+                .build();
+
+        let committed = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap();
+
+        assert!(matches!(
+            committed.projection,
+            ProjectionStatus::RepairRequired(_)
+        ));
+        let after: i64 = db
+            .projection()
+            .connection()
+            .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .unwrap()
+                .indexed_chain_state_hash,
+            conflicting_hash
+        );
+    }
+
+    #[test]
+    fn committed_write_reports_stale_projection_without_losing_cas_result() {
+        let (dir, db) = open_temp();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        let initial = db.create_chain("T-root", snapshot, &signer).unwrap();
+        db.projection()
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER reject_test_event_projection
+                 BEFORE INSERT ON events
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected event projection failure');
+                 END;",
+            )
+            .unwrap();
+
+        let event = crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            "T-root",
+            "projection_failure_test",
+        )
+        .build();
+        let committed = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap();
+        assert!(matches!(
+            committed.projection,
+            ProjectionStatus::RepairRequired(ProjectionRepairRequest {
+                operation: "append_events",
+                ..
+            })
+        ));
+        let head = crate::refs::read_signed_ref(&db.refs_root().join("generic/chains/T-root/head"))
+            .unwrap();
+        assert_eq!(head.target_hash, committed.value.chain_state_hash);
+        assert_eq!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .unwrap()
+                .indexed_chain_state_hash,
+            initial.value.chain_state_hash,
+            "failed row projection must roll back the cursor advance"
+        );
+
+        db.projection()
+            .connection()
+            .execute_batch("DROP TRIGGER reject_test_event_projection")
+            .unwrap();
+        drop(db);
+        let reopened = StateDb::open(dir.path()).unwrap();
+        let projected = reopened
+            .projection()
+            .get_projection_meta("T-root")
+            .unwrap()
+            .expect("startup catch-up must restore the projection cursor");
+        assert_eq!(projected.indexed_chain_state_hash, head.target_hash);
+    }
+
+    #[derive(Default)]
+    struct RecordingRepairSink {
+        requests: Mutex<Vec<ProjectionRepairRequest>>,
+    }
+
+    impl ProjectionRepairSink for RecordingRepairSink {
+        fn request_repair(&self, request: ProjectionRepairRequest) {
+            self.requests.lock().unwrap().push(request);
+        }
+    }
+
+    #[test]
+    fn projection_failure_signals_repair_even_when_status_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(RecordingRepairSink::default());
+        let db = StateDb::open_with_projection_repair_sink(dir.path(), sink.clone()).unwrap();
+        let signer = TestSigner::default();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .build();
+        db.create_chain("T-root", snapshot, &signer).unwrap();
+        db.projection()
+            .connection()
+            .execute_batch("DROP TABLE events")
+            .unwrap();
+        let event = crate::objects::thread_event::NewEvent::new(
+            "T-root",
+            "T-root",
+            "projection_failure_test",
+        )
+        .build();
+
+        let committed_head_hash = db
+            .append_events("T-root", "T-root", vec![event], vec![], &signer)
+            .unwrap()
+            .value
+            .chain_state_hash;
+
+        let requests = sink.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].chain_root_id, "T-root");
+        assert_eq!(requests[0].committed_head_hash, committed_head_hash);
+        assert_eq!(requests[0].operation, "append_events");
+        assert!(!requests[0].error.is_empty());
     }
 
     #[test]
@@ -714,12 +1167,20 @@ mod tests {
 
         let result = db.create_chain("T-root", snapshot, &signer).unwrap();
 
-        let snapshot_path =
-            lillux::shard_path(db.cas_root(), "objects", &result.snapshot_hash, ".json");
+        let snapshot_path = lillux::shard_path(
+            db.cas_root(),
+            "objects",
+            &result.value.snapshot_hash,
+            ".json",
+        );
         assert!(snapshot_path.exists());
 
-        let chain_state_path =
-            lillux::shard_path(db.cas_root(), "objects", &result.chain_state_hash, ".json");
+        let chain_state_path = lillux::shard_path(
+            db.cas_root(),
+            "objects",
+            &result.value.chain_state_hash,
+            ".json",
+        );
         assert!(chain_state_path.exists());
     }
 
@@ -838,7 +1299,7 @@ mod tests {
             .append_events("T-root", "T-root", vec![event], vec![], &signer)
             .unwrap();
 
-        assert_eq!(result.event_count, 1);
+        assert_eq!(result.value.event_count, 1);
 
         let conn = db.projection().connection();
         let count: i64 = conn

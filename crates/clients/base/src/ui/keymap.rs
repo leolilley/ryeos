@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::event::{RyeOsAction, RyeOsStackMoveDirection, RyeOsUiEvent};
+use super::event::{RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
 use super::model::RyeOsDockEdge;
 use crate::workspace::FocusDirection;
 
@@ -137,16 +137,16 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             overlay_id: "help".to_string(),
         }),
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'q') => {
-            action(RyeOsAction::CloseFocused)
+            intent(RyeOsUiIntent::CloseFocused)
         }
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'m') => {
-            action(RyeOsAction::ToggleFocusedMaster)
+            intent(RyeOsUiIntent::ToggleFocusedMaster)
         }
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'t') => {
-            action(RyeOsAction::ToggleTopStatusBar)
+            intent(RyeOsUiIntent::ToggleTopStatusBar)
         }
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'b') => {
-            action(RyeOsAction::ToggleBottomStatusBar)
+            intent(RyeOsUiIntent::ToggleBottomStatusBar)
         }
         RyeOsKey::Char(c)
             if event.modifiers.none()
@@ -167,7 +167,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
                 && c.eq_ignore_ascii_case(&'s') =>
         {
-            action(RyeOsAction::ToggleBackdropBreak)
+            intent(RyeOsUiIntent::ToggleBackdropBreak)
         }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_shift() => resize(FocusDirection::Up),
         RyeOsKey::ArrowDown if event.modifiers.ctrl_shift() => resize(FocusDirection::Down),
@@ -194,7 +194,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::Escape if event.modifiers.none() && context.head_thread_running => {
             ui(RyeOsUiEvent::InterruptHead)
         }
-        RyeOsKey::Escape if event.modifiers.none() => action(RyeOsAction::CloseFocused),
+        RyeOsKey::Escape if event.modifiers.none() => intent(RyeOsUiIntent::CloseFocused),
         // Alt+Enter submits as a forceful INTERRUPT (cut the running thread's
         // in-flight cognition and redirect); plain Enter steers. Checked first so
         // the modifier wins over the plain-submit arm below.
@@ -334,6 +334,12 @@ fn overlay_key_command(event: RyeOsKeyEvent) -> RyeOsKeyCommand {
         RyeOsKey::ArrowDown if event.modifiers.none() => {
             ui(RyeOsUiEvent::MoveOverlaySelection { delta: 1 })
         }
+        RyeOsKey::ArrowLeft if event.modifiers.none() => {
+            ui(RyeOsUiEvent::FoldOverlayGroup { expand: false })
+        }
+        RyeOsKey::ArrowRight if event.modifiers.none() => {
+            ui(RyeOsUiEvent::FoldOverlayGroup { expand: true })
+        }
         RyeOsKey::Backspace if event.modifiers.none() => RyeOsKeyCommand::DeleteOverlayChar,
         RyeOsKey::Char(ch)
             if !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.meta =>
@@ -349,8 +355,8 @@ fn ui(event: RyeOsUiEvent) -> RyeOsKeyCommand {
     RyeOsKeyCommand::Ui { event }
 }
 
-fn action(action: RyeOsAction) -> RyeOsKeyCommand {
-    ui(RyeOsUiEvent::Activate { action })
+fn intent(intent: RyeOsUiIntent) -> RyeOsKeyCommand {
+    ui(RyeOsUiEvent::Activate { intent })
 }
 
 fn focus(direction: FocusDirection) -> RyeOsKeyCommand {
@@ -358,15 +364,15 @@ fn focus(direction: FocusDirection) -> RyeOsKeyCommand {
 }
 
 fn resize(direction: FocusDirection) -> RyeOsKeyCommand {
-    action(RyeOsAction::ResizeFocused { direction })
+    intent(RyeOsUiIntent::ResizeFocused { direction })
 }
 
 fn move_focused_tile(direction: RyeOsStackMoveDirection) -> RyeOsKeyCommand {
-    action(RyeOsAction::MoveFocusedTile { direction })
+    intent(RyeOsUiIntent::MoveFocusedTile { direction })
 }
 
 fn cycle_tab(direction: RyeOsStackMoveDirection) -> RyeOsKeyCommand {
-    action(RyeOsAction::CycleTab { direction })
+    intent(RyeOsUiIntent::CycleTab { direction })
 }
 
 impl RyeOsKeyModifiers {
@@ -456,17 +462,27 @@ impl super::model::RyeOsCore {
 
     fn move_focused_row(&mut self, delta: i32) -> (bool, Vec<super::RyeOsEffect>) {
         let vm = self.envelope(Vec::new()).view_model;
-        let target = match self.focus_target() {
+        // A focused dock with selectable rows owns the point. A focused
+        // dock WITHOUT rows — the chat line — falls through to the
+        // focused center tile: the chat convention is that arrows walk
+        // the content behind the input while you type, and sessions now
+        // START with the input focused.
+        let dock_target = match self.focus_target() {
             super::model::RyeOsFocusTarget::Dock { edge } => {
-                let Some(dock) = dock_vm_for_edge(&vm.workspace.docks, edge) else {
-                    return (false, Vec::new());
-                };
-                FocusedRowsTarget {
-                    source_key: super::model::dock_source_key(edge),
-                    count_and_feed: selectable_of(&dock.view),
-                }
+                dock_vm_for_edge(&vm.workspace.docks, edge)
+                    .map(|dock| FocusedRowsTarget {
+                        source_key: super::model::dock_source_key(edge),
+                        count_and_feed: selectable_of(&dock.view),
+                    })
+                    .filter(|target| target.count_and_feed.0 > 0)
             }
-            super::model::RyeOsFocusTarget::WorkspaceTile { .. } => {
+            super::model::RyeOsFocusTarget::WorkspaceTile { .. } => None,
+        };
+        let target = match self.focus_target() {
+            super::model::RyeOsFocusTarget::Dock { .. } if dock_target.is_some() => {
+                dock_target.unwrap()
+            }
+            _ => {
                 let focused = vm.workspace.focused_tile;
                 let Some(root) = vm.workspace.root.as_ref() else {
                     return (false, Vec::new());
@@ -582,10 +598,10 @@ fn initial_list_local_state() -> crate::workspace::ViewLocalState {
     }
 }
 
-fn dock_vm_for_edge<'a>(
-    docks: &'a super::view_model::RyeOsDockPlaneVm,
+fn dock_vm_for_edge(
+    docks: &super::view_model::RyeOsDockPlaneVm,
     edge: RyeOsDockEdge,
-) -> Option<&'a super::view_model::RyeOsDockTileVm> {
+) -> Option<&super::view_model::RyeOsDockTileVm> {
     match edge {
         RyeOsDockEdge::Top => docks.top.as_ref(),
         RyeOsDockEdge::Bottom => docks.bottom.as_ref(),
@@ -758,7 +774,7 @@ mod tests {
             ryeos_key_command(ctrl('s'), context(false, true)),
             RyeOsKeyCommand::Ui {
                 event: RyeOsUiEvent::Activate {
-                    action: RyeOsAction::ToggleBackdropBreak
+                    intent: RyeOsUiIntent::ToggleBackdropBreak
                 }
             }
         ));
@@ -846,6 +862,23 @@ mod tests {
             ryeos_key_command(key(RyeOsKey::Escape), overlay),
             RyeOsKeyCommand::Ui {
                 event: RyeOsUiEvent::CloseOverlay
+            }
+        ));
+    }
+
+    #[test]
+    fn overlay_arrow_keys_fold_and_unfold_the_selected_group() {
+        let overlay = context(true, true);
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowLeft), overlay),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::FoldOverlayGroup { expand: false }
+            }
+        ));
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowRight), overlay),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::FoldOverlayGroup { expand: true }
             }
         ));
     }

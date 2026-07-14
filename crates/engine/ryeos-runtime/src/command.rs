@@ -500,17 +500,14 @@ fn validate_command(
     policy: &CommandRegistrationPolicy,
 ) -> Result<(), CommandRegistryError> {
     validate_tokens(&record.name, &record.tokens)?;
-    match &record.dispatch {
-        CommandDispatch::ExecuteRef { execute, .. } => {
-            ryeos_engine::canonical_ref::CanonicalRef::parse(execute).map_err(|e| {
-                CommandRegistryError::InvalidExecuteRef {
-                    name: record.name.clone(),
-                    execute: execute.clone(),
-                    detail: e.to_string(),
-                }
-            })?;
-        }
-        _ => {}
+    if let CommandDispatch::ExecuteRef { execute, .. } = &record.dispatch {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(execute).map_err(|e| {
+            CommandRegistryError::InvalidExecuteRef {
+                name: record.name.clone(),
+                execute: execute.clone(),
+                detail: e.to_string(),
+            }
+        })?;
     }
     for alias in &record.aliases {
         validate_tokens(&record.name, &alias.tokens)?;

@@ -6,6 +6,7 @@ use super::launch_envelope::HardLimits;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct LimitsConfig {
     #[serde(default)]
     pub category: Option<String>,
@@ -13,16 +14,6 @@ pub struct LimitsConfig {
     pub defaults: LimitValues,
     #[serde(default)]
     pub caps: LimitCaps,
-}
-
-impl Default for LimitsConfig {
-    fn default() -> Self {
-        Self {
-            category: None,
-            defaults: LimitValues::default(),
-            caps: LimitCaps::default(),
-        }
-    }
 }
 
 impl LimitsConfig {

@@ -210,7 +210,11 @@ mod tests {
     fn truncate_snippet_bounds_long_content() {
         let long = "word ".repeat(500); // 2500 chars
         let t = truncate_snippet(&long);
-        assert!(t.chars().count() <= SNIPPET_MAX_CHARS + 1, "len={}", t.chars().count());
+        assert!(
+            t.chars().count() <= SNIPPET_MAX_CHARS + 1,
+            "len={}",
+            t.chars().count()
+        );
         assert!(t.ends_with('…'));
         assert_eq!(truncate_snippet("short snippet"), "short snippet");
     }

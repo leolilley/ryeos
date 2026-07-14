@@ -3,7 +3,7 @@
 //! the braid as they append, settle on exit. Fold-from-braid keeps live
 //! and replay the same fold.
 
-use ryeos_client_base::ui::{RyeOsCore, SeatEvent, SeatEventKind};
+use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 
 use crate::transport::daemon::DaemonClient;
 
@@ -59,14 +59,30 @@ async fn reattach_seat_thread(
         "parameters": { "surface_ref": surface_ref },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
-    let thread_id = envelope
+    let seats: Vec<String> = envelope
         .get("result")
         .and_then(|result| result.get("seats"))
         .and_then(serde_json::Value::as_array)?
-        .first()
-        .and_then(|seat| seat.get("thread_id"))
-        .and_then(serde_json::Value::as_str)?
-        .to_string();
+        .iter()
+        .filter_map(|seat| seat.get("thread_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let thread_id = seats.first()?.clone();
+    // Discovery itself does not mutate presence. Renew/recreate the selected
+    // runtime lease before replay so a freshly reattached seat cannot be reaped
+    // during the first heartbeat interval.
+    if !touch_seat_thread(client, &thread_id).await {
+        return None;
+    }
+
+    // Supersede the stragglers: parallel clients share the newest seat by
+    // construction (this same freshest-first pick), so a SECOND running
+    // seat for the surface is always an orphan — a close that was skipped
+    // by a crash, a kill, or a pre-settle exit. Settle them now or they
+    // sit "running" in every thread listing forever.
+    for orphan in seats.iter().skip(1) {
+        close_seat_thread(client, orphan).await;
+    }
 
     let replayed = replay_seat_thread(client, &thread_id).await;
     Some((thread_id, replayed))
@@ -110,22 +126,10 @@ fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {
     })
 }
 
-/// Mirror newly-appended seat events into the seat thread's braid. The
-/// local log is the write-ahead view; the braid is the durable truth.
-pub async fn sync_seat_braid(
-    client: &DaemonClient,
-    core: &RyeOsCore,
-    seat_thread: &Option<String>,
-    synced: &mut usize,
-) {
-    let Some(thread_id) = seat_thread else {
-        return;
-    };
-    let events = core.seat.events();
-    if events.len() <= *synced {
-        return;
-    }
-    let batch: Vec<serde_json::Value> = events[*synced..]
+/// Serialize newly-appended seat events for the braid mirror. The local
+/// log is the write-ahead view; the braid is the durable truth.
+pub fn braid_batch(events: &[SeatEvent]) -> Vec<serde_json::Value> {
+    events
         .iter()
         .filter_map(|event| serde_json::to_value(event).ok())
         .filter_map(|value| {
@@ -138,14 +142,22 @@ pub async fn sync_seat_braid(
                 },
             }))
         })
-        .collect();
+        .collect()
+}
+
+/// Append one mirrored batch to the seat thread's braid. A single writer
+/// task calls this with at most one batch in flight, so braid order
+/// matches local append order without the loop ever waiting on it.
+pub async fn append_braid(
+    client: &DaemonClient,
+    thread_id: &str,
+    events: Vec<serde_json::Value>,
+) -> bool {
     let body = serde_json::json!({
         "item_ref": "service:seat/append",
-        "parameters": { "thread_id": thread_id, "events": batch },
+        "parameters": { "thread_id": thread_id, "events": events },
     });
-    if client.signed_post("/execute", &body).await.is_ok() {
-        *synced = events.len();
-    }
+    client.signed_post("/execute", &body).await.is_ok()
 }
 
 /// Settle the seat thread on clean exit; best effort.
@@ -159,6 +171,21 @@ pub async fn close_seat_thread(client: &DaemonClient, thread_id: &str) {
             }),
         )
         .await;
+}
+
+/// Refresh the runtime-only seat presence lease; best effort and deliberately
+/// independent of durable seat events.
+pub async fn touch_seat_thread(client: &DaemonClient, thread_id: &str) -> bool {
+    client
+        .signed_post(
+            "/execute",
+            &serde_json::json!({
+                "item_ref": "service:seat/touch",
+                "parameters": { "thread_id": thread_id },
+            }),
+        )
+        .await
+        .is_ok()
 }
 
 #[cfg(test)]

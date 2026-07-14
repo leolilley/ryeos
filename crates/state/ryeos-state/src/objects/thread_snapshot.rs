@@ -4,6 +4,7 @@
 //! remain in CAS (immutable). The chain_state points to the latest.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -202,6 +203,10 @@ pub struct ThreadSnapshot {
     pub upstream_thread_id: Option<String>,
     /// Who requested the execution (e.g. "user:alice").
     pub requested_by: Option<String>,
+    /// Normalized local project root captured at execution creation. Remote and
+    /// snapshot-backed project contexts intentionally remain unattributed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<PathBuf>,
     /// The project snapshot hash at the start of execution.
     /// Set when execution begins against a specific project state.
     /// Immutable for this thread. Null for non-CS executions.
@@ -334,6 +339,7 @@ pub struct ThreadSnapshotBuilder {
     origin_site_id: String,
     upstream_thread_id: Option<String>,
     requested_by: Option<String>,
+    project_root: Option<PathBuf>,
     base_project_snapshot_hash: Option<String>,
     result_project_snapshot_hash: Option<String>,
     created_at: String,
@@ -373,6 +379,7 @@ impl ThreadSnapshotBuilder {
             origin_site_id: "site:host".to_string(),
             upstream_thread_id: None,
             requested_by: None,
+            project_root: None,
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
             created_at: now.clone(),
@@ -418,6 +425,11 @@ impl ThreadSnapshotBuilder {
 
     pub fn requested_by(mut self, who: Option<String>) -> Self {
         self.requested_by = who;
+        self
+    }
+
+    pub fn project_root(mut self, root: Option<PathBuf>) -> Self {
+        self.project_root = root;
         self
     }
 
@@ -512,6 +524,7 @@ impl ThreadSnapshotBuilder {
             origin_site_id: self.origin_site_id,
             upstream_thread_id: self.upstream_thread_id,
             requested_by: self.requested_by,
+            project_root: self.project_root,
             base_project_snapshot_hash: self.base_project_snapshot_hash,
             result_project_snapshot_hash: self.result_project_snapshot_hash,
             created_at: self.created_at,

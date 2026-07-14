@@ -26,6 +26,65 @@ use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv, StopOp
 
 use crate::error::CliError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalCommandDescriptor {
+    pub tokens: &'static [&'static str],
+    pub summary: &'static str,
+    pub category: &'static str,
+}
+
+const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
+    LocalCommandDescriptor {
+        tokens: &["identity"],
+        summary: "Print the local node public identity",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["init"],
+        summary: "Bootstrap local node state and packaged bundles",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["start"],
+        summary: "Bring the local node runtime online",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["stop"],
+        summary: "Gracefully stop the local node runtime",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "status"],
+        summary: "Show local node lifecycle status",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "doctor"],
+        summary: "Diagnose local node startup and config",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["help"],
+        summary: "Open the compact TTY help screen",
+        category: "meta",
+    },
+    LocalCommandDescriptor {
+        tokens: &["help", "--all"],
+        summary: "Print the exhaustive CLI reference",
+        category: "meta",
+    },
+    LocalCommandDescriptor {
+        tokens: &["commands"],
+        summary: "Print the full verified command list",
+        category: "meta",
+    },
+];
+
+pub fn local_command_descriptors() -> &'static [LocalCommandDescriptor] {
+    LOCAL_COMMANDS
+}
+
 /// Returns `Ok(true)` if the argv was handled by a lifecycle command, `Ok(false)`
 /// if no lifecycle command matched.
 ///
@@ -43,13 +102,13 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
             run_init_command(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
-        ("node" | "system", Some("status")) => {
+        ("node", Some("status")) => {
             run_status_command(&argv[2..])
                 .await
                 .map_err(map_local_err)?;
             Ok(true)
         }
-        ("node" | "system", Some("doctor")) => {
+        ("node", Some("doctor")) => {
             run_node_doctor_command(&argv[2..])
                 .await
                 .map_err(map_local_err)?;
@@ -372,6 +431,71 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         }
     }
 
+    // Report the node-config activation switch first. Backend policy health is
+    // relevant only when the operator explicitly enables sandboxing.
+    if initialized {
+        match inspect_sandbox_policy(&config.app_root, config.sandbox_enabled) {
+            Ok(detail) => checks.push(check("sandbox", OK, detail)),
+            Err(error) => checks.push(check(
+                "sandbox",
+                FAIL,
+                serde_json::json!({
+                    "app_root": config.app_root,
+                    "error": format!("{error:#}"),
+                    "fix": "set `sandbox_enabled: false` in node config or repair the Bubblewrap policy; then run `ryeos node doctor` again",
+                }),
+            )),
+        }
+    } else {
+        checks.push(check(
+            "sandbox",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
+    if initialized {
+        match ryeos_app::bundle_transaction::inspect_bundle_transactions(&config.app_root) {
+            Ok(diagnostics) if !diagnostics.invalid.is_empty() => checks.push(check(
+                "bundle_transactions",
+                FAIL,
+                serde_json::json!({
+                    "pending": diagnostics.pending,
+                    "invalid": diagnostics.invalid,
+                    "note": "invalid transaction journals block fail-closed startup; inspect or remove them only after verifying bundle tree and registration state",
+                }),
+            )),
+            Ok(diagnostics) if !diagnostics.pending.is_empty() => checks.push(check(
+                "bundle_transactions",
+                WARN,
+                serde_json::json!({
+                    "pending": diagnostics.pending,
+                    "invalid": [],
+                    "fix": "start the node to reconcile interrupted bundle transactions before registry loading",
+                }),
+            )),
+            Ok(diagnostics) => checks.push(check(
+                "bundle_transactions",
+                OK,
+                serde_json::json!({
+                    "pending": diagnostics.pending,
+                    "invalid": diagnostics.invalid,
+                }),
+            )),
+            Err(error) => checks.push(check(
+                "bundle_transactions",
+                FAIL,
+                serde_json::json!({ "error": format!("{error:#}") }),
+            )),
+        }
+    } else {
+        checks.push(check(
+            "bundle_transactions",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and
@@ -553,6 +677,64 @@ fn check(
         status: status.to_string(),
         detail,
     }
+}
+
+fn inspect_sandbox_policy(
+    app_root: &std::path::Path,
+    sandbox_enabled: bool,
+) -> Result<serde_json::Value> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let config_path = app_root.join(ryeos_engine::AI_DIR).join("node/config.yaml");
+    if !sandbox_enabled {
+        return Ok(serde_json::json!({
+            "config": config_path,
+            "enabled": false,
+            "backend_status": "disabled",
+        }));
+    }
+
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/sandbox.yaml");
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("read sandbox policy {}", path.display()))?;
+    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
+        .with_context(|| format!("strictly parse sandbox policy {}", path.display()))?;
+    anyhow::ensure!(
+        policy.version == 1,
+        "unsupported sandbox policy version {} (expected 1)",
+        policy.version
+    );
+    anyhow::ensure!(
+        policy.backend_path.is_absolute(),
+        "sandbox backend path must be absolute: {}",
+        policy.backend_path.display()
+    );
+    let metadata = std::fs::metadata(&policy.backend_path).with_context(|| {
+        format!(
+            "sandbox backend {} is unavailable; install Bubblewrap (for example `sudo pacman -S bubblewrap` or `sudo apt install bubblewrap`)",
+            policy.backend_path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "sandbox backend is not a regular file: {}",
+        policy.backend_path.display()
+    );
+    anyhow::ensure!(
+        metadata.permissions().mode() & 0o111 != 0,
+        "sandbox backend is not executable: {}",
+        policy.backend_path.display()
+    );
+    Ok(serde_json::json!({
+        "config": config_path,
+        "enabled": true,
+        "policy": path,
+        "version": policy.version,
+        "backend": policy.backend_path,
+        "backend_status": "regular executable",
+    }))
 }
 
 #[derive(Parser, Debug)]
@@ -755,6 +937,9 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
 /// Parse argv with clap, but treat `--help` / `--version` as a successful
 /// exit (print to stdout, exit 0) rather than an error. Other parse
 /// failures are mapped to anyhow errors that propagate as `CliError::Local`.
+///
+/// This direct process exit is acceptable for one-shot CLI dispatch. It must be
+/// converted to a returned outcome before extracting an in-process command core.
 fn parse_or_handle_help<P: Parser>(argv: &[String]) -> Result<P> {
     use clap::error::ErrorKind;
     match P::try_parse_from(argv) {
@@ -783,6 +968,20 @@ fn default_app_root() -> PathBuf {
 mod tests {
     use super::*;
 
+    fn sandbox_root() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let node = temp.path().join(".ai/node");
+        std::fs::create_dir_all(&node).unwrap();
+        temp
+    }
+
+    fn sandbox_policy(backend: &std::path::Path, version: u32) -> String {
+        format!(
+            "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
+            backend.display()
+        )
+    }
+
     #[test]
     fn revision_skew_detects_mismatch_and_missing() {
         // Same revision → not skewed.
@@ -795,5 +994,48 @@ mod tests {
         // revision can't be discriminated, but a missing one still skews.
         assert!(!is_revision_skew(Some("abc123def456"), "unknown"));
         assert!(is_revision_skew(None, "unknown"));
+    }
+
+    #[test]
+    fn sandbox_doctor_accepts_absolute_regular_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = sandbox_root();
+        let backend = temp.path().join("bwrap");
+        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
+        std::fs::write(&policy, sandbox_policy(&backend, 1)).unwrap();
+
+        assert!(inspect_sandbox_policy(temp.path(), true).is_ok());
+    }
+
+    #[test]
+    fn sandbox_doctor_rejects_unknown_fields_and_bad_backend() {
+        let temp = sandbox_root();
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
+        std::fs::write(
+            &policy,
+            format!(
+                "{}unexpected: true\n",
+                sandbox_policy(std::path::Path::new("relative/bwrap"), 2)
+            ),
+        )
+        .unwrap();
+
+        let error = inspect_sandbox_policy(temp.path(), true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("strictly parse"));
+
+        std::fs::write(
+            &policy,
+            sandbox_policy(std::path::Path::new("relative/bwrap"), 1),
+        )
+        .unwrap();
+        assert!(inspect_sandbox_policy(temp.path(), true)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute"));
     }
 }

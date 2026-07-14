@@ -1,4 +1,4 @@
-use super::effect::RyeOsEffect;
+use super::effect::{RyeOsEffect, RyeOsEffectKind};
 use super::event::RyeOsStackMoveDirection;
 use super::model::RyeOsCore;
 use super::view_model::{RyeOsMotionEventVm, RyeOsSplitAxisVm};
@@ -6,6 +6,26 @@ use super::wrap_index;
 use crate::ids::TileId;
 use crate::surface::ArrangeSpec;
 use crate::workspace::{ViewLocalState, ViewSpec};
+
+/// One launcher group: a surface-declared (or ref-path-derived) title and
+/// its lensable view refs, in declared order.
+pub(crate) struct LibraryGroup {
+    pub title: String,
+    pub refs: Vec<String>,
+}
+
+/// The mechanical group for a view no surface group lists: the ref's path
+/// segments between the namespace and the leaf (`view:ryeos/node/events`
+/// → `node`), or `views` for refs too short to carry one.
+fn derived_group_title(view_ref: &str) -> String {
+    let path = view_ref.strip_prefix("view:").unwrap_or(view_ref);
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() > 2 {
+        segments[1..segments.len() - 1].join("/")
+    } else {
+        "views".to_string()
+    }
+}
 
 impl RyeOsCore {
     pub(crate) fn cycle_workspace_tab(
@@ -26,32 +46,140 @@ impl RyeOsCore {
         self.switch_workspace_tab(next)
     }
 
-    /// The surface's ordered library, filtered to refs that work as a center
-    /// lens: a real bound view that is neither a scene backdrop nor the foot
-    /// input. Single-lens `Ctrl+←/→` cycles this list.
-    pub(crate) fn lens_library(&self) -> Vec<String> {
-        self.data
+    /// Whether a view works as a center lens: a real bound view that is
+    /// neither a scene backdrop nor a pure input line. An `input` block
+    /// alone does not disqualify — the thread history views carry live
+    /// FILTER inputs and are the canonical center lenses; only a view
+    /// with no content of its own (no source, no sections — the foot
+    /// chat line) is input-only.
+    fn lensable(&self, view_ref: &str) -> bool {
+        self.views.get(view_ref).is_some_and(|binding| {
+            let input_only =
+                binding.input.is_some() && binding.source.is_none() && binding.sections.is_empty();
+            binding.widget != "scene" && !input_only
+        })
+    }
+
+    /// The surface's declared library groups, filtered to lensable refs.
+    /// Grouped entries — `{ group, views: [ref…] }` — are the canonical
+    /// shape; a bare `view:` ref string (the legacy flat form) is shelved
+    /// under its path-derived group in declared order. One key serving
+    /// two consumers: `lens_library` cycles the flattened declared
+    /// order, `library_groups` hands the launcher the tree.
+    fn library_groups_declared(&self) -> Vec<LibraryGroup> {
+        let Some(entries) = self
+            .data
             .session
             .as_ref()
             .and_then(|session| session.effective_surface.as_ref())
             .and_then(|surface| surface.get("library"))
             .and_then(|library| library.as_array())
-            .map(|refs| {
-                refs.iter()
-                    .filter_map(|value| value.as_str())
-                    .filter(|view_ref| {
-                        self.views.get(*view_ref).is_some_and(|binding| {
-                            binding.widget != "scene" && binding.input.is_none()
-                        })
-                    })
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
+        else {
+            return Vec::new();
+        };
+        let mut groups: Vec<LibraryGroup> = Vec::new();
+        let add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| match groups
+            .iter_mut()
+            .find(|group| group.title.eq_ignore_ascii_case(&title))
+        {
+            Some(existing) => existing.refs.extend(refs),
+            None => groups.push(LibraryGroup { title, refs }),
+        };
+        for entry in entries {
+            if let Some(view_ref) = entry.as_str() {
+                if self.lensable(view_ref) {
+                    add(
+                        &mut groups,
+                        derived_group_title(view_ref),
+                        vec![view_ref.to_string()],
+                    );
+                }
+                continue;
+            }
+            let Some(title) = entry
+                .get("group")
+                .and_then(|value| value.as_str())
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty())
+            else {
+                continue;
+            };
+            let refs = entry
+                .get("views")
+                .and_then(|value| value.as_array())
+                .map(|views| {
+                    views
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .filter(|view_ref| self.lensable(view_ref))
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            add(&mut groups, title, refs);
+        }
+        groups
+    }
+
+    /// The launcher's full tree: the declared groups plus every OTHER
+    /// lensable view in the surface, grouped by its ref's path segments.
+    /// The append is a completeness invariant, not curation — a view that
+    /// exists is always reachable, whether or not the surface author
+    /// listed it.
+    pub(crate) fn library_groups(&self) -> Vec<LibraryGroup> {
+        let mut groups = self.library_groups_declared();
+        let declared: std::collections::BTreeSet<&str> = groups
+            .iter()
+            .flat_map(|group| group.refs.iter().map(String::as_str))
+            .collect();
+        let mut derived: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for view_ref in self.views.keys() {
+            if declared.contains(view_ref.as_str()) || !self.lensable(view_ref) {
+                continue;
+            }
+            derived
+                .entry(derived_group_title(view_ref))
+                .or_default()
+                .push(view_ref.clone());
+        }
+        for (title, refs) in derived {
+            // A derived group that matches a declared one (path segment
+            // vs authored title, case-insensitively) appends to it —
+            // "node" must not sit beside "Node" as a second header.
+            if let Some(existing) = groups
+                .iter_mut()
+                .find(|group| group.title.eq_ignore_ascii_case(&title))
+            {
+                existing.refs.extend(refs);
+            } else {
+                groups.push(LibraryGroup { title, refs });
+            }
+        }
+        groups
+    }
+
+    /// The flattened declared library, in group order. Single-lens
+    /// `Ctrl+←/→` cycles this list.
+    pub(crate) fn lens_library(&self) -> Vec<String> {
+        self.library_groups_declared()
+            .into_iter()
+            .flat_map(|group| group.refs)
+            .collect()
     }
 
     pub(crate) fn cycle_lens(&mut self, delta: i32) -> Vec<RyeOsEffect> {
-        let lenses = self.lens_library();
+        // Cycling only lands on views whose facet params the seat fold can
+        // satisfy — the same gate the launcher shows as a disabled row.
+        let lenses: Vec<String> = self
+            .lens_library()
+            .into_iter()
+            .filter(|lens| {
+                self.views.get(lens).is_none_or(|binding| {
+                    super::view_model::unsatisfied_facets(self, binding).is_empty()
+                })
+            })
+            .collect();
         if lenses.is_empty() {
             return Vec::new();
         }
@@ -81,7 +209,14 @@ impl RyeOsCore {
         self.data.tile_items.clear();
         self.data.tile_files.clear();
         self.data.tile_file_space.clear();
+        self.data.sources.clear();
+        self.data.source_epoch.clear();
+        self.data.source_stored_epoch.clear();
+        self.data.source_floor.clear();
         self.data.timeline_sources.clear();
+        self.deferred_source_fetches.clear();
+        self.pending_effects
+            .retain(|_, kind| !matches!(kind, RyeOsEffectKind::FetchSource { .. }));
         self.data.file_read = None;
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -160,10 +295,19 @@ impl RyeOsCore {
                 let key = tile_id.0.to_string();
                 self.data.sources.remove(&key);
                 self.data.source_epoch.remove(&key);
+                self.data.source_stored_epoch.remove(&key);
                 self.data.timeline_sources.remove(&key);
+                let section_prefix = format!("{key}#section");
+                self.deferred_source_fetches
+                    .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
                 self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
                 self.bump_generation();
-                return self.effects_for_view(&view);
+                let effects = self.effects_for_view(&view);
+                // The lens swapped subjects: eviction alone would let an
+                // in-flight response for the OLD lens land into the empty
+                // store — the floor refuses it outright.
+                self.floor_source_fetches(&effects, true);
+                return effects;
             }
         }
 
@@ -204,24 +348,33 @@ impl RyeOsCore {
         for key in restored_facets {
             effects.extend(self.effects_for_facet(&key));
         }
+        // Returning up the drill stack swaps the subject back: a straggler
+        // from the drilled-into lens must not land under the restored one.
+        self.floor_source_fetches(&effects, true);
         effects
     }
 
     pub(crate) fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
+        let source_key = tile_id.0.to_string();
+        let section_prefix = format!("{source_key}#section");
         if self.workspace.tile_ids().len() <= 1 {
             if self.workspace.center_is_empty() || !self.workspace.tiles.contains_key(&tile_id) {
                 return false;
             }
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: tile_id.0.to_string(),
+                tile_id: source_key.clone(),
             });
             self.workspace.reset_to_empty();
+            self.deferred_source_fetches
+                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             return true;
         }
         if self.workspace.close_tile(tile_id) {
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: tile_id.0.to_string(),
+                tile_id: source_key.clone(),
             });
+            self.deferred_source_fetches
+                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
                 tile_id: self.workspace.focused_tile.0.to_string(),
             });
@@ -288,7 +441,7 @@ mod tests {
 
     #[test]
     fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {
-        use crate::ui::view_model::{action_for_focused_row, RyeOsLayoutNodeVm, RyeOsViewVm};
+        use crate::ui::view_model::{intent_for_focused_row, RyeOsLayoutNodeVm, RyeOsViewVm};
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
                 "name": "t",
@@ -354,8 +507,8 @@ mod tests {
             },
         });
         assert_eq!(selected_primaries(&core), vec!["T-ab".to_string()]);
-        match action_for_focused_row(&core).expect("threads row activates") {
-            RyeOsAction::InvokeAffordance {
+        match intent_for_focused_row(&core).expect("threads row activates") {
+            RyeOsUiIntent::InvokeAffordance {
                 affordance_id,
                 record,
                 ..
@@ -367,7 +520,7 @@ mod tests {
         }
 
         // Flat cursor 2 = the first Bundles row (Threads contributed 2). Bundles
-        // declares no activation, so the point resolves a row but no action.
+        // declares no activation, so the point resolves a row but no intent.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
                 tile_id: key.clone(),
@@ -376,7 +529,7 @@ mod tests {
         });
         assert_eq!(selected_primaries(&core), vec!["ryeos".to_string()]);
         assert!(
-            action_for_focused_row(&core).is_none(),
+            intent_for_focused_row(&core).is_none(),
             "a bundles row has no section activation"
         );
     }
@@ -489,7 +642,7 @@ mod tests {
         seed_view(&mut core, "view:test/services");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -499,7 +652,7 @@ mod tests {
         let before = core.workspace.tile_ids().len();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -540,7 +693,7 @@ mod tests {
         // First open fills the empty center with the one lens.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -553,7 +706,7 @@ mod tests {
         // Switching the lens replaces in place — still exactly one tile.
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -589,7 +742,7 @@ mod tests {
         // OpenNewView also collapses to a replace — no second tile.
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -614,7 +767,9 @@ mod tests {
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             effective_surface: Some(serde_json::json!({
                 "name": "lens-test",
-                "library": ["view:a", "view:scene", "view:input", "view:b"],
+                "library": [
+                    { "group": "Lenses", "views": ["view:a", "view:scene", "view:input", "view:b"] }
+                ],
                 "views": {
                     "view:a": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } },
                     "view:scene": { "widget": "scene" },
@@ -639,7 +794,7 @@ mod tests {
         let open = |core: &mut RyeOsCore, view_ref: &str| {
             core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::Activate {
-                    action: RyeOsAction::OpenView {
+                    intent: RyeOsUiIntent::OpenView {
                         view: ViewSpec {
                             view_ref: view_ref.to_string(),
                         },
@@ -650,7 +805,7 @@ mod tests {
         let cycle = |core: &mut RyeOsCore| {
             core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::Activate {
-                    action: RyeOsAction::CycleTab {
+                    intent: RyeOsUiIntent::CycleTab {
                         direction: RyeOsStackMoveDirection::Down,
                     },
                 },
@@ -682,7 +837,7 @@ mod tests {
         seed_view(&mut core, "view:ryeos/items/space");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -692,7 +847,7 @@ mod tests {
         let before = core.workspace.tile_ids().len();
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -726,7 +881,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -735,7 +890,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
@@ -745,7 +900,7 @@ mod tests {
         let tile_id = core.workspace.tile_ids()[1];
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::CloseTile {
+                intent: RyeOsUiIntent::CloseTile {
                     tile_id: tile_id.0.to_string(),
                 },
             },
@@ -764,7 +919,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -775,7 +930,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::CloseFocused,
+                intent: RyeOsUiIntent::CloseFocused,
             },
         });
 
@@ -793,7 +948,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -802,7 +957,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
@@ -811,7 +966,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
@@ -848,7 +1003,7 @@ mod tests {
         seed_view(&mut core, "view:test/files");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -857,7 +1012,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
@@ -868,7 +1023,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SwitchTab { index: 1 },
+                intent: RyeOsUiIntent::SwitchTab { index: 1 },
             },
         });
 
@@ -878,7 +1033,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
@@ -887,7 +1042,7 @@ mod tests {
         });
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenNewView {
+                intent: RyeOsUiIntent::OpenNewView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
@@ -897,13 +1052,13 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SwitchTab { index: 0 },
+                intent: RyeOsUiIntent::SwitchTab { index: 0 },
             },
         });
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::SwitchTab { index: 1 },
+                intent: RyeOsUiIntent::SwitchTab { index: 1 },
             },
         });
 
@@ -920,7 +1075,7 @@ mod tests {
         seed_view(&mut core, "view:test/services");
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
@@ -932,7 +1087,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::CloseTile {
+                intent: RyeOsUiIntent::CloseTile {
                     tile_id: "999".to_string(),
                 },
             },

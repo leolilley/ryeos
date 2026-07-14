@@ -32,18 +32,11 @@ pub trait StaticAssetProvider: Send + Sync {
 
 // ── StaticMode ─────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct StaticMode {
     /// Static asset providers keyed by source name (e.g. "embedded_asset").
     /// When empty, `source: embedded_asset` routes are rejected at compile time.
     providers: HashMap<String, Arc<dyn StaticAssetProvider>>,
-}
-
-impl Default for StaticMode {
-    fn default() -> Self {
-        Self {
-            providers: HashMap::new(),
-        }
-    }
 }
 
 impl StaticMode {
@@ -256,9 +249,7 @@ impl CompiledResponseMode for CompiledStaticMode {
                     }
                 };
 
-                let asset = provider
-                    .get(&path)
-                    .ok_or_else(|| RouteDispatchError::NotFound)?;
+                let asset = provider.get(&path).ok_or(RouteDispatchError::NotFound)?;
 
                 // ETag / If-None-Match → 304.
                 if let Some(inm) = ctx.request_parts.headers.get(header::IF_NONE_MATCH) {

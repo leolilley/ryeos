@@ -1,6 +1,8 @@
 # Maintainer: Leo Lilley <leo.lml.lilley@gmail.com>
 pkgname=ryeos
-pkgver=0.5.8
+# Release template. scripts/release/prepare-aur.sh replaces both placeholders
+# only after verifying the signed tag and hashing the exact source archive.
+pkgver=RELEASE_VERSION
 pkgrel=1
 pkgdesc="Portable operating system for AI — persistent, signed workspace for LLMs"
 arch=('x86_64')
@@ -15,16 +17,13 @@ install=ryeos.install
 options=('!strip' '!lto')
 
 # SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
-depends=('gcc-libs' 'glibc')
+depends=('bubblewrap' 'gcc-libs' 'glibc')
 
 # cc needed for bundled libsqlite3-sys C compilation
 makedepends=('rust' 'cargo' 'cc')
 
 source=("$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
-
-# Uncomment once a GPG signing key is set up for release tags
-# validpgpkeys=('')
+sha256sums=('RELEASE_ARCHIVE_SHA256')
 
 build() {
     cd "ryeos-${pkgver}"

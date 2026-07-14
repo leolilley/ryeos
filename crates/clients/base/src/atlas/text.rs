@@ -80,9 +80,7 @@ fn render_projected(
         }
         let style = if node.state.selected || node.state.highlighted {
             highlight
-        } else if node.state.dimmed {
-            dim
-        } else if visible_stack.is_empty() {
+        } else if node.state.dimmed || visible_stack.is_empty() {
             dim
         } else {
             normal
@@ -195,7 +193,7 @@ fn stack_glyphs(kinds: impl Iterator<Item = AtlasItemKind>) -> String {
         AtlasItemKind::File,
         AtlasItemKind::Other,
     ] {
-        if kinds.iter().any(|candidate| *candidate == kind) {
+        if kinds.contains(&kind) {
             glyphs.push(kind.glyph());
         }
     }

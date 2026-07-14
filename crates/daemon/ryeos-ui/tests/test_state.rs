@@ -29,6 +29,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
+        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -107,6 +108,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
+        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -203,6 +205,8 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         .with_composers(composers)
 }
 
+// Test fixture: one argument per AppState component under test.
+#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
     config: ryeos_app::config::Config,

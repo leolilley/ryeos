@@ -144,3 +144,42 @@ pub fn extract_required_caps(metadata_extra: &HashMap<String, Value>) -> Vec<Str
         })
         .unwrap_or_default()
 }
+
+/// Whether a verified service invocation should create a durable lifecycle
+/// thread. Auditability remains the secure default.
+pub fn extract_record_thread(metadata_extra: &HashMap<String, Value>) -> Result<bool> {
+    match metadata_extra.get("record_thread") {
+        None => Ok(true),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => anyhow::bail!("service YAML field 'record_thread' must be a boolean"),
+    }
+}
+
+/// Whether a signed service may be invoked from a browser session whose
+/// project authority is read-only. This is independent of audit policy.
+pub fn extract_ui_read_only(metadata_extra: &HashMap<String, Value>) -> Result<bool> {
+    match metadata_extra.get("ui_read_only") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => anyhow::bail!("service YAML field 'ui_read_only' must be a boolean"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiDispatchMode {
+    Verified,
+    SessionLocal,
+}
+
+/// Browser dispatch mechanism declared by the signed service item. The normal
+/// path is the generic verified executor; only session-state services opt into
+/// direct descriptor dispatch so they retain the browser-session principal.
+pub fn extract_ui_dispatch(metadata_extra: &HashMap<String, Value>) -> Result<UiDispatchMode> {
+    match metadata_extra.get("ui_dispatch").and_then(Value::as_str) {
+        None | Some("verified") => Ok(UiDispatchMode::Verified),
+        Some("session_local") => Ok(UiDispatchMode::SessionLocal),
+        Some(other) => anyhow::bail!(
+            "service YAML field 'ui_dispatch' has invalid value '{other}'; expected verified | session_local"
+        ),
+    }
+}

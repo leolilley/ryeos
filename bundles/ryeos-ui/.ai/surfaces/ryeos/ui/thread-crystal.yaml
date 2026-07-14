@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-08T06:03:18Z:836bd395753ddb82cf1d34057a6c08c17dd15572b6a8c9ca20cf8ab2051738ab:nwpuKHKziu72/yykcR9jHrDpaDBASZD4lupGME/M3u4mzctGI9Ohsvw9vEmTeUQ5Rkgxd6y6A9XJu0eKC+dWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-13T01:54:18Z:3f72c34f2eb7c50fa46c1486dbd7892754c2dcfc87a4e1955cd917e066db41fc:VFbe6xuj6wL/lSNl5MVpf+SDIJMnRagf1LnYYmeavB87Z3rlxe9jtSrTPHGtATI0anmkT7mJaBAJKNnjG5j+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
 description: Focused thread transcript over the live prism backdrop
@@ -23,9 +22,13 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/threads/history
-  - view:ryeos/node/threads/history
-  - view:ryeos/node/events
+  - group: Threads
+    views:
+      - view:ryeos/threads/history
+      - view:ryeos/node/threads/history
+  - group: Node
+    views:
+      - view:ryeos/node/events
 
 input:
   route:

@@ -39,8 +39,7 @@ impl InstalledBundleRecord {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BundleRegistrationBody {
-    #[serde(default)]
-    kind: Option<String>,
+    kind: String,
     path: PathBuf,
     #[allow(dead_code)]
     #[serde(default)]
@@ -105,9 +104,9 @@ pub fn load_installed_bundle_records_with_trust(
         let body: BundleRegistrationBody = serde_yaml::from_str(&strip_signature(&content))
             .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
 
-        if body.kind.as_deref().is_some_and(|kind| kind != "node") {
+        if body.kind != "node" {
             bail!(
-                "node bundle registration {} declares kind {:?}, expected 'node'",
+                "node bundle registration {} declares kind {:?}, expected the current ryeos.bundle-registration/v1 kind 'node'",
                 path.display(),
                 body.kind
             );
@@ -375,6 +374,21 @@ mod tests {
             msg.contains("unknown field `id`"),
             "expected id rejection: {msg}"
         );
+    }
+
+    #[test]
+    fn rejects_registration_without_current_v1_kind() {
+        let layout = Layout::new();
+        let bundle = layout.write_bundle("core");
+        let dir = layout.system.join(".ai/node/bundles");
+        fs::create_dir_all(&dir).unwrap();
+        let body = format!("path: {}\n", bundle.display());
+        let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
+        fs::write(dir.join("core.yaml"), signed).unwrap();
+
+        let error = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("missing field `kind`"));
     }
 
     #[cfg(unix)]

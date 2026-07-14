@@ -43,23 +43,43 @@ pub async fn handle_remotes_list(
 
     let project = session.project_root.as_deref().map(std::path::Path::new);
 
-    let remotes = ryeos_api::remote::config::load_remotes_layered(&state.config.app_root, project)?;
+    let report =
+        ryeos_api::remote::config::load_remotes_layered_report(&state.config.app_root, project)?;
 
-    let mut entries: Vec<Value> = remotes
+    let mut entries: Vec<Value> = report
+        .remotes
         .values()
-        .map(|r| {
+        .map(|loaded| {
+            let r = &loaded.config;
             serde_json::json!({
                 "name": r.name,
                 "url": r.url,
                 "principal_id": r.principal_id,
                 "site_id": r.site_id,
+                "scope": loaded.scope.label(),
+                "config_path": loaded.config_path,
                 "project_bindings": r.project_bindings,
             })
         })
         .collect();
     entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let mut invalid: Vec<Value> = report
+        .invalid
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "scope": entry.scope.label(),
+                "config_path": entry.config_path,
+                "url": entry.url,
+                "error": entry.error,
+                "repair_hint": entry.repair_hint,
+            })
+        })
+        .collect();
+    invalid.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-    Ok(serde_json::json!({ "remotes": entries }))
+    Ok(serde_json::json!({ "remotes": entries, "invalid_remotes": invalid }))
 }
 
 // ── remotes.probe ──────────────────────────────────────────────────

@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-06T13:09:32Z:95fc5fec349b134de305c8ddec0aa01893e58fa3ac6bdc063a02d910e2c0e028:bVFrs24s1FU0h4sasqgoGtTKmkBnlJ/p870lepfdwcv7C7Y55mIszjoPH28tHEKjFKIPKNfrYJ5VE8+eZembBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:19Z:75245ac9eb25cc92062694c8f2f9c9ad12449f4fdc5b4d38985f47c8f13fa75e:cfGvYLvhP5cX7BpEbp+pL1X4Zhv9JhuIQ00h2d4bxGvhYOoWIasa3gO48rbBvmeJ5DJ0oqPKPrLVnNK/3sqVCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-atlas
 version: "1.0.0"
 description: RyeOS UI with a Three.js 2D namespace atlas background

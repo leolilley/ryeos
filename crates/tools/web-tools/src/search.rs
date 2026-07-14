@@ -21,18 +21,14 @@ struct SearchParams {
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum SearchProvider {
+    #[default]
     Auto,
     BingWebRss,
     Duckduckgo,
     GoogleNewsRss,
     BingNewsRss,
-}
-
-impl Default for SearchProvider {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Serialize)]

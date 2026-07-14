@@ -11,14 +11,15 @@
 # debian:trixie ships glibc 2.41+, matching modern host toolchains. The
 # previous base (debian:bookworm-slim, glibc 2.36) refused to load
 # host-built release binaries with `GLIBC_2.39 not found`.
-FROM debian:trixie-slim
+FROM node:22-trixie-slim@sha256:4228fca437e45714a3ebd1d4ecd1dcc583cf79f5a940aa025e286b472d93b67c AS node-runtime
+
+FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg && \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    apt-get purge -y curl gnupg && apt-get autoremove -y && \
+        bubblewrap ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+COPY --from=node-runtime /usr/local/ /usr/local/
 
 WORKDIR /app
 
@@ -50,5 +51,8 @@ ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD ["ryeos", "node", "status"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

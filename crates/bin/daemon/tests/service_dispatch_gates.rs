@@ -197,7 +197,7 @@ fn gate_cap_consistency() {
 
     // Services that MUST have empty caps (public)
     let cap_free = [
-        "service:system/status",
+        "service:node/status",
         "service:threads/list",
         "service:threads/get",
         "service:bundle/list",
@@ -332,8 +332,8 @@ fn gate_service_count_matches_expected() {
     let services = service_refs();
     assert_eq!(
         services.len(),
-        85,
-        "service descriptor table count drifted from expected 85"
+        87,
+        "service descriptor table count drifted from expected 87"
     );
 }
 

@@ -1,11 +1,11 @@
-# ryeos:signed:2026-06-30T00:10:25Z:252ae361501a6cae2f2f758c689dc090d69011f8394ba98850e1f1d852204c32:oG5lPCRuX08gq+ku7ehwuMqGNDzkZ+5zOnLyjMmdxWwLSsjZOgHfkJFrVXNRoNdaZLuLtd2Uki1kwiGh8v6fCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T02:07:24Z:ceb40fcdb34e7a30e4c625e9789fd9f1276cf37fe5d9eefd763bc61c2d593593:VRIWDX7nUOPwSXk/7/OP0sHkCVs3EEzpKnTMPe6MHzwWiwRffI7MYoBdhca9cQt2fqokkc5BqLjZyGpyr5fNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: remotes-list
 version: "1.0.0"
 description: Configured remote nodes (the mesh as reach)
 
 widget: table
 source:
-  ref: service:remote/list
+  ref: service:ui/ryeos-ui/remotes/list
   params: {}
   collection: remotes
 projections:

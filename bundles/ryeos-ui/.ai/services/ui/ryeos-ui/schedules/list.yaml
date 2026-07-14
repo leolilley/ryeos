@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-06T12:24:56Z:899a32025866b5b3d4200622adab38781f5c54ca413c213abf8fc5bfd96eca5a:UiOXdW741RQnhETOg+Q0LuMOHHG3RNt9C66oTkqHEUVxWerNm4vSRkBvv24SLR/HkFfAr5FNDRnCJwLRfJuNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:006e4cd511f1538b1e8e34a67973be35086c8bb9b3a0f7a3c26f1b5356535569:olzp7cIrNM7bZaSLCg0c15wo/iabJnD4iW5WzvgTz8BnSbcL+Wsu4cQG6HIcXN0wPnr0xUTMdnuzGmF/rAsLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/schedules/list
 version: "1.0.0"
 description: Schedule listing for RyeOS UI — returns schedules with last-fire and fire-count data.
 endpoint: ui.ryeos.schedules.list
+ui_read_only: true
+record_thread: false
 availability: daemon_only

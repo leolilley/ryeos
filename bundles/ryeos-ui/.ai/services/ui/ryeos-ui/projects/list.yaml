@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-06T12:24:56Z:f37d4c4a0e7a4f41bd675e790e17861efbe9f949c58ca970c61f6afb211259fc:feOVMO0SzIK0kzmwXdaG/tTM+HY25sHayhJtytmgyw97BCTnzcXfkkOeKpRgvIY71jbxIJ2pjgMTOLwvVP6/CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:56445e784b8ef14fc3f8d2270f5b17440386ae26d0a57eaa6ab0d96ee482b867:OoyCy/gHbdBg8HpLkhm5KwuYfVglz2TKNGMmzSsfslYtmBrhtrx3ZrIk3tfcgOOHUM3CE2/2Vj6cW6bofxZXDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/projects/list
 version: "1.0.0"
 description: List the local per-principal RyeOS UI project registry.
 endpoint: ui.ryeos.projects.list
+ui_read_only: true
+record_thread: false
 availability: daemon_only

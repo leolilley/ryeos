@@ -1892,11 +1892,47 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
         }
         VaultCmd::Rewrap { app_root } => {
             let ssd = resolve_app_root(app_root)?;
-            let report = ryeos_core_tools::actions::vault::run_rewrap(
+            let outcome = ryeos_core_tools::actions::vault::run_rewrap(
                 &ryeos_core_tools::actions::vault::RewrapOptions { app_root: ssd },
             )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            Ok(())
+            let failure_status = match &outcome {
+                ryeos_core_tools::actions::vault::RewrapOutcome::CommittedDurable {
+                    warning: Some(warning),
+                    ..
+                } => {
+                    eprintln!("vault rewrap committed durably; cleanup is deferred: {warning}");
+                    None
+                }
+                ryeos_core_tools::actions::vault::RewrapOutcome::CommittedDurable {
+                    warning: None,
+                    ..
+                } => None,
+                ryeos_core_tools::actions::vault::RewrapOutcome::RestoredPrevious {
+                    reason,
+                    ..
+                } => {
+                    eprintln!(
+                        "vault rewrap did not commit; the previous generation was durably restored: {reason}"
+                    );
+                    Some("restored_previous")
+                }
+                ryeos_core_tools::actions::vault::RewrapOutcome::CommitDurabilityUncertain {
+                    reason,
+                    ..
+                } => {
+                    eprintln!(
+                        "vault rewrap changed the live namespace, but crash durability is uncertain; recovery evidence was preserved: {reason}"
+                    );
+                    Some("commit_durability_uncertain")
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            match failure_status {
+                Some(status) => Err(anyhow::anyhow!(
+                    "vault rewrap completed with non-success status `{status}`; inspect the structured outcome"
+                )),
+                None => Ok(()),
+            }
         }
     }
 }

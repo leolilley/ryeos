@@ -20,7 +20,10 @@ pub use ryeos_vault::paths::{
     default_sealed_store_path, default_vault_public_key_path, default_vault_secret_key_path,
 };
 pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
-pub use ryeos_vault::sealed::{read_sealed_secrets, write_sealed_secrets};
+pub use ryeos_vault::sealed::{
+    cleanup_staged_rewrap_files, prepare_rewrap, read_sealed_secrets, recover_rewrap,
+    with_store_lock, write_sealed_secrets,
+};
 
 // ── Command options + reports ────────────────────────────────────────
 
@@ -75,6 +78,24 @@ pub struct RewrapReport {
     pub keys_rewrapped: usize,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RewrapOutcome {
+    CommittedDurable {
+        report: RewrapReport,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
+    RestoredPrevious {
+        report: RewrapReport,
+        reason: String,
+    },
+    CommitDurabilityUncertain {
+        report: RewrapReport,
+        reason: String,
+    },
+}
+
 // ── Command implementations ──────────────────────────────────────────
 
 pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
@@ -88,25 +109,28 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
         }
     }
     let key_path = default_vault_secret_key_path(&opts.app_root);
-    let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
-        format!(
-            "read vault secret key {} — has `ryeos init` (or daemon) ever run \
-             on this state dir?",
-            key_path.display()
-        )
-    })?;
-    let pk = sk.public_key();
     let store_path = default_sealed_store_path(&opts.app_root);
+    let public_path = default_vault_public_key_path(&opts.app_root);
 
-    let mut current = read_sealed_secrets(&store_path, &sk)?;
-    let mut keys_written = Vec::with_capacity(opts.entries.len());
-    for (k, v) in &opts.entries {
-        keys_written.push(k.clone());
-        current.insert(k.clone(), v.clone());
-    }
-
-    write_sealed_secrets(&store_path, &pk, &current)?;
-    let total = current.len();
+    let (keys_written, total) = with_store_lock(&store_path, || {
+        recover_rewrap(&key_path, &public_path, &store_path)?;
+        let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
+            format!(
+                "read vault secret key {} — has `ryeos init` (or daemon) ever run \
+                 on this state dir?",
+                key_path.display()
+            )
+        })?;
+        let pk = sk.public_key();
+        let mut current = read_sealed_secrets(&store_path, &sk)?;
+        let mut keys_written = Vec::with_capacity(opts.entries.len());
+        for (k, v) in &opts.entries {
+            keys_written.push(k.clone());
+            current.insert(k.clone(), v.clone());
+        }
+        write_sealed_secrets(&store_path, &pk, &current)?;
+        Ok((keys_written, current.len()))
+    })?;
     Ok(PutReport {
         store_path,
         keys_written,
@@ -116,10 +140,14 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
 
 pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
     let key_path = default_vault_secret_key_path(&opts.app_root);
-    let sk = lillux::vault::read_secret_key(&key_path)
-        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
     let store_path = default_sealed_store_path(&opts.app_root);
-    let current = read_sealed_secrets(&store_path, &sk)?;
+    let public_path = default_vault_public_key_path(&opts.app_root);
+    let current = with_store_lock(&store_path, || {
+        recover_rewrap(&key_path, &public_path, &store_path)?;
+        let sk = lillux::vault::read_secret_key(&key_path)
+            .with_context(|| format!("read vault secret key {}", key_path.display()))?;
+        read_sealed_secrets(&store_path, &sk)
+    })?;
     let mut keys: Vec<String> = current.keys().cloned().collect();
     keys.sort();
     Ok(ListReport { store_path, keys })
@@ -130,24 +158,27 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
         bail!("ryeos vault remove: at least one KEY required");
     }
     let key_path = default_vault_secret_key_path(&opts.app_root);
-    let sk = lillux::vault::read_secret_key(&key_path)
-        .with_context(|| format!("read vault secret key {}", key_path.display()))?;
-    let pk = sk.public_key();
     let store_path = default_sealed_store_path(&opts.app_root);
+    let public_path = default_vault_public_key_path(&opts.app_root);
 
-    let mut current = read_sealed_secrets(&store_path, &sk)?;
-    let mut removed = Vec::new();
-    let mut not_present = Vec::new();
-    for k in &opts.keys {
-        if current.remove(k).is_some() {
-            removed.push(k.clone());
-        } else {
-            not_present.push(k.clone());
+    let (removed, not_present, total) = with_store_lock(&store_path, || {
+        recover_rewrap(&key_path, &public_path, &store_path)?;
+        let sk = lillux::vault::read_secret_key(&key_path)
+            .with_context(|| format!("read vault secret key {}", key_path.display()))?;
+        let pk = sk.public_key();
+        let mut current = read_sealed_secrets(&store_path, &sk)?;
+        let mut removed = Vec::new();
+        let mut not_present = Vec::new();
+        for k in &opts.keys {
+            if current.remove(k).is_some() {
+                removed.push(k.clone());
+            } else {
+                not_present.push(k.clone());
+            }
         }
-    }
-
-    write_sealed_secrets(&store_path, &pk, &current)?;
-    let total = current.len();
+        write_sealed_secrets(&store_path, &pk, &current)?;
+        Ok((removed, not_present, current.len()))
+    })?;
     Ok(RemoveReport {
         store_path,
         removed,
@@ -156,10 +187,24 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     })
 }
 
-pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
+pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapOutcome> {
     let key_path = default_vault_secret_key_path(&opts.app_root);
     let pub_path = default_vault_public_key_path(&opts.app_root);
     let store_path = default_sealed_store_path(&opts.app_root);
+
+    with_store_lock(&store_path, || {
+        lillux::with_exclusive_file_lock(&key_path, || {
+            run_rewrap_locked(key_path.clone(), pub_path, store_path.clone())
+        })
+    })
+}
+
+fn run_rewrap_locked(
+    key_path: PathBuf,
+    pub_path: PathBuf,
+    store_path: PathBuf,
+) -> Result<RewrapOutcome> {
+    recover_rewrap(&key_path, &pub_path, &store_path)?;
 
     let old_sk = lillux::vault::read_secret_key(&key_path)
         .with_context(|| format!("read vault secret key {}", key_path.display()))?;
@@ -189,33 +234,47 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
     })();
 
     if let Err(e) = write_result {
-        cleanup_new_files(&new_key_path, &new_pub_path, &new_store_path);
+        cleanup_staged_rewrap_files(&key_path, &pub_path, &store_path)
+            .context("clean incomplete vault rewrap staging")?;
         return Err(e);
     }
 
-    std::fs::rename(&new_key_path, &key_path).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            new_key_path.display(),
-            key_path.display()
-        )
-    })?;
-    std::fs::rename(&new_pub_path, &pub_path).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            new_pub_path.display(),
-            pub_path.display()
-        )
-    })?;
-    if rewrap_store {
-        std::fs::rename(&new_store_path, &store_path).with_context(|| {
-            format!(
-                "rename {} -> {}",
-                new_store_path.display(),
-                store_path.display()
-            )
-        })?;
+    prepare_rewrap(&key_path, &pub_path, &store_path)?;
+
+    let report = RewrapReport {
+        store_path: store_path.clone(),
+        old_fingerprint: old_fingerprint.clone(),
+        new_fingerprint: new_fingerprint.clone(),
+        keys_rewrapped: plaintext.len(),
+    };
+
+    let activation = (|| -> std::result::Result<(), lillux::AtomicMutationError> {
+        if rewrap_store {
+            let bytes = std::fs::read(&new_store_path)
+                .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+            lillux::atomic_write_private(&store_path, &bytes)?;
+        }
+        let public_bytes = std::fs::read(&new_pub_path)
+            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        lillux::atomic_write(&pub_path, &public_bytes)?;
+        // Secret key last: once this changes, the current generation is complete.
+        let secret_bytes = std::fs::read(&new_key_path)
+            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        lillux::atomic_write_private(&key_path, &secret_bytes)?;
+        Ok(())
+    })();
+    if let Err(error) = activation {
+        return Ok(handle_activation_failure(
+            &key_path,
+            &pub_path,
+            &store_path,
+            report,
+            error,
+        ));
     }
+    let finalization_warning = recover_rewrap(&key_path, &pub_path, &store_path)
+        .err()
+        .map(|error| format!("rotation committed; deferred cleanup/recovery: {error:#}"));
 
     tracing::info!(
         old_fingerprint = %old_fingerprint,
@@ -225,23 +284,118 @@ pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
         "vault: rewrap complete — keypair rotated and store re-sealed"
     );
 
-    Ok(RewrapReport {
-        store_path,
-        old_fingerprint,
-        new_fingerprint,
-        keys_rewrapped: plaintext.len(),
+    Ok(RewrapOutcome::CommittedDurable {
+        report,
+        warning: finalization_warning,
     })
 }
 
-fn cleanup_new_files(new_key_path: &Path, new_pub_path: &Path, new_store_path: &Path) {
-    let _ = std::fs::remove_file(new_key_path);
-    let _ = std::fs::remove_file(new_pub_path);
-    let _ = std::fs::remove_file(new_store_path);
+fn handle_activation_failure(
+    key_path: &Path,
+    public_path: &Path,
+    store_path: &Path,
+    report: RewrapReport,
+    error: lillux::AtomicMutationError,
+) -> RewrapOutcome {
+    match error {
+        lillux::AtomicMutationError::BeforeCommit(error) => {
+            match recover_rewrap(key_path, public_path, store_path) {
+                Ok(()) => RewrapOutcome::RestoredPrevious {
+                    report,
+                    reason: format!("{error:#}"),
+                },
+                Err(recovery_error) => RewrapOutcome::CommitDurabilityUncertain {
+                    report,
+                    reason: format!(
+                        "activation failed before its current commit point: {error:#}; durable recovery also failed: {recovery_error:#}"
+                    ),
+                },
+            }
+        }
+        lillux::AtomicMutationError::DurabilityUncertain(error) => {
+            // Do not reconcile here: the durable journal and backups are the
+            // evidence the next locked operation needs to select a generation.
+            RewrapOutcome::CommitDurabilityUncertain {
+                report,
+                reason: format!("{error:#}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expect_committed(outcome: RewrapOutcome) -> RewrapReport {
+        match outcome {
+            RewrapOutcome::CommittedDurable { report, .. } => report,
+            other => panic!("expected durable rewrap commit, got {other:?}"),
+        }
+    }
+
+    fn test_rewrap_report(state: &Path, old_fingerprint: String) -> RewrapReport {
+        RewrapReport {
+            store_path: default_sealed_store_path(state),
+            old_fingerprint,
+            new_fingerprint: "new-fingerprint".to_string(),
+            keys_rewrapped: 0,
+        }
+    }
+
+    #[test]
+    fn uncertain_activation_preserves_recovery_journal() {
+        let (state, old_key) = fresh_state_with_keypair();
+        let key_path = default_vault_secret_key_path(state.path());
+        let public_path = default_vault_public_key_path(state.path());
+        let store_path = default_sealed_store_path(state.path());
+        prepare_rewrap(&key_path, &public_path, &store_path).unwrap();
+        let journal = store_path.with_extension("rewrap-journal.toml");
+
+        let outcome = handle_activation_failure(
+            &key_path,
+            &public_path,
+            &store_path,
+            test_rewrap_report(state.path(), old_key.public_key().fingerprint()),
+            lillux::AtomicMutationError::DurabilityUncertain(anyhow::anyhow!(
+                "injected sync failure"
+            )),
+        );
+
+        assert!(matches!(
+            outcome,
+            RewrapOutcome::CommitDurabilityUncertain { .. }
+        ));
+        assert!(journal.exists());
+    }
+
+    #[test]
+    fn before_commit_failure_durably_restores_previous_generation() {
+        let (state, old_key) = fresh_state_with_keypair();
+        let key_path = default_vault_secret_key_path(state.path());
+        let public_path = default_vault_public_key_path(state.path());
+        let store_path = default_sealed_store_path(state.path());
+        prepare_rewrap(&key_path, &public_path, &store_path).unwrap();
+        let journal = store_path.with_extension("rewrap-journal.toml");
+
+        let outcome = handle_activation_failure(
+            &key_path,
+            &public_path,
+            &store_path,
+            test_rewrap_report(state.path(), old_key.public_key().fingerprint()),
+            lillux::AtomicMutationError::BeforeCommit(anyhow::anyhow!(
+                "injected pre-rename failure"
+            )),
+        );
+
+        assert!(matches!(outcome, RewrapOutcome::RestoredPrevious { .. }));
+        assert!(!journal.exists());
+        let restored = lillux::vault::read_secret_key(&key_path).unwrap();
+        assert_eq!(
+            restored.public_key().fingerprint(),
+            old_key.public_key().fingerprint()
+        );
+    }
 
     fn fresh_state_with_keypair() -> (tempfile::TempDir, lillux::vault::VaultSecretKey) {
         let tmp = tempfile::tempdir().unwrap();
@@ -389,10 +543,12 @@ mod tests {
         .unwrap();
         let old_fingerprint = old_sk.public_key().fingerprint();
 
-        let report = run_rewrap(&RewrapOptions {
-            app_root: state.path().to_path_buf(),
-        })
-        .unwrap();
+        let report = expect_committed(
+            run_rewrap(&RewrapOptions {
+                app_root: state.path().to_path_buf(),
+            })
+            .unwrap(),
+        );
         assert_eq!(report.old_fingerprint, old_fingerprint);
         assert_ne!(report.old_fingerprint, report.new_fingerprint);
         assert_eq!(report.keys_rewrapped, 2);
@@ -434,10 +590,12 @@ mod tests {
     #[test]
     fn rewrap_with_empty_store_only_rotates_keys() {
         let (state, old_sk) = fresh_state_with_keypair();
-        let report = run_rewrap(&RewrapOptions {
-            app_root: state.path().to_path_buf(),
-        })
-        .unwrap();
+        let report = expect_committed(
+            run_rewrap(&RewrapOptions {
+                app_root: state.path().to_path_buf(),
+            })
+            .unwrap(),
+        );
         assert_eq!(report.keys_rewrapped, 0);
         assert_ne!(report.new_fingerprint, old_sk.public_key().fingerprint());
     }

@@ -1,5 +1,6 @@
-# ryeos:signed:2026-07-08T01:26:03Z:4fad1c0060e0bf55f5e8a0ede274acacfcc68e96cb3465376f5cba6bc1b6ea0e:D7xKtld4K3jLUsPfJLt8BvmSEGmHfO2cWgwvGlT86M+QuWfMhMNWCCsMyz72mK3UkFx6JpTZb4h7TY4r/MG0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T06:05:20Z:75b2834cae00c9786a30c444ba682313e8eab846c2d6a129c1d31e85f6bf382f:1IYAqautQ2YwmuwzdJx0mdTD/OAItrqkNNxFPnrDZE02AtuWJAb/nfSi4DhZsq/MPW6JRAeLqIf1sSAkoScvBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: projects-list
+title: Projects
 version: "1.0.0"
 description: >-
   Registered project contexts for this operator. The current TUI project is

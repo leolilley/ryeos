@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T09:54:31Z:6b69ff6bbe3b5e8c2b39416fc90c4170d7f2471ad5df21e0bf717b67d651590e:NBbtMKEBW8g3h/j+3gNj7dF2NxEX+MDGuC+hfMf/eBGvD704gpO46om6hnhQ8QqC4P1WYeZX8hge6jYgAyJUBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-13T04:02:46Z:d999e51f149b70ac5945c85051d60cb99da38c4e982ecb6c668783993d20fd2e:jhwsFPcZgA0VJNYQm4cMbqKCZ5xEN6t0stULprMgBaf/BOP1cdr3JKfxjeVU9eXdXCcJtRE+1XRgYNpZ4K7BCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -148,6 +148,40 @@ nodes:
     edges:
       - to: finish
 ```
+
+For managed-runtime children whose whole continuation chains must finish before
+the graph proceeds, use an **action node with `follow: true` and `over`**, not a
+`foreach` node:
+
+```yaml
+nodes:
+  review-all:
+    type: action
+    over: "${inputs.subjects}"
+    as: subject
+    parallel: true
+    max_concurrency: 4
+    follow: true
+    action:
+      item_id: "directive:example/review"
+      params:
+        subject: "${subject}"
+        run_id: "${_run.graph_run_id}"
+    facets: {cohort: "${_run.graph_run_id}", subject: "${subject}"}
+    collect: reviews
+    on_error: handle-partial
+    next: {type: unconditional, to: finish}
+```
+
+This cohort form requires `as` and `parallel: true`; `collect` must differ from
+`as`, and `retry`, caching, and `detach` are invalid. `max_concurrency`, when
+set, must be positive and bounds launched-and-live child chains. Collection is
+input-ordered, failed slots are `null`, and successful assignment/collection is
+committed before `on_error` routing. An empty input succeeds with `[]`. Actions,
+params, and facets interpolate per item, including `${_run.graph_run_id}`. The
+parent's effective capabilities and hard limits bound every child. See
+`graphs/follow.md` for capability wildcard examples, cancellation/resume
+behavior, and a complete authoring example.
 
 ## Hooks
 

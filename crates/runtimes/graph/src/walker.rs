@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -22,6 +20,24 @@ use ryeos_runtime::checkpoint::CheckpointWriter;
 use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
+
+mod checkpointing;
+mod transitions;
+
+use transitions::{foreach_failure_summary, resolve_next_on_error, retry_attempts_remaining};
+
+fn add_runtime_cost(total: &mut Option<RuntimeCost>, cost: Option<RuntimeCost>) {
+    let Some(cost) = cost else { return };
+    let acc = total.get_or_insert(RuntimeCost {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_usd: 0.0,
+        basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+    });
+    acc.input_tokens += cost.input_tokens;
+    acc.output_tokens += cost.output_tokens;
+    acc.total_usd += cost.total_usd;
+}
 
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
 /// change to the written fields; the resume parser rejects an unknown version.
@@ -162,6 +178,24 @@ enum StepOutcome {
     /// via `spawn_follow_child`. No result exists yet — it is consumed on resume.
     /// Carries only the child item + params; the daemon derives the rest.
     FollowSuspend { item_id: String, params: Value },
+    FollowFanoutSuspend {
+        children: Vec<ryeos_runtime::callback::FollowChildSpec>,
+        width: Option<u32>,
+        iteration_snapshot: Vec<Value>,
+    },
+    FollowFanoutDone {
+        results: Vec<Value>,
+        statuses: Vec<String>,
+        errors: Vec<ErrorRecord>,
+        assign_delta: Value,
+        collect_key: Option<String>,
+        var_name: String,
+        item_id: String,
+        next: Option<String>,
+        next_on_error: NextOnError,
+        cost: Option<RuntimeCost>,
+        elapsed_ms: u64,
+    },
     /// Action dispatch failed and the node's `retry` policy has attempts left.
     /// The walker checkpoints the incremented attempt count on the SAME node,
     /// backs off, and re-dispatches on the next step (so max_steps/segment_steps
@@ -209,7 +243,8 @@ enum CommitResult {
         /// advance to a fresh node resets it to 0.
         next_retry_attempt: u32,
     },
-    Terminate(GraphResult),
+    /// Boxed: a `GraphResult` dwarfs `Advance`'s cursor fields.
+    Terminate(Box<GraphResult>),
 }
 
 /// A cooperative control action drained from the thread's command queue between
@@ -297,7 +332,8 @@ pub struct Walker {
 /// A pending follow result armed at resume, consumed at its follow node.
 struct FollowResumeState {
     follow_node: String,
-    follow_result: Value,
+    follow_result: Option<Value>,
+    iteration_snapshot: Option<Vec<Value>>,
 }
 
 struct RunGuard {
@@ -389,12 +425,17 @@ impl Walker {
     /// If a follow result is armed for `node`, take it (consumed once). The
     /// resumed follow node classifies this envelope like a live dispatch instead
     /// of re-suspending.
-    fn take_follow_result(&self, node: &str) -> Option<Value> {
+    fn take_follow_state(&self, node: &str) -> Option<FollowResumeState> {
         let mut slot = self.follow_resume.lock().unwrap();
         if slot.as_ref().is_some_and(|fr| fr.follow_node == node) {
-            return slot.take().map(|fr| fr.follow_result);
+            return slot.take();
         }
         None
+    }
+
+    fn take_follow_result(&self, node: &str) -> Option<Value> {
+        self.take_follow_state(node)
+            .and_then(|state| state.follow_result)
     }
 
     /// Drain the accumulated callback-drift warnings. Called by the
@@ -608,22 +649,25 @@ impl Walker {
                     .get("retry_attempt")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
-                // Arm follow resume: if the checkpoint marks a pending follow AND a
-                // child envelope was spliced in, consume it at the follow node
-                // instead of re-suspending. Only when BOTH are present — a bare
-                // pending_follow with no result re-drives the suspend (idempotent).
-                if let (Some(pf), Some(fr)) = (
-                    resume_val
-                        .get(follow_keys::PENDING_FOLLOW)
-                        .filter(|v| !v.is_null()),
-                    resume_val
-                        .get(follow_keys::FOLLOW_RESULT)
-                        .filter(|v| !v.is_null()),
-                ) {
+                // Arm every pending follow. A spliced result is consumed at the
+                // node; a bare marker re-drives the same idempotency key. Fanout
+                // must retain its checkpointed iteration snapshot in both cases so
+                // mutable graph state cannot change cohort membership on re-drive.
+                if let Some(pf) = resume_val
+                    .get(follow_keys::PENDING_FOLLOW)
+                    .filter(|v| !v.is_null())
+                {
                     if let Some(fnode) = pf.get(follow_keys::FOLLOW_NODE).and_then(|v| v.as_str()) {
                         *self.follow_resume.lock().unwrap() = Some(FollowResumeState {
                             follow_node: fnode.to_string(),
-                            follow_result: fr.clone(),
+                            follow_result: resume_val
+                                .get(follow_keys::FOLLOW_RESULT)
+                                .filter(|v| !v.is_null())
+                                .cloned(),
+                            iteration_snapshot: pf
+                                .get("iteration_snapshot")
+                                .and_then(Value::as_array)
+                                .cloned(),
                         });
                     }
                 }
@@ -729,7 +773,7 @@ impl Walker {
                     .await
                 {
                     CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                    CommitResult::Terminate(result) => result,
+                    CommitResult::Terminate(result) => *result,
                 };
             }
 
@@ -758,7 +802,7 @@ impl Walker {
                         .await
                     {
                         CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                        CommitResult::Terminate(result) => return result,
+                        CommitResult::Terminate(result) => return *result,
                     }
                 }
             };
@@ -804,7 +848,7 @@ impl Walker {
                     retry_attempt = next_retry_attempt;
                     steps_this_segment += 1;
                 }
-                CommitResult::Terminate(result) => return result,
+                CommitResult::Terminate(result) => return *result,
             }
         }
 
@@ -833,7 +877,7 @@ impl Walker {
                 .await
             {
                 CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => result,
+                CommitResult::Terminate(result) => *result,
             };
         }
 
@@ -862,7 +906,7 @@ impl Walker {
                 .await
             {
                 CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => result,
+                CommitResult::Terminate(result) => *result,
             };
         }
 
@@ -894,7 +938,7 @@ impl Walker {
                 .await
             {
                 CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-                CommitResult::Terminate(result) => result,
+                CommitResult::Terminate(result) => *result,
             };
         }
 
@@ -1068,7 +1112,8 @@ impl Walker {
 
             NodeType::Gate => {
                 // Gate: evaluate conditions and pick a branch target.
-                let target = edges::evaluate_next(node, state, inputs, Some(&execution));
+                let target =
+                    edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
                 StepOutcome::GateTaken { target }
             }
 
@@ -1079,6 +1124,7 @@ impl Walker {
                     inputs: inputs.clone(),
                     result: None,
                     execution: Some(execution.clone()),
+                    graph_run_id: Some(graph_run_id.to_string()),
                 };
                 let over_val = match ryeos_runtime::interpolate(
                     &Value::String(over_expr.to_string()),
@@ -1157,7 +1203,7 @@ impl Walker {
                             client: &self.client,
                             exec_ctx: Some(exec_ctx),
                             step,
-                            current_node: &current,
+                            current_node: current,
                             graph_run_id,
                             definition_ref: &self.graph.definition_ref,
                             definition_hash: &self.graph.definition_hash,
@@ -1179,7 +1225,7 @@ impl Walker {
                             client: &self.client,
                             exec_ctx: Some(exec_ctx),
                             step,
-                            current_node: &current,
+                            current_node: current,
                             graph_run_id,
                             definition_ref: &self.graph.definition_ref,
                             definition_hash: &self.graph.definition_hash,
@@ -1217,7 +1263,7 @@ impl Walker {
                             // iterations before the failure.
                             return StepOutcome::DispatchHardError {
                                 item_id: Some(foreach_item_id),
-                                error: foreach_failure_summary(&current, &errors),
+                                error: foreach_failure_summary(current, &errors),
                                 next_on_error: policy,
                                 elapsed_ms: start.elapsed().as_millis() as u64,
                                 cost: cost.clone(),
@@ -1226,7 +1272,8 @@ impl Walker {
                     }
                 }
 
-                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
+                let next =
+                    edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
                 StepOutcome::ForeachDone {
                     results,
                     collect_key: node.collect.clone(),
@@ -1274,16 +1321,35 @@ impl Walker {
             inputs,
             exec_ctx,
             cache,
-            graph_run_id: _graph_run_id,
+            graph_run_id,
             suppressed_errors: _suppressed_errors,
             retry_attempt,
         } = ctx;
         let execution = exec_ctx.as_context_value();
+
+        // Cohort follow is an action-node state machine of its own. Split before
+        // generic action interpolation: the authored action may reference `as`.
+        if node.follow && node.over.is_some() {
+            return self
+                .run_follow_fanout(
+                    node,
+                    current,
+                    cfg,
+                    step,
+                    state,
+                    inputs,
+                    &execution,
+                    graph_run_id,
+                    start,
+                )
+                .await;
+        }
         let mut action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 // Action node with no action — treat as terminal.
-                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
+                let next =
+                    edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
                 return match next {
                     Some(n) => StepOutcome::ActionOk {
                         item_id: String::new(),
@@ -1328,6 +1394,7 @@ impl Walker {
             inputs: inputs.clone(),
             result: None,
             execution: Some(execution.clone()),
+            graph_run_id: Some(graph_run_id.to_string()),
         };
 
         let interpolated_action =
@@ -1410,9 +1477,9 @@ impl Walker {
         // like a live dispatch, so the resumed node runs the identical success/
         // failure path (receipt, cost, assign land normally in commit_step).
         let mut cache_hit = false;
-        let outcome: Result<dispatch::ActionOutcome, String> =
+        let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> =
             if let Some(envelope) = resumed_follow_envelope {
-                Ok(dispatch::classify_envelope(envelope))
+                Ok(dispatch::classify_follow_envelope(envelope))
             } else if node.is_cacheable() {
                 let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
                 if let Some(cached) = cache.lookup(&cache_key) {
@@ -1433,6 +1500,7 @@ impl Walker {
                              inline continuation is retired — use a `follow: true` node"
                             ),
                             cost: None,
+                            retryable: false,
                         }))
                     } else {
                         Ok(dispatch::ActionOutcome::Success(
@@ -1458,11 +1526,11 @@ impl Walker {
                             Ok(dispatch::ActionOutcome::Success(success))
                         }
                         Ok(failure) => Ok(failure),
-                        Err(e) => Err(format!("{e:#}")),
+                        Err(e) => Err(e),
                     }
                 }
             } else {
-                match dispatch::dispatch_action(
+                dispatch::dispatch_action(
                     &self.client,
                     &stripped_action,
                     &self.thread_id,
@@ -1470,34 +1538,32 @@ impl Walker {
                     Some(exec_ctx),
                 )
                 .await
-                {
-                    Ok(o) => Ok(o),
-                    Err(e) => Err(format!("{e:#}")),
-                }
             };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
         match outcome {
-            Err(err_detail) => {
+            Err(dispatch_error) => {
                 // A transport/dispatch failure with retry attempts remaining
                 // reschedules a fresh-step re-dispatch; exhausted → on_error.
-                if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                    let rc = node.retry.as_ref().expect("retry present when scheduling");
-                    return StepOutcome::RetryScheduled {
-                        item_id: dispatched_item_id,
-                        error: err_detail,
-                        failed_attempt,
-                        total_attempts: rc.attempts,
-                        delay_ms: rc.delay_ms(failed_attempt),
-                        elapsed_ms: elapsed,
-                        // Transport failed before the child returned — no cost.
-                        cost: None,
-                    };
+                if dispatch_error.retryable {
+                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
+                        let rc = node.retry.as_ref().expect("retry present when scheduling");
+                        return StepOutcome::RetryScheduled {
+                            item_id: dispatched_item_id,
+                            error: dispatch_error.diagnostic,
+                            failed_attempt,
+                            total_attempts: rc.attempts,
+                            delay_ms: rc.delay_ms(failed_attempt),
+                            elapsed_ms: elapsed,
+                            // Transport failed before the child returned — no cost.
+                            cost: None,
+                        };
+                    }
                 }
                 StepOutcome::DispatchHardError {
                     item_id: Some(dispatched_item_id),
-                    error: err_detail,
+                    error: dispatch_error.diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // Transport/dispatch failed before the child returned — no cost.
@@ -1505,19 +1571,21 @@ impl Walker {
                 }
             }
             Ok(dispatch::ActionOutcome::Failure(failure)) => {
-                // A leaf that ran but failed retries the same way; a failed
-                // native child may have spent tokens, carried on every path.
-                if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                    let rc = node.retry.as_ref().expect("retry present when scheduling");
-                    return StepOutcome::RetryScheduled {
-                        item_id: dispatched_item_id,
-                        error: failure.diagnostic,
-                        failed_attempt,
-                        total_attempts: rc.attempts,
-                        delay_ms: rc.delay_ms(failed_attempt),
-                        elapsed_ms: elapsed,
-                        cost: failure.cost,
-                    };
+                // Authored retry is an attempt budget, not blanket permission.
+                // Only a failure explicitly classified retryable may consume it.
+                if failure.retryable {
+                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
+                        let rc = node.retry.as_ref().expect("retry present when scheduling");
+                        return StepOutcome::RetryScheduled {
+                            item_id: dispatched_item_id,
+                            error: failure.diagnostic,
+                            failed_attempt,
+                            total_attempts: rc.attempts,
+                            delay_ms: rc.delay_ms(failed_attempt),
+                            elapsed_ms: elapsed,
+                            cost: failure.cost,
+                        };
+                    }
                 }
                 StepOutcome::LeafSoftError {
                     item_id: dispatched_item_id,
@@ -1596,6 +1664,7 @@ impl Walker {
                             inputs: inputs.clone(),
                             result: Some(val.clone()),
                             execution: Some(execution.clone()),
+                            graph_run_id: Some(graph_run_id.to_string()),
                         };
                         match ryeos_runtime::interpolate(assign_tpl, &assign_ctx.as_context()) {
                             Ok(interpolated) => Some(interpolated),
@@ -1617,8 +1686,14 @@ impl Walker {
                     }
                     None => None,
                 };
-                let next =
-                    edges::evaluate_next_with_result(node, state, inputs, &val, Some(&execution));
+                let next = edges::evaluate_next_with_result(
+                    node,
+                    state,
+                    inputs,
+                    &val,
+                    Some(&execution),
+                    Some(graph_run_id),
+                );
                 StepOutcome::ActionOk {
                     item_id: dispatched_item_id,
                     result: val,
@@ -1629,6 +1704,299 @@ impl Walker {
                     cost,
                 }
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_follow_fanout(
+        &self,
+        node: &GraphNode,
+        current: &str,
+        cfg: &GraphConfig,
+        step: u32,
+        state: &Value,
+        inputs: &Value,
+        execution: &Value,
+        graph_run_id: &str,
+        start: Instant,
+    ) -> StepOutcome {
+        // Consume first. An armed successor must never repeat env preflight or
+        // interpolate/dispatch the child action.
+        let resumed_state = self.take_follow_state(current);
+        let checkpointed_items = resumed_state
+            .as_ref()
+            .and_then(|state| state.iteration_snapshot.clone());
+        let resumed = resumed_state.and_then(|state| state.follow_result);
+        if resumed.is_some() && checkpointed_items.is_none() {
+            return StepOutcome::LeafSoftError {
+                item_id: node
+                    .action
+                    .as_ref()
+                    .and_then(|a| a.get("item_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                error: format!("follow fanout node `{current}` resumed without iteration snapshot"),
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                cost: None,
+            };
+        }
+        let base_ctx = WalkContext {
+            state: state.clone(),
+            inputs: inputs.clone(),
+            result: None,
+            execution: Some(execution.clone()),
+            graph_run_id: Some(graph_run_id.to_string()),
+        };
+        // An armed cohort resume is immutable: its iteration values are local
+        // checkpoint facts and must not be re-resolved from mutable state.
+        let over = if let Some(items) = checkpointed_items {
+            items
+        } else {
+            match ryeos_runtime::interpolate(
+                &Value::String(node.over.as_deref().unwrap_or_default().to_string()),
+                &base_ctx.as_context(),
+            ) {
+                Ok(Value::Array(items)) => items,
+                Ok(other) => {
+                    return StepOutcome::DispatchHardError {
+                        item_id: None,
+                        error: format!(
+                        "follow fanout node `{current}` over must resolve to array, got {other}"
+                    ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                    }
+                }
+                Err(e) => {
+                    return StepOutcome::DispatchHardError {
+                        item_id: None,
+                        error: format!("interpolation error in `over` for node `{current}`: {e:#}"),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                    }
+                }
+            }
+        };
+        let var = node.foreach_var().to_string();
+        let raw_item_id = node
+            .action
+            .as_ref()
+            .and_then(|a| a.get("item_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(wrapper) = resumed {
+            if wrapper.get("fanout").and_then(Value::as_bool) != Some(true) {
+                return StepOutcome::LeafSoftError {
+                    item_id: raw_item_id,
+                    error: format!(
+                        "follow fanout node `{current}` resumed with malformed fanout wrapper"
+                    ),
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: None,
+                };
+            }
+            let Some(envelopes) = wrapper.get("items").and_then(Value::as_array) else {
+                return StepOutcome::LeafSoftError {
+                    item_id: raw_item_id,
+                    error: format!(
+                        "follow fanout node `{current}` resumed without fanout items wrapper"
+                    ),
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: None,
+                };
+            };
+            let expected = wrapper
+                .get("expected")
+                .and_then(Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let wrapper_statuses = wrapper.get("statuses").and_then(Value::as_array);
+            if expected != Some(envelopes.len())
+                || envelopes.len() != over.len()
+                || wrapper_statuses.map(Vec::len) != Some(envelopes.len())
+            {
+                return StepOutcome::LeafSoftError { item_id: raw_item_id, error: format!("follow fanout node `{current}` resumed with inconsistent expected/items/statuses/snapshot cardinality"), next_on_error: resolve_next_on_error(node, cfg), elapsed_ms: start.elapsed().as_millis() as u64, cost: None };
+            }
+            let mut results = vec![Value::Null; envelopes.len()];
+            let mut statuses = Vec::with_capacity(envelopes.len());
+            let mut errors = Vec::new();
+            let mut delta = Value::Object(serde_json::Map::new());
+            let mut total_cost: Option<RuntimeCost> = None;
+            for (index, envelope) in envelopes.iter().cloned().enumerate() {
+                match dispatch::classify_follow_envelope(envelope) {
+                    dispatch::ActionOutcome::Success(success) => {
+                        statuses.push("completed".to_string());
+                        results[index] = success.result.clone();
+                        add_runtime_cost(&mut total_cost, success.cost);
+                        if let (Some(assign), Some(item)) = (&node.assign, over.get(index)) {
+                            let assign_ctx = WalkContext {
+                                state: state.clone(),
+                                inputs: inputs.clone(),
+                                result: Some(success.result),
+                                execution: Some(execution.clone()),
+                                graph_run_id: Some(graph_run_id.to_string()),
+                            }
+                            .with_foreach_item(&var, item);
+                            match ryeos_runtime::interpolate(assign, &assign_ctx) {
+                                Ok(value) => merge_into(&mut delta, &value),
+                                Err(e) => {
+                                    statuses[index] = "failed".to_string();
+                                    results[index] = Value::Null;
+                                    errors.push(ErrorRecord { step, node: current.to_string(), error: format!("follow item {index} assign interpolation failed: {e:#}") });
+                                }
+                            }
+                        }
+                    }
+                    dispatch::ActionOutcome::Failure(failure) => {
+                        statuses.push("failed".to_string());
+                        add_runtime_cost(&mut total_cost, failure.cost);
+                        errors.push(ErrorRecord {
+                            step,
+                            node: current.to_string(),
+                            error: format!("follow item {index} failed: {}", failure.diagnostic),
+                        });
+                    }
+                }
+            }
+            let next = if errors.is_empty() {
+                edges::evaluate_next_with_result(
+                    node,
+                    state,
+                    inputs,
+                    &Value::Array(results.clone()),
+                    Some(execution),
+                    Some(graph_run_id),
+                )
+            } else {
+                None
+            };
+            return StepOutcome::FollowFanoutDone {
+                results,
+                statuses,
+                errors,
+                assign_delta: delta,
+                collect_key: node.collect.clone(),
+                var_name: var,
+                item_id: raw_item_id,
+                next,
+                next_on_error: resolve_next_on_error(node, cfg),
+                cost: total_cost,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+
+        if over.is_empty() {
+            return StepOutcome::FollowFanoutDone {
+                results: vec![],
+                statuses: vec![],
+                errors: vec![],
+                assign_delta: Value::Object(serde_json::Map::new()),
+                collect_key: node.collect.clone(),
+                var_name: var,
+                item_id: raw_item_id,
+                next: edges::evaluate_next_with_result(
+                    node,
+                    state,
+                    inputs,
+                    &Value::Array(vec![]),
+                    Some(execution),
+                    Some(graph_run_id),
+                ),
+                next_on_error: resolve_next_on_error(node, cfg),
+                cost: None,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+        if let Err(env_err) =
+            env_preflight::check_env_requires(&cfg.env_requires, &node.env_requires)
+        {
+            return StepOutcome::DispatchHardError {
+                item_id: Some(raw_item_id),
+                error: format!("env preflight failed: {env_err}"),
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                cost: None,
+            };
+        }
+        let mut children = Vec::with_capacity(over.len());
+        for (index, item) in over.iter().enumerate() {
+            let item_ctx = base_ctx.with_foreach_item(&var, item);
+            let action =
+                match ryeos_runtime::interpolate_action(node.action.as_ref().unwrap(), &item_ctx) {
+                    Ok(v) => strip_none_values(&v),
+                    Err(e) => {
+                        return StepOutcome::DispatchHardError {
+                            item_id: Some(raw_item_id),
+                            error: format!("follow fanout action interpolation failed: {e:#}"),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            cost: None,
+                        }
+                    }
+                };
+            let facets = match &node.facets {
+                Some(value) => match ryeos_runtime::interpolate(value, &item_ctx) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        return StepOutcome::DispatchHardError {
+                            item_id: Some(raw_item_id),
+                            error: format!("follow fanout facets interpolation failed: {e:#}"),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            cost: None,
+                        }
+                    }
+                },
+                None => None,
+            };
+            let item_ref = action
+                .get("item_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if item_ref.is_empty() {
+                return StepOutcome::DispatchHardError {
+                    item_id: None,
+                    error: format!(
+                        "follow fanout item {index} has missing or empty interpolated item_id"
+                    ),
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: None,
+                };
+            }
+            children.push(ryeos_runtime::callback::FollowChildSpec {
+                item_ref,
+                parameters: action.get("params").cloned().unwrap_or_else(|| json!({})),
+                facets,
+            });
+        }
+        let width = match node.max_concurrency.map(u32::try_from).transpose() {
+            Ok(width) => width,
+            Err(_) => {
+                return StepOutcome::DispatchHardError {
+                    item_id: None,
+                    error: format!(
+                        "follow fanout node `{current}` max_concurrency does not fit in u32"
+                    ),
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: None,
+                }
+            }
+        };
+        StepOutcome::FollowFanoutSuspend {
+            children,
+            width,
+            iteration_snapshot: over,
         }
     }
 
@@ -1664,14 +2032,21 @@ impl Walker {
                 // exist yet; those are emitted on resume.
                 self.emit_graph_step_started(graph_run_id, step, current)
                     .await;
-                self.emit_graph_follow_suspended(graph_run_id, step, current, item_id)
+                self.emit_graph_follow_suspended(graph_run_id, step, current, item_id, None)
                     .await;
 
                 // Checkpoint at the follow node so a re-entry re-drives the suspend
                 // idempotently (by follow_key). A checkpoint failure is a hard error
                 // like any other resume-correctness failure.
                 if let Err(e) = self
-                    .write_follow_checkpoint(graph_run_id, current, step, state, suppressed_errors)
+                    .write_follow_checkpoint(
+                        graph_run_id,
+                        current,
+                        step,
+                        state,
+                        suppressed_errors,
+                        None,
+                    )
                     .await
                 {
                     let msg = format!("follow checkpoint write failed: {e}");
@@ -1715,7 +2090,7 @@ impl Walker {
                             let acc = self.accounting.lock().unwrap();
                             (acc.total.clone(), acc.nodes.clone())
                         };
-                        CommitResult::Terminate(GraphResult {
+                        CommitResult::Terminate(Box::new(GraphResult {
                             success: false,
                             graph_id: self.graph.graph_id.clone(),
                             definition_ref: self.graph.definition_ref.clone(),
@@ -1738,10 +2113,104 @@ impl Walker {
                             error: None,
                             cost: agg_cost,
                             node_costs,
-                        })
+                        }))
                     }
                     Err(e) => {
                         let msg = format!("follow handoff failed: {e}");
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step,
+                            state,
+                            suppressed_errors,
+                            base_status: "error",
+                            error: Some(&msg),
+                            guard,
+                            current_node_id: current,
+                            inputs,
+                            execution,
+                        })
+                        .await
+                    }
+                }
+            }
+            StepOutcome::FollowFanoutSuspend {
+                children,
+                width,
+                iteration_snapshot,
+            } => {
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                self.emit_graph_follow_suspended(
+                    graph_run_id,
+                    step,
+                    current,
+                    "cohort",
+                    Some(children.len()),
+                )
+                .await;
+                if let Err(e) = self
+                    .write_follow_checkpoint(
+                        graph_run_id,
+                        current,
+                        step,
+                        state,
+                        suppressed_errors,
+                        Some(&iteration_snapshot),
+                    )
+                    .await
+                {
+                    let msg = format!("follow checkpoint write failed: {e}");
+                    return self
+                        .commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step,
+                            state,
+                            suppressed_errors,
+                            base_status: "error",
+                            error: Some(&msg),
+                            guard,
+                            current_node_id: current,
+                            inputs,
+                            execution,
+                        })
+                        .await;
+                }
+                match self
+                    .client
+                    .spawn_follow_children(
+                        graph_run_id,
+                        current,
+                        step as i64,
+                        children,
+                        width,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        guard.finalized = true;
+                        let acc = self.accounting.lock().unwrap();
+                        CommitResult::Terminate(Box::new(GraphResult {
+                            success: false,
+                            graph_id: self.graph.graph_id.clone(),
+                            definition_ref: self.graph.definition_ref.clone(),
+                            definition_hash: self.graph.definition_hash.clone(),
+                            graph_run_id: graph_run_id.to_string(),
+                            status: "continued".into(),
+                            steps: step,
+                            state: state.clone(),
+                            result: None,
+                            errors_suppressed: (!suppressed_errors.is_empty())
+                                .then_some(suppressed_errors.len()),
+                            errors: (!suppressed_errors.is_empty())
+                                .then_some(suppressed_errors.clone()),
+                            error: None,
+                            cost: acc.total.clone(),
+                            node_costs: acc.nodes.clone(),
+                        }))
+                    }
+                    Err(e) => {
+                        let msg = format!("follow cohort handoff failed: {e}");
                         self.commit_terminal(CommitTerminalInput {
                             graph_run_id,
                             steps: step,
@@ -1799,6 +2268,7 @@ impl Walker {
                     elapsed_ms,
                     error: Some(error.clone()),
                     cost: cost.clone(),
+                    fanout: None,
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
                     .await;
@@ -2009,6 +2479,160 @@ impl Walker {
                 }
             }
 
+            StepOutcome::FollowFanoutDone {
+                results,
+                statuses,
+                errors,
+                assign_delta,
+                collect_key,
+                var_name,
+                item_id,
+                next,
+                next_on_error,
+                cost,
+                elapsed_ms,
+            } => {
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                if let Some(key) = collect_key {
+                    if let Some(obj) = state.as_object_mut() {
+                        obj.insert(key, Value::Array(results.clone()));
+                    }
+                }
+                merge_into(state, &assign_delta);
+                if let Some(obj) = state.as_object_mut() {
+                    obj.remove(&var_name);
+                }
+                if let Some(c) = &cost {
+                    // Match classic follow resume: the detached children's
+                    // aggregate cost is attributed once to the parent node.
+                    self.accounting
+                        .lock()
+                        .unwrap()
+                        .record(current, step, &item_id, c.clone());
+                }
+                let diagnostic = (!errors.is_empty()).then(|| {
+                    errors
+                        .iter()
+                        .map(|e| e.error.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                });
+                receipts.push(NodeReceipt {
+                    node: current.to_string(),
+                    step,
+                    definition_ref: self.graph.definition_ref.clone(),
+                    definition_hash: self.graph.definition_hash.clone(),
+                    result_hash: Some(hash_json_value(
+                        &json!({"results": results, "statuses": statuses}),
+                    )),
+                    cache_hit: false,
+                    elapsed_ms,
+                    error: diagnostic.clone(),
+                    cost: cost.clone(),
+                    fanout: Some(crate::model::FanoutReceiptSummary {
+                        statuses: statuses.clone(),
+                        failed: statuses
+                            .iter()
+                            .filter(|status| status.as_str() == "failed")
+                            .count(),
+                        expected: statuses.len(),
+                        // Results remain represented by result_hash; receipts do not have
+                        // an explicit local-content policy permitting raw result persistence.
+                        results: None,
+                    }),
+                });
+                self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
+                    .await;
+                let status = if errors.is_empty() { "ok" } else { "error" };
+                self.emit_graph_step_completed(
+                    graph_run_id,
+                    step,
+                    current,
+                    status,
+                    diagnostic.as_deref(),
+                )
+                .await;
+                self.fire_graph_hooks(
+                    "graph_step_completed",
+                    self.step_hook_context(
+                        graph_run_id,
+                        current,
+                        step,
+                        status,
+                        diagnostic.as_deref(),
+                        state,
+                    ),
+                )
+                .await;
+
+                let target = if errors.is_empty() {
+                    next
+                } else {
+                    match next_on_error {
+                        NextOnError::Redirect(target) => Some(target),
+                        NextOnError::PolicyContinue => {
+                            suppressed_errors.extend(errors);
+                            edges::evaluate_next_with_result(
+                                self.graph.config.nodes.get(current).unwrap(),
+                                state,
+                                inputs,
+                                &Value::Array(results.clone()),
+                                Some(execution),
+                                Some(graph_run_id),
+                            )
+                        }
+                        NextOnError::PolicyFail => {
+                            return self
+                                .commit_terminal(CommitTerminalInput {
+                                    graph_run_id,
+                                    steps: step,
+                                    state,
+                                    suppressed_errors,
+                                    base_status: "error",
+                                    error: diagnostic.as_deref(),
+                                    guard,
+                                    current_node_id: current,
+                                    inputs,
+                                    execution,
+                                })
+                                .await;
+                        }
+                    }
+                };
+                self.emit_graph_branch_taken(graph_run_id, step, current, target.as_deref())
+                    .await;
+                match target {
+                    Some(target) => {
+                        self.write_checkpoint_or_error(
+                            graph_run_id,
+                            &target,
+                            step + 1,
+                            state,
+                            suppressed_errors,
+                            guard,
+                            0,
+                        )
+                        .await
+                    }
+                    None => {
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step + 1,
+                            state,
+                            suppressed_errors,
+                            base_status: "completed",
+                            error: None,
+                            guard,
+                            current_node_id: current,
+                            inputs,
+                            execution,
+                        })
+                        .await
+                    }
+                }
+            }
+
             StepOutcome::ActionOk {
                 ref item_id,
                 ref result,
@@ -2057,6 +2681,7 @@ impl Walker {
                     elapsed_ms,
                     error: None,
                     cost: cost.clone(),
+                    fanout: None,
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
                     .await;
@@ -2137,6 +2762,7 @@ impl Walker {
                     elapsed_ms,
                     error: Some(error.clone()),
                     cost: cost.clone(),
+                    fanout: None,
                 });
 
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
@@ -2182,6 +2808,7 @@ impl Walker {
                             state,
                             inputs,
                             Some(execution),
+                            Some(graph_run_id),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -2277,6 +2904,7 @@ impl Walker {
                     elapsed_ms,
                     error: Some(error.clone()),
                     cost: cost.clone(),
+                    fanout: None,
                 });
 
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
@@ -2322,6 +2950,7 @@ impl Walker {
                             state,
                             inputs,
                             Some(execution),
+                            Some(graph_run_id),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -2425,6 +3054,7 @@ impl Walker {
                         inputs: inputs.clone(),
                         result: None,
                         execution: Some(execution.clone()),
+                        graph_run_id: Some(graph_run_id.to_string()),
                     };
                     // `tpl` is a `Value` (scalar, map, or list);
                     // `interpolate` recurses through all of them.
@@ -2579,11 +3209,15 @@ impl Walker {
         self.record_callback_warning("finalize_thread", r.map(|_| ()));
         guard.finalized = true;
 
-        CommitResult::Terminate(graph_result)
+        CommitResult::Terminate(Box::new(graph_result))
     }
 
     /// Write a checkpoint pointing at the next node. If the checkpoint
     /// write fails, terminates with an error.
+    // Execution plumbing: each argument is a distinct leg of the thread's
+    // auth/provenance context, threaded verbatim — a struct would rename,
+    // not simplify. Restructure with a compiler in the loop, not here.
+    #[allow(clippy::too_many_arguments)]
     async fn write_checkpoint_or_error(
         &self,
         graph_run_id: &str,
@@ -2661,7 +3295,7 @@ impl Walker {
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
             guard.finalized = true;
 
-            return CommitResult::Terminate(graph_result);
+            return CommitResult::Terminate(Box::new(graph_result));
         }
 
         CommitResult::Advance {
@@ -2754,21 +3388,23 @@ impl Walker {
         step: u32,
         current: &str,
         item_id: &str,
+        expected: Option<usize>,
     ) {
+        let mut payload = json!({
+            "graph_run_id": graph_run_id,
+            "definition_ref": &self.graph.definition_ref,
+            "definition_hash": &self.graph.definition_hash,
+            "node": current,
+            "node_ref": node_ref(&self.graph.definition_ref, current),
+            "step": step,
+            "item_id": item_id,
+        });
+        if let Some(expected) = expected {
+            payload["expected"] = json!(expected);
+        }
         let r = self
             .client
-            .append_runtime_event(
-                RuntimeEventType::GraphFollowSuspended,
-                json!({
-                    "graph_run_id": graph_run_id,
-                    "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
-                    "node": current,
-                    "node_ref": node_ref(&self.graph.definition_ref, current),
-                    "step": step,
-                    "item_id": item_id,
-                }),
-            )
+            .append_runtime_event(RuntimeEventType::GraphFollowSuspended, payload)
             .await;
         self.record_callback_warning("graph_follow_suspended", r);
     }
@@ -2922,154 +3558,6 @@ impl Walker {
             self.record_callback_warning("graph_branch_taken", r);
         }
     }
-
-    /// Write a local checkpoint using the daemon-provided CheckpointWriter.
-    ///
-    /// Persists the versioned payload: cursor/step/state plus snapshots of the
-    /// `GraphAccounting` aggregate and `suppressed_errors`, so a resumed run
-    /// reconstructs cost and non-fatal error history from before the checkpoint
-    /// (both restored in `execute` from `resume_state`).
-    /// Write a checkpoint marking a follow suspend: `current_node` is the follow
-    /// node ITSELF (so re-entry re-drives the suspend idempotently by follow_key),
-    /// and a `pending_follow` marker carries LOCAL facts only (no child IDs) so the
-    /// resume path consumes the stored child result instead of re-dispatching.
-    async fn write_follow_checkpoint(
-        &self,
-        graph_run_id: &str,
-        follow_node: &str,
-        step: u32,
-        state: &Value,
-        suppressed_errors: &[ErrorRecord],
-    ) -> anyhow::Result<()> {
-        let Some(writer) = &self.checkpoint else {
-            return Ok(());
-        };
-        let accounting = {
-            let acc = self.accounting.lock().unwrap();
-            serde_json::to_value(&*acc).unwrap_or(Value::Null)
-        };
-        let mut pending = serde_json::Map::new();
-        pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
-        pending.insert("step_count".to_string(), json!(step));
-        pending.insert("graph_run_id".to_string(), json!(graph_run_id));
-        let mut payload = json!({
-            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
-            "graph_run_id": graph_run_id,
-            "current_node": follow_node,
-            "step_count": step,
-            "state": state,
-            "accounting": accounting,
-            "suppressed_errors": suppressed_errors,
-            // A follow node never carries retry (validation excludes the pair),
-            // so a follow suspend always checkpoints a zero attempt count.
-            "retry_attempt": 0,
-            "written_at": lillux::time::iso8601_now(),
-        });
-        payload[follow_keys::PENDING_FOLLOW] = Value::Object(pending);
-        writer.write(&payload)?;
-        Ok(())
-    }
-
-    async fn write_checkpoint(
-        &self,
-        graph_run_id: &str,
-        next_node: &str,
-        next_step: u32,
-        state: &Value,
-        suppressed_errors: &[ErrorRecord],
-        retry_attempt: u32,
-    ) -> anyhow::Result<()> {
-        let Some(writer) = &self.checkpoint else {
-            return Ok(());
-        };
-
-        // Accounting is interior-mutable on the walker; snapshot it under the
-        // lock (no await) so resume restores accumulated cost instead of
-        // restarting it at zero and under-billing the pre-checkpoint work.
-        let accounting = {
-            let acc = self.accounting.lock().unwrap();
-            serde_json::to_value(&*acc).unwrap_or(Value::Null)
-        };
-        writer.write(&json!({
-            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
-            "graph_run_id": graph_run_id,
-            "current_node": next_node,
-            "step_count": next_step,
-            "state": state,
-            "accounting": accounting,
-            "suppressed_errors": suppressed_errors,
-            // Per-step retry counter for `next_node`: non-zero only when the
-            // walker is re-entering the SAME node under a `retry` backoff, so a
-            // segment cut or crash mid-retry resumes with the count intact.
-            "retry_attempt": retry_attempt,
-            "written_at": lillux::time::iso8601_now(),
-        }))?;
-
-        // Test-only crash-injection hook (prod-inert: fires ONLY when
-        // `RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT` is set, which only the
-        // graph crash-recovery e2e sets — and that name only reaches this
-        // process because the daemon env allowlist lets it through). Once the
-        // checkpoint for `next_node` is durably written, park forever so a
-        // harness can SIGKILL the daemon with this thread's row still
-        // `running`, kill this orphaned process group, and then exercise the
-        // daemon's startup-reconcile native-resume path. The resumed launch
-        // injects `RYEOS_RESUME=1` (`is_resume()`), so this hook never fires on
-        // the resume pass: the walker proceeds from the checkpoint cursor to
-        // completion. Gated on `next_node` (the resume cursor), so the test
-        // names the node the graph should resume *into*.
-        if !CheckpointWriter::is_resume()
-            && std::env::var("RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT")
-                .ok()
-                .as_deref()
-                == Some(next_node)
-        {
-            // Park forever without depending on the tokio `time` feature:
-            // a never-resolving future suspends this task until the process
-            // is killed by the harness.
-            std::future::pending::<()>().await;
-        }
-        Ok(())
-    }
-}
-
-/// Whether a node whose current dispatch just failed has retry attempts left.
-///
-/// `retry_attempt` is the number of attempts already spent BEFORE this one, so
-/// the attempt that just failed is `retry_attempt + 1`. Returns that 1-based
-/// failed-attempt number when a further attempt is allowed under the node's
-/// `retry.attempts` (the total, incl. the first), and `None` when the policy is
-/// absent or exhausted (route through `on_error`).
-fn retry_attempts_remaining(node: &GraphNode, retry_attempt: u32) -> Option<u32> {
-    let rc = node.retry.as_ref()?;
-    let failed_attempt = retry_attempt + 1;
-    (failed_attempt < rc.attempts).then_some(failed_attempt)
-}
-
-/// Resolve what to do on error based on node-level `on_error` and
-/// graph-level `on_error` mode.
-fn resolve_next_on_error(node: &GraphNode, cfg: &GraphConfig) -> NextOnError {
-    if let Some(ref target) = node.on_error {
-        NextOnError::Redirect(target.clone())
-    } else {
-        match cfg.on_error {
-            ErrorMode::Continue => NextOnError::PolicyContinue,
-            ErrorMode::Fail => NextOnError::PolicyFail,
-        }
-    }
-}
-
-/// Build one combined diagnostic for a foreach node whose per-item
-/// failures trip a fail/redirect policy. Leads with the count and the
-/// first item's error (which carries the leaf stderr excerpt).
-fn foreach_failure_summary(node: &str, errors: &[ErrorRecord]) -> String {
-    let first = errors
-        .first()
-        .map(|e| e.error.as_str())
-        .unwrap_or("unknown error");
-    format!(
-        "foreach node `{node}` failed: {} of its iterations errored; first: {first}",
-        errors.len()
-    )
 }
 
 fn merge_into(target: &mut Value, source: &Value) {
@@ -3171,7 +3659,16 @@ mod tests {
             if results.is_empty() {
                 Ok(json!({"thread": {}, "result": {}}))
             } else {
-                Ok(json!({"thread": {}, "result": results.remove(0)}))
+                let result = results.remove(0);
+                if result.get("__retryable_dispatch_error").is_some() {
+                    Err(CallbackError::ActionFailed {
+                        code: "service_unavailable".to_string(),
+                        message: "simulated transient dispatch failure".to_string(),
+                        retryable: true,
+                    })
+                } else {
+                    Ok(json!({"thread": {}, "result": result}))
+                }
             }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -3289,44 +3786,6 @@ mod tests {
             make_callback(results),
             None,
         )
-    }
-
-    fn make_test_node() -> GraphNode {
-        GraphNode {
-            node_type: NodeType::Action,
-            action: None,
-            assign: None,
-            next: None,
-            on_error: None,
-            cache_result: false,
-            cache: false,
-            follow: false,
-            detach: false,
-            facets: None,
-            over: None,
-            r#as: None,
-            collect: None,
-            parallel: false,
-            max_concurrency: None,
-            output: None,
-            env_requires: Vec::new(),
-            retry: None,
-        }
-    }
-
-    fn make_test_graph_config() -> GraphConfig {
-        GraphConfig {
-            start: "x".to_string(),
-            max_steps: 100,
-            on_error: ErrorMode::Fail,
-            nodes: HashMap::new(),
-            hooks: Vec::new(),
-            config_schema: None,
-            env_requires: Vec::new(),
-            state: None,
-            max_concurrency: None,
-            segment_steps: None,
-        }
     }
 
     #[tokio::test]
@@ -4981,41 +5440,6 @@ config:
         }
     }
 
-    #[test]
-    fn next_on_error_redirect_from_node() {
-        let node = GraphNode {
-            on_error: Some("handler".to_string()),
-            ..make_test_node()
-        };
-        let cfg = make_test_graph_config();
-        let noe = resolve_next_on_error(&node, &cfg);
-        assert!(matches!(noe, NextOnError::Redirect(ref t) if t == "handler"));
-    }
-
-    #[test]
-    fn next_on_error_policy_fail_when_no_node_target() {
-        let node = make_test_node();
-        let cfg = GraphConfig {
-            start: "x".to_string(),
-            on_error: ErrorMode::Fail,
-            ..make_test_graph_config()
-        };
-        let noe = resolve_next_on_error(&node, &cfg);
-        assert!(matches!(noe, NextOnError::PolicyFail));
-    }
-
-    #[test]
-    fn next_on_error_policy_continue_when_no_node_target() {
-        let node = make_test_node();
-        let cfg = GraphConfig {
-            start: "x".to_string(),
-            on_error: ErrorMode::Continue,
-            ..make_test_graph_config()
-        };
-        let noe = resolve_next_on_error(&node, &cfg);
-        assert!(matches!(noe, NextOnError::PolicyContinue));
-    }
-
     // ── F3 commit_step tests: event ordering + checkpoint writes ─────
 
     /// A mock callback client that records every `append_event` call
@@ -5083,7 +5507,16 @@ config:
             if results.is_empty() {
                 Ok(json!({"thread": {}, "result": {}}))
             } else {
-                Ok(json!({"thread": {}, "result": results.remove(0)}))
+                let result = results.remove(0);
+                if result.get("__retryable_dispatch_error").is_some() {
+                    Err(CallbackError::ActionFailed {
+                        code: "service_unavailable".to_string(),
+                        message: "simulated transient dispatch failure".to_string(),
+                        retryable: true,
+                    })
+                } else {
+                    Ok(json!({"thread": {}, "result": result}))
+                }
             }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -5258,12 +5691,19 @@ config:
         json!({"outcome_code": null, "result": {"ok": true}, "error": null, "artifacts": []})
     }
 
+    fn retryable_dispatch_failure() -> Value {
+        json!({"__retryable_dispatch_error": true})
+    }
+
     #[tokio::test]
     async fn retry_redispatches_until_success() {
         // First dispatch fails, the retry re-dispatches and succeeds. The
         // failed attempt consumed a walker step, so `done` is reached at step 2.
         let graph = make_graph(RETRY_YAML);
-        let w = make_walker(graph, vec![subprocess_failure(), subprocess_success()]);
+        let w = make_walker(
+            graph,
+            vec![retryable_dispatch_failure(), subprocess_success()],
+        );
         let result = w.execute(json!({}), None).await;
         assert!(result.success, "retry should recover: {result:?}");
         assert_eq!(result.status, "completed");
@@ -5294,7 +5734,10 @@ config:
       node_type: return
 "#;
         let graph = make_graph(yaml);
-        let w = make_walker(graph, vec![subprocess_failure(), subprocess_failure()]);
+        let w = make_walker(
+            graph,
+            vec![retryable_dispatch_failure(), retryable_dispatch_failure()],
+        );
         let result = w.execute(json!({}), None).await;
         assert_eq!(result.status, "completed");
         assert_eq!(
@@ -5310,7 +5753,7 @@ config:
         let graph = make_graph(RETRY_YAML);
         let (w, rec) = make_recording_walker(
             graph,
-            vec![subprocess_failure(), subprocess_success()],
+            vec![retryable_dispatch_failure(), subprocess_success()],
             None,
         );
         let result = w.execute(json!({}), Some("gr-retry".to_string())).await;
@@ -5383,6 +5826,21 @@ config:
             "the persisted count was exhausted on the single remaining attempt — no new retry; \
              events={events:#?}"
         );
+    }
+
+    #[tokio::test]
+    async fn deterministic_leaf_failure_does_not_consume_retry_budget() {
+        let graph = make_graph(RETRY_YAML);
+        let (w, recorder) = make_recording_walker(graph, vec![subprocess_failure()], None);
+        let result = w
+            .execute(json!({}), Some("gr-nonretryable".to_string()))
+            .await;
+        assert_eq!(result.status, "error");
+        assert_eq!(recorder.dispatch_count(), 1);
+        assert!(recorder
+            .recorded_events()
+            .iter()
+            .all(|(_, event_type, _, _)| event_type != "graph_node_retry"));
     }
 
     // ── §B2 graph hooks ──────────────────────────────────────────────
@@ -5501,7 +5959,7 @@ config:
         assert_eq!(reqs[0].graph_run_id, "gr-follow");
         assert_eq!(reqs[0].follow_node, "fetch");
         assert_eq!(reqs[0].step_count, 0);
-        assert_eq!(reqs[0].child_item_ref, "directive:child");
+        assert_eq!(reqs[0].child_item_ref.as_deref(), Some("directive:child"));
     }
 
     #[tokio::test]
@@ -5873,6 +6331,187 @@ config:
             "after both follow nodes resume, the graph completes"
         );
         assert!(r3.success);
+    }
+
+    const FOLLOW_FANOUT_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fan
+  nodes:
+    fan:
+      follow: true
+      over: "${state.jobs}"
+      as: job
+      parallel: true
+      max_concurrency: 2
+      collect: gathered
+      facets: {lane: "${job.lane}"}
+      action:
+        item_id: "directive:${job.kind}"
+        params: {value: "${job.value}", run: "${_run.graph_run_id}"}
+      assign: {last_success: "${job.value}"}
+      on_error: recover
+      next: {type: unconditional, to: done}
+    recover:
+      node_type: return
+    done:
+      node_type: return
+"#;
+
+    fn fanout_resume(items: Value, wrapper: Option<Value>) -> Value {
+        let pending = json!({
+            "follow_node": "fan", "step_count": 0, "graph_run_id": "gr-fan",
+            "iteration_snapshot": items,
+        });
+        let mut resume = json!({
+            "current_node": "fan", "step_count": 0,
+            "state": {"jobs": [{"kind":"mutated","value":99,"lane":"x"}]},
+            "graph_run_id": "gr-fan", "pending_follow": pending,
+        });
+        if let Some(value) = wrapper {
+            resume["follow_result"] = value;
+        }
+        json!({"resume_state": resume})
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_spawns_one_ordered_interpolated_cohort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (w, rec) =
+            make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], Some(tmp.path()));
+        let jobs = json!([
+            {"kind":"alpha","value":1,"lane":"red"},
+            {"kind":"beta","value":2,"lane":"blue"}
+        ]);
+        let result = w
+            .execute(
+                json!({"inject_state":{"jobs": jobs}}),
+                Some("gr-fan".into()),
+            )
+            .await;
+        assert_eq!(result.status, "continued");
+        let requests = rec.recorded_follow_requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.graph_run_id, "gr-fan");
+        assert_eq!(request.follow_node, "fan");
+        assert_eq!(request.launch_window_width, Some(2));
+        let children = request.children.as_ref().expect("cohort children");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].item_ref, "directive:alpha");
+        assert_eq!(children[0].parameters, json!({"value":1,"run":"gr-fan"}));
+        assert_eq!(children[0].facets, Some(json!({"lane":"red"})));
+        assert_eq!(children[1].item_ref, "directive:beta");
+        let checkpoint: Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("latest.json")).unwrap())
+                .unwrap();
+        assert_eq!(checkpoint["pending_follow"]["iteration_snapshot"], jobs);
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_binds_item_before_interpolating_action() {
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w
+            .execute(
+                json!({"inject_state":{"jobs":[{"kind":"bound","value":7,"lane":"z"}]}}),
+                Some("gr-fan".into()),
+            )
+            .await;
+        assert_eq!(
+            result.status, "continued",
+            "per-item templates must not fail before binding: {result:?}"
+        );
+        assert_eq!(
+            rec.recorded_follow_requests()[0].children.as_ref().unwrap()[0].item_ref,
+            "directive:bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_empty_completes_without_spawn() {
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w
+            .execute(json!({"inject_state":{"jobs":[]}}), Some("gr-fan".into()))
+            .await;
+        assert!(result.success);
+        assert_eq!(result.state["gathered"], json!([]));
+        assert!(rec.recorded_follow_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_bare_marker_redrives_same_key_from_snapshot() {
+        let snapshot = json!([{"kind":"original","value":1,"lane":"a"}]);
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w
+            .execute(fanout_resume(snapshot, None), Some("outer-other".into()))
+            .await;
+        assert_eq!(result.status, "continued");
+        let request = &rec.recorded_follow_requests()[0];
+        assert_eq!(request.graph_run_id, "gr-fan");
+        assert_eq!(request.follow_node, "fan");
+        assert_eq!(
+            request.children.as_ref().unwrap()[0].item_ref,
+            "directive:original"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_resume_collects_ordered_results_and_routes_errors() {
+        let snapshot = json!([
+            {"kind":"a","value":1,"lane":"a"},
+            {"kind":"b","value":2,"lane":"b"}
+        ]);
+        let wrapper = json!({
+            "fanout":true, "expected":2, "statuses":["completed","failed"],
+            "items":[
+                {"success":true,"status":"completed","result":{"ok":1},"cost":{"input_tokens":3,"output_tokens":1,"total_usd":0.1}},
+                {"success":false,"status":"error","result":{"error":"boom"},"cost":{"input_tokens":4,"output_tokens":0,"total_usd":0.2}}
+            ]
+        });
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], None);
+        let result = w
+            .execute(
+                fanout_resume(snapshot, Some(wrapper)),
+                Some("gr-fan".into()),
+            )
+            .await;
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.state["gathered"], json!([{"ok":1}, null]));
+        assert_eq!(
+            result.state["last_success"], 1,
+            "successful assign commits before on_error"
+        );
+        assert_eq!(result.cost.unwrap().input_tokens, 7);
+        assert!(rec.recorded_follow_requests().is_empty());
+        assert_eq!(rec.dispatch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn follow_fanout_assign_failure_demotes_only_its_slot_and_malformed_wrapper_fails() {
+        let yaml = FOLLOW_FANOUT_YAML.replace("${job.value}", "${job.missing}");
+        let snapshot = json!([{"kind":"a","value":1,"lane":"a"}]);
+        let good = json!({"fanout":true,"expected":1,"statuses":["completed"],"items":[{"result":{"ok":1}}]});
+        let (w, _) = make_recording_walker(make_graph(&yaml), vec![], None);
+        let result = w
+            .execute(
+                fanout_resume(snapshot.clone(), Some(good)),
+                Some("gr-fan".into()),
+            )
+            .await;
+        assert_eq!(result.state["gathered"], json!([null]));
+        let bad =
+            json!({"fanout":true,"expected":2,"statuses":["completed"],"items":[{"result":1}]});
+        let strict_yaml = FOLLOW_FANOUT_YAML.replace("      on_error: recover\n", "");
+        let (w, _) = make_recording_walker(make_graph(&strict_yaml), vec![], None);
+        let result = w
+            .execute(fanout_resume(snapshot, Some(bad)), Some("gr-fan".into()))
+            .await;
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cardinality"));
     }
 
     /// Assert the R3 fence order for an action-success step:

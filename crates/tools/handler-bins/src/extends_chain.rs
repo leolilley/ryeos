@@ -5,6 +5,10 @@ use ryeos_handler_protocol::{ComposeRequest, ComposeSuccess, ResolutionStepNameW
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+mod permissions;
+
+use permissions::narrow_capabilities;
+
 pub fn validate_config(config: &Value) -> Result<(), String> {
     let cfg: ExtendsChainConfig =
         serde_json::from_value(config.clone()).map_err(|e| e.to_string())?;
@@ -284,46 +288,6 @@ fn validate_field_shape(
     Ok(())
 }
 
-/// Check if a granted capability pattern covers a child capability.
-///
-/// Same semantics as `ryeos_runtime::authorizer::cap_matches`:
-/// - Exact match → true
-/// - `*` → `.*` (matches any characters including `/`)
-/// - `?` → `.` (matches exactly one character)
-/// - Regex metacharacters are escaped
-/// - Anchored `^...$`
-fn cap_covers(granted: &str, child: &str) -> bool {
-    if granted == child {
-        return true;
-    }
-    let mut regex_str = String::from("^");
-    for ch in granted.chars() {
-        match ch {
-            '*' => regex_str.push_str(".*"),
-            '?' => regex_str.push('.'),
-            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
-                regex_str.push('\\');
-                regex_str.push(ch);
-            }
-            _ => regex_str.push(ch),
-        }
-    }
-    regex_str.push('$');
-    Regex::new(&regex_str)
-        .map(|re| re.is_match(child))
-        .unwrap_or(false)
-}
-
-/// Narrow a child's verb caps against the parent's verb caps.
-/// Returns only the child caps that are covered by at least one parent cap.
-fn narrow_verb(child_caps: &[String], parent_caps: &[String]) -> Vec<String> {
-    child_caps
-        .iter()
-        .filter(|child| parent_caps.iter().any(|parent| cap_covers(parent, child)))
-        .cloned()
-        .collect()
-}
-
 fn apply_strategy(
     rule: &ComposerFieldRule,
     composed: &mut Value,
@@ -449,7 +413,7 @@ fn apply_strategy(
                             if child_map.contains_key(verb) {
                                 // Child declared this verb — narrow against parent
                                 let narrowed_caps =
-                                    narrow_verb(&child_verb_caps, &parent_verb_caps);
+                                    narrow_capabilities(&child_verb_caps, &parent_verb_caps);
                                 result.insert(
                                     verb.to_string(),
                                     Value::Array(
@@ -595,7 +559,7 @@ fn capability_subtree<'a>(parsed: &'a Value, sub: &str) -> Option<&'a Map<String
 }
 
 /// `requires.capabilities.declared` value (a list of cap strings), if present.
-pub(crate) fn declared_value<'a>(parsed: &'a Value) -> Option<&'a Value> {
+pub(crate) fn declared_value(parsed: &Value) -> Option<&Value> {
     parsed
         .get("requires")?
         .get("capabilities")?
@@ -625,7 +589,7 @@ fn compose_declared(
         (Some(c), Some(p)) => {
             validate_declared_shape(c)?;
             validate_declared_shape(p)?;
-            let narrowed = narrow_verb(&string_array(c), &string_array(p));
+            let narrowed = narrow_capabilities(&string_array(c), &string_array(p));
             Ok(Some(Value::Array(
                 narrowed.into_iter().map(Value::String).collect(),
             )))

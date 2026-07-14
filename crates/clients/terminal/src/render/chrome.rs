@@ -46,8 +46,10 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let base = Style::new().fg(MUTED).bg(bg);
     fill_line(surface, 0, y, surface.width, base);
     let mut x = 1usize;
+    // Wall-clock stepped (144ms/step) so the pulse holds a steady rate no
+    // matter how many events folded this frame.
     let heartbeat = if energy > 0.05 {
-        ["⋄", "◇", "◈", "◆"][(vm.generation as usize / 2) % 4]
+        ["⋄", "◇", "◈", "◆"][(vm.now_ms as usize / 144) % 4]
     } else {
         "⋄"
     };
@@ -58,36 +60,39 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
         Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg),
     );
     x += 2;
+
+    // The key hint is the affordance the operator relies on to know what's
+    // available — reserve its width (plus the "· " separator) up front so
+    // the segment loop degrades into whatever budget remains instead of
+    // squeezing the hint out entirely when the bar is tight.
+    let key_hint = &vm.presentation.chrome.status_bar.key_hint;
+    let hint_width = display_width(key_hint);
+    let hint_reserve = if hint_width > 0 { hint_width + 3 } else { 0 };
+    let segments_end = surface.width.saturating_sub(hint_reserve);
+
     for segment in &vm.presentation.chrome.status_bar.segments {
-        if x >= surface.width {
-            return;
+        if x >= segments_end {
+            break;
         }
         if let Some(label) = &segment.label {
             let label = format!("{}: ", letterspace(label));
             surface.draw_text(
                 x,
                 y,
-                &truncate(&label, surface.width - x),
+                &truncate(&label, segments_end - x),
                 style_muted().bg(bg),
             );
             x = x.saturating_add(display_width(&label));
         }
-        let value = truncate(&segment.value, surface.width.saturating_sub(x));
+        let value = truncate(&segment.value, segments_end.saturating_sub(x));
         surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg));
         x = x.saturating_add(display_width(&value) + 2);
     }
-    if x + 3 < surface.width {
+
+    if hint_width > 0 && x + hint_width < surface.width {
         surface.draw_text(x, y, "·", style_muted().bg(bg));
         x += 2;
-        surface.draw_text(
-            x,
-            y,
-            &truncate(
-                &vm.presentation.chrome.status_bar.key_hint,
-                surface.width - x,
-            ),
-            style_muted().bg(bg),
-        );
+        surface.draw_text(x, y, key_hint, style_muted().bg(bg));
     }
 }
 
@@ -118,10 +123,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &RyeOsViewModel) ->
 /// 1-cell gap; left/right are bounded so the center keeps ≥ 8 cells wide,
 /// top/bottom so it keeps ≥ 6 tall. This encodes the CURRENT terminal
 /// policy verbatim.
-fn carve_docks<'a>(
-    body: Rect,
-    docks: &'a RyeOsDockPlaneVm,
-) -> (Vec<(&'a RyeOsDockTileVm, Rect)>, Rect) {
+fn carve_docks(body: Rect, docks: &RyeOsDockPlaneVm) -> (Vec<(&RyeOsDockTileVm, Rect)>, Rect) {
     let mut center = body;
     let mut out = Vec::new();
 
@@ -225,7 +227,7 @@ pub fn draw_tile(
     _tile_id: &str,
     focused: bool,
     title: &str,
-    _action_count: usize,
+    _intent_count: usize,
     view: &RyeOsViewVm,
     input: Option<&RyeOsInputVm>,
     border: Option<Border>,
@@ -242,7 +244,7 @@ pub fn draw_tile(
     // The tile reads like the input box: a bordered frame on the page
     // background, with its label in the TOP border and provenance in the
     // BOTTOM border — no separate title bar, rule, corner marks, tile id, or
-    // action count. Border weight/colour carries focus.
+    // intent count. Border weight/colour carries focus.
     let border_style = if focused {
         Style::new().fg(ACCENT).bg(BG)
     } else {
@@ -418,12 +420,13 @@ mod tests {
                 cells: vec!["T-ab".into()],
                 cell_tones: Vec::new(),
                 tone: RyeOsTone::Neutral,
-                action: None,
+                intent: None,
                 selected: false,
                 expandable: false,
                 expanded: false,
                 detail: Vec::new(),
                 changed_at_ms: None,
+                changed_tone: None,
                 raw: serde_json::Value::Null,
             }],
         };

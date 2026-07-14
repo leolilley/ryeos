@@ -204,7 +204,8 @@ mod tests {
     fn disk_check_is_best_effort_and_never_panics() {
         let tmp = tempfile::tempdir().unwrap();
         check_disk_space(tmp.path());
-        // A non-existent path returns None rather than erroring.
-        assert!(available_bytes(&tmp.path().join("does-not-exist")).is_none() || true);
+        // A non-existent path must not panic; the probe is best-effort,
+        // so the value itself is platform-dependent and unasserted.
+        let _ = available_bytes(&tmp.path().join("does-not-exist"));
     }
 }

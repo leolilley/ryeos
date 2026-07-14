@@ -11,7 +11,7 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use ryeos_client_base::text_surface::{Attr, Cell, Color as CoreColor, TextSurface};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
 /// Render a complete text surface to the terminal using diff painting.
 ///
@@ -19,35 +19,39 @@ use std::io::Write;
 /// emulator reflows the previous frame during a resize and absolute
 /// repaints don't cover the displaced junk — and dedupe color codes
 /// across runs of same-styled cells, which keeps resize storms cheap
-/// enough to repaint per event.
+/// enough to repaint per event. The caller owns buffer succession (`prev`
+/// is a borrow, not a slot this function fills).
 #[allow(dead_code)]
 pub fn render_text_surface(
     stdout: &mut impl Write,
     new: &TextSurface,
-    prev: &mut Option<TextSurface>,
+    prev: Option<&TextSurface>,
     offset_x: u16,
     offset_y: u16,
 ) -> std::io::Result<()> {
-    let full_redraw = prev.is_none()
-        || prev.as_ref().unwrap().width != new.width
-        || prev.as_ref().unwrap().height != new.height;
+    let full_redraw = match prev {
+        None => true,
+        Some(prev) => prev.width != new.width || prev.height != new.height,
+    };
+
+    let mut w = BufWriter::with_capacity(64 * 1024, stdout);
 
     if full_redraw {
         queue!(
-            stdout,
+            w,
             ResetColor,
             SetAttribute(Attribute::Reset),
             Clear(ClearType::All),
         )?;
         let mut brush = Brush::default();
         for y in 0..new.height {
-            queue!(stdout, MoveTo(offset_x, offset_y + y as u16))?;
+            queue!(w, MoveTo(offset_x, offset_y + y as u16))?;
             for x in 0..new.width {
-                paint_cell(stdout, new.get(x, y), &mut brush)?;
+                paint_cell(&mut w, new.get(x, y), &mut brush)?;
             }
         }
     } else {
-        let prev_surf = prev.as_ref().unwrap();
+        let prev_surf = prev.expect("full_redraw covers the None case above");
         for y in 0..new.height {
             let mut row_changed = false;
             for x in 0..new.width {
@@ -56,23 +60,52 @@ pub fn render_text_surface(
                     break;
                 }
             }
+            if !row_changed {
+                continue;
+            }
 
-            if row_changed {
-                let mut brush = Brush::default();
-                for x in 0..new.width {
-                    let new_cell = new.get(x, y);
-                    let old_cell = prev_surf.get(x, y);
-                    if new_cell != old_cell {
-                        queue!(stdout, MoveTo(offset_x + x as u16, offset_y + y as u16))?;
-                        paint_cell(stdout, new_cell, &mut brush)?;
-                    }
+            let mut brush = Brush::default();
+            // The column the terminal cursor sits at after the last paint
+            // in this row (`None` until the first paint): a run of
+            // adjacent changed cells emits one MoveTo instead of one per
+            // cell.
+            let mut cursor: Option<usize> = None;
+            for x in 0..new.width {
+                let new_cell = new.get(x, y);
+                let old_cell = prev_surf.get(x, y);
+                if new_cell == old_cell {
+                    continue;
                 }
+                if new_cell.rune == '\u{0}' {
+                    // A wide-char continuation cell never prints on its
+                    // own. If its head is unchanged, the head must
+                    // repaint anyway to carry the new colors across both
+                    // terminal columns; if the head changed too, its own
+                    // iteration already painted it and the cursor is
+                    // already past this column.
+                    if x > 0 {
+                        let head = new.get(x - 1, y);
+                        if head.width == 2 && head == prev_surf.get(x - 1, y) {
+                            let head_x = x - 1;
+                            if cursor != Some(head_x) {
+                                queue!(w, MoveTo(offset_x + head_x as u16, offset_y + y as u16))?;
+                            }
+                            paint_cell(&mut w, head, &mut brush)?;
+                            cursor = Some(head_x + 2);
+                        }
+                    }
+                    continue;
+                }
+                if cursor != Some(x) {
+                    queue!(w, MoveTo(offset_x + x as u16, offset_y + y as u16))?;
+                }
+                paint_cell(&mut w, new_cell, &mut brush)?;
+                cursor = Some(x + new_cell.width.max(1) as usize);
             }
         }
     }
 
-    *prev = Some(new.clone());
-    stdout.flush()?;
+    w.flush()?;
     Ok(())
 }
 
@@ -127,7 +160,7 @@ fn paint_cell(stdout: &mut impl Write, cell: Cell, brush: &mut Brush) -> std::io
         // continuation cell for wide char — skip
         return Ok(());
     }
-    queue!(stdout, Print(cell.rune.to_string()))?;
+    queue!(stdout, Print(cell.rune))?;
     Ok(())
 }
 
@@ -168,8 +201,7 @@ mod tests {
         let mut surface = TextSurface::new(4, 1);
         surface.draw_text(0, 0, "Hi", Style::new().bold());
         let mut out: Vec<u8> = Vec::new();
-        let mut prev = None;
-        render_text_surface(&mut out, &surface, &mut prev, 0, 0).unwrap();
+        render_text_surface(&mut out, &surface, None, 0, 0).unwrap();
         // crossterm encodes SetAttribute(Bold) as ESC[1m.
         assert!(
             String::from_utf8_lossy(&out).contains("\x1b[1m"),

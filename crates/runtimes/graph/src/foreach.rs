@@ -100,12 +100,15 @@ struct RetryEventCtx {
     step: u32,
 }
 
-/// Dispatch one foreach item, retrying on a dispatch-level failure (transport
-/// error or a classified leaf `Failure`) per the node's `retry` policy. Unlike
+/// Dispatch one foreach item, retrying only a dispatch-level or leaf failure
+/// explicitly classified retryable, within the node's attempt budget. Unlike
 /// the single-action path, a foreach's per-item retries run inside this one
 /// walker step (they do NOT consume walker steps and are not individually
 /// checkpointed); each item keeps its own attempt count. Every re-attempt
 /// emits a braid-visible `graph_node_retry` event, then sleeps the backoff.
+// Retry plumbing: the policy, backoff, and per-item event context for one
+// dispatch attempt, threaded verbatim from the foreach loop.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_item_with_retry(
     client: &CallbackClient,
     action: &Value,
@@ -115,7 +118,7 @@ async fn dispatch_item_with_retry(
     retry: Option<&RetryConfig>,
     ev: &RetryEventCtx,
     item_id: &str,
-) -> anyhow::Result<crate::dispatch::ActionOutcome> {
+) -> Result<crate::dispatch::ActionOutcome, crate::dispatch::ActionDispatchError> {
     let total = retry.map(|r| r.attempts).unwrap_or(1);
     let mut attempt = 0u32;
     loop {
@@ -123,9 +126,12 @@ async fn dispatch_item_with_retry(
         let outcome =
             crate::dispatch::dispatch_action(client, action, thread_id, project_path, exec_ctx)
                 .await;
-        let failed = matches!(&outcome, Err(_))
-            || matches!(&outcome, Ok(crate::dispatch::ActionOutcome::Failure(_)));
-        if !failed || attempt >= total {
+        let retryable = match &outcome {
+            Err(error) => error.retryable,
+            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
+            Ok(crate::dispatch::ActionOutcome::Success(_)) => false,
+        };
+        if !retryable || attempt >= total {
             return outcome;
         }
         let rc = retry.expect("retry policy present when total attempts > 1");
@@ -219,6 +225,7 @@ pub async fn run_foreach_sequential(
             inputs: inputs.clone(),
             result: None,
             execution: exec_ctx.map(|ctx| ctx.as_context_value()),
+            graph_run_id: Some(graph_run_id.to_string()),
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
 
@@ -394,6 +401,7 @@ pub async fn run_foreach_parallel(
             inputs: inputs.clone(),
             result: None,
             execution: Some(exec_ctx.as_context_value()),
+            graph_run_id: Some(graph_run_id.to_string()),
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
         let mut action = match &node.action {

@@ -37,14 +37,30 @@ impl RpcResponse {
     }
 
     pub fn err(request_id: u64, code: &str, message: impl Into<String>) -> Self {
+        Self::classified_err(
+            request_id,
+            code,
+            message,
+            false,
+            Value::Object(Default::default()),
+        )
+    }
+
+    pub fn classified_err(
+        request_id: u64,
+        code: &str,
+        message: impl Into<String>,
+        retryable: bool,
+        details: Value,
+    ) -> Self {
         Self {
             request_id,
             result: None,
             error: Some(RpcError {
                 code: code.to_string(),
                 message: message.into(),
-                retryable: false,
-                details: Value::Object(Default::default()),
+                retryable,
+                details,
             }),
         }
     }

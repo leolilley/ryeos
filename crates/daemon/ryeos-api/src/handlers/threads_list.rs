@@ -14,6 +14,8 @@ use ryeos_executor::executor::ServiceAvailability;
 use super::default_list_limit;
 use crate::handler_context::HandlerContext;
 
+const MAX_THREAD_LIST_LIMIT: usize = 2_000;
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -49,9 +51,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         (None, None) => None,
         _ => anyhow::bail!("facet_key and facet_value must be given together"),
     };
-    state
-        .threads
-        .list_threads_filtered_sorted_facet(req.limit, Some(filter_principal), facet, sort)
+    state.threads.list_threads_filtered_sorted_facet(
+        req.limit.clamp(1, MAX_THREAD_LIST_LIMIT),
+        Some(filter_principal),
+        facet,
+        sort,
+    )
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

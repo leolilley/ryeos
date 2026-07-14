@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-09T01:14:05Z:c3b31942978fdd94d463d35b2cce79c8f3a43966d754a0970c22a8c39585d0d7:nBYZUUBHDdWEOvc1lLQia70YGGZVToWovHaSWxfTHKwptc4Vyyk+2MOipYz6xu9nqZrIcI5DHcJZlZmt9XMnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/invocations/dispatch
+path: /ui/api/invocations/dispatch
+methods:
+  - POST
+auth: browser_session
+limits:
+  body_bytes_max: 65536
+  timeout_ms: 30000
+  concurrent_max: 64
+request:
+  body: json
+response:
+  mode: json
+  source: "service:ui/invocations/dispatch"

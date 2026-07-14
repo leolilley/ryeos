@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-06T12:24:56Z:19fa49106a53f6464ead43c6616cb0bb896c2b9d8f153a747083c37189930c9d:FOnUIS3W4sKrc8KrXKxIG7O8V4kiTMa8Nfyc+MsLK53piKNIMW9nkiZxl9FH6MqLqlt/SicPp72JHFjBHoS7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-09T06:05:20Z:6e831b48b46b44b3875a988a6118ad5e7e3f9138992613c02ea6637f1db1d383:cS8CgaMqRDcCjIq4Uxw45xX6bOvvwoKNSyfYCo0O54wqw+fHBWE1/iWCPcY7/TLK6ZS84D7DFUOMdbemBwWbAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-bundles
+title: Bundles
 version: "1.0.0"
 description: Installed bundles on this node
 

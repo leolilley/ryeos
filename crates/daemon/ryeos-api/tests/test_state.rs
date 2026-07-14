@@ -26,6 +26,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
+        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -140,6 +141,8 @@ pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::Te
     (tmpdir, state)
 }
 
+// Test fixture: one argument per AppState component under test.
+#[allow(clippy::too_many_arguments)]
 fn build_app_state(
     tmpdir: tempfile::TempDir,
     config: ryeos_app::config::Config,

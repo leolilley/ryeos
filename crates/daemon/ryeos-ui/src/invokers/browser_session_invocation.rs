@@ -57,7 +57,7 @@ impl CompiledRouteInvocation for CompiledBrowserSessionVerifier {
         ctx: RouteInvocationContext,
     ) -> Result<RouteInvocationResult, RouteDispatchError> {
         let session_id =
-            extract_session_cookie(&ctx.headers).ok_or_else(|| RouteDispatchError::Unauthorized)?;
+            extract_session_cookie(&ctx.headers).ok_or(RouteDispatchError::Unauthorized)?;
 
         let session = self
             .ui

@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-08T01:26:03Z:1d959d69d25c6f8641cae59231eb8aa4d248c70a87e6360be90df49f4d39c0b2:cyqD3gJNIUyBhcH0Kg3seFPnJw5GaWG9I17CqSDvJcSwozmPoHAJxlxnhEtraY7ldwRKZTQN+gzYSTScc4i7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-13T10:47:02Z:f9a537b650dce32cfb4c6571bfc3bae1b3b149f766f1ca51e48ab1d1ec21e54b:j9blvzDb+BmzTe5Htn9hV/udVNNTBUbqpi5o75mV/IaAG1jnSonCRIa1rP31uQ27hmRbtp8h+n7eXCjscQgKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: project-threads
+title: Project Threads
 version: "1.0.0"
 description: >-
   Active-project thread history. This is the broad project execution table:
@@ -16,6 +16,11 @@ source:
     project_path: ""
     limit: 200
     sort: watch
+    # Substrate plumbing (threads/get polls, status strips, chain
+    # replays) records a service_run per invocation and drowns the
+    # execution signal ~9:1. The watch views exclude them wholesale;
+    # tool/graph/directive/knowledge runs and seats are the content.
+    exclude_item_prefixes: ["service:"]
   collection: threads
 projections:
   columns:
@@ -23,7 +28,12 @@ projections:
       field: thread_id
     - label: kind
       field: kind
+    # Leaf-first: the segment that names the thing survives a narrow
+    # cell; the raw canonical ref rides beside it as `id`.
     - label: item
+      field: item_ref
+      present: tail_first
+    - label: id
       field: item_ref
     - label: project
       field: project.name
@@ -47,8 +57,11 @@ projections:
     field: status
     map:
       running: accent
-      created: accent
-      accepted: accent
+      # A queued (created/accepted) thread sits calm — only genuinely
+      # RUNNING rows breathe, so a fanned-out cohort backlog reads as a
+      # queue, not a wall of live activity.
+      created: neutral
+      accepted: neutral
       failed: danger
       killed: danger
       timed_out: danger

@@ -1,8 +1,9 @@
-# ryeos:signed:2026-06-11T21:03:06Z:bfb482a7b4d7bf54488e3d152fcfa2b2585c00cebeb91fb45ec3f3fa4eac578d:nrEQuY6a2vQeArfM4yNU4AqMyxd7xfjRA46ImSQxDSWW6CsIX/s2TvRJSigaDvicDw9FR38k/SwkoTtQEDD7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T01:35:00Z:b9994a683c87e872a56cfe5849b3a0c958ef183337f3d7113a76f7277a752b91:Vnfhxvyedbws2jiE7fH2XSpLV4MG3obwoE1JxWHAjn248Dd1Bj52Apg6RkYlJ4QfNVB0MuR+snHErdr5dAHHBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "children"
 kind: service
 endpoint: threads.children
+record_thread: false
 required_caps: []
 schema:
   thread_id: string

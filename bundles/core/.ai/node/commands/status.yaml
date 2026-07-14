@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-19T05:40:59Z:1b099064fa651438df79974b1d6f3ca6fd84c2c425784fe95590f418e61ec9ba:cUCjERDjiZltqDVPk/r1WItP10StcIg/naOtJ+Qcc2Owu/VRuffof1eSTommEh03EtfhesAOAJyLXwha1J+bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T01:18:09Z:227f81eaeca95627a3bb9ca009ab940680a9ed6e207e7191b7ee07ab687cc027:dZiTgZwMq24IoWZWE0bpVWTee0tgIJh5ARlbXFgWQpNhbzPiZJH2TjCtxbZH/ENVN280k1bZFGU5khcIW5qFDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - daemon
 - status
 description: 'Show daemon status: version, uptime, bind address, active threads'
 dispatch:
   kind: execute_ref
-  execute: service:system/status
+  execute: service:node/status

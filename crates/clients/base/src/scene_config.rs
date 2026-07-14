@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SceneConfig {
     #[serde(default)]
     pub animation: AnimationConfig,
@@ -516,20 +516,6 @@ fn default_ring_speed() -> f32 {
 }
 fn default_ring_bob() -> f32 {
     1.0
-}
-
-impl Default for SceneConfig {
-    fn default() -> Self {
-        Self {
-            animation: AnimationConfig::default(),
-            scene: SceneParams::default(),
-            camera: CameraConfig::default(),
-            colors: ColorConfig::default(),
-            fog: FogConfig::default(),
-            stars: StarConfig::default(),
-            rings: RingsConfig::default(),
-        }
-    }
 }
 
 impl SceneConfig {

@@ -347,11 +347,8 @@ impl Engine {
             use crate::resolution::ResolutionError;
             match &e {
                 ResolutionError::StepFailed { reason, .. } => {
-                    if reason.starts_with("unknown kind:") {
-                        EngineError::EffectiveItemNotFound {
-                            canonical_ref: ref_str.clone(),
-                        }
-                    } else if reason.contains("not found")
+                    if reason.starts_with("unknown kind:")
+                        || reason.contains("not found")
                         || reason.contains("not in manifest")
                         || reason.contains("missing")
                     {

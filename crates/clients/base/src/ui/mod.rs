@@ -20,7 +20,7 @@ pub mod view_model;
 
 pub use content::{ProjectedRecord, SourceBinding, ViewBinding};
 pub use effect::{RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
-pub use event::{RyeOsAction, RyeOsEvent, RyeOsFilterField, RyeOsUiEvent};
+pub use event::{RyeOsEvent, RyeOsFilterField, RyeOsUiEvent, RyeOsUiIntent};
 pub use keymap::{
     ryeos_key_command, RyeOsKey, RyeOsKeyCommand, RyeOsKeyContext, RyeOsKeyEvent, RyeOsKeyModifiers,
 };

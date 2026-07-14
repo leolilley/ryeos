@@ -6,6 +6,13 @@ use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::TrustStore;
 use serde::{Deserialize, Serialize};
 
+/// The only signed bundle-manifest format accepted by this release.
+///
+/// V1 predates an on-wire format discriminator, so it is identified by its
+/// closed structural schema. A future format must use a new parser and all
+/// signed manifests must be republished; this parser never upgrades in place.
+pub const CURRENT_BUNDLE_MANIFEST_FORMAT: &str = "ryeos.bundle-manifest/v1";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BundleEventOperation {
@@ -184,6 +191,35 @@ pub struct BundleManifest {
     pub shadows: Vec<String>,
 }
 
+pub(crate) fn parse_current_manifest_body(body: &str, origin: &Path) -> Result<BundleManifest> {
+    let value: serde_yaml::Value = serde_yaml::from_str(body).with_context(|| {
+        format!(
+            "parse {CURRENT_BUNDLE_MANIFEST_FORMAT} at {}",
+            origin.display()
+        )
+    })?;
+    let mapping = value.as_mapping().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} must contain a YAML mapping in format {CURRENT_BUNDLE_MANIFEST_FORMAT}",
+            origin.display()
+        )
+    })?;
+    for required in ["name", "version", "provides_kinds", "requires_kinds"] {
+        if !mapping.contains_key(serde_yaml::Value::String(required.to_string())) {
+            bail!(
+                "{} is not {CURRENT_BUNDLE_MANIFEST_FORMAT}: missing required field '{required}'",
+                origin.display()
+            );
+        }
+    }
+    serde_yaml::from_value(value).with_context(|| {
+        format!(
+            "validate {} as {CURRENT_BUNDLE_MANIFEST_FORMAT}",
+            origin.display()
+        )
+    })
+}
+
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
     let kinds_dir = ai_dir.join("node").join("engine").join("kinds");
     if !kinds_dir.is_dir() {
@@ -286,8 +322,7 @@ pub fn load_verified_manifest_yaml(
     }
 
     let body = lillux::signature::strip_signature_lines(&raw);
-    let manifest: BundleManifest = serde_yaml::from_str(&body)
-        .with_context(|| format!("parse manifest body from {}", manifest_path.display()))?;
+    let manifest = parse_current_manifest_body(&body, &manifest_path)?;
     manifest.runtime_authority.validate().map_err(|e| {
         anyhow::anyhow!(
             "invalid `runtime_authority` declaration in {}: {e}",
@@ -322,8 +357,7 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<Bundl
         let raw = fs::read_to_string(&manifest_path)
             .with_context(|| format!("read manifest {}", manifest_path.display()))?;
         let body = lillux::signature::strip_signature_lines(&raw);
-        let manifest: BundleManifest = serde_yaml::from_str(&body)
-            .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+        let manifest = parse_current_manifest_body(&body, &manifest_path)?;
         manifest.runtime_authority.validate().map_err(|e| {
             anyhow::anyhow!(
                 "invalid `runtime_authority` declaration in {}: {e}",
@@ -457,11 +491,9 @@ pub fn sort_bundles_by_dependency(bundles: &[(String, PathBuf)]) -> Result<Vec<(
 
     for j in 0..n {
         for req in &bundle_deps[j].1 {
-            for i in 0..n {
-                if i != j && provides[i].contains(req) {
-                    if edges[j].insert(i) {
-                        in_degree[j] += 1;
-                    }
+            for (i, provided) in provides.iter().enumerate() {
+                if i != j && provided.contains(req) && edges[j].insert(i) {
+                    in_degree[j] += 1;
                 }
             }
         }
@@ -833,6 +865,17 @@ typo_field: oops
             msg.contains("unknown field"),
             "error should mention unknown field: {msg}"
         );
+    }
+
+    #[test]
+    fn current_signed_manifest_format_requires_complete_v1_shape() {
+        let origin = Path::new("manifest.yaml");
+        let error =
+            parse_current_manifest_body("name: demo\nversion: 1.0.0\nprovides_kinds: []\n", origin)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("missing required field 'requires_kinds'"));
     }
 
     #[test]

@@ -71,9 +71,9 @@ pub fn execute_plan(
 fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
-    _ctx: &EngineContext,
+    ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let request = spec_to_request(spec)?;
+    let request = sandbox_plan_request(spec, ctx)?;
     let capture = debug_raw.then(|| DebugCapture::from_spec(spec));
     let result = lillux::run(request);
     let debug = capture.map(|c| c.into_block(&result));
@@ -344,9 +344,9 @@ pub fn spawn_plan(
 fn spawn_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
-    _ctx: &EngineContext,
+    ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    let request = spec_to_request(spec)?;
+    let request = sandbox_plan_request(spec, ctx)?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
     match lillux::spawn(request) {
@@ -364,6 +364,58 @@ fn spawn_subprocess(
             reason: format!("subprocess spawn failed: {}", err_result.stderr),
         }),
     }
+}
+
+fn sandbox_plan_request(
+    spec: &PlanSubprocessSpec,
+    ctx: &EngineContext,
+) -> Result<lillux::SubprocessRequest, EngineError> {
+    let request = spec_to_request(spec)?;
+    let project_path = spec
+        .cwd
+        .as_deref()
+        .ok_or_else(|| EngineError::SandboxPolicyRefused {
+            reason: "executable plan requires an explicit working directory".to_string(),
+        })?;
+    crate::subprocess_spec::sandbox_lillux_request(
+        request,
+        ctx.sandbox_enabled,
+        &ctx.app_root,
+        project_path,
+        "tool:ryeos/internal/plan-subprocess",
+        &ctx.thread_id,
+    )
+}
+
+/// Truncate a string for inclusion in error payloads.
+/// Returns the original if already short enough; otherwise returns
+/// the first `max_len` chars + "… (truncated, N bytes total)".
+fn truncate_for_error(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_owned()
+    } else {
+        // Walk back to a char boundary so we never slice mid-codepoint.
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}… (truncated, {} bytes total)", &s[..end], s.len())
+    }
+}
+
+/// Retain the LAST `max_len` bytes of `s` (the tail), where a tool's real
+/// error — a Python traceback, a final `logger.error(...)` — usually
+/// lands. Char-boundary safe; prefixes a marker when bytes were dropped.
+fn truncate_tail_for_error(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_owned();
+    }
+    // Walk forward to a char boundary so we never slice mid-codepoint.
+    let mut start = s.len() - max_len;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("… (truncated, {} bytes total)\n{}", s.len(), &s[start..])
 }
 
 #[cfg(test)]
@@ -389,8 +441,29 @@ mod tests {
         dir
     }
 
+    fn host_executable(name: &str) -> String {
+        let search_path = std::env::var_os("PATH").expect("test PATH is set");
+        std::env::split_paths(&search_path)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+            .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+            .unwrap_or_else(|| panic!("test executable `{name}` is not available on PATH"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn test_engine_context() -> EngineContext {
+        let app_root = tempdir();
+        let policy_dir = app_root.join(".ai/node");
+        fs::create_dir_all(&policy_dir).unwrap();
+        fs::write(
+            policy_dir.join("sandbox.yaml"),
+            "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\nwritable_paths: [\"{project}\"]\nallowed_env: [\"*\"]\nmax_open_files: 128\nmax_processes: 32\n",
+        )
+        .unwrap();
         EngineContext {
+            app_root,
+            sandbox_enabled: false,
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),
@@ -429,16 +502,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello world".into()],
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -470,16 +543,16 @@ mod tests {
         let mut plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
                     args: vec!["hello debug".into()],
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env,
                     env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -519,8 +592,8 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                spec: Box::new(PlanSubprocessSpec {
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -528,7 +601,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -549,16 +622,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/bin/false".into(),
                     args: Vec::new(),
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -593,8 +666,8 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                spec: Box::new(PlanSubprocessSpec {
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -602,7 +675,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -650,8 +723,8 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                spec: Box::new(PlanSubprocessSpec {
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -659,7 +732,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -738,8 +811,8 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
-                    cmd: "python3".into(),
+                spec: Box::new(PlanSubprocessSpec {
+                    cmd: host_executable("python3"),
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env,
@@ -747,7 +820,7 @@ mod tests {
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -769,16 +842,16 @@ mod tests {
         let plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),
-                spec: PlanSubprocessSpec {
+                spec: Box::new(PlanSubprocessSpec {
                     cmd: "/nonexistent/binary".into(),
                     args: Vec::new(),
-                    cwd: None,
+                    cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
                     stdin_data: None,
                     timeout_secs: 300,
                     execution: Default::default(),
-                },
+                }),
                 tool_path: None,
                 executor_chain: Vec::new(),
             },
@@ -789,11 +862,16 @@ mod tests {
 
         let ctx = test_engine_context();
         let completion = execute_plan(&plan, &ctx).unwrap();
-        // Lillux returns a failed result for spawn errors
-        assert!(!matches!(
-            completion.status,
-            ThreadTerminalStatus::Completed
-        ));
+        assert_eq!(completion.status, ThreadTerminalStatus::Failed);
+        assert_eq!(completion.outcome_code.as_deref(), Some("exit:-1"));
+        let error = completion.error.expect("spawn failure carries error");
+        assert_eq!(error["exit_code"], -1);
+        assert!(
+            error["stderr"]
+                .as_str()
+                .is_some_and(|stderr| stderr.contains("Failed to spawn")),
+            "spawn error must be preserved: {error}"
+        );
     }
 
     #[test]
@@ -830,35 +908,4 @@ mod tests {
         assert_eq!(env_map.get("RYEOS_THREAD_ID").unwrap(), "thread:test");
         assert_eq!(env_map.get("RYEOS_CHAIN_ROOT_ID").unwrap(), "chain:test");
     }
-}
-
-/// Truncate a string for inclusion in error payloads.
-/// Returns the original if already short enough; otherwise returns
-/// the first `max_len` chars + "… (truncated, N bytes total)".
-fn truncate_for_error(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_owned()
-    } else {
-        // Walk back to a char boundary so we never slice mid-codepoint.
-        let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}… (truncated, {} bytes total)", &s[..end], s.len())
-    }
-}
-
-/// Retain the LAST `max_len` bytes of `s` (the tail), where a tool's real
-/// error — a Python traceback, a final `logger.error(...)` — usually
-/// lands. Char-boundary safe; prefixes a marker when bytes were dropped.
-fn truncate_tail_for_error(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        return s.to_owned();
-    }
-    // Walk forward to a char boundary so we never slice mid-codepoint.
-    let mut start = s.len() - max_len;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("… (truncated, {} bytes total)\n{}", s.len(), &s[start..])
 }

@@ -1,11 +1,11 @@
-# ryeos:signed:2026-07-06T05:31:39Z:d84455bdb7a953b6914f11b79faee31102a04961cebcc98cba6b512f9621db21:RuZmFfa6tWwa87NSlz2guD8PZ3ED1VQGlE45GKniZRy4GXb5E9ZaG3WVMBWywFOiBSn7dmM8YJAldDEi//xnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-09T01:18:09Z:8837698125c1c78709427998e34e3f3b19de7112a0847bef72fed4ad3f7b7439:7seZQVksQK3fyiPozPo8L2U/HYAmiAJ3aRxKPbSOI8Pb6mWmOGiXh3aAHACAqFT0Fb5uhFRk/x2NkJhgO+WIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-status
 version: "1.0.0"
 description: Node status detail (provenance first)
 
 widget: key_value
 source:
-  ref: service:system/status
+  ref: service:node/status
   params: {}
 projections:
   detail:

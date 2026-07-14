@@ -17,7 +17,10 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
-    let status = if state.catalog_health.missing_services.is_empty() {
+    let thread_projection = state.state_store.projection_health_snapshot();
+    let status = if state.catalog_health.missing_services.is_empty()
+        && thread_projection.status == ryeos_app::projection_health::ThreadProjectionState::Current
+    {
         "healthy"
     } else {
         "degraded"
@@ -26,6 +29,10 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
         "status": status,
         "operational_services": state.catalog_health.status,
         "missing_services": state.catalog_health.missing_services,
+        "thread_projection": {
+            "status": thread_projection.status,
+            "generation": thread_projection.generation,
+        },
     }))
 }
 

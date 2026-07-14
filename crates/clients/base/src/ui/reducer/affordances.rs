@@ -181,11 +181,23 @@ impl RyeOsCore {
         effects
     }
 
-    /// Facet write arrived: refetch every bound tile whose binding
+    /// Facet write arrived: refetch every bound tile or visible dock whose binding
     /// declares `refresh.on_facet: <key>` or whose source params
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
-        let targets: Vec<(crate::ids::TileId, String)> = self
+        let binding_subscribes = |binding: &super::content::ViewBinding| {
+            binding.refresh.get("on_facet").and_then(|v| v.as_str()) == Some(facet)
+                || binding
+                    .source
+                    .iter()
+                    .chain(binding.sections.iter().map(|section| &section.source))
+                    .any(|source| {
+                        serde_json::to_string(&source.params)
+                            .unwrap_or_default()
+                            .contains(&format!("@facet:{facet}"))
+                    })
+        };
+        let mut targets: Vec<(String, String)> = self
             .workspace
             .tile_ids()
             .into_iter()
@@ -193,23 +205,27 @@ impl RyeOsCore {
                 let tile = self.workspace.tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
-                let subscribed = binding.refresh.get("on_facet").and_then(|v| v.as_str())
-                    == Some(facet)
-                    || binding
-                        .source
-                        .as_ref()
-                        .map(|source| {
-                            serde_json::to_string(&source.params)
-                                .unwrap_or_default()
-                                .contains(&format!("@facet:{facet}"))
-                        })
-                        .unwrap_or(false);
-                subscribed.then(|| (tile_id, view_ref.clone()))
+                binding_subscribes(binding).then(|| (tile_id.0.to_string(), view_ref.clone()))
             })
             .collect();
+        targets.extend(
+            self.visible_dock_views()
+                .into_iter()
+                .filter(|(_, view_ref)| {
+                    self.views
+                        .get(view_ref)
+                        .is_some_and(|binding| binding_subscribes(binding))
+                }),
+        );
         targets
             .into_iter()
-            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(source_key, view_ref)| {
+                // A facet write means the SUBJECT changed (a new selection,
+                // a new route). Fence the old source before resolving the new
+                // parameters; if they resolve to null, the view stays empty.
+                self.invalidate_view_sources(&source_key, &view_ref);
+                self.emit_fetch_source_keyed(source_key, &view_ref)
+            })
             .collect()
     }
 
@@ -311,7 +327,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:test/list".to_string(),
                     affordance_id: "select-item".to_string(),
                     record: serde_json::json!({ "canonical_ref": "tool:demo/run" }),
@@ -347,14 +363,14 @@ mod tests {
                         "plane": "ui",
                         "facet": "input.route",
                         "merge": { "thread": "{record.thread_id}", "chain_root": "{record.chain_root_id}" },
-                        "open_view": "view:ryeos/chain/timeline"
+                        "open_view": "view:ryeos/thread/transcript"
                     }
                 }]
             }),
         );
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -367,7 +383,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -386,7 +402,7 @@ mod tests {
             core.workspace
                 .tiles
                 .values()
-                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+                .any(|t| t.view.view_ref == "view:ryeos/thread/transcript"),
             "drill-in opens the braid lens"
         );
 
@@ -425,7 +441,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-7" }),
@@ -459,7 +475,7 @@ mod tests {
             .insert("view:ryeos/threads/list".to_string(), binding);
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -477,7 +493,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:ryeos/threads/list".to_string(),
                     affordance_id: "watch".to_string(),
                     record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
@@ -497,7 +513,7 @@ mod tests {
             core.workspace
                 .tiles
                 .values()
-                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+                .any(|t| t.view.view_ref == "view:ryeos/thread/transcript"),
             "watch opens the braid lens"
         );
         assert!(
@@ -582,10 +598,10 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
         core.workspace
-            .add_tile(ViewSpec::bound("view:ryeos/chain/timeline"));
+            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"));
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -606,7 +622,7 @@ mod tests {
             crate::ui::seat::KEY_INPUT_ROUTE.to_string(),
             None,
             Some(serde_json::json!({ "chain_root": "B" })),
-            Some("view:ryeos/chain/timeline".to_string()),
+            Some("view:ryeos/thread/transcript".to_string()),
             true,
         );
 
@@ -655,10 +671,10 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
         core.workspace
-            .add_tile(ViewSpec::bound("view:ryeos/chain/timeline"));
+            .add_tile(ViewSpec::bound("view:ryeos/thread/transcript"));
         seed_view_value(
             &mut core,
-            "view:ryeos/chain/timeline",
+            "view:ryeos/thread/transcript",
             serde_json::json!({
                 "widget": "timeline",
                 "source": {
@@ -677,7 +693,7 @@ mod tests {
         // Step into child C (a fresh root: both coords = C).
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::DrillThread {
+                intent: RyeOsUiIntent::DrillThread {
                     thread_id: "C".to_string(),
                     chain_root_id: "C".to_string(),
                     label: Some("study".to_string()),
@@ -738,7 +754,7 @@ mod tests {
 
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "cancel".to_string(),
                     record: serde_json::json!({ "thread_id": "T-demo" }),
@@ -787,7 +803,7 @@ mod tests {
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: "view:test/threads".to_string(),
                     affordance_id: "aim-input".to_string(),
                     record: serde_json::json!({ "thread_id": "T-route" }),
@@ -811,7 +827,7 @@ mod tests {
         );
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec::bound("view:ryeos/graph/topology"),
                 },
             },

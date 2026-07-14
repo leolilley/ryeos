@@ -15,7 +15,7 @@ pub enum RyeOsFilterField {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RyeOsAction {
+pub enum RyeOsUiIntent {
     Refresh,
     /// Run a content-declared affordance against a projected row: the
     /// ONE generic row interaction. The engine resolves the binding's
@@ -34,6 +34,11 @@ pub enum RyeOsAction {
     },
     OpenOverlay {
         overlay_id: String,
+    },
+    /// Fold or unfold one launcher group. The overlay stays open — this
+    /// mutates presentation state, never launches anything.
+    ToggleOverlayGroup {
+        group: String,
     },
     CloseFocused,
     CloseTile {
@@ -143,7 +148,7 @@ pub enum RyeOsAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RyeOsUiEvent {
     Activate {
-        action: RyeOsAction,
+        intent: RyeOsUiIntent,
     },
     SetFilter {
         tile_id: String,
@@ -244,6 +249,13 @@ pub enum RyeOsUiEvent {
     ChooseOverlay {
         secondary: bool,
     },
+    /// Fold (`expand: false`) or unfold the launcher group under the
+    /// overlay selection. Folding from a leaf lands the selection on the
+    /// group's header. Inert while a search query is live — matches
+    /// present under force-expanded headers.
+    FoldOverlayGroup {
+        expand: bool,
+    },
     SetTileCursor {
         tile_id: String,
         index: usize,
@@ -291,6 +303,19 @@ pub enum RyeOsEvent {
     DaemonEvent {
         payload: serde_json::Value,
     },
+    /// Immediate lossy presentation patch. It never emits a fetch.
+    HintReceived {
+        kind: String,
+        payload: serde_json::Value,
+    },
+    /// Coalesced reconciliation for every dirty hint kind in one client
+    /// window. Reconciliation remains single-flight per resolved source key.
+    HintFlushBatch {
+        kinds: Vec<String>,
+    },
+    /// A lossy transport came back after a gap (or explicitly requested a
+    /// snapshot); rebuild all content-bound sources.
+    TransportReconnected,
     /// One frame from the head thread's live SSE tail. The reducer applies
     /// ryeos event semantics so both clients reach them through `dispatch`:
     /// cognition deltas accumulate into the live buffer; durable milestones

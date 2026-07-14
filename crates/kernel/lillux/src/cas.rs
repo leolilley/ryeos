@@ -1,9 +1,15 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::io::{ErrorKind, Write};
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+use crate::atomic_fs::next_temp_sequence;
+use crate::atomic_fs::{atomic_write, atomic_write_with_mode};
 
 // ── Public library primitives ──────────────────────────────────────
 
@@ -22,18 +28,6 @@ pub fn shard_path(root: &Path, namespace: &str, hash: &str, ext: &str) -> PathBu
         .join(format!("{hash}{ext}"))
 }
 
-pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    fs::rename(&tmp, target)?;
-    Ok(())
-}
-
 /// Atomically write a batch of files with a single durability barrier.
 ///
 /// Each file is written tmp+rename like [`atomic_write`], but per-file
@@ -45,17 +39,59 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
 /// leave some files missing or empty, which is only safe while nothing
 /// references them yet.
 pub fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        atomic_write_batch_unix(writes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = writes;
+        anyhow::bail!("durable CAS batch writes are unavailable on this platform")
+    }
+}
+
+#[cfg(unix)]
+fn atomic_write_batch_unix(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     if let [(target, data)] = writes {
-        return atomic_write(target, data);
+        atomic_write(target, data)?;
+        return Ok(());
     }
     for (target, data) in writes {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(data)?;
-        fs::rename(&tmp, target)?;
+        let mut written = false;
+        for _ in 0..128 {
+            let sequence = next_temp_sequence();
+            let tmp = target.with_extension(format!("tmp.{}.{sequence}", std::process::id()));
+            let mut file = match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(file) => file,
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err.into()),
+            };
+            let result = (|| -> std::io::Result<()> {
+                file.write_all(data)?;
+                drop(file);
+                fs::rename(&tmp, target)
+            })();
+            if let Err(err) = result {
+                let _ = fs::remove_file(&tmp);
+                return Err(err.into());
+            }
+            written = true;
+            break;
+        }
+        if !written {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "atomic batch temp file collision",
+            )
+            .into());
+        }
     }
     sync_write_batch(writes)
 }
@@ -73,7 +109,7 @@ fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     for (target, _) in writes {
         fs::File::open(target)?.sync_all()?;
@@ -85,14 +121,10 @@ fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
 /// bits so the result is executable. Like `atomic_write` but preserves
 /// the exec mode from the `ItemSource` record.
 ///
-/// On non-Unix platforms, the mode is ignored (the file is still written).
+/// Unsupported platforms fail closed rather than materializing with a mode
+/// that was not enforced.
 pub fn materialize_executable(target: &Path, data: &[u8], mode: u32) -> Result<()> {
-    atomic_write(target, data)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(target, fs::Permissions::from_mode(mode))?;
-    }
+    atomic_write_with_mode(target, data, mode)?;
     Ok(())
 }
 

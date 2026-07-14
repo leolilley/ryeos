@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::content::ViewBinding;
-use super::event::RyeOsAction;
+use super::event::RyeOsUiIntent;
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
 use super::scene_model::{build_scene_model, RyeOsSceneModel};
 use super::seat::InvokeTemplate;
@@ -10,71 +10,40 @@ use crate::layout::{LayoutTree, SplitAxis};
 use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
 use crate::workspace::{TileState, ViewLocalState, ViewSpec};
 
+mod dialogs;
+mod execution;
+mod navigation;
+pub use dialogs::{
+    RyeOsOverlayChoice, RyeOsOverlayItemVm, RyeOsOverlayVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm,
+};
+#[cfg(test)]
+use execution::status_tone;
+pub(crate) use execution::timeline_summary_entry;
+pub use execution::RyeOsTimelineEntryVm;
+use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
+pub use navigation::{
+    RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
+    RyeOsSessionVm,
+};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
     pub schema_version: String,
     pub generation: u64,
     #[serde(default)]
     pub now_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_chain_root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
     pub workspace: RyeOsWorkspaceVm,
     pub overlays: Vec<RyeOsOverlayVm>,
     pub notices: Vec<RyeOsNoticeVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct RyeOsSessionVm {
-    pub session_id: String,
-    pub project_path: Option<String>,
-    pub surface_ref: String,
-    #[serde(default)]
-    pub ambient: RyeOsAmbientVm,
-    pub user_principal_id: Option<String>,
-    pub read_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsAmbientVm {
-    pub show_background: bool,
-    pub opacity: Option<f32>,
-    pub mode: RyeOsAmbientModeVm,
-    pub atlas: Option<RyeOsAmbientAtlasVm>,
-}
-
-impl Default for RyeOsAmbientVm {
-    fn default() -> Self {
-        Self {
-            show_background: true,
-            opacity: None,
-            mode: RyeOsAmbientModeVm::Ambient,
-            atlas: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RyeOsAmbientModeVm {
-    #[default]
-    Ambient,
-    NamespaceAtlas,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsAmbientAtlasVm {
-    pub style: RyeOsAmbientAtlasStyleVm,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RyeOsAmbientAtlasStyleVm {
-    #[default]
-    #[serde(rename = "flat_2d")]
-    Flat2d,
-    #[serde(rename = "paper_3d")]
-    Paper3d,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -297,8 +266,9 @@ pub enum RyeOsLayoutNodeVm {
         tile_id: String,
         focused: bool,
         title: String,
-        actions: Vec<RyeOsTileActionVm>,
-        view: RyeOsViewVm,
+        intents: Vec<RyeOsTileIntentVm>,
+        /// Boxed: the view VM dominates the enum's size next to `Split`.
+        view: Box<RyeOsViewVm>,
         #[serde(default)]
         chrome_hidden: bool,
         #[serde(default)]
@@ -346,6 +316,8 @@ pub enum RyeOsViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<RyeOsTimelineEntryVm>,
+        #[serde(default)]
+        entry_arrived_at_ms: Vec<Option<u64>>,
         /// Call-tree indent depth per entry (parallel to `entries`): a graph
         /// node's tool calls and its directive/sub-graph fork nest one level
         /// under the node. Empty or shorter than `entries` renders flat (depth
@@ -386,7 +358,7 @@ pub enum RyeOsViewVm {
     /// widget over many datasets, each section a titled, collapsible group of
     /// rows. The engine knows the `sections` widget vocabulary; the specific
     /// sections (threads/bundles/node/…) are declared by the bound view, never
-    /// named here (no fire-sword). Rows reuse `RyeOsRowVm`, so per-row actions
+    /// named here (no fire-sword). Rows reuse `RyeOsRowVm`, so per-row intents
     /// come for free.
     Sections {
         title: String,
@@ -400,7 +372,7 @@ pub enum RyeOsViewVm {
     /// (threads/bundles/schedules/…): aligned cells under headers rather than
     /// the rows widget's primary/secondary/meta. The engine knows the `table`
     /// widget vocabulary; the columns + their field projections are declared by
-    /// the bound view (no fire-sword). Rows carry per-row actions like the rows
+    /// the bound view (no fire-sword). Rows carry per-row intents like the rows
     /// widget.
     Table {
         title: String,
@@ -434,7 +406,7 @@ pub struct RyeOsTextPositionVm {
 }
 
 /// One row of a `Table` view: a cell per declared column, plus the per-row
-/// tone/action/selection the rows widget also carries.
+/// tone/intent/selection the rows widget also carries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsTableRowVm {
     pub id: String,
@@ -446,7 +418,7 @@ pub struct RyeOsTableRowVm {
     pub cell_tones: Vec<Option<RyeOsTone>>,
     pub tone: RyeOsTone,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<RyeOsAction>,
+    pub intent: Option<RyeOsUiIntent>,
     #[serde(default)]
     pub selected: bool,
     #[serde(default)]
@@ -457,6 +429,10 @@ pub struct RyeOsTableRowVm {
     pub detail: Vec<RyeOsRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// The change's tone when it crossed a tone boundary (or the row just
+    /// arrived) — renderers flash in this color instead of generic accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_tone: Option<RyeOsTone>,
     /// The row's raw record — base-only (not serialized to clients). Overlays
     /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
     /// management is reachable. Skipped to avoid duplicating every record into
@@ -490,57 +466,6 @@ pub struct RyeOsSectionVm {
     pub rows: Vec<RyeOsRowVm>,
 }
 
-// The timeline entry shapes live in `super::timeline`; re-exported here so
-// the established `ui::view_model::RyeOsTimelineEntryVm` path is stable.
-pub use super::timeline::RyeOsTimelineEntryVm;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsOverlayActionItem {
-    pub label: String,
-    pub hint: String,
-    pub action: RyeOsAction,
-    pub secondary_action: Option<RyeOsAction>,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsShortcutEntryVm {
-    pub category: String,
-    pub keys: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsTileActionVm {
-    pub label: String,
-    pub title: String,
-    pub action: RyeOsAction,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsOverlayVm {
-    pub id: String,
-    pub title: String,
-    pub widget: String,
-    #[serde(default)]
-    pub columns: Vec<String>,
-    pub query: String,
-    pub selected: usize,
-    pub hint: String,
-    pub items: Vec<RyeOsOverlayItemVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsOverlayItemVm {
-    pub category: String,
-    pub primary: String,
-    pub secondary: String,
-    pub meta: String,
-    pub enabled: bool,
-    pub action: Option<RyeOsAction>,
-    pub secondary_action: Option<RyeOsAction>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsRowVm {
     pub id: String,
@@ -548,7 +473,7 @@ pub struct RyeOsRowVm {
     pub secondary: Option<String>,
     pub meta: Option<String>,
     pub kind: Option<String>,
-    pub action: Option<RyeOsAction>,
+    pub intent: Option<RyeOsUiIntent>,
     pub tone: RyeOsTone,
     pub selected: bool,
     #[serde(default)]
@@ -559,6 +484,10 @@ pub struct RyeOsRowVm {
     pub detail: Vec<RyeOsRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// The change's tone when it crossed a tone boundary (or the row just
+    /// arrived) — renderers flash in this color instead of generic accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_tone: Option<RyeOsTone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -589,10 +518,18 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         health_label: health.clone(),
         health_tone: tone_for_health(&health),
     };
+    let route = core.seat.fold().input_route();
+    let tail_url = route
+        .chain_root
+        .as_ref()
+        .map(|root| format!("/ui/events/chain/{root}"));
     RyeOsViewModel {
         schema_version: "ryeos.ui.vm.v1".to_string(),
         generation: core.generation,
         now_ms: core.runtime.now_ms,
+        tail_thread_id: route.thread,
+        tail_chain_root_id: route.chain_root,
+        tail_url,
         presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
         chrome,
@@ -976,7 +913,7 @@ fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
     if binding.widget != "scene" {
         return None;
     }
-    let mut scene = super::scene_model::scene_from_body(&binding.body, core.generation);
+    let mut scene = super::scene_model::scene_from_body(&binding.body, core.scene_frame());
     scene.break_amount = core.ui.backdrop_break_amount.clamp(0.0, 1.0);
     // The backdrop breathes with the node: live threads lift the scene's
     // energy, so the empty center visibly quickens while cognition runs
@@ -1034,7 +971,6 @@ fn dock_tile_vm(
         core.focus_target(),
         super::model::RyeOsFocusTarget::Dock { edge: focused } if focused == edge
     );
-    let (cursor, collapsed, expanded_rows, changed_rows) = dock_selected_state(core, &source_key);
     Some(RyeOsDockTileVm {
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
@@ -1043,10 +979,7 @@ fn dock_tile_vm(
         view: bound_view_vm_keyed(
             core,
             &source_key,
-            cursor,
-            collapsed,
-            expanded_rows,
-            changed_rows,
+            dock_selected_state(core, &source_key),
             view_ref,
             &core.ui.atlas,
         ),
@@ -1054,14 +987,17 @@ fn dock_tile_vm(
     })
 }
 
-type RowStateRefs<'a> = (
-    Option<usize>,
-    Option<&'a std::collections::BTreeSet<usize>>,
-    Option<&'a std::collections::BTreeSet<String>>,
-    Option<&'a std::collections::BTreeMap<String, u64>>,
-);
+/// Per-instance row-local UI state a bound view projects with — named
+/// fields so the two BTreeSet-shaped members can't be transposed.
+#[derive(Clone, Copy, Default)]
+struct RowLocalState<'a> {
+    cursor: Option<usize>,
+    collapsed: Option<&'a std::collections::BTreeSet<usize>>,
+    expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
+    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
+}
 
-fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowStateRefs<'a> {
+fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalState<'a> {
     match core.ui.dock_local.get(source_key) {
         Some(crate::workspace::ViewLocalState::GenericList {
             cursor,
@@ -1069,13 +1005,13 @@ fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowStateRef
             expanded_rows,
             changed_rows,
             ..
-        }) => (
-            Some(*cursor),
-            Some(collapsed),
-            Some(expanded_rows),
-            Some(changed_rows),
-        ),
-        _ => (None, None, None, None),
+        }) => RowLocalState {
+            cursor: Some(*cursor),
+            collapsed: Some(collapsed),
+            expanded_rows: Some(expanded_rows),
+            changed_rows: Some(changed_rows),
+        },
+        _ => RowLocalState::default(),
     }
 }
 
@@ -1090,15 +1026,17 @@ fn instance_input_vm(core: &RyeOsCore, instance_id: &str, view_ref: &str) -> Opt
 
 /// Render a content-bound view: binding + source response -> widget VM.
 /// Pure projection; unknown widgets and missing data degrade honestly.
-fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
+pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
     let (expanded_rows, changed_rows) = selected_row_state(core, tile_id);
     bound_view_vm_keyed(
         core,
         &tile_id.0.to_string(),
-        selected_cursor(core, tile_id),
-        selected_collapsed(core, tile_id),
-        expanded_rows,
-        changed_rows,
+        RowLocalState {
+            cursor: selected_cursor(core, tile_id),
+            collapsed: selected_collapsed(core, tile_id),
+            expanded_rows,
+            changed_rows,
+        },
         view_ref,
         core.tile_atlas_state(tile_id),
     )
@@ -1107,13 +1045,16 @@ fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsView
 fn bound_view_vm_keyed(
     core: &RyeOsCore,
     source_key: &str,
-    cursor: Option<usize>,
-    collapsed: Option<&std::collections::BTreeSet<usize>>,
-    expanded_rows: Option<&std::collections::BTreeSet<String>>,
-    changed_rows: Option<&std::collections::BTreeMap<String, u64>>,
+    local: RowLocalState<'_>,
     view_ref: &str,
     atlas: &crate::atlas::AtlasUiStateVm,
 ) -> RyeOsViewVm {
+    let RowLocalState {
+        cursor,
+        collapsed,
+        expanded_rows,
+        changed_rows,
+    } = local;
     let Some(binding) = core.views.get(view_ref) else {
         return RyeOsViewVm::Placeholder {
             title: view_ref.to_string(),
@@ -1221,7 +1162,7 @@ fn bound_view_vm_keyed(
                             secondary: None,
                             meta: record.meta,
                             kind: None,
-                            action: activate.map(|affordance_id| RyeOsAction::InvokeAffordance {
+                            intent: activate.map(|affordance_id| RyeOsUiIntent::InvokeAffordance {
                                 view_ref: view_ref.to_string(),
                                 affordance_id: affordance_id.clone(),
                                 record: record.raw.clone(),
@@ -1232,6 +1173,7 @@ fn bound_view_vm_keyed(
                             expanded: false,
                             detail: Vec::new(),
                             changed_at_ms: None,
+                    changed_tone: None,
                         });
                     }
                 }
@@ -1253,7 +1195,7 @@ fn bound_view_vm_keyed(
     }
     // A view may render a seat facet directly (no service fetch) — e.g. the
     // inspector showing `selection.summary`, an inline event detail written by
-    // an inspect action. The facet wins when it resolves; otherwise the view
+    // an inspect intent. The facet wins when it resolves; otherwise the view
     // falls back to its fetched `source` response.
     let facet_response = binding
         .facet
@@ -1310,17 +1252,19 @@ fn bound_view_vm_keyed(
                     let record = super::content::project_record_for_binding(binding, raw);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
-                    let detail = expanded
-                        .then(|| detail_vm(&record.raw, &expand_fields))
-                        .unwrap_or_default();
+                    let detail = if expanded {
+                        detail_vm(&record.raw, &expand_fields)
+                    } else {
+                        Default::default()
+                    };
                     RyeOsRowVm {
                         id: format!("{view_ref}#{index}"),
                         primary: record.primary,
                         secondary: None,
                         meta: record.meta,
                         kind: None,
-                        action: activate_affordance.as_ref().map(|affordance_id| {
-                            RyeOsAction::InvokeAffordance {
+                        intent: activate_affordance.as_ref().map(|affordance_id| {
+                            RyeOsUiIntent::InvokeAffordance {
                                 view_ref: view_ref.to_string(),
                                 affordance_id: affordance_id.clone(),
                                 record: record.raw.clone(),
@@ -1331,7 +1275,13 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
-                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        changed_at_ms: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .map(|flash| flash.at_ms),
+                        changed_tone: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .and_then(|flash| flash.tone.as_deref())
+                            .map(|tone| tone_from_name(Some(tone))),
                     }
                 })
                 .collect();
@@ -1348,33 +1298,45 @@ fn bound_view_vm_keyed(
             use std::borrow::Cow;
 
             let cached = core.data.timeline_sources.get(source_key);
-            let (full, full_indents, full_sources) = if let Some(cache) = cached {
-                (
-                    Cow::Borrowed(cache.entries.as_slice()),
-                    Cow::Borrowed(cache.indents.as_slice()),
-                    Cow::Borrowed(cache.sources.as_slice()),
-                )
-            } else {
-                let (mut entries, mut indents, mut sources) =
-                    timeline_entries_indented(super::content::project_records(binding, response));
-                if let Some(summary) = timeline_summary_entry(response) {
-                    entries.insert(0, summary);
-                    indents.insert(0, 0);
-                    sources.insert(0, None);
-                }
-                (
-                    Cow::Owned(entries),
-                    Cow::Owned(indents),
-                    Cow::Owned(sources),
-                )
-            };
+            let (full, full_indents, full_sources, full_sections, collapsible) =
+                if let Some(cache) = cached {
+                    (
+                        Cow::Borrowed(cache.entries.as_slice()),
+                        Cow::Borrowed(cache.indents.as_slice()),
+                        Cow::Borrowed(cache.sources.as_slice()),
+                        Cow::Borrowed(cache.sections.as_slice()),
+                        Cow::Borrowed(&cache.collapsible),
+                    )
+                } else {
+                    let (mut entries, mut indents, mut sources) = timeline_entries_indented(
+                        super::content::project_records(binding, response),
+                    );
+                    if let Some(summary) = timeline_summary_entry(response) {
+                        entries.insert(0, summary);
+                        indents.insert(0, 0);
+                        sources.insert(0, None);
+                    }
+                    let (sections, collapsible_set) =
+                        super::timeline::timeline_section_index(&entries);
+                    (
+                        Cow::Owned(entries),
+                        Cow::Owned(indents),
+                        Cow::Owned(sources),
+                        Cow::Owned(sections),
+                        Cow::Owned(collapsible_set),
+                    )
+                };
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
             let windowed = super::timeline::fold_timeline_window(
-                full.as_ref(),
-                full_indents.as_ref(),
-                full_sources.as_ref(),
+                super::timeline::TimelineWindowInput {
+                    entries: full.as_ref(),
+                    indents: full_indents.as_ref(),
+                    sources: full_sources.as_ref(),
+                    sections: full_sections.as_ref(),
+                    collapsible: collapsible.as_ref(),
+                },
                 super::timeline::live_delta_entry(core),
                 collapsed.unwrap_or(&empty),
                 cursor.unwrap_or(0),
@@ -1382,6 +1344,27 @@ fn bound_view_vm_keyed(
             );
             let folded = windowed.folded;
             let selected = windowed.selected;
+            let arrival_by_key: std::collections::HashMap<&str, Option<u64>> = cached
+                .map(|cache| {
+                    cache
+                        .sources
+                        .iter()
+                        .zip(cache.arrivals.iter())
+                        .filter_map(|(source, arrived)| {
+                            Some((source.as_ref()?.key.as_str(), *arrived))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let entry_arrived_at_ms = folded
+                .sources
+                .iter()
+                .map(|source| {
+                    source
+                        .as_ref()
+                        .and_then(|source| arrival_by_key.get(source.key.as_str()).copied().flatten())
+                })
+                .collect();
             // The foldable section under the point — what a fold key toggles.
             let fold_section = selected.and_then(|i| {
                 let section = folded.sections.get(i).copied()?;
@@ -1427,6 +1410,7 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                entry_arrived_at_ms,
                 entry_indents: folded.indents,
                 selected,
                 fold_section,
@@ -1456,9 +1440,11 @@ fn bound_view_vm_keyed(
                     let record = super::content::project_table_record(binding, raw, &columns);
                     let key = super::model::row_key(&record.raw, index);
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
-                    let detail = expanded
-                        .then(|| detail_vm(&record.raw, &expand_fields))
-                        .unwrap_or_default();
+                    let detail = if expanded {
+                        detail_vm(&record.raw, &expand_fields)
+                    } else {
+                        Default::default()
+                    };
                     RyeOsTableRowVm {
                         id: format!("{view_ref}#{index}"),
                         cells: record.cells,
@@ -1472,8 +1458,8 @@ fn bound_view_vm_keyed(
                                 .collect()
                         },
                         tone: tone_from_name(record.tone.as_deref()),
-                        action: activate_affordance.as_ref().map(|affordance_id| {
-                            RyeOsAction::InvokeAffordance {
+                        intent: activate_affordance.as_ref().map(|affordance_id| {
+                            RyeOsUiIntent::InvokeAffordance {
                                 view_ref: view_ref.to_string(),
                                 affordance_id: affordance_id.clone(),
                                 record: record.raw.clone(),
@@ -1483,7 +1469,13 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
-                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        changed_at_ms: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .map(|flash| flash.at_ms),
+                        changed_tone: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .and_then(|flash| flash.tone.as_deref())
+                            .map(|tone| tone_from_name(Some(tone))),
                         raw: record.raw,
                     }
                 })
@@ -1507,13 +1499,14 @@ fn bound_view_vm_keyed(
                     secondary: None,
                     meta: None,
                     kind: None,
-                    action: None,
+                    intent: None,
                     tone: RyeOsTone::Neutral,
                     selected: cursor == Some(index),
                     expandable: false,
                     expanded: false,
                     detail: Vec::new(),
                     changed_at_ms: None,
+                    changed_tone: None,
                 })
                 .collect();
             let notice_start = rows.len();
@@ -1581,13 +1574,14 @@ fn status_notice_rows(
             secondary: None,
             meta: Some("notice".to_string()),
             kind: None,
-            action: None,
+            intent: None,
             tone: notice.tone,
             selected: cursor == Some(start_index + offset),
             expandable: false,
             expanded: false,
             detail: Vec::new(),
             changed_at_ms: None,
+                    changed_tone: None,
         })
         .collect()
 }
@@ -1724,64 +1718,6 @@ fn input_vm(
         completion,
         live_filter,
         text,
-    }
-}
-
-/// The deep-watch header for a braid: one summary line built from the source's
-/// `summary` (chain status + chain-wide usage totals, from chain_replay).
-/// Returns `None` when the source carries no `summary` — any non-chain timeline —
-/// so the header only appears where it means something.
-pub(crate) fn timeline_summary_entry(response: &serde_json::Value) -> Option<RyeOsTimelineEntryVm> {
-    let summary = response.get("summary")?;
-    let status = summary.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let input = summary
-        .get("input_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let output = summary
-        .get("output_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let cost = summary
-        .get("spend_usd")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let turns = summary.get("turns").and_then(|v| v.as_i64()).unwrap_or(0);
-    let primary = format!("{status} · ↑{input} ↓{output} · ${cost:.4} · {turns} turns");
-    Some(RyeOsTimelineEntryVm::Line {
-        primary,
-        meta: None,
-        tone: status_tone(status),
-        action: None,
-        secondary_action: None,
-    })
-}
-
-/// The response a facet-backed view renders: the seat-fold value at `facet`,
-/// resolved through the shared `@facet:` grammar (so a dotted path like
-/// `selection.summary` reads the field within the `selection` facet). `None`
-/// when the facet is unset — the view then falls back to its `source` fetch.
-fn facet_backed_response(core: &RyeOsCore, facet: &str) -> Option<serde_json::Value> {
-    let fold = core.seat.fold();
-    let resolved = super::content::resolve_params(
-        &serde_json::Value::String(format!("@facet:{facet}")),
-        |key| fold.get(key).cloned(),
-    );
-    (!resolved.is_null()).then_some(resolved)
-}
-
-/// Map a thread/chain status to a tone (the same status→tone vocabulary the
-/// list/detail tone blocks declare, in code here for the summary header). Matches
-/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
-/// not a silently-neutral string.
-fn status_tone(status: &str) -> RyeOsTone {
-    use super::dto::ThreadStatus;
-    match ThreadStatus::from_wire(status) {
-        ThreadStatus::Running | ThreadStatus::Created => RyeOsTone::Accent,
-        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => RyeOsTone::Danger,
-        ThreadStatus::Cancelled => RyeOsTone::Warn,
-        ThreadStatus::Completed | ThreadStatus::Continued => RyeOsTone::Good,
-        ThreadStatus::Unknown => RyeOsTone::Neutral,
     }
 }
 
@@ -1941,8 +1877,8 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
                 title,
-                actions: tile_actions(core, *tile_id),
-                view,
+                intents: tile_intents(core, *tile_id),
+                view: Box::new(view),
                 chrome_hidden,
                 background_transparent,
                 input,
@@ -2093,62 +2029,116 @@ fn ambient_vm(core: &RyeOsCore) -> RyeOsAmbientVm {
 /// Launchable views: every view embedded in the effective surface,
 /// graph/atlas included (they are ordinary `view:` items now). Nothing
 /// here names a product concept — labels and hints come from the items.
-pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
-    let mut items: Vec<RyeOsOverlayActionItem> = Vec::new();
-    for view_ref in core.lens_library() {
-        let Some(binding) = core.views.get(&view_ref) else {
+pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> {
+    let mut items: Vec<RyeOsOverlayItemVm> = Vec::new();
+    for group in core.library_groups() {
+        if group.refs.is_empty() {
             continue;
-        };
-        let view = ViewSpec {
-            view_ref: view_ref.clone(),
-        };
-        let (label, hint) = launchable_view_text(&view_ref, binding);
-        items.push(RyeOsOverlayActionItem {
-            label,
-            hint,
-            action: RyeOsAction::OpenView { view: view.clone() },
-            secondary_action: Some(RyeOsAction::OpenNewView { view }),
+        }
+        let expanded = !core.ui.overlay.collapsed.contains(&group.title);
+        items.push(RyeOsOverlayItemVm {
+            category: group.title.clone(),
+            primary: group.title.clone(),
             enabled: true,
+            intent: Some(RyeOsUiIntent::ToggleOverlayGroup {
+                group: group.title.clone(),
+            }),
+            header: true,
+            expanded,
+            ..Default::default()
         });
+        for view_ref in group.refs {
+            let Some(binding) = core.views.get(&view_ref) else {
+                continue;
+            };
+            let missing = unsatisfied_facets(core, binding);
+            let enabled = missing.is_empty();
+            let view = ViewSpec {
+                view_ref: view_ref.clone(),
+            };
+            items.push(RyeOsOverlayItemVm {
+                category: group.title.clone(),
+                primary: launchable_view_label(&view_ref, binding),
+                secondary: binding
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| binding.widget.clone()),
+                meta: if enabled {
+                    String::new()
+                } else {
+                    format!("needs {}", missing.join(", "))
+                },
+                enabled,
+                intent: enabled.then(|| RyeOsUiIntent::OpenView { view: view.clone() }),
+                secondary_intent: enabled.then_some(RyeOsUiIntent::OpenNewView { view }),
+                depth: 1,
+                ..Default::default()
+            });
+        }
     }
     items
 }
 
-fn launchable_view_text(view_ref: &str, binding: &ViewBinding) -> (String, String) {
-    let clean_ref = view_ref.strip_prefix("view:").unwrap_or(view_ref);
-    let (category, title) = match view_ref {
-        "view:ryeos/threads/history" => ("Project", "Threads"),
-        "view:ryeos/node/threads/history" => ("Node", "Threads"),
-        "view:ryeos/projects/list" => ("Node", "Projects"),
-        "view:ryeos/project/files" => ("Project", "Files"),
-        "view:ryeos/project/items" => ("Project", "Items"),
-        "view:ryeos/project/schedules" => ("Project", "Schedules"),
-        "view:ryeos/items/space" => ("Project", "Item space"),
-        "view:ryeos/node/events" => ("Node", "Events"),
-        "view:ryeos/node/remotes" => ("Node", "Remotes"),
-        "view:ryeos/node/bundles" => ("Node", "Bundles"),
-        "view:ryeos/node/gc" => ("Node", "Garbage collection"),
-        "view:ryeos/commands/grammar" => ("Node", "Command grammar"),
-        "view:ryeos/graph/topology" => ("Node", "Topology"),
-        "view:ryeos/atlas" => ("System", "Atlas"),
-        _ => (
-            "View",
-            binding
-                .name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(clean_ref),
-        ),
-    };
-    let hint = binding
-        .description
-        .clone()
-        .unwrap_or_else(|| binding.widget.clone());
-    (format!("{category}/{title}"), hint)
+/// A view's launcher label, from content: authored `title:`, else the
+/// authored `name:`, else the stripped ref.
+fn launchable_view_label(view_ref: &str, binding: &ViewBinding) -> String {
+    binding
+        .title
+        .as_deref()
+        .or(binding.name.as_deref())
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| view_ref.strip_prefix("view:").unwrap_or(view_ref))
+        .to_string()
 }
 
-fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
+/// The `@facet:` references in a view's declarations that the current
+/// seat fold cannot resolve. Defaulting refs (`@facet:x|…`) never gate —
+/// they resolve to their default. Generic over the grammar; the engine
+/// never names a facet.
+pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec<String> {
+    let mut refs: Vec<String> = Vec::new();
+    collect_required_facet_refs(&binding.body, &mut refs);
+    if let Some(source) = &binding.source {
+        collect_required_facet_refs(&source.params, &mut refs);
+    }
+    refs.sort();
+    refs.dedup();
+    let fold = core.seat.fold();
+    refs.retain(|spec| {
+        super::content::resolve_params(
+            &serde_json::Value::String(format!("@facet:{spec}")),
+            |key| fold.get(key).cloned(),
+        )
+        .is_null()
+    });
+    refs
+}
+
+fn collect_required_facet_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some(rest) = s.strip_prefix("@facet:") {
+                if !rest.contains('|') {
+                    out.push(rest.to_string());
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for nested in map.values() {
+                collect_required_facet_refs(nested, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for nested in items {
+                collect_required_facet_refs(nested, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
     // Only surface-declared slots are toggleable; absent edges have no
     // slot and offer nothing. Labels stay mechanism words (edge names).
     [
@@ -2163,20 +2153,20 @@ fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
     ]
     .into_iter()
     .filter_map(|(edge, name, slot)| slot.map(|slot| (edge, name, slot.visible)))
-    .map(|(edge, name, visible)| RyeOsOverlayActionItem {
+    .map(|(edge, name, visible)| RyeOsOverlayChoice {
         label: format!("{} {name} slot", if visible { "Hide" } else { "Show" }),
         hint: "toggle edge slot".to_string(),
-        action: RyeOsAction::ToggleDock { edge },
-        secondary_action: None,
+        intent: RyeOsUiIntent::ToggleDock { edge },
+        secondary_intent: None,
         enabled: true,
     })
     .collect()
 }
 
-/// Focused table row affordances OTHER than its activate (Enter) action.
+/// Focused table row affordances OTHER than its activate (Enter) intent.
 /// Each is rebuilt as an `InvokeAffordance` from the row's raw record and
 /// the view's declared affordances.
-fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
+fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
     let Some(view) = core.workspace.focused_view() else {
         return Vec::new();
     };
@@ -2197,35 +2187,35 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
         .filter_map(|aff| {
             let id = aff.get("id").and_then(|v| v.as_str())?;
             if Some(id) == activate {
-                return None; // already the row's Enter action
+                return None; // already the row's Enter intent
             }
             let label = aff
                 .get("label")
                 .and_then(|v| v.as_str())
                 .unwrap_or(id)
                 .to_string();
-            Some(RyeOsOverlayActionItem {
+            Some(RyeOsOverlayChoice {
                 label,
                 hint: "focused row".to_string(),
-                action: RyeOsAction::InvokeAffordance {
+                intent: RyeOsUiIntent::InvokeAffordance {
                     view_ref: view_ref.clone(),
                     affordance_id: id.to_string(),
                     record: row.raw.clone(),
                 },
-                secondary_action: None,
+                secondary_intent: None,
                 enabled: true,
             })
         })
         .collect()
 }
 
-fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
+fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
     let mut items = Vec::new();
-    items.push(RyeOsOverlayActionItem {
+    items.push(RyeOsOverlayChoice {
         label: "Toggle backdrop break".to_string(),
         hint: "toggle the current backdrop scene between together and apart".to_string(),
-        action: RyeOsAction::ToggleBackdropBreak,
-        secondary_action: None,
+        intent: RyeOsUiIntent::ToggleBackdropBreak,
+        secondary_intent: None,
         enabled: true,
     });
 
@@ -2234,35 +2224,35 @@ fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
     // review (not one-click). Surfaced two ways so it works everywhere — as the
     // Inspect item's Shift+Enter secondary, AND as a distinct plain-Enter item
     // (clients that can't send Shift+Enter still reach it).
-    let retry = retry_action_for_focused_row(core);
+    let retry = retry_intent_for_focused_row(core);
 
-    if let Some(action) = inspect_action_for_focused_row(core) {
+    if let Some(intent) = inspect_intent_for_focused_row(core) {
         let hint = if retry.is_some() {
             "Enter inspect · Shift+Enter retry".to_string()
         } else {
             focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string())
         };
-        items.push(RyeOsOverlayActionItem {
+        items.push(RyeOsOverlayChoice {
             label: "Inspect selection".to_string(),
             hint,
-            action,
-            secondary_action: retry.clone(),
+            intent,
+            secondary_intent: retry.clone(),
             enabled: true,
         });
     }
 
-    if let Some(action) = retry {
-        items.push(RyeOsOverlayActionItem {
+    if let Some(intent) = retry {
+        items.push(RyeOsOverlayChoice {
             label: "Retry failed turn".to_string(),
             hint: "re-submit this failed turn (review, then Enter)".to_string(),
-            action,
-            secondary_action: None,
+            intent,
+            secondary_intent: None,
             enabled: true,
         });
     }
 
     // The focused row's non-activate affordances (e.g. Cancel on a thread row),
-    // so row management is reachable — the row's Enter action is only the
+    // so row management is reachable — the row's Enter intent is only the
     // activate affordance.
     items.extend(focused_row_command_items(core));
 
@@ -2282,11 +2272,11 @@ fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
             ("Continue thread", ThreadControlCommand::Continue),
             ("Cancel thread", ThreadControlCommand::Cancel),
         ] {
-            items.push(RyeOsOverlayActionItem {
+            items.push(RyeOsOverlayChoice {
                 label: label.to_string(),
                 hint: "active thread".to_string(),
-                action: RyeOsAction::SubmitThreadCommand { command },
-                secondary_action: None,
+                intent: RyeOsUiIntent::SubmitThreadCommand { command },
+                secondary_intent: None,
                 enabled: command != ThreadControlCommand::Continue || operator_continuable,
             });
         }
@@ -2295,7 +2285,7 @@ fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
     items
 }
 
-pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
+pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayChoice> {
     let mut items = context_command_items(core);
     items.extend(dock_command_items(core));
     items
@@ -2308,8 +2298,9 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
         secondary: secondary.to_string(),
         meta: String::new(),
         enabled: false,
-        action: None,
-        secondary_action: None,
+        intent: None,
+        secondary_intent: None,
+        ..Default::default()
     };
     let overlay =
         |category: &str, primary: &str, secondary: &str, overlay_id: &str| RyeOsOverlayItemVm {
@@ -2318,10 +2309,11 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
             secondary: secondary.to_string(),
             meta: String::new(),
             enabled: true,
-            action: Some(RyeOsAction::OpenOverlay {
+            intent: Some(RyeOsUiIntent::OpenOverlay {
                 overlay_id: overlay_id.to_string(),
             }),
-            secondary_action: None,
+            secondary_intent: None,
+            ..Default::default()
         };
     let view =
         |category: &str, primary: &str, secondary: &str, view_ref: &str| RyeOsOverlayItemVm {
@@ -2330,12 +2322,13 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
             secondary: secondary.to_string(),
             meta: String::new(),
             enabled: true,
-            action: Some(RyeOsAction::OpenView {
+            intent: Some(RyeOsUiIntent::OpenView {
                 view: ViewSpec {
                     view_ref: view_ref.to_string(),
                 },
             }),
-            secondary_action: None,
+            secondary_intent: None,
+            ..Default::default()
         };
     vec![
         overlay("Start", "Views", "Open the view launcher", "views"),
@@ -2367,12 +2360,12 @@ fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
     ]
 }
 
-fn inspect_action_for_focused_row(core: &RyeOsCore) -> Option<RyeOsAction> {
-    match action_for_focused_row(core)? {
-        action @ (RyeOsAction::InspectItem { .. }
-        | RyeOsAction::InspectThread { .. }
-        | RyeOsAction::InspectSummary { .. }
-        | RyeOsAction::ReadFile { .. }) => Some(action),
+fn inspect_intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
+    match intent_for_focused_row(core)? {
+        intent @ (RyeOsUiIntent::InspectItem { .. }
+        | RyeOsUiIntent::InspectThread { .. }
+        | RyeOsUiIntent::InspectSummary { .. }
+        | RyeOsUiIntent::ReadFile { .. }) => Some(intent),
         _ => None,
     }
 }
@@ -2492,7 +2485,7 @@ fn overlay_definition(
             "table".to_string(),
             "type to filter shortcuts · esc to close".to_string(),
             "runtime:shortcuts".to_string(),
-            vec!["Keys".to_string(), "Action".to_string()],
+            vec!["Keys".to_string(), "Intent".to_string()],
         ),
         _ => return None,
     })
@@ -2506,45 +2499,78 @@ pub(crate) fn active_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> 
         return Vec::new();
     };
     let query = core.ui.overlay.query.trim().to_lowercase();
-    overlay_source_items(core, &source_ref)
-        .into_iter()
-        .filter(|item| {
-            let haystack = format!(
-                "{} {} {} {}",
-                item.category, item.primary, item.secondary, item.meta
-            )
-            .to_lowercase();
-            query.is_empty() || haystack.contains(&query)
-        })
-        .collect()
+    let items = overlay_source_items(core, &source_ref);
+    if query.is_empty() {
+        // Tree presentation: a collapsed header hides its children. Flat
+        // sources carry no headers, so everything passes.
+        let mut hidden = false;
+        return items
+            .into_iter()
+            .filter(|item| {
+                if item.header {
+                    hidden = !item.expanded;
+                    true
+                } else {
+                    !hidden
+                }
+            })
+            .collect();
+    }
+    // A live search matches over every child regardless of fold state and
+    // presents hits under their forced-open headers — a collapsed group
+    // can never hide a match, and Enter always lands on one (headers go
+    // inert while the query is live).
+    let mut out: Vec<RyeOsOverlayItemVm> = Vec::new();
+    let mut pending_header: Option<RyeOsOverlayItemVm> = None;
+    for item in items {
+        if item.header {
+            pending_header = Some(item);
+            continue;
+        }
+        let haystack = format!(
+            "{} {} {} {}",
+            item.category, item.primary, item.secondary, item.meta
+        )
+        .to_lowercase();
+        if !haystack.contains(&query) {
+            continue;
+        }
+        if let Some(mut header) = pending_header.take() {
+            header.expanded = true;
+            header.enabled = false;
+            header.intent = None;
+            header.secondary_intent = None;
+            out.push(header);
+        }
+        out.push(item);
+    }
+    out
 }
 
 fn overlay_source_items(core: &RyeOsCore, source_ref: &str) -> Vec<RyeOsOverlayItemVm> {
     match source_ref {
         "runtime:commands/available" => command_overlay_items_for(core)
             .into_iter()
-            .map(overlay_item_from_action_item)
+            .map(overlay_item_from_choice)
             .collect(),
         "runtime:help" => help_overlay_items(),
         "runtime:shortcuts" => shortcut_overlay_items(),
-        "runtime:views/launchable" => view_overlay_items(core)
-            .into_iter()
-            .map(overlay_item_from_action_item)
-            .collect(),
+        "runtime:views/launchable" => view_overlay_items(core),
         _ => Vec::new(),
     }
 }
 
-fn overlay_item_from_action_item(item: RyeOsOverlayActionItem) -> RyeOsOverlayItemVm {
-    let (category, primary) = action_category_and_label(&item.label);
+fn overlay_item_from_choice(item: RyeOsOverlayChoice) -> RyeOsOverlayItemVm {
+    let (category, primary) = choice_category_and_label(&item.label);
     RyeOsOverlayItemVm {
         category,
         primary,
         secondary: item.hint,
         meta: String::new(),
         enabled: item.enabled,
-        action: Some(item.action),
-        secondary_action: item.secondary_action,
+        intent: Some(item.intent),
+        secondary_intent: item.secondary_intent,
+        ..Default::default()
     }
 }
 
@@ -2557,13 +2583,14 @@ fn shortcut_overlay_items() -> Vec<RyeOsOverlayItemVm> {
             secondary: entry.description,
             meta: String::new(),
             enabled: false,
-            action: None,
-            secondary_action: None,
+            intent: None,
+            secondary_intent: None,
+            ..Default::default()
         })
         .collect()
 }
 
-fn action_category_and_label(label: &str) -> (String, String) {
+fn choice_category_and_label(label: &str) -> (String, String) {
     let trimmed = label.trim();
     if let Some((category, command)) = trimmed.rsplit_once('/') {
         return (category.to_string(), command.to_string());
@@ -2589,7 +2616,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         entry(
             "Move",
             "← / →",
-            "Expand row/feed details, fold sections, or move focus",
+            "Expand row/feed details, fold sections or launcher groups, or move focus",
         ),
         entry(
             "Act",
@@ -2641,61 +2668,32 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
     ]
 }
 
-fn tile_actions(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileActionVm> {
+fn tile_intents(core: &RyeOsCore, tile_id: TileId) -> Vec<RyeOsTileIntentVm> {
     // Dynamic tiling: the algorithm owns the tree; tiles offer no
     // manual splits. Closing the last tile returns home.
     let _ = core;
     let tile_id = tile_id_text(tile_id);
-    vec![RyeOsTileActionVm {
+    vec![RyeOsTileIntentVm {
         label: "×".to_string(),
         title: "Close tile".to_string(),
-        action: RyeOsAction::CloseTile { tile_id },
+        intent: RyeOsUiIntent::CloseTile { tile_id },
     }]
 }
 
-pub(crate) fn action_for_focused_row(core: &RyeOsCore) -> Option<RyeOsAction> {
+pub(crate) fn intent_for_focused_row(core: &RyeOsCore) -> Option<RyeOsUiIntent> {
     // Feed lens: activation acts on the entry under the point (e.g. enter a
     // forked subthread, inspect an error terminal), not a row.
     if let Some(entry) = focused_timeline_entry(core) {
         return match entry {
-            RyeOsTimelineEntryVm::Line { action, .. } => action,
+            RyeOsTimelineEntryVm::Line { intent, .. } => intent,
             _ => None,
         };
     }
-    if let Some(action) = focused_selected_row(core).and_then(|row| row.action) {
-        return Some(action);
+    if let Some(intent) = focused_selected_row(core).and_then(|row| row.intent) {
+        return Some(intent);
     }
     // Table lens: rows carry the same activation affordance, on a distinct VM.
-    focused_selected_table_row(core).and_then(|row| row.action)
-}
-
-/// The timeline entry under the point in the focused feed lens, if the focused
-/// view is a timeline with a point on an entry. The single home for reading the
-/// focused feed entry — both the Enter action and command-overlay secondary
-/// actions derive from it.
-fn focused_timeline_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
-    if let RyeOsViewVm::Timeline {
-        entries, selected, ..
-    } = bound_view_vm(core, tile_id, &view.view_ref)
-    {
-        return selected.and_then(|i| entries.into_iter().nth(i));
-    }
-    None
-}
-
-/// The focused feed entry's secondary affordance — the retry a recoverable
-/// failed terminal carries. Surfaced through the commands overlay (its Shift+Enter
-/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
-/// so Enter stays inspect.
-fn retry_action_for_focused_row(core: &RyeOsCore) -> Option<RyeOsAction> {
-    match focused_timeline_entry(core)? {
-        RyeOsTimelineEntryVm::Line {
-            secondary_action, ..
-        } => secondary_action,
-        _ => None,
-    }
+    focused_selected_table_row(core).and_then(|row| row.intent)
 }
 
 /// The row under the point in the focused tile, if the point is on a row. The
@@ -2750,7 +2748,7 @@ fn selected_row_state(
     tile_id: TileId,
 ) -> (
     Option<&std::collections::BTreeSet<String>>,
-    Option<&std::collections::BTreeMap<String, u64>>,
+    Option<&std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 ) {
     match core.workspace.tiles.get(&tile_id).map(|tile| &tile.local) {
         Some(ViewLocalState::GenericList {
@@ -2905,7 +2903,7 @@ mod tests {
                 "views": {
                     "view:ryeos/node/status": {
                         "widget": "key_value",
-                        "source": { "ref": "service:system/status" },
+                        "source": { "ref": "service:node/status" },
                         "projections": { "detail": ["version"] }
                     }
                 }
@@ -2966,7 +2964,6 @@ mod tests {
             effective_surface: Some(json!({
                 "name": "ryeos-base",
                 "tiles": tiles,
-                "library": tiles,
                 "views": views,
             })),
             ..Default::default()
@@ -3000,24 +2997,34 @@ mod tests {
     }
 
     #[test]
-    fn view_overlay_label_uses_launcher_scope_and_ref_fallback() {
+    fn view_overlay_labels_come_from_content_with_ref_fallback() {
         let core = session_with_views(
             json!({
-                "view:ryeos/atlas": { "widget": "atlas", "name": "Atlas", "description": "the namespace atlas" },
+                "view:ryeos/atlas": { "widget": "atlas", "name": "atlas-slug", "title": "Atlas", "description": "the namespace atlas" },
                 "view:ryeos/x/raw": { "widget": "rows" },
             }),
             json!(["view:ryeos/atlas", "view:ryeos/x/raw"]),
         );
         let items = view_overlay_items(&core);
-        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = items
+            .iter()
+            .filter(|item| !item.header)
+            .map(|item| item.primary.as_str())
+            .collect();
         assert!(
-            labels.contains(&"System/Atlas"),
-            "known view uses launcher scope: {labels:?}"
+            labels.contains(&"Atlas"),
+            "authored title labels the view: {labels:?}"
         );
         assert!(
-            labels.contains(&"View/ryeos/x/raw"),
+            labels.contains(&"ryeos/x/raw"),
             "unnamed view falls back to stripped ref: {labels:?}"
         );
+        // Every leaf sits under its group header, indented one level.
+        assert!(items.iter().any(|item| item.header));
+        assert!(items
+            .iter()
+            .filter(|item| !item.header)
+            .all(|item| item.depth == 1));
     }
 
     #[test]
@@ -3073,8 +3080,8 @@ mod tests {
                     primary: "thinking".to_string(),
                     meta: None,
                     tone: RyeOsTone::Neutral,
-                    action: None,
-                    secondary_action: None,
+                    intent: None,
+                    secondary_intent: None,
                 },
             ]
         );
@@ -3096,8 +3103,8 @@ mod tests {
                 primary: "orphan close".to_string(),
                 meta: Some("done".to_string()),
                 tone: RyeOsTone::Good,
-                action: None,
-                secondary_action: None,
+                intent: None,
+                secondary_intent: None,
             }]
         );
     }
@@ -3160,8 +3167,8 @@ mod tests {
                 primary: "message".to_string(),
                 meta: None,
                 tone: RyeOsTone::Neutral,
-                action: None,
-                secondary_action: None,
+                intent: None,
+                secondary_intent: None,
             }]
         );
     }
@@ -3235,7 +3242,7 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "status", "source", "follow", "created"]
+            ["thread", "kind", "item", "id", "project", "status", "source", "follow", "created"]
         );
         let rows = project_table(
             &binding,
@@ -3251,7 +3258,9 @@ mod tests {
             [
                 "T-ab",
                 "directive",
+                "base \u{2039} directive:ops",
                 "directive:ops/base",
+                "",
                 "running",
                 "fp:claude",
                 "",
@@ -3459,7 +3468,7 @@ mod tests {
 
         fn find_tile_view(node: &RyeOsLayoutNodeVm) -> Option<&RyeOsViewVm> {
             match node {
-                RyeOsLayoutNodeVm::Tile { view, .. } => Some(view),
+                RyeOsLayoutNodeVm::Tile { view, .. } => Some(view.as_ref()),
                 RyeOsLayoutNodeVm::Split { first, second, .. } => {
                     find_tile_view(first).or_else(|| find_tile_view(second))
                 }
@@ -3489,8 +3498,8 @@ mod tests {
             selected_cells(&core),
             vec![vec!["T-cd".to_string(), "running".to_string()]]
         );
-        match action_for_focused_row(&core).expect("table row activates") {
-            RyeOsAction::InvokeAffordance {
+        match intent_for_focused_row(&core).expect("table row activates") {
+            RyeOsUiIntent::InvokeAffordance {
                 affordance_id,
                 record,
                 ..
@@ -3545,16 +3554,16 @@ mod tests {
             .find(|i| i.label == "Cancel")
             .expect("cancel overlay item");
         assert!(
-            matches!(&cancel.action,
-                RyeOsAction::InvokeAffordance { view_ref, affordance_id, record }
+            matches!(&cancel.intent,
+                RyeOsUiIntent::InvokeAffordance { view_ref, affordance_id, record }
                     if view_ref == "view:ryeos/threads/list"
                         && affordance_id == "cancel"
                         && record["thread_id"] == "T-ab"),
             "cancel item must invoke the row's cancel affordance; got {:?}",
-            cancel.action
+            cancel.intent
         );
         // The activate (watch) affordance is NOT duplicated as a context item —
-        // it's already the row's Enter action.
+        // it's already the row's Enter intent.
         assert!(
             !items.iter().any(|i| i.label == "Watch"),
             "activate affordance should not be surfaced as a context item"
@@ -3608,15 +3617,15 @@ mod tests {
             .find(|i| i.label == "Inspect selection")
             .expect("inspect item on a failed entry");
         assert!(
-            matches!(&inspect.action, RyeOsAction::InspectSummary { title, .. } if title == "failed — boom")
+            matches!(&inspect.intent, RyeOsUiIntent::InspectSummary { title, .. } if title == "failed — boom")
         );
         // Retry is the inspect item's Shift+Enter secondary …
         assert!(
-            matches!(&inspect.secondary_action,
-                Some(RyeOsAction::PrefillRetryTurn { thread_id, chain_root_id, input })
+            matches!(&inspect.secondary_intent,
+                Some(RyeOsUiIntent::PrefillRetryTurn { thread_id, chain_root_id, input })
                     if thread_id == "T-1" && chain_root_id == "R-1" && input == "do it"),
             "retry is offered as the inspect item's secondary; got {:?}",
-            inspect.secondary_action
+            inspect.secondary_intent
         );
         // … AND a distinct plain-Enter item (for clients that can't send Shift+Enter).
         let retry = items
@@ -3624,8 +3633,8 @@ mod tests {
             .find(|i| i.label == "Retry failed turn")
             .expect("distinct retry item");
         assert!(matches!(
-            &retry.action,
-            RyeOsAction::PrefillRetryTurn { thread_id, .. } if thread_id == "T-1"
+            &retry.intent,
+            RyeOsUiIntent::PrefillRetryTurn { thread_id, .. } if thread_id == "T-1"
         ));
     }
 

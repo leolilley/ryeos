@@ -158,8 +158,8 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
     }
 
     // A follow node suspends the graph and awaits a detached child. It is only
-    // meaningful on a single action dispatch, and its result does not exist at
-    // suspend time — so reject it on non-action, parallel, and cacheable nodes.
+    // meaningful on an action dispatch, and its result does not exist at
+    // suspend time. `over` opts an action into the cohort-follow state machine.
     if node.follow {
         if node.node_type != NodeType::Action {
             result.errors.push(format!(
@@ -167,10 +167,29 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 node.node_type
             ));
         }
-        if node.parallel {
+        if node.parallel && node.over.is_none() {
             result.errors.push(format!(
                 "node '{name}' cannot be both 'follow' and 'parallel'"
             ));
+        }
+        if node.over.is_some() {
+            if node.r#as.is_none() {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' must declare 'as' for the iteration variable"
+                ));
+            }
+            if !node.parallel {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' must set 'parallel: true'"
+                ));
+            }
+            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as) {
+                if collect == as_var {
+                    result.errors.push(format!(
+                        "follow fanout node '{name}' uses '{collect}' for both 'collect' and 'as'"
+                    ));
+                }
+            }
         }
         if node.is_cacheable() {
             result.errors.push(format!(
@@ -221,11 +240,19 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
     // Cohort `facets:` are stamped by the daemon only on a detached child launch;
     // on any other node they are silently inert, so reject them as a loud
     // authoring error rather than let a mistagged cohort pass unnoticed.
-    if node.facets.is_some() && !node.detach {
+    if node.facets.is_some() && !(node.detach || (node.follow && node.over.is_some())) {
         result.errors.push(format!(
-            "node '{name}' declares 'facets' without 'detach' — cohort facets are only stamped \
-             on a detached child launch"
+            "node '{name}' declares 'facets' without 'detach' or follow fanout — cohort facets are only stamped \
+             on a detached child launch or follow fanout child launch"
         ));
+    }
+
+    if let Some(width) = node.max_concurrency {
+        if width == 0 || u32::try_from(width).is_err() {
+            result.errors.push(format!(
+                "node '{name}' max_concurrency must be greater than zero and fit in u32"
+            ));
+        }
     }
 
     // Per-step retry is only meaningful for a dispatching node (a single
@@ -814,6 +841,58 @@ config:
             "expected collect==as error, got: {:?}",
             result.errors
         );
+    }
+
+    #[test]
+    fn validate_follow_fanout_shape_matrix() {
+        let base = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fan
+  nodes:
+    fan:
+      follow: true
+      over: "${state.items}"
+      as: item
+      parallel: true
+      collect: results
+      max_concurrency: 3
+      action: {item_id: "directive:child", params: {value: "${item}"}}
+    done: {node_type: return}
+"#;
+        assert!(validate_graph(&make_graph(base)).errors.is_empty());
+        let cases = [
+            ("      as: item\n", "", "must declare 'as'"),
+            (
+                "      parallel: true\n",
+                "      parallel: false\n",
+                "parallel: true",
+            ),
+            (
+                "      collect: results\n",
+                "      collect: item\n",
+                "both 'collect' and 'as'",
+            ),
+            (
+                "      max_concurrency: 3\n",
+                "      max_concurrency: 0\n",
+                "greater than zero",
+            ),
+            (
+                "      action: {item_id: \"directive:child\", params: {value: \"${item}\"}}\n",
+                "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\"}\n",
+                "cannot combine 'retry' and 'follow'",
+            ),
+        ];
+        for (from, to, expected) in cases {
+            let graph = make_graph(&base.replacen(from, to, 1));
+            let errors = validate_graph(&graph).errors;
+            assert!(
+                errors.iter().any(|e| e.contains(expected)),
+                "missing {expected:?} in {errors:?}"
+            );
+        }
     }
 
     #[test]

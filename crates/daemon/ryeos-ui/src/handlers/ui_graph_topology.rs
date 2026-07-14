@@ -615,18 +615,18 @@ fn add_workflow_definition_edges(
             "structural",
         );
 
-        if let Some(action_ref) = graph_action_ref(node_value) {
-            let edge_type = match split_ref(&action_ref).map(|(kind, _)| kind) {
+        if let Some(operation_ref) = graph_operation_ref(node_value) {
+            let edge_type = match split_ref(&operation_ref).map(|(kind, _)| kind) {
                 Some(kind) if kind == "tool" => "calls_tool",
                 Some(kind) if kind == "directive" || kind == "graph" => "spawns",
                 _ => "references",
             };
-            builder.add_ref_node(&action_ref, "item");
+            builder.add_ref_node(&operation_ref, "item");
             builder.add_edge(
                 graph_node_ref.clone(),
-                action_ref,
+                operation_ref,
                 edge_type,
-                "action",
+                "operation",
                 Some(EdgeSource {
                     field: Some(format!("config.nodes.{node_name}.action")),
                     path: Some(path.display().to_string()),
@@ -714,10 +714,8 @@ fn markdown_frontmatter(raw: &str) -> Option<&str> {
 
 fn collect_string_refs(value: &serde_json::Value, prefix: &str, refs: &mut BTreeSet<String>) {
     match value {
-        serde_json::Value::String(s) => {
-            if s.starts_with(prefix) {
-                refs.insert(s.clone());
-            }
+        serde_json::Value::String(s) if s.starts_with(prefix) => {
+            refs.insert(s.clone());
         }
         serde_json::Value::Array(items) => {
             for item in items {
@@ -733,13 +731,13 @@ fn collect_string_refs(value: &serde_json::Value, prefix: &str, refs: &mut BTree
     }
 }
 
-fn graph_action_ref(node_value: &serde_json::Value) -> Option<String> {
-    let action = node_value.get("action")?;
-    if let Some(item_ref) = action.get("item_ref").and_then(|v| v.as_str()) {
+fn graph_operation_ref(node_value: &serde_json::Value) -> Option<String> {
+    let operation = node_value.get("action")?;
+    if let Some(item_ref) = operation.get("item_ref").and_then(|v| v.as_str()) {
         return Some(item_ref.to_owned());
     }
-    let item_type = action.get("item_type").and_then(|v| v.as_str())?;
-    let item_id = action.get("item_id").and_then(|v| v.as_str())?;
+    let item_type = operation.get("item_type").and_then(|v| v.as_str())?;
+    let item_id = operation.get("item_id").and_then(|v| v.as_str())?;
     Some(format!("{item_type}:{item_id}"))
 }
 

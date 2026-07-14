@@ -1,162 +1,63 @@
 //! Rye OS CLI TTY presentation.
 //!
-//! This is a normal stdout renderer, not the full TUI. Cached data is only a
-//! presentation projection and is never used for dispatch or authorization.
+//! This is a normal stdout renderer, not the full TUI: every render reads
+//! live local state and prints directly, with no on-disk projection.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result as AnyhowResult};
-use ryeos_app::principal::{PrincipalPaths, PrincipalResolver, PrincipalStore};
 use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv};
-use serde::{Deserialize, Serialize};
+use ryeos_state::event_types::{
+    outcome_code_is_failure, thread_terminal_outcome, ThreadOutcomeKind,
+};
+use serde_json::Value;
 
 use crate::error::{CliError, CliTransportError};
+use crate::exec_stream::StreamOutcome;
+use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
-const TTY_HOME_VERSION: u32 = 1;
-const TTY_CONFIG_VERSION: u32 = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtyScreen {
     Home,
     Help,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TtyEntryKind {
-    Bare,
-    ExplicitScreen,
 }
 
 pub async fn run(
     app_root: &Path,
     explicit_project: Option<&Path>,
     screen: TtyScreen,
-    debug: bool,
 ) -> std::result::Result<(), CliError> {
-    let app_root_key = normalize_path_for_key(app_root);
-    let app_root_path = PathBuf::from(&app_root_key);
-    let entry_kind = match screen {
-        TtyScreen::Home => TtyEntryKind::Bare,
-        TtyScreen::Help => TtyEntryKind::ExplicitScreen,
-    };
-    let screen = configured_screen(&app_root_path, screen, entry_kind, debug);
     let project = resolve_project_for_display(explicit_project);
-    let signer = resolve_operator(app_root);
+    let operator_problem = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
-    let cache_enabled = remote_url.is_none();
-    let mut rendered_lines = 0;
 
-    if let (Some(operator), true, true) = (
-        signer.operator_principal_id.as_ref(),
-        project.cacheable,
-        cache_enabled,
-    ) {
-        let resolver = AppRootPrincipalResolver {
-            root: app_root_path.clone(),
-        };
-        if let Ok(store) = PrincipalStore::resolve_with(&resolver, operator) {
-            let path = store.paths().ryeos_tty_home();
-            match load_optional_tty_home(&path) {
-                Ok(Some(cached))
-                    if cache_matches(&cached, &app_root_key, operator, &project.key, screen) =>
-                {
-                    rendered_lines = render(&cached, RenderMode::Cached, rendered_lines)?;
-                }
-                Ok(_) => {}
-                Err(err) => debug_warn(debug, format!("ignore tty home cache: {err:#}")),
-            }
-        }
-    }
-
-    if rendered_lines == 0 {
-        rendered_lines = render(
-            &loading_projection(
-                &app_root_key,
-                signer.operator_principal_id.as_deref(),
-                &project,
-                screen,
-            ),
-            RenderMode::Live,
-            rendered_lines,
-        )?;
-    }
+    let rendered_lines = render(&loading_projection(screen, &project), 0)?;
 
     let live = build_live_projection(
         app_root,
-        &app_root_key,
         &project,
-        &signer,
+        operator_problem.as_deref(),
         screen,
         remote_url.as_deref(),
     )
     .await;
-    render(&live, RenderMode::Live, rendered_lines)?;
-
-    if let (Some(operator), true, true, true) = (
-        signer.operator_principal_id.as_ref(),
-        project.cacheable,
-        signer.cache_writable,
-        cache_enabled,
-    ) {
-        let resolver = AppRootPrincipalResolver {
-            root: app_root_path,
-        };
-        match PrincipalStore::locked_with(&resolver, operator).await {
-            Ok(locked) => {
-                let path = locked.paths().ryeos_tty_home();
-                if let Err(err) = locked.write_yaml(&path, &live) {
-                    debug_warn(debug, format!("write tty home cache: {err:#}"));
-                }
-            }
-            Err(err) => debug_warn(debug, format!("lock tty home cache: {err:#}")),
-        }
-    }
+    render(&live, rendered_lines)?;
 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct AppRootPrincipalResolver {
-    root: PathBuf,
-}
-
-impl PrincipalResolver for AppRootPrincipalResolver {
-    fn resolve(&self, principal_id: &str) -> AnyhowResult<PrincipalPaths> {
-        if principal_id.trim().is_empty() {
-            anyhow::bail!("principal id is required");
-        }
-        Ok(PrincipalPaths::new(self.root.clone()))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct OperatorState {
-    operator_principal_id: Option<String>,
-    cache_writable: bool,
-    key_status: SourceStatus,
-}
-
-fn resolve_operator(app_root: &Path) -> OperatorState {
+/// `Some(problem)` when the operator signing key is missing or errors,
+/// surfaced in the node detail line; `None` when it resolves fine.
+fn resolve_operator(app_root: &Path) -> Option<String> {
     match Signer::resolve(app_root) {
-        Ok(signer) => OperatorState {
-            operator_principal_id: Some(format!("fp:{}", signer.fingerprint)),
-            cache_writable: true,
-            key_status: SourceStatus::live(),
-        },
-        Err(CliTransportError::SigningKeyMissing { .. }) => OperatorState {
-            operator_principal_id: None,
-            cache_writable: false,
-            key_status: SourceStatus::missing("operator signing key missing"),
-        },
-        Err(err) => OperatorState {
-            operator_principal_id: None,
-            cache_writable: false,
-            key_status: SourceStatus::error(format!("operator signing key error: {err}")),
-        },
+        Ok(_) => None,
+        Err(CliTransportError::SigningKeyMissing { .. }) => {
+            Some("operator signing key missing".to_string())
+        }
+        Err(err) => Some(format!("operator signing key error: {err}")),
     }
 }
 
@@ -165,7 +66,6 @@ struct ProjectDisplay {
     key: Option<String>,
     label: String,
     detail: Option<String>,
-    cacheable: bool,
 }
 
 fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDisplay {
@@ -178,20 +78,17 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
                     label: path_label(&canonical),
                     detail: Some(key.clone()),
                     key: Some(key),
-                    cacheable: true,
                 }
             }
             Ok(canonical) => ProjectDisplay {
                 key: None,
                 label: canonical.display().to_string(),
                 detail: Some("not a directory".to_string()),
-                cacheable: false,
             },
             Err(err) => ProjectDisplay {
                 key: None,
                 label: abs.display().to_string(),
                 detail: Some(format!("unavailable: {err}")),
-                cacheable: false,
             },
         };
     }
@@ -201,7 +98,6 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
             key: None,
             label: "none".to_string(),
             detail: Some("current directory unavailable".to_string()),
-            cacheable: false,
         };
     };
 
@@ -212,7 +108,6 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
                 label: path_label(ancestor),
                 detail: Some(key.clone()),
                 key: Some(key),
-                cacheable: true,
             };
         }
     }
@@ -221,7 +116,6 @@ fn resolve_project_for_display(explicit_project: Option<&Path>) -> ProjectDispla
         key: None,
         label: "none".to_string(),
         detail: None,
-        cacheable: true,
     }
 }
 
@@ -241,14 +135,6 @@ fn path_label(path: &Path) -> String {
         .to_string()
 }
 
-fn normalize_path_for_key(path: &Path) -> String {
-    let abs = absolutize(path);
-    abs.canonicalize()
-        .unwrap_or(abs)
-        .display()
-        .to_string()
-}
-
 fn remote_daemon_url() -> Option<String> {
     std::env::var("RYEOSD_URL")
         .ok()
@@ -256,97 +142,9 @@ fn remote_daemon_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn load_optional_tty_home(path: &Path) -> AnyhowResult<Option<TtyHomeFile>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_yaml::from_str(&raw)
-            .map(Some)
-            .with_context(|| format!("parse {}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
-    }
-}
-
-fn configured_screen(
-    app_root: &Path,
-    default: TtyScreen,
-    entry_kind: TtyEntryKind,
-    debug: bool,
-) -> TtyScreen {
-    if entry_kind != TtyEntryKind::Bare {
-        return default;
-    }
-
-    let resolver = AppRootPrincipalResolver {
-        root: app_root.to_path_buf(),
-    };
-    let store = match PrincipalStore::resolve_with(
-        &resolver,
-        ryeos_app::principal::LOCAL_PRINCIPAL_ID,
-    ) {
-        Ok(store) => store,
-        Err(err) => {
-            debug_warn(debug, format!("resolve tty config path: {err:#}"));
-            return default;
-        }
-    };
-    match load_optional_tty_config(&store.paths().ryeos_tty_config()) {
-        Ok(Some(config)) if config.version == TTY_CONFIG_VERSION => config.bare_action.screen(),
-        Ok(Some(config)) => {
-            debug_warn(
-                debug,
-                format!("ignore tty config version {}", config.version),
-            );
-            default
-        }
-        Ok(None) => default,
-        Err(err) => {
-            debug_warn(debug, format!("ignore tty config: {err:#}"));
-            default
-        }
-    }
-}
-
-fn load_optional_tty_config(path: &Path) -> AnyhowResult<Option<TtyConfigFile>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_yaml::from_str(&raw)
-            .map(Some)
-            .with_context(|| format!("parse {}", path.display())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
-    }
-}
-
-fn cache_matches(
-    cached: &TtyHomeFile,
-    app_root: &str,
-    operator_principal_id: &str,
-    project_root: &Option<String>,
-    screen: TtyScreen,
-) -> bool {
-    cached.version == TTY_HOME_VERSION
-        && cached.screen == screen
-        && cached.app_root == app_root
-        && cached.operator_principal_id == operator_principal_id
-        && &cached.project_root == project_root
-}
-
-fn loading_projection(
-    app_root: &str,
-    operator_principal_id: Option<&str>,
-    project: &ProjectDisplay,
-    screen: TtyScreen,
-) -> TtyHomeFile {
+fn loading_projection(screen: TtyScreen, project: &ProjectDisplay) -> TtyHomeFile {
     TtyHomeFile {
-        version: TTY_HOME_VERSION,
         screen,
-        generated_at: lillux::time::iso8601_now(),
-        app_root: app_root.to_string(),
-        operator_principal_id: operator_principal_id.unwrap_or("missing").to_string(),
-        project_root: project.key.clone(),
-        source: TtyHomeSource {
-            node: SourceStatus::loading(),
-            node_config: SourceStatus::loading(),
-        },
         sections: TtyHomeSections {
             node: TtyNodeSummary {
                 status: "loading".to_string(),
@@ -357,72 +155,58 @@ fn loading_projection(
                 count: None,
                 detail: Some(loading_command_detail(screen).to_string()),
             },
-            actions: screen_actions(screen, false),
+            items: screen_items(screen, false, Vec::new()),
         },
     }
 }
 
 async fn build_live_projection(
     app_root: &Path,
-    app_root_key: &str,
     project: &ProjectDisplay,
-    signer: &OperatorState,
+    operator_problem: Option<&str>,
     screen: TtyScreen,
     remote_url: Option<&str>,
 ) -> TtyHomeFile {
-    let (node, node_status) = match remote_url {
-        Some(remote_url) => (
-            TtyNodeSummary {
-                status: "remote override".to_string(),
-                detail: Some(format!("RYEOSD_URL={remote_url}")),
-            },
-            SourceStatus::live(),
-        ),
+    let mut node = match remote_url {
+        Some(remote_url) => TtyNodeSummary {
+            status: "remote override".to_string(),
+            detail: Some(format!("RYEOSD_URL={remote_url}")),
+        },
         None => lifecycle_summary(app_root).await,
     };
     let snapshot = crate::node_descriptors::load_verified_snapshot(app_root);
-    let (node_config_status, command_count, has_tui_command) = match snapshot {
+    let (command_count, has_tui_command, verified_items) = match snapshot {
         Ok(snapshot) => {
-            let has_tui_command = crate::node_descriptors::load_command_descriptors_from_snapshot(
-                &snapshot,
-            )
-            .iter()
-            .any(|command| command.tokens.len() == 1 && command.tokens[0] == "tui");
+            let descriptors =
+                crate::node_descriptors::load_command_descriptors_from_snapshot(&snapshot);
+            let has_tui_command = descriptors
+                .iter()
+                .any(|command| command.tokens.len() == 1 && command.tokens[0] == "tui");
             (
-                SourceStatus::live(),
-                Some(snapshot.commands.len()),
+                Some(
+                    snapshot.commands.len()
+                        + crate::lifecycle_commands::local_command_descriptors().len(),
+                ),
                 has_tui_command,
+                verified_command_items(descriptors),
             )
         }
-        Err(err) => (
-            SourceStatus::error(format!("verified node config: {err:#}")),
-            None,
+        Err(_) => (
+            Some(crate::lifecycle_commands::local_command_descriptors().len()),
             false,
+            Vec::new(),
         ),
     };
 
-    let mut node = node;
-    if !matches!(signer.key_status.state, SourceState::Live) {
+    if let Some(problem) = operator_problem {
         node.detail = Some(match node.detail {
-            Some(detail) => format!("{detail}; {}", signer.key_status.label()),
-            None => signer.key_status.label(),
+            Some(detail) => format!("{detail}; {problem}"),
+            None => problem.to_string(),
         });
     }
 
     TtyHomeFile {
-        version: TTY_HOME_VERSION,
         screen,
-        generated_at: lillux::time::iso8601_now(),
-        app_root: app_root_key.to_string(),
-        operator_principal_id: signer
-            .operator_principal_id
-            .clone()
-            .unwrap_or_else(|| "missing".to_string()),
-        project_root: project.key.clone(),
-        source: TtyHomeSource {
-            node: node_status,
-            node_config: node_config_status,
-        },
         sections: TtyHomeSections {
             node,
             project: Some(TtyProjectSummary::from_project(project)),
@@ -432,40 +216,44 @@ async fn build_live_projection(
                     .is_none()
                     .then(|| "run `ryeos node doctor` for diagnostics".to_string()),
             },
-            actions: screen_actions(screen, has_tui_command),
+            items: screen_items(screen, has_tui_command, verified_items),
         },
     }
 }
 
-async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
+fn verified_command_items(
+    descriptors: Vec<crate::node_descriptors::LoadedCommandDescriptor>,
+) -> Vec<TtyItem> {
+    let mut items = descriptors
+        .into_iter()
+        .filter(|command| !(command.tokens.len() == 1 && command.tokens[0].len() <= 1))
+        .map(|command| command_item(command.tokens, command.description))
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.dedup_by(|a, b| a.label == b.label);
+    items
+}
+
+async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
     let env = match LocalLifecycleEnv::load(Some(app_root.to_path_buf())) {
         Ok(env) => env,
         Err(err) => {
-            return (
-                TtyNodeSummary {
-                    status: "config error".to_string(),
-                    detail: Some(err.to_string()),
-                },
-                SourceStatus::error(format!("local lifecycle config: {err:#}")),
-            )
+            return TtyNodeSummary {
+                status: "config error".to_string(),
+                detail: Some(err.to_string()),
+            }
         }
     };
     let controller = LifecycleController::from_env(env);
     match controller.status().await {
-        Ok(LifecycleStatus::NotInitialized { diagnostics }) => (
-            TtyNodeSummary {
-                status: "not initialized".to_string(),
-                detail: Some(diagnostics.message),
-            },
-            SourceStatus::missing("not initialized"),
-        ),
-        Ok(LifecycleStatus::Stopped { app_root }) => (
-            TtyNodeSummary {
-                status: "stopped".to_string(),
-                detail: Some(format!("app root: {}", app_root.display())),
-            },
-            SourceStatus::live(),
-        ),
+        Ok(LifecycleStatus::NotInitialized { diagnostics }) => TtyNodeSummary {
+            status: "not initialized".to_string(),
+            detail: Some(diagnostics.message),
+        },
+        Ok(LifecycleStatus::Stopped { app_root }) => TtyNodeSummary {
+            status: "stopped".to_string(),
+            detail: Some(format!("app root: {}", app_root.display())),
+        },
         Ok(LifecycleStatus::Running { metadata }) => {
             let mut detail = Vec::new();
             if let Some(pid) = metadata.pid {
@@ -474,111 +262,95 @@ async fn lifecycle_summary(app_root: &Path) -> (TtyNodeSummary, SourceStatus) {
             if let Some(bind) = metadata.bind {
                 detail.push(format!("http://{bind}"));
             }
-            (
-                TtyNodeSummary {
-                    status: "running".to_string(),
-                    detail: (!detail.is_empty()).then(|| detail.join(" · ")),
-                },
-                SourceStatus::live(),
-            )
+            TtyNodeSummary {
+                status: "running".to_string(),
+                detail: (!detail.is_empty()).then(|| detail.join(" · ")),
+            }
         }
-        Ok(LifecycleStatus::Stale { diagnostics, .. }) => (
-            TtyNodeSummary {
-                status: "stale".to_string(),
-                detail: Some(diagnostics.message),
-            },
-            SourceStatus::error("stale daemon metadata"),
-        ),
-        Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => (
-            TtyNodeSummary {
-                status: "busy".to_string(),
-                detail: Some(diagnostics.message),
-            },
-            SourceStatus::error("daemon is running but not answering"),
-        ),
-        Ok(LifecycleStatus::Starting { pid, started_at, .. }) => (
-            TtyNodeSummary {
-                status: "starting".to_string(),
-                detail: Some(format!("pid {pid} · since {started_at}")),
-            },
-            SourceStatus::loading(),
-        ),
-        Err(err) => (
-            TtyNodeSummary {
-                status: "status error".to_string(),
-                detail: Some(err.to_string()),
-            },
-            SourceStatus::error(format!("local lifecycle status: {err:#}")),
-        ),
+        Ok(LifecycleStatus::Stale { diagnostics, .. }) => TtyNodeSummary {
+            status: "stale".to_string(),
+            detail: Some(diagnostics.message),
+        },
+        Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => TtyNodeSummary {
+            status: "busy".to_string(),
+            detail: Some(diagnostics.message),
+        },
+        Ok(LifecycleStatus::Starting {
+            pid, started_at, ..
+        }) => TtyNodeSummary {
+            status: "starting".to_string(),
+            detail: Some(format!("pid {pid} · since {started_at}")),
+        },
+        Err(err) => TtyNodeSummary {
+            status: "status error".to_string(),
+            detail: Some(err.to_string()),
+        },
     }
 }
 
-fn screen_actions(screen: TtyScreen, has_tui_command: bool) -> Vec<TtyAction> {
-    let mut actions = match screen {
-        TtyScreen::Home => home_actions(),
-        TtyScreen::Help => help_actions(),
+fn screen_items(
+    screen: TtyScreen,
+    has_tui_command: bool,
+    verified_items: Vec<TtyItem>,
+) -> Vec<TtyItem> {
+    let mut items = match screen {
+        TtyScreen::Home => home_items(),
+        TtyScreen::Help => help_items(verified_items),
     };
     if has_tui_command {
-        actions.insert(
+        items.insert(
             0,
-            TtyAction {
-                label: "tui".to_string(),
-                command: "tui".to_string(),
-                description: "open terminal workspace".to_string(),
-            },
+            command_item(
+                vec!["tui".to_string()],
+                "open terminal workspace".to_string(),
+            ),
         );
     }
-    actions
+    items
 }
 
-fn home_actions() -> Vec<TtyAction> {
+fn home_items() -> Vec<TtyItem> {
     vec![
-        TtyAction {
-            label: "help".to_string(),
-            command: "help".to_string(),
-            description: "open the compact TTY help screen".to_string(),
-        },
-        TtyAction {
-            label: "status".to_string(),
-            command: "node status".to_string(),
-            description: "show local node lifecycle status".to_string(),
-        },
-        TtyAction {
-            label: "doctor".to_string(),
-            command: "node doctor".to_string(),
-            description: "diagnose local node startup and config".to_string(),
-        },
+        command_item(
+            vec!["help".to_string()],
+            "open the compact TTY help screen".to_string(),
+        ),
+        command_item(
+            vec!["node".to_string(), "status".to_string()],
+            "show local node lifecycle status".to_string(),
+        ),
+        command_item(
+            vec!["node".to_string(), "doctor".to_string()],
+            "diagnose local node startup and config".to_string(),
+        ),
     ]
 }
 
-fn help_actions() -> Vec<TtyAction> {
-    vec![
-        TtyAction {
-            label: "open".to_string(),
-            command: "help <command>".to_string(),
-            description: "show focused help for one command".to_string(),
-        },
-        TtyAction {
-            label: "list".to_string(),
-            command: "commands".to_string(),
-            description: "print the full verified command list".to_string(),
-        },
-        TtyAction {
-            label: "all".to_string(),
-            command: "help --all".to_string(),
-            description: "print the exhaustive CLI reference".to_string(),
-        },
-        TtyAction {
-            label: "status".to_string(),
-            command: "node status".to_string(),
-            description: "show local node lifecycle status".to_string(),
-        },
-        TtyAction {
-            label: "doctor".to_string(),
-            command: "node doctor".to_string(),
-            description: "diagnose local node startup and config".to_string(),
-        },
-    ]
+fn help_items(verified_items: Vec<TtyItem>) -> Vec<TtyItem> {
+    let mut items = crate::lifecycle_commands::local_command_descriptors()
+        .iter()
+        .map(|command| {
+            command_item(
+                command
+                    .tokens
+                    .iter()
+                    .map(|token| (*token).to_string())
+                    .collect(),
+                command.summary.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    items.extend(verified_items);
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.dedup_by(|a, b| a.label == b.label);
+    items
+}
+
+fn command_item(tokens: Vec<String>, detail: String) -> TtyItem {
+    TtyItem {
+        label: tokens.join(" "),
+        detail: Some(detail),
+    }
 }
 
 fn loading_command_detail(screen: TtyScreen) -> &'static str {
@@ -588,140 +360,30 @@ fn loading_command_detail(screen: TtyScreen) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyHomeFile {
-    version: u32,
     screen: TtyScreen,
-    generated_at: String,
-    app_root: String,
-    operator_principal_id: String,
-    project_root: Option<String>,
-    source: TtyHomeSource,
     sections: TtyHomeSections,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TtyConfigFile {
-    #[serde(default = "default_tty_config_version")]
-    version: u32,
-    bare_action: TtyBareAction,
-}
-
-fn default_tty_config_version() -> u32 {
-    TTY_CONFIG_VERSION
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum TtyBareAction {
-    Screen { screen: TtyScreen },
-}
-
-impl TtyBareAction {
-    fn screen(&self) -> TtyScreen {
-        match self {
-            Self::Screen { screen } => *screen,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TtyHomeSource {
-    node: SourceStatus,
-    node_config: SourceStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SourceStatus {
-    state: SourceState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
-
-impl SourceStatus {
-    fn live() -> Self {
-        Self {
-            state: SourceState::Live,
-            message: None,
-        }
-    }
-
-    fn loading() -> Self {
-        Self {
-            state: SourceState::Loading,
-            message: None,
-        }
-    }
-
-    fn missing(message: impl Into<String>) -> Self {
-        Self {
-            state: SourceState::Missing,
-            message: Some(message.into()),
-        }
-    }
-
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            state: SourceState::Error,
-            message: Some(message.into()),
-        }
-    }
-
-    fn label(&self) -> String {
-        self.message
-            .clone()
-            .unwrap_or_else(|| format!("{:?}", self.state).to_ascii_lowercase())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SourceState {
-    Missing,
-    Loading,
-    Live,
-    Error,
-}
-
-impl SourceState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Missing => "missing",
-            Self::Loading => "loading",
-            Self::Live => "live",
-            Self::Error => "error",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyHomeSections {
     node: TtyNodeSummary,
     project: Option<TtyProjectSummary>,
     commands: TtyCommandSummary,
-    actions: Vec<TtyAction>,
+    items: Vec<TtyItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyNodeSummary {
     status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyProjectSummary {
     label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
@@ -735,31 +397,338 @@ impl TtyProjectSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct TtyCommandSummary {
-    #[serde(skip_serializing_if = "Option::is_none")]
     count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TtyAction {
+#[derive(Debug, Clone)]
+struct TtyItem {
     label: String,
+    detail: Option<String>,
+}
+
+pub fn render_command_loading(command: &str, route: &str) -> io::Result<usize> {
+    let lines = command_frame_lines(CommandFrame {
+        title: "RYE OS COMMAND",
+        phase: "loading",
+        command,
+        status: "contacting daemon",
+        detail: Some(route),
+        payload: &[],
+    });
+    render_command_frame(&lines, 0)
+}
+
+pub fn render_command_result(
+    command: &str,
+    payload: &Value,
+    previous_lines: usize,
+) -> io::Result<usize> {
+    let result = payload.get("result").unwrap_or(payload);
+    let mut rows = Vec::new();
+    if let Some(execution) = payload.get("execution") {
+        if let Some(source) = execution.get("source_root").and_then(Value::as_str) {
+            rows.push(("source_root".to_string(), source.to_string()));
+        }
+        if let Some(state) = execution.get("state_root").and_then(Value::as_str) {
+            rows.push(("state_root".to_string(), state.to_string()));
+        }
+    }
+    if let Some(outcome) = result.get("outcome_code").and_then(Value::as_str) {
+        rows.push(("outcome".to_string(), outcome.to_string()));
+    }
+    if let Some(error) = result.get("error").filter(|value| !value.is_null()) {
+        rows.push(("error".to_string(), value_summary(error)));
+    }
+    if let Some(artifacts) = result.get("artifacts").and_then(Value::as_array) {
+        rows.push(("artifacts".to_string(), artifacts.len().to_string()));
+    }
+
+    let display_value = result.get("result").unwrap_or(result);
+    append_value_rows("result", display_value, &mut rows);
+    if rows.is_empty() {
+        rows.push(("result".to_string(), value_summary(display_value)));
+    }
+
+    let status = if result_indicates_failure(result) {
+        "error"
+    } else {
+        "complete"
+    };
+    let row_refs = rows
+        .iter()
+        .map(|(label, value)| (label.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let lines = command_frame_lines(CommandFrame {
+        title: "RYE OS COMMAND",
+        phase: "live",
+        command,
+        status,
+        detail: None,
+        payload: &row_refs,
+    });
+    render_command_frame(&lines, previous_lines)
+}
+
+/// Minimum gap between repaints for non-status-changing events, so a fast
+/// stream of ordinary events doesn't thrash the terminal with one reflow
+/// per event. Status-changing events (started, error, terminal) always
+/// repaint regardless of this gap.
+const REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+pub struct TtyStreamPresenter {
     command: String,
-    description: String,
+    previous_lines: usize,
+    thread_id: Option<String>,
+    status: String,
+    events: Vec<(String, String)>,
+    last_render: Option<std::time::Instant>,
 }
 
-enum RenderMode {
-    Cached,
-    Live,
+impl TtyStreamPresenter {
+    pub fn new(command: impl Into<String>) -> io::Result<Self> {
+        Self::with_previous(command, 0)
+    }
+
+    pub fn with_previous(command: impl Into<String>, previous_lines: usize) -> io::Result<Self> {
+        let mut presenter = Self {
+            command: command.into(),
+            previous_lines,
+            thread_id: None,
+            status: "opening stream".to_string(),
+            events: Vec::new(),
+            last_render: None,
+        };
+        presenter.render()?;
+        Ok(presenter)
+    }
+
+    pub fn render_event(&mut self, ev: &SseEvent) -> io::Result<StreamOutcome> {
+        let data: Value = serde_json::from_str(&ev.data).unwrap_or(Value::Null);
+        let inner = data.get("payload").unwrap_or(&data);
+        match ev.event.as_str() {
+            "stream_started" => {
+                self.status = "streaming".to_string();
+                self.thread_id = data
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                let thread_id = self.thread_id.clone().unwrap_or_default();
+                self.push_event("stream_started", &thread_id);
+                self.render()?;
+                Ok(StreamOutcome::Continue)
+            }
+            "stream_error" => {
+                let code = data
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stream_error");
+                let msg = data.get("error").and_then(Value::as_str).unwrap_or("");
+                let detail = format!("{code}: {msg}");
+                self.status = "error".to_string();
+                self.push_event("stream_error", &detail);
+                self.render()?;
+                Ok(StreamOutcome::Failed(detail))
+            }
+            event => match thread_terminal_outcome(event) {
+                Some(ThreadOutcomeKind::Success) => {
+                    self.status = "complete".to_string();
+                    self.push_event(event, &value_summary(inner));
+                    self.render()?;
+                    Ok(StreamOutcome::Done)
+                }
+                Some(ThreadOutcomeKind::Failure) => {
+                    let detail = stream_failure_reason(inner, event);
+                    self.status = "error".to_string();
+                    self.push_event(event, &detail);
+                    self.render()?;
+                    Ok(StreamOutcome::Failed(detail))
+                }
+                None => {
+                    self.push_event(event, &value_summary(inner));
+                    self.render_if_due()?;
+                    Ok(StreamOutcome::Continue)
+                }
+            },
+        }
+    }
+
+    fn push_event(&mut self, event: &str, detail: &str) {
+        self.events.push((event.to_string(), detail.to_string()));
+        if self.events.len() > 10 {
+            let excess = self.events.len() - 10;
+            self.events.drain(0..excess);
+        }
+    }
+
+    /// Repaint only if `REPAINT_INTERVAL` has elapsed since the last paint.
+    /// State is already updated via `push_event`; the next allowed repaint
+    /// shows it.
+    fn render_if_due(&mut self) -> io::Result<()> {
+        let due = match self.last_render {
+            Some(at) => at.elapsed() >= REPAINT_INTERVAL,
+            None => true,
+        };
+        if due {
+            self.render()?;
+        }
+        Ok(())
+    }
+
+    fn render(&mut self) -> io::Result<()> {
+        let mut owned = Vec::new();
+        if let Some(thread_id) = &self.thread_id {
+            owned.push(("thread".to_string(), thread_id.clone()));
+        }
+        for (event, detail) in &self.events {
+            owned.push((event.clone(), detail.clone()));
+        }
+        let refs = owned
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let lines = command_frame_lines(CommandFrame {
+            title: "RYE OS STREAM",
+            phase: "live",
+            command: &self.command,
+            status: &self.status,
+            detail: None,
+            payload: &refs,
+        });
+        self.previous_lines = render_command_frame(&lines, self.previous_lines)?;
+        self.last_render = Some(std::time::Instant::now());
+        Ok(())
+    }
 }
 
-fn render(home: &TtyHomeFile, mode: RenderMode, previous_lines: usize) -> io::Result<usize> {
+struct CommandFrame<'a> {
+    title: &'static str,
+    phase: &'static str,
+    command: &'a str,
+    status: &'a str,
+    detail: Option<&'a str>,
+    payload: &'a [(&'a str, &'a str)],
+}
+
+fn command_frame_lines(frame: CommandFrame<'_>) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(frame.title.to_string());
+    lines.push(format!("{:<9} {}", "phase", frame.phase));
+    lines.push(format!("{:<9} {}", "command", empty_dash(frame.command)));
+    lines.push(format!("{:<9} {}", "status", frame.status));
+    if let Some(detail) = frame.detail {
+        lines.push(format!("{:<9} {}", "detail", detail));
+    }
+    if !frame.payload.is_empty() {
+        lines.push(String::new());
+        for (label, value) in frame.payload.iter().take(16) {
+            lines.push(format!("{:<13} {}", label, value));
+        }
+    }
+    lines.push(String::new());
+    lines
+}
+
+fn render_command_frame(lines: &[String], previous_lines: usize) -> io::Result<usize> {
     let width = terminal_width();
-    let lines = render_lines(home, mode)
+    let lines = lines
+        .iter()
+        .map(|line| clamp_line(line, width))
+        .collect::<Vec<_>>();
+    write_frame(&mut io::stdout(), &lines, previous_lines)?;
+    Ok(lines.len())
+}
+
+fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter().take(12) {
+                rows.push((format!("{prefix}.{key}"), value_summary(value)));
+            }
+        }
+        Value::Array(values) => {
+            rows.push((prefix.to_string(), format!("{} item(s)", values.len())));
+            for (idx, value) in values.iter().take(8).enumerate() {
+                rows.push((format!("{prefix}[{idx}]"), value_summary(value)));
+            }
+        }
+        _ => rows.push((prefix.to_string(), value_summary(value))),
+    }
+}
+
+fn value_summary(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        Value::Array(values) => format!("{} item(s)", values.len()),
+        Value::Object(map) => {
+            let mut fields = map
+                .iter()
+                .filter_map(|(key, value)| {
+                    scalar_summary(value).map(|value| format!("{key}={value}"))
+                })
+                .take(4)
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                fields.push(format!("{} field(s)", map.len()));
+            }
+            fields.join(" · ")
+        }
+    }
+}
+
+/// `result` is already unwrapped from any `payload`/envelope wrapper by the
+/// caller. Failure is a non-null `error` field, or an `outcome_code` the
+/// shared vocabulary (`ryeos_state::event_types`) names as a failure.
+fn result_indicates_failure(result: &Value) -> bool {
+    if result.get("error").is_some_and(|error| !error.is_null()) {
+        return true;
+    }
+    result
+        .get("outcome_code")
+        .and_then(Value::as_str)
+        .is_some_and(outcome_code_is_failure)
+}
+
+fn scalar_summary(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some("null".to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
+fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
+    if let Some(error) = payload.get("error").and_then(Value::as_str) {
+        return error.to_string();
+    }
+    if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
+        return value_summary(error);
+    }
+    payload
+        .get("outcome_code")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn render(home: &TtyHomeFile, previous_lines: usize) -> io::Result<usize> {
+    let width = terminal_width();
+    let lines = render_lines(home)
         .into_iter()
         .map(|line| clamp_line(&line, width))
         .collect::<Vec<_>>();
@@ -767,11 +736,7 @@ fn render(home: &TtyHomeFile, mode: RenderMode, previous_lines: usize) -> io::Re
     Ok(lines.len())
 }
 
-fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
-    let source = match mode {
-        RenderMode::Cached => "cached",
-        RenderMode::Live => "live",
-    };
+fn render_lines(home: &TtyHomeFile) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(match home.screen {
         TtyScreen::Home => "RYE OS".to_string(),
@@ -779,7 +744,7 @@ fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
     });
     lines.push(match home.screen {
         TtyScreen::Home => "portable verified execution".to_string(),
-        TtyScreen::Help => "compact TTY help".to_string(),
+        TtyScreen::Help => "verified command surface".to_string(),
     });
     lines.push(String::new());
     lines.push(format!(
@@ -808,29 +773,49 @@ fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
         command_label,
         detail_suffix(home.sections.commands.detail.as_deref())
     ));
-    lines.push(format!("{:<9} {} · {}", "source", source, home.generated_at));
-    lines.push(format!(
-        "{:<9} node {} · node config {}",
-        "state",
-        home.source.node.state.label(),
-        home.source.node_config.state.label()
-    ));
     lines.push(String::new());
-    for action in &home.sections.actions {
-        lines.push(format!(
-            "  {:<8} {:<18} {}",
-            action.label, action.command, action.description
-        ));
+    match home.screen {
+        TtyScreen::Home => render_home_items(&home.sections.items, &mut lines),
+        TtyScreen::Help => render_help_items(&home.sections.items, &mut lines),
     }
     lines.push(String::new());
     lines
 }
 
-fn write_frame(
-    out: &mut impl Write,
-    lines: &[String],
-    previous_lines: usize,
-) -> io::Result<()> {
+fn render_home_items(items: &[TtyItem], lines: &mut Vec<String>) {
+    lines.push("items".to_string());
+    for item in items {
+        lines.push(format!(
+            "  {:<24} {}",
+            item.label,
+            item.detail.as_deref().unwrap_or_default()
+        ));
+    }
+}
+
+fn render_help_items(items: &[TtyItem], lines: &mut Vec<String>) {
+    lines.push("commands".to_string());
+    let visible = items.iter().take(24).collect::<Vec<_>>();
+    if visible.is_empty() {
+        lines.push("  no commands available".to_string());
+    } else {
+        for item in visible {
+            lines.push(format!(
+                "  {:<28} {}",
+                item.label,
+                item.detail.as_deref().unwrap_or_default()
+            ));
+        }
+        let remaining = items.len().saturating_sub(24);
+        if remaining > 0 {
+            lines.push(format!(
+                "  ... {remaining} more · use `ryeos commands` for the full reference"
+            ));
+        }
+    }
+}
+
+fn write_frame(out: &mut impl Write, lines: &[String], previous_lines: usize) -> io::Result<()> {
     if previous_lines == 0 {
         for line in lines {
             writeln!(out, "{line}")?;
@@ -885,8 +870,21 @@ fn detail_suffix(detail: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn debug_warn(debug: bool, message: String) {
-    if debug {
-        eprintln!("ryeos tty: {message}");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_failure_detection_uses_error_and_outcome_code() {
+        assert!(result_indicates_failure(&serde_json::json!({
+            "error": "boom"
+        })));
+        assert!(result_indicates_failure(&serde_json::json!({
+            "outcome_code": "exit:1"
+        })));
+        assert!(!result_indicates_failure(&serde_json::json!({
+            "outcome_code": "success"
+        })));
+        assert!(!result_indicates_failure(&serde_json::json!({})));
     }
 }

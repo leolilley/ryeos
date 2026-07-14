@@ -46,10 +46,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .with_state_db(|db| db.list_generic_head_refs(&req.prefix))?;
     let expected_signer = state.identity.fingerprint().to_string();
     let mut trust_store = TrustStore::new();
-    trust_store.insert(
-        expected_signer.clone(),
-        state.identity.verifying_key().clone(),
-    );
+    trust_store.insert(expected_signer.clone(), *state.identity.verifying_key());
     let verified_heads = heads
         .into_iter()
         .map(|head| {

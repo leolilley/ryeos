@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::error::CliError;
 use crate::lifecycle_commands;
+use crate::presenter::Presenter;
 
 /// CLI struct for clap argument parsing.
 #[derive(clap::Parser)]
@@ -54,14 +55,10 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    if should_show_tty_screen(&cli.rest, std::io::stdout().is_terminal()) {
-        return crate::tty::run(
-            &app_root,
-            cli.project.as_deref(),
-            tty_screen_for(&cli.rest),
-            cli.debug,
-        )
-        .await;
+    if should_show_tty_screen(&cli.rest, stdout_supports_tty()) {
+        let screen = tty_screen_for(&cli.rest);
+        crate::tty::run(&app_root, cli.project.as_deref(), screen).await?;
+        return Ok(());
     }
 
     // Load the verified node-config snapshot once per invocation; help,
@@ -135,14 +132,19 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 5. Descriptor-driven offline dispatch.
     //    For commands whose service descriptor declares availability: offline,
     //    run the in-process handler. Returns None to fall through to daemon.
+    let stdout_is_tty = stdout_supports_tty() && !forces_plain_output(&cli.rest);
+    let mut presenter = Presenter::for_stdout(stdout_is_tty);
+
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
         &cli.rest,
         &app_root,
         body_project_path.as_deref().unwrap_or("."),
         snapshot,
-    )? {
+    )
+    .await?
+    {
         if let crate::offline_dispatch::OfflineDispatchOutcome::Json(result) = outcome {
-            print_result(result);
+            print_result(result, &mut presenter, &cli.rest, 0)?;
         }
         return Ok(());
     }
@@ -158,6 +160,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    the command remains supported by clap above.
 
     let mut resolved = resolve_command_for_daemon(&cli.rest, snapshot, cli.project.as_deref())?;
+    let stdout_is_tty = stdout_is_tty && !resolved_forces_plain_output(&resolved, &cli.rest);
+    let mut presenter = Presenter::for_stdout(stdout_is_tty);
     let item_ref_for_contract = resolved.item_ref.clone();
     normalize_resolved_parameters(
         &app_root,
@@ -214,16 +218,14 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
                 .into(),
         });
     }
-    let want_stream = resolved
-        .stream
-        .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let want_stream = resolved.stream.unwrap_or_else(stdout_supports_tty);
     let stream_live = resolved.direct_execute
         && !resolved.async_launch
         && resolved.project_path.is_some()
         && resolved.state_root.is_none()
         && want_stream;
     if stream_live {
-        return post_to_daemon_streaming(&app_root, &body).await;
+        return post_to_daemon_streaming(&app_root, &body, &cli.rest, presenter).await;
     }
 
     let route_path = if resolved.async_launch {
@@ -231,6 +233,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     } else {
         "/execute"
     };
+    let command_label = cli.rest.join(" ");
+    let rendered_lines = presenter.loading(&command_label, route_path)?;
     let result = post_to_daemon(&app_root, route_path, &body).await?;
 
     // A service may resolve to a live stream rather than a buffered value: the
@@ -240,16 +244,50 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // descriptor that is present but unsupported/unsafe errors loudly rather than
     // being misread as an ordinary JSON result and exiting zero.
     if let Some((path, braid)) = stream_descriptor_path(&result)? {
-        return follow_stream_descriptor(&app_root, &path, braid).await;
+        return follow_stream_descriptor(
+            &app_root,
+            &path,
+            braid,
+            &command_label,
+            rendered_lines,
+            presenter,
+        )
+        .await;
     }
 
-    print_result(result);
+    print_result(result, &mut presenter, &cli.rest, rendered_lines)?;
     Ok(())
 }
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
-    stdout_is_tty
-        && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
+    stdout_is_tty && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
+}
+
+fn stdout_supports_tty() -> bool {
+    std::io::stdout().is_terminal()
+        && std::env::var("TERM")
+            .map(|term| term != "dumb")
+            .unwrap_or(true)
+}
+
+fn forces_plain_output(rest: &[String]) -> bool {
+    rest.iter().any(|token| plain_output_flag_is_on(token))
+}
+
+fn plain_output_flag_is_on(token: &str) -> bool {
+    let Some(rest) = token.strip_prefix("--") else {
+        return false;
+    };
+    let (name, inline) = match rest.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (rest, None),
+    };
+    let plain_flag = matches!(name, "json" | "raw" | "plain" | "no-tty" | "no-stream");
+    plain_flag && inline != Some("false")
+}
+
+fn resolved_forces_plain_output(resolved: &CliResolvedExecute, rest: &[String]) -> bool {
+    forces_plain_output(rest) || (resolved.direct_execute && resolved.stream == Some(false))
 }
 
 fn tty_screen_for(rest: &[String]) -> crate::tty::TtyScreen {
@@ -318,7 +356,6 @@ fn stream_descriptor_path(response: &Value) -> Result<Option<(String, bool)>, Cl
     };
     Ok(Some((path.to_string(), braid)))
 }
-
 /// Reject any descriptor path that is not a safe, node-relative path before it is
 /// signed and opened. The daemon currently only emits safe paths, but this is a
 /// generic descriptor consumer, so it must be self-protecting against a scheme,
@@ -360,6 +397,9 @@ async fn follow_stream_descriptor(
     app_root: &Path,
     path: &str,
     braid: bool,
+    command_label: &str,
+    previous_lines: usize,
+    mut presenter: Presenter,
 ) -> Result<(), CliError> {
     use crate::exec_stream::StreamOutcome;
 
@@ -374,8 +414,24 @@ async fn follow_stream_descriptor(
     );
 
     let mut terminal: Option<Result<(), String>> = None;
+    presenter.stream_with_previous(
+        if command_label.trim().is_empty() {
+            path
+        } else {
+            command_label
+        },
+        previous_lines,
+    )?;
     crate::transport::http::get_streaming(&url, &headers, |ev| {
-        match crate::exec_stream::render_event(ev) {
+        let outcome = match presenter.stream_event(ev) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => crate::exec_stream::render_event(ev),
+            Err(err) => {
+                terminal = Some(Err(format!("render stream: {err}")));
+                return true;
+            }
+        };
+        match outcome {
             StreamOutcome::Continue => false,
             // A braid follows continuations: a per-thread terminal is rendered
             // but does not stop the stream — only EOF / interrupt ends it.
@@ -978,7 +1034,7 @@ async fn post_to_daemon(
     route_path: &str,
     body: &Value,
 ) -> Result<Value, CliError> {
-    lifecycle_preflight(app_root).await?;
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
 
@@ -1002,10 +1058,12 @@ async fn post_to_daemon(
 async fn post_to_daemon_streaming(
     app_root: &std::path::Path,
     body: &Value,
+    command_tokens: &[String],
+    mut presenter: Presenter,
 ) -> Result<(), CliError> {
     use crate::exec_stream::StreamOutcome;
 
-    lifecycle_preflight(app_root).await?;
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
@@ -1019,6 +1077,15 @@ async fn post_to_daemon_streaming(
     // failure, `None` means the stream ended without any terminal event.
     let mut terminal: Option<Result<(), String>> = None;
     let mut thread_id: Option<String> = None;
+    let command_label = command_tokens.join(" ");
+    presenter.stream_with_previous(
+        if command_label.trim().is_empty() {
+            "execute"
+        } else {
+            command_label.as_str()
+        },
+        0,
+    )?;
     crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
         if ev.event == "stream_started" {
             if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
@@ -1028,7 +1095,15 @@ async fn post_to_daemon_streaming(
                     .map(String::from);
             }
         }
-        match crate::exec_stream::render_event(ev) {
+        let outcome = match presenter.stream_event(ev) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => crate::exec_stream::render_event(ev),
+            Err(err) => {
+                terminal = Some(Err(format!("render stream: {err}")));
+                return true;
+            }
+        };
+        match outcome {
             StreamOutcome::Continue => false,
             StreamOutcome::Done => {
                 terminal = Some(Ok(()));
@@ -1067,7 +1142,12 @@ async fn post_to_daemon_streaming(
                 "execute stream completed but final result fetch failed for {tid}: {e}"
             ),
         })?;
-    print_result(thread_get_payload_to_execute_result(payload));
+    print_result(
+        thread_get_payload_to_execute_result(payload),
+        &mut presenter,
+        command_tokens,
+        0,
+    )?;
     Ok(())
 }
 
@@ -1091,82 +1171,17 @@ fn thread_get_payload_to_execute_result(payload: Value) -> Value {
     })
 }
 
-async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError> {
-    // A deliberate remote override is still valid for normal daemon-backed
-    // dispatch. Lifecycle reads/mutations themselves ignore this env var.
-    if std::env::var_os("RYEOSD_URL").is_some() {
+fn print_result(
+    payload: serde_json::Value,
+    presenter: &mut Presenter,
+    command_tokens: &[String],
+    previous_lines: usize,
+) -> Result<(), CliError> {
+    let command = command_tokens.join(" ");
+    if presenter.structured_result(&command, &payload, previous_lines)? {
         return Ok(());
     }
 
-    let env = ryeos_node::LocalLifecycleEnv::load(Some(app_root.to_path_buf())).map_err(|e| {
-        CliError::Local {
-            detail: format!("resolve local node lifecycle env: {e:#}"),
-        }
-    })?;
-    let controller = ryeos_node::LifecycleController::from_env(env);
-
-    // A busy daemon (e.g. absorbing a launch burst) times out the status
-    // probe transiently; that congestion is self-clearing, so give it a few
-    // bounded retries before failing the launch. Every other outcome is
-    // settled on the first probe.
-    const BUSY_ATTEMPTS: u32 = 3;
-    let mut busy_message = String::new();
-    for attempt in 1..=BUSY_ATTEMPTS {
-        match controller.status().await.map_err(|e| CliError::Local {
-            detail: format!("read lifecycle status: {e:#}"),
-        })? {
-            ryeos_node::LifecycleStatus::Running { .. } => return Ok(()),
-            ryeos_node::LifecycleStatus::NotInitialized { diagnostics } => {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "RyeOS is not initialized. Run: ryeos init\nDetail: {}",
-                        diagnostics.message
-                    ),
-                })
-            }
-            ryeos_node::LifecycleStatus::Stopped { .. } => {
-                return Err(CliError::Local {
-                    detail: "RyeOS is initialized but not running. Run: ryeos start".into(),
-                })
-            }
-            ryeos_node::LifecycleStatus::Stale { diagnostics, .. } => {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "RyeOS daemon metadata is stale: {}\nRun: ryeos start",
-                        diagnostics.message
-                    ),
-                })
-            }
-            ryeos_node::LifecycleStatus::Starting { pid, .. } => {
-                // Boot (projection catch-up after a deploy) runs for minutes,
-                // far past the busy-retry budget — settle immediately with
-                // the actual remediation: wait, don't start a second daemon.
-                return Err(CliError::Local {
-                    detail: format!(
-                        "RyeOS daemon (pid {pid}) is starting up; its control socket is \
-                         not available yet — wait for `ryeos node status` to report \
-                         running, then retry"
-                    ),
-                });
-            }
-            ryeos_node::LifecycleStatus::Unresponsive { diagnostics, .. } => {
-                busy_message = diagnostics.message;
-                if attempt < BUSY_ATTEMPTS {
-                    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-                }
-            }
-        }
-    }
-    Err(CliError::Local {
-        detail: format!(
-            "RyeOS daemon is running but did not answer the control probe within the \
-             timeout ({busy_message}); likely busy — retry shortly rather than starting \
-             a replacement daemon"
-        ),
-    })
-}
-
-fn print_result(payload: serde_json::Value) {
     // A state-root override echoes both roots as top-level `execution`
     // diagnostics; surface them on stderr so stdout stays the bare result
     // for scripts.
@@ -1182,6 +1197,7 @@ fn print_result(payload: serde_json::Value) {
     let result = payload.get("result").cloned().unwrap_or(payload);
     let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     println!("{pretty}");
+    Ok(())
 }
 
 fn discover_app_root() -> PathBuf {
@@ -1197,6 +1213,19 @@ fn discover_app_root() -> PathBuf {
 mod tests {
     use super::*;
     use ryeos_runtime::CommandArgumentKind;
+
+    #[test]
+    fn plain_output_flags_force_plain_tty_presentation() {
+        assert!(plain_output_flag_is_on("--json"));
+        assert!(plain_output_flag_is_on("--json=true"));
+        assert!(plain_output_flag_is_on("--no-stream"));
+        assert!(plain_output_flag_is_on("--raw"));
+        assert!(plain_output_flag_is_on("--plain"));
+        assert!(plain_output_flag_is_on("--no-tty"));
+        assert!(!plain_output_flag_is_on("--json=false"));
+        assert!(!plain_output_flag_is_on("--stream"));
+        assert!(!plain_output_flag_is_on("value"));
+    }
 
     #[test]
     fn strip_execute_control_flags_parses_stream_prefs() {

@@ -1,41 +1,44 @@
 //! The terminal effect executor: each `RyeOsEffect` from the core maps
-//! to one daemon call; results fold back into the core as
-//! `EffectResult` events. No ryeos state lives here — this is the
-//! boundary where engine intent becomes transport calls.
+//! to one daemon call; results come home over the loop's effect channel
+//! and fold back into the core as `EffectResult` events. No ryeos state
+//! lives here — this is the boundary where engine intent becomes
+//! transport calls, and the boundary where the render loop stops
+//! waiting: a round trip in flight never blocks a frame.
+
+use std::sync::Arc;
 
 use ryeos_client_base::ui::{
-    RyeOsCore, RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind, RyeOsEvent,
+    RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind,
 };
 
 use crate::transport::daemon::{ClientError, DaemonClient};
 
-pub async fn dispatch_effects(
-    core: &mut RyeOsCore,
-    client: &DaemonClient,
+/// Launch one generation of effects as a concurrent batch off the loop —
+/// a startup burst of independent fetches costs one round trip, not one
+/// per view. The joined results arrive as a single message in emission
+/// order; the loop folds them and spawns any follow-up generation the
+/// folds emit. Freshness is the core's job (per-key epochs), so batches
+/// from different generations may resolve in any order.
+pub fn spawn_effects(
+    client: &Arc<DaemonClient>,
+    project_path: Option<String>,
     effects: Vec<RyeOsEffect>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Vec<RyeOsEffectResult>>,
 ) {
-    // Each generation of effects runs as one concurrent batch — a startup
-    // burst of independent fetches costs one round trip, not one per view.
-    // Results fold back sequentially in emission order, and any effects
-    // those folds emit form the next batch.
-    let mut pending = effects;
-    while !pending.is_empty() {
-        let project_path = core
-            .data
-            .session
-            .as_ref()
-            .and_then(|session| session.project_path.clone());
-        let batch = std::mem::take(&mut pending);
+    if effects.is_empty() {
+        return;
+    }
+    let client = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
         let results = futures_util::future::join_all(
-            batch
+            effects
                 .iter()
-                .map(|effect| run_effect(client, effect, project_path.as_deref())),
+                .map(|effect| run_effect(&client, effect, project_path.as_deref())),
         )
         .await;
-        for result in results {
-            pending.extend(core.dispatch(RyeOsEvent::EffectResult { result }));
-        }
-    }
+        let _ = tx.send(results);
+    });
 }
 
 async fn run_effect(
@@ -82,7 +85,7 @@ async fn effect_data(
             // ONE generic source mechanism: any service ref through the
             // same execute path; result keyed to the subscribing tile. A
             // view OPTS INTO project scoping by declaring an (empty)
-            // `project_path` param — the executor fills it with the seat's
+            // `project_path` param — this client fills it from the seat's
             // project. Sources that don't declare it never receive it, so
             // substrate ops that reject the field don't break.
             let mut params = params.clone();
@@ -105,7 +108,13 @@ async fn effect_data(
         RyeOsEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/ryeos-ui/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         RyeOsEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/ryeos-ui/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
         RyeOsEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/ryeos-ui/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        RyeOsEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
+        RyeOsEffectKind::DispatchInvocation { item_ref, params } => client.signed_post(
+            "/ui/api/invocations/dispatch",
+            &serde_json::json!({
+                "target": { "kind": "ref", "ref": item_ref },
+                "params": params,
+            }),
+        ).await,
         RyeOsEffectKind::SubmitThreadCommand { thread_id, command_type } => {
             // Steer the head thread through the shared control channel. Authority
             // == the CLI's `commands submit`; see .tmp/thread-authorization-review.md
@@ -153,13 +162,16 @@ async fn effect_data(
             }
             ryeos_client_base::ui::effect::InvokeRef::Tokens { tokens } => {
                 // One daemon path: tokens resolve + bind server-side.
-                let mut params = serde_json::json!({ "tokens": tokens });
+                let mut command = serde_json::json!({
+                    "tokens": tokens,
+                    "arguments": params,
+                });
                 if let Some(project) = project_path {
-                    params["project_path"] = serde_json::Value::String(project.to_string());
+                    command["project_path"] = serde_json::Value::String(project.to_string());
                 }
                 let body = serde_json::json!({
                     "item_ref": "service:commands/dispatch",
-                    "parameters": params,
+                    "parameters": command,
                 });
                 let envelope = client.signed_post("/execute", &body).await?;
                 Ok(envelope.get("result").cloned().unwrap_or(envelope))
@@ -182,7 +194,7 @@ fn result_kind_for(kind: &RyeOsEffectKind) -> RyeOsEffectResultKind {
         RyeOsEffectKind::ListFiles { .. } => RyeOsEffectResultKind::FilesList,
         RyeOsEffectKind::FetchFileSpace { .. } => RyeOsEffectResultKind::FileSpace,
         RyeOsEffectKind::ReadFile { .. } => RyeOsEffectResultKind::FileRead,
-        RyeOsEffectKind::InvokeAction { .. } => RyeOsEffectResultKind::ActionInvocation,
+        RyeOsEffectKind::DispatchInvocation { .. } => RyeOsEffectResultKind::InvocationDispatch,
         RyeOsEffectKind::SubmitThreadCommand { .. } => {
             RyeOsEffectResultKind::ThreadCommandSubmitted
         }

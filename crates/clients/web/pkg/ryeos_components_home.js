@@ -102,7 +102,7 @@ export function topStatusLine(vm, shell) {
     button.title = `workspace ${tab.number} · ${tab.tile_count || 0} tiles`;
     button.addEventListener("click", () => shell?.dispatchUi?.({
       type: "activate",
-      action: { type: "switch_tab", index: Math.max(0, (tab.number || 1) - 1) },
+      intent: { type: "switch_tab", index: Math.max(0, (tab.number || 1) - 1) },
     }));
     tabs.append(button);
   }
@@ -327,13 +327,13 @@ function dispatchAtlasInteraction(interaction) {
     case "inspect_item":
       latestShell.dispatchUi({
         type: "activate",
-        action: { type: "inspect_item", canonical_ref: interaction.canonical_ref },
+        intent: { type: "inspect_item", canonical_ref: interaction.canonical_ref },
       });
       return true;
     case "read_file":
       latestShell.dispatchUi({
         type: "activate",
-        action: { type: "read_file", root: interaction.root, path: interaction.path },
+        intent: { type: "read_file", root: interaction.root, path: interaction.path },
       });
       return true;
     case "focus_folder":

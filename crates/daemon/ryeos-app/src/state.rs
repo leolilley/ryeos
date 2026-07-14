@@ -22,6 +22,7 @@ use crate::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
 use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
+use crate::projection_health::ThreadProjectionHealthSnapshot;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
 use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadLifecycleService;
@@ -130,6 +131,7 @@ pub struct StatusResponse {
     pub uds_path: String,
     pub db_path: String,
     pub active_threads: i64,
+    pub thread_projection: ThreadProjectionHealthSnapshot,
 }
 
 impl AppState {
@@ -160,6 +162,7 @@ impl AppState {
             uds_path: self.config.uds_path.display().to_string(),
             db_path: self.config.db_path.display().to_string(),
             active_threads: self.state_store.active_thread_count().unwrap_or(0),
+            thread_projection: self.state_store.projection_health_snapshot(),
         }
     }
 }

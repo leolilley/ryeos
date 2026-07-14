@@ -21,6 +21,11 @@ on:
         required: true
         default: false
         type: boolean
+      installed_resume_smoke:
+        description: "Run the installed init/start/restart resume smoke (expensive)"
+        required: true
+        default: false
+        type: boolean
       bundle_set:
         description: "Bundle set for refresh_bundles"
         required: true
@@ -48,6 +53,88 @@ env:
   GATE_TEST_THREADS: 2
 
 jobs:
+  static-policy:
+    name: Static repository policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install checksum-pinned workflow and shell linters
+        run: ./scripts/ci/install-static-linters.sh "$RUNNER_TEMP/ryeos-linters"
+
+      - name: Check workflows and release/install shell
+        run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
+
+      - name: Check release input validation
+        run: ./scripts/release/test-resolve-version.sh
+
+      - name: Check deterministic AUR metadata preparation
+        run: ./scripts/release/test-prepare-aur.sh
+
+      - name: Check canonical naming
+        run: ./scripts/lint-naming.sh
+
+      - name: Check removed compatibility vocabulary
+        run: ./scripts/lint-no-content-wrap.sh
+
+      - name: Check workspace dependency direction
+        run: ./scripts/lint-dependency-layers.py
+
+      - name: Check browser key adapter
+        working-directory: crates/clients/web
+        run: npm test
+
+  rust-policy:
+    name: Rust formatting, lint, and dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check Clippy policy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check dependency advisories, licenses, and sources
+        run: cargo deny check
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository history
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   test:
     name: Workspace tests
     runs-on: ubuntu-latest
@@ -55,23 +142,23 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Show tool versions
         run: |
@@ -92,20 +179,20 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_bundles }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Show tool versions
         run: |
@@ -114,4 +201,36 @@ jobs:
           openssl version
 
       - name: Refresh bundle sources
-        run: ./scripts/gate.sh --refresh-bundles --no-tests --bundle-set "${{ inputs.bundle_set }}"
+        env:
+          BUNDLE_SET: ${{ inputs.bundle_set }}
+        run: ./scripts/gate.sh --refresh-bundles --no-tests --bundle-set "$BUNDLE_SET"
+
+  installed-resume-smoke:
+    name: Installed restart/resume smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build and install standard distribution
+        run: |
+          sudo ./scripts/pkg/install-local-direct.sh \
+            --populate --all --bundle-set standard --no-init --no-daemon-restart
+
+      - name: Exercise installed restart and resume
+        run: ./scripts/smoke-installed-resume.sh

@@ -147,6 +147,18 @@ pub struct FollowFact {
     /// The parent's resume-successor thread id.
     #[serde(default)]
     pub parent_successor_thread_id: Option<String>,
+    /// Aggregate completion progress for a fanout cohort. Absent on classic
+    /// daemon payloads and durable successor facts without a live waiter.
+    #[serde(default)]
+    pub cohort: Option<FollowCohortProgress>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct FollowCohortProgress {
+    #[serde(default)]
+    pub done: u32,
+    #[serde(default)]
+    pub expected: u32,
 }
 
 /// The `follow.role` wire strings a client branches on. Kept in sync with the
@@ -647,7 +659,8 @@ mod tests {
             "child_thread_id": "T-child",
             "child_chain_root_id": "T-child",
             "child_terminal_status": null,
-            "parent_successor_thread_id": "T-succ"
+            "parent_successor_thread_id": "T-succ",
+            "cohort": { "done": 1, "expected": 3 }
         });
         let f: FollowFact = serde_json::from_value(row).unwrap();
         assert!(f.is_suspended_parent());
@@ -658,6 +671,13 @@ mod tests {
         assert_eq!(f.child_chain_root_id.as_deref(), Some("T-child"));
         assert!(f.child_terminal_status.is_none());
         assert_eq!(f.parent_successor_thread_id.as_deref(), Some("T-succ"));
+        assert_eq!(
+            f.cohort,
+            Some(FollowCohortProgress {
+                done: 1,
+                expected: 3
+            })
+        );
     }
 
     #[test]
@@ -675,6 +695,7 @@ mod tests {
         assert!(f.phase.is_none(), "resume_successor carries no phase");
         assert!(f.follow_node.is_none());
         assert!(f.child_thread_id.is_none());
+        assert!(f.cohort.is_none(), "legacy/durable shape defaults cohort");
     }
 
     #[test]

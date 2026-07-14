@@ -121,6 +121,7 @@ function inputDock(inputVm, dispatchUi) {
   input.rows = 1;
   input.value = inputVm.text || "";
   input.placeholder = inputVm.placeholder || "type RyeOS input…";
+  input.setAttribute("aria-label", inputVm.route_label ? `Input for ${inputVm.route_label}` : "RyeOS input");
   input.spellcheck = false;
   input.autocomplete = "off";
   input.setAttribute("data-focus-key", "ryeos-input-dock");
@@ -140,6 +141,7 @@ function inputDock(inputVm, dispatchUi) {
   submit.type = "button";
   submit.disabled = !inputVm.submit_enabled;
   submit.textContent = "send";
+  submit.setAttribute("aria-label", "Send RyeOS input");
   submit.addEventListener("click", () => dispatchUi({ type: "submit_input" }));
   row.append(prompt, input, submit);
   wrap.append(meta, row);
@@ -272,32 +274,36 @@ function timeline(viewVm) {
   const wrap = el("section", "ryeos-timeline");
   wrap.append(listHeader(viewVm.title || "timeline", ""));
   const entries = el("div", "ryeos-timeline-entries");
-  for (const entry of viewVm.entries || []) {
-    entries.append(timelineEntry(entry));
+  for (const [index, entry] of (viewVm.entries || []).entries()) {
+    entries.append(timelineEntry(entry, viewVm.entry_arrived_at_ms?.[index]));
   }
   if (!(viewVm.entries || []).length) entries.append(textEl("p", "No timeline events loaded."));
   wrap.append(entries);
   return wrap;
 }
 
-function timelineEntry(entry) {
+function timelineEntry(entry, arrivedAtMs) {
+  let node;
   switch (entry.type) {
     case "block":
-      return textEl("p", entry.text || "", `ryeos-timeline-block ${entry.tone || "neutral"}`);
+      node = textEl("p", entry.text || "", `ryeos-timeline-block ${entry.tone || "neutral"}`);
+      break;
     case "pair": {
-      const row = el("div", `ryeos-timeline-pair ${entry.tone || "neutral"}${entry.pending ? " pending" : ""}`);
-      row.append(textEl("span", entry.pending ? "▸" : entry.tone === "danger" ? "✗" : "✓"), textEl("strong", entry.summary || "tool"), textEl("small", entry.meta || ""));
-      return row;
+      node = el("div", `ryeos-timeline-pair ${entry.tone || "neutral"}${entry.pending ? " pending" : ""}`);
+      node.append(textEl("span", entry.pending ? "▸" : entry.tone === "danger" ? "✗" : "✓"), textEl("strong", entry.summary || "tool"), textEl("small", entry.meta || ""));
+      break;
     }
     case "separator":
       return textEl("div", entry.label || "turn", "ryeos-timeline-separator");
     case "line":
     default: {
-      const row = el("div", `ryeos-timeline-line ${entry.tone || "neutral"}`);
-      row.append(textEl("span", toneGlyph(entry.tone)), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
-      return row;
+      node = el("div", `ryeos-timeline-line ${entry.tone || "neutral"}`);
+      node.append(textEl("span", toneGlyph(entry.tone)), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
+      break;
     }
   }
+  applyTimedClass(node, "arrived", arrivedAtMs, 1_200);
+  return node;
 }
 
 // Tone → glyph, mirroring the terminal's theme::tone_glyph so a toned line
@@ -456,9 +462,9 @@ function sceneMap(scene, dispatchUi) {
     node.style.setProperty("--node-color", object.color || "#fabd2f");
     node.style.opacity = String(object.opacity ?? 1);
     if (object.kind === "link") node.style.width = `${Math.max(72, (object.scale?.[0] || 1) * 24)}px`;
-    node.disabled = !object.action;
+    node.disabled = !object.intent;
     node.append(textEl("strong", object.label || object.id), textEl("span", object.kind || "object"));
-    if (object.action) node.addEventListener("click", () => dispatchUi({ type: "activate", action: object.action }));
+    if (object.intent) node.addEventListener("click", () => dispatchUi({ type: "activate", intent: object.intent }));
     stage.append(node);
   }
   wrap.append(header, stage);
@@ -559,7 +565,7 @@ function atlasMap(atlas, dispatchUi, wrap = el("section", "ryeos-scene")) {
         dot.addEventListener("click", (event) => {
           event.stopPropagation();
           if (!item.canonical_ref) return;
-          dispatchUi({ type: "activate", action: { type: "inspect_item", canonical_ref: item.canonical_ref } });
+          dispatchUi({ type: "activate", intent: { type: "inspect_item", canonical_ref: item.canonical_ref } });
         });
         cluster.append(dot);
       }
@@ -640,16 +646,17 @@ function rows(items, kind, dispatchUi) {
   const list = el("div", `ryeos-rows lf ${kind || "rows"}`);
   items.forEach((item, index) => {
     const row = el("button", `ryeos-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
+    applyMotion(row, item);
     row.type = "button";
     row.dataset.rowIndex = String(index);
-    row.disabled = !item.action;
+    row.disabled = !item.intent;
     row.append(
       textEl("span", rowGlyph(item, kind), "ryeos-row-glyph"),
       textEl("strong", item.primary),
       textEl("span", item.secondary || ""),
       textEl("small", item.meta || ""),
     );
-    if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
+    if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
     list.append(row);
   });
   return list;
@@ -663,6 +670,27 @@ function rowGlyph(item) {
     case "accent": return "›";
     default: return "•";
   }
+}
+
+function applyMotion(node, item) {
+  if (item.tone === "accent") node.classList.add("motion-breathe");
+  if (item.tone === "warn") node.classList.add("motion-swell");
+  if (applyTimedClass(node, "changed", item.changed_at_ms, 1_200)) {
+    node.classList.add(`changed-${item.changed_tone || "accent"}`);
+  }
+}
+
+function applyTimedClass(node, className, timestamp, durationMs) {
+  if (timestamp == null) return false;
+  const at = Number(timestamp);
+  if (!Number.isFinite(at)) return false;
+  const age = Math.max(0, Date.now() - at);
+  if (age >= durationMs) return false;
+  node.classList.add(className);
+  // Re-renders replace DOM nodes. Start the replacement at the marker's
+  // current age so unrelated commits cannot restart a one-shot animation.
+  node.style.animationDelay = `${-age}ms`;
+  return true;
 }
 
 // The table widget: aligned cells under column headers, a leading tone-glyph
@@ -699,9 +727,10 @@ function tableView(viewVm, dispatchUi) {
 
 function tableRow(item, ncols, index, dispatchUi) {
   const row = el("button", `ryeos-table-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
+  applyMotion(row, item);
   row.type = "button";
   row.dataset.rowIndex = String(index);
-  row.disabled = !item.action;
+  row.disabled = !item.intent;
   row.append(textEl("span", rowGlyph(item), "ryeos-table-glyph"));
   const cells = item.cells || [];
   // Per-cell tone overrides (parallel to cells; absent for tables whose
@@ -713,7 +742,7 @@ function tableRow(item, ncols, index, dispatchUi) {
     const tone = cellTones[i] && cellTones[i] !== "neutral" ? ` tone-${cellTones[i]}` : "";
     row.append(textEl("span", cells[i] || "", `ryeos-table-cell${i === 0 ? " lead" : ""}${tone}`));
   }
-  if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
+  if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
   return row;
 }
 
@@ -722,7 +751,7 @@ function tableRow(item, ncols, index, dispatchUi) {
 // indented; a collapsed section shows only its header, and its `count` still
 // reflects the hidden rows. Reference semantics live in the terminal's
 // widgets/sections.rs. Rows reuse the rows-widget renderer (RyeOsRowVm), so
-// tone glyph, primary/secondary/meta, and per-row actions come for free.
+// tone glyph, primary/secondary/meta, and per-row intents come for free.
 function sectionsView(viewVm, dispatchUi) {
   const wrap = el("section", "ryeos-sections");
   wrap.append(listHeader(viewVm.title || "sections", ""));

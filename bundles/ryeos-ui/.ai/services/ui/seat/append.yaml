@@ -1,7 +1,9 @@
-# ryeos:signed:2026-06-13T00:00:43Z:a1dc05e2f5011575eb13d34b42edcc771d820a2bea53a426fde0c098e495cafb:2whfff72ljhVPeFC4SnKUDYLAuTfyfNinAso+dXiE3ZEY+9FCmpZ+DU4tMzUQgGbujQnC4tff0CS/efG2um5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:08ce08802c930d22a11c2807297cb29d9f80284e1704dbcb87d3a5d8c6dea3e9:QWqADDjTfocy+JUlnaeU4oBJy/hpxKPGc7hP0XBRQIAsSWh7LMbdCmGHf45mL3dixBv61Bx8mXMzzK04Tnt4BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-append
 version: "1.0.0"
 description: Append seat.* events to the session's running seat braid
 endpoint: ui.seat.append
+ui_read_only: true
+ui_dispatch: session_local
 availability: daemon_only

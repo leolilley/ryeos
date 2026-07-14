@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-06T12:24:56Z:265fa035eebf5b9dfd1908c338dfd4c476c5bcc9a46fee0b025f9f3654de0a46:Ktyt5Aq7o+TK/FyiLUWT/8eTeqmfj75e7B+5Sz3Oanw81MhZ0PjMWyV5S3RwehBU1MVjmZGd5yJs71hCSojiBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# ryeos:unsigned
+# ryeos:signed:2026-07-13T10:47:02Z:eddb53c275634e3339e205c76c80e05723bd78c8bd0a4c4e28ec89da8bfa7c08:7H1hRxWwVLwiDtmsHmY+7/XHud0rMvNK7DOTHf5qnzhpRo0JWWiXP7KwsiEZb3JUB3nKIJWrGHiVQ1kd7vWlDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the ryeos-ui threads source
@@ -13,6 +12,11 @@ source:
   params:
     limit: 200
     sort: watch
+    # Substrate plumbing (threads/get polls, status strips, chain
+    # replays) records a service_run per invocation and drowns the
+    # execution signal ~9:1. The watch views exclude them wholesale;
+    # tool/graph/directive/knowledge runs and seats are the content.
+    exclude_item_prefixes: ["service:"]
   collection: threads
 projections:
   columns:
@@ -20,7 +24,12 @@ projections:
       field: thread_id
     - label: kind
       field: kind
+    # Leaf-first: the segment that names the thing survives a narrow
+    # cell; the raw canonical ref rides beside it as `id`.
     - label: item
+      field: item_ref
+      present: tail_first
+    - label: id
       field: item_ref
     - label: project
       field: project.name
@@ -51,7 +60,8 @@ projections:
     field: status
     map:
       running: accent
-      created: accent
+      # Queued threads sit calm; only RUNNING rows breathe.
+      created: neutral
       failed: danger
       cancelled: warn
       completed: good

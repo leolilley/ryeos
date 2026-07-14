@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::content::{ProjectedRecord, TimelineRole};
 use super::dto::CognitionOutPayload;
 use super::effect::RyeOsEffect;
-use super::event::RyeOsAction;
+use super::event::RyeOsUiIntent;
 use super::model::RyeOsCore;
 use super::view_model::{tone_from_name, RyeOsTone};
 
@@ -63,15 +63,15 @@ pub enum RyeOsTimelineEntryVm {
         /// What activating this entry (Enter on the point) does — e.g. a
         /// forked-subthread line aims the route at that child thread so the
         /// feed re-projects to its braid; an error terminal inspects its full
-        /// structured error. Most lines carry no action.
+        /// structured error. Most lines carry no intent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        action: Option<RyeOsAction>,
+        intent: Option<RyeOsUiIntent>,
         /// A second affordance for this entry, surfaced through command overlays
         /// (its Shift+Enter secondary and a distinct context item) rather than
         /// a direct key — e.g. "retry this failed turn" beside the entry's
-        /// Enter=inspect action. Most lines carry none.
+        /// Enter=inspect intent. Most lines carry none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        secondary_action: Option<RyeOsAction>,
+        secondary_intent: Option<RyeOsUiIntent>,
     },
     Pair {
         summary: String,
@@ -98,6 +98,25 @@ pub(crate) fn timeline_sections(entries: &[RyeOsTimelineEntryVm]) -> Vec<usize> 
         sections.push(current);
     }
     sections
+}
+
+/// The section index per entry, plus the sections headed by a real
+/// `Separator` (the ones a fold key can collapse) — the per-entry metadata
+/// [`fold_timeline_window`] needs but does not itself derive. Depends only
+/// on `full`, so it is computed once when a source's entries are (re)built
+/// (`RyeOsTimelineSourceCache::sections`/`collapsible`) rather than
+/// rescanned on every windowed render frame.
+pub(crate) fn timeline_section_index(
+    full: &[RyeOsTimelineEntryVm],
+) -> (Vec<usize>, std::collections::BTreeSet<usize>) {
+    let sections = timeline_sections(full);
+    let mut collapsible = std::collections::BTreeSet::new();
+    for (i, entry) in full.iter().enumerate() {
+        if matches!(entry, RyeOsTimelineEntryVm::Separator { .. }) {
+            collapsible.insert(sections[i]);
+        }
+    }
+    (sections, collapsible)
 }
 
 /// A timeline with folds applied: collapsed turns keep only their header
@@ -175,72 +194,150 @@ pub(crate) fn fold_timeline(
     }
 }
 
+/// Borrowed view over the cached full-transcript arrays
+/// [`fold_timeline_window`] reads — the parallel per-entry slices built
+/// once per source (`RyeOsTimelineSourceCache`), never rescanned here.
+pub(crate) struct TimelineWindowInput<'a> {
+    pub entries: &'a [RyeOsTimelineEntryVm],
+    pub indents: &'a [u8],
+    pub sources: &'a [Option<TimelineEntrySource>],
+    pub sections: &'a [usize],
+    pub collapsible: &'a std::collections::BTreeSet<usize>,
+}
+
 /// Fold a render window around the selected visible entry, cloning only the
 /// entries the renderer can plausibly draw. This keeps transcript render cost
 /// bounded while preserving the cursor's distance-from-bottom semantics.
+///
+/// `full_sections`/`collapsible` are `full`'s per-entry section index and
+/// foldable-section set — [`timeline_section_index`], cached alongside `full`
+/// at build time (`RyeOsTimelineSourceCache`) rather than rescanned here. So
+/// this does only bounded work: locating the selected entry scans at most
+/// `cursor_from_bottom` (+ any folded runs skipped) entries back from the
+/// bottom, and collecting the window scans at most `window` entries out from
+/// there in each direction — never the full transcript length, no matter how
+/// long the thread is.
 pub(crate) fn fold_timeline_window(
-    full: &[RyeOsTimelineEntryVm],
-    full_indents: &[u8],
-    full_sources: &[Option<TimelineEntrySource>],
+    input: TimelineWindowInput<'_>,
     tail_entry: Option<RyeOsTimelineEntryVm>,
     collapsed: &std::collections::BTreeSet<usize>,
     cursor_from_bottom: usize,
     window: usize,
 ) -> FoldedTimelineWindow {
-    let mut section_of = timeline_sections(full);
-    if tail_entry.is_some() {
-        section_of.push(section_of.last().copied().unwrap_or(0));
+    let TimelineWindowInput {
+        entries: full,
+        indents: full_indents,
+        sources: full_sources,
+        sections: full_sections,
+        collapsible,
+    } = input;
+    let total = full.len() + tail_entry.is_some() as usize;
+    // The live tail entry is never a `Separator` (a Block or a "working…"
+    // Line), so it always extends the last real section rather than opening
+    // one — it needs no entry of its own in `full_sections`/`collapsible`.
+    let tail_section = full_sections.last().copied().unwrap_or(0);
+    let section_at = |i: usize| {
+        if i < full.len() {
+            full_sections[i]
+        } else {
+            tail_section
+        }
+    };
+    let entry_at = |i: usize| timeline_window_entry(full, tail_entry.as_ref(), i);
+    let is_header_at =
+        |i: usize| i == 0 || matches!(entry_at(i), Some(RyeOsTimelineEntryVm::Separator { .. }));
+    let is_visible_at = |i: usize| {
+        let sec = section_at(i);
+        !(collapsed.contains(&sec) && collapsible.contains(&sec) && !is_header_at(i))
+    };
+
+    let empty = || FoldedTimelineWindow {
+        folded: FoldedTimeline {
+            entries: Vec::new(),
+            sections: Vec::new(),
+            indents: Vec::new(),
+            sources: Vec::new(),
+            collapsible: collapsible.clone(),
+        },
+        selected: None,
+    };
+    if total == 0 {
+        return empty();
     }
-    let total = section_of.len();
-    let is_header: Vec<bool> = (0..total)
-        .map(|i| i == 0 || section_of[i] != section_of[i - 1])
-        .collect();
-    let mut collapsible = std::collections::BTreeSet::new();
-    for i in 0..total {
-        if is_header[i]
-            && timeline_window_entry(full, tail_entry.as_ref(), i)
-                .is_some_and(|entry| matches!(entry, RyeOsTimelineEntryVm::Separator { .. }))
-        {
-            collapsible.insert(section_of[i]);
+
+    // Locate the selected entry: the visible entry `cursor_from_bottom` back
+    // from the bottom. Falls back to the topmost visible entry if the
+    // transcript has fewer visible entries than that (cursor pinned to the
+    // top), mirroring the old `cursor_from_bottom.min(last_visible)` clamp.
+    let mut selected_index = None;
+    let mut remaining = cursor_from_bottom;
+    let mut i = total;
+    while i > 0 {
+        i -= 1;
+        if is_visible_at(i) {
+            selected_index = Some(i);
+            if remaining == 0 {
+                break;
+            }
+            remaining -= 1;
         }
     }
-
-    let visible_full_indices: Vec<usize> = (0..total)
-        .filter(|i| {
-            let sec = section_of[*i];
-            !(collapsed.contains(&sec) && collapsible.contains(&sec) && !is_header[*i])
-        })
-        .collect();
-    let Some(last_visible) = visible_full_indices.len().checked_sub(1) else {
-        return FoldedTimelineWindow {
-            folded: FoldedTimeline {
-                entries: Vec::new(),
-                sections: Vec::new(),
-                indents: Vec::new(),
-                sources: Vec::new(),
-                collapsible,
-            },
-            selected: None,
-        };
+    let Some(selected_index) = selected_index else {
+        return empty();
     };
-    let selected_visible = last_visible.saturating_sub(cursor_from_bottom.min(last_visible));
-    let window = window.max(1).min(visible_full_indices.len());
-    let start_visible = selected_visible
-        .saturating_sub(window / 2)
-        .min(visible_full_indices.len().saturating_sub(window));
-    let end_visible = start_visible + window;
 
-    let mut entries = Vec::with_capacity(window);
-    let mut sections = Vec::with_capacity(window);
-    let mut indents = Vec::with_capacity(window);
-    let mut sources = Vec::with_capacity(window);
-    for i in visible_full_indices[start_visible..end_visible]
-        .iter()
-        .copied()
-    {
-        let sec = section_of[i];
+    // Collect the window's visible entries centered on `selected_index`:
+    // nominally `window / 2` above and the rest at-or-below. Either side
+    // that runs out early (the selection sits near the top or bottom of the
+    // visible list) hands its shortfall to the other side, so a full
+    // `window` is still shown whenever that many visible entries exist
+    // anywhere in the transcript — matching the prior min-clamped centering.
+    let window = window.max(1);
+    let want_above = window / 2;
+    let want_below = window - want_above;
+
+    let mut below = Vec::with_capacity(want_below);
+    let mut i = selected_index;
+    while below.len() < want_below && i < total {
+        if is_visible_at(i) {
+            below.push(i);
+        }
+        i += 1;
+    }
+    let short_below = want_below - below.len();
+
+    let want_above_total = want_above + short_below;
+    let mut above = Vec::with_capacity(want_above_total);
+    let mut i = selected_index;
+    while above.len() < want_above_total && i > 0 {
+        i -= 1;
+        if is_visible_at(i) {
+            above.push(i);
+        }
+    }
+    let short_above = want_above_total - above.len();
+    if short_above > 0 {
+        let mut i = below.last().map_or(selected_index + 1, |last| last + 1);
+        let target = below.len() + short_above;
+        while below.len() < target && i < total {
+            if is_visible_at(i) {
+                below.push(i);
+            }
+            i += 1;
+        }
+    }
+    above.reverse();
+    let selected_visible = above.len();
+    let visible_full_indices: Vec<usize> = above.into_iter().chain(below).collect();
+
+    let mut entries = Vec::with_capacity(visible_full_indices.len());
+    let mut sections = Vec::with_capacity(visible_full_indices.len());
+    let mut indents = Vec::with_capacity(visible_full_indices.len());
+    let mut sources = Vec::with_capacity(visible_full_indices.len());
+    for i in visible_full_indices {
+        let sec = section_at(i);
         let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
-        let Some(source_entry) = timeline_window_entry(full, tail_entry.as_ref(), i) else {
+        let Some(source_entry) = entry_at(i) else {
             continue;
         };
         let entry = if folded {
@@ -269,9 +366,9 @@ pub(crate) fn fold_timeline_window(
             sections,
             indents,
             sources,
-            collapsible,
+            collapsible: collapsible.clone(),
         },
-        selected: Some(selected_visible - start_visible),
+        selected: Some(selected_visible),
     }
 }
 
@@ -358,7 +455,7 @@ pub(crate) fn timeline_entries_indented(
             }
             // Paired runtime exchanges (graph steps, tool calls) have multiple
             // producer shapes: directive tools emit `{tool, call_id}`, graph
-            // action nodes emit `{item_id, node, step}`. When the authored
+            // intent nodes emit `{item_id, node, step}`. When the authored
             // projection does not match the producer's shape, the raw event would
             // otherwise degrade to a bare `event_type` line. Read the stable
             // payload fields directly and pair start with settle so the tail
@@ -397,8 +494,8 @@ pub(crate) fn timeline_entries_indented(
                             primary: content.to_string(),
                             meta: None,
                             tone: RyeOsTone::Accent,
-                            action: None,
-                            secondary_action: None,
+                            intent: None,
+                            secondary_intent: None,
                         },
                         Some(&record),
                     );
@@ -534,9 +631,7 @@ pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelin
 }
 
 pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
-    let Some(head) = core.seat.fold().input_route().thread else {
-        return None;
-    };
+    let head = core.seat.fold().input_route().thread?;
     // Streaming output for the head thread → render it with a trailing cursor.
     if let Some(buf) = core.data.live_delta.as_ref() {
         if !buf.text.is_empty() && buf.thread == head {
@@ -554,8 +649,8 @@ pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm>
             primary: "▍ working…".to_string(),
             meta: None,
             tone: RyeOsTone::Accent,
-            action: None,
-            secondary_action: None,
+            intent: None,
+            secondary_intent: None,
         });
     }
     None
@@ -627,8 +722,8 @@ fn line_entry(record: ProjectedRecord) -> RyeOsTimelineEntryVm {
         primary: record.primary,
         meta: record.meta,
         tone: tone_from_name(record.tone.as_deref()),
-        action: None,
-        secondary_action: None,
+        intent: None,
+        secondary_intent: None,
     }
 }
 
@@ -813,7 +908,7 @@ fn execution_entry(
         // being stepped into (`↘ study`) so the entry reads as a call into a
         // named cognition, not an anonymous fork. Falls back to "forked
         // subthread" when the producer carries no `node`. The child id (meta)
-        // is the drill target the `DrillThread` action below steps into.
+        // is the drill target the `DrillThread` intent below steps into.
         FeedEventType::ChildThreadSpawned => (
             payload
                 .and_then(|p| payload_text(p, "node"))
@@ -824,7 +919,7 @@ fn execution_entry(
         ),
         // A graph `follow:` node suspended the run (`continued`) to await its
         // child chain. Renders as a boundary milestone — the follow node in the
-        // meta — but carries NO drill-in action: the suspend event names only
+        // meta — but carries NO drill-in intent: the suspend event names only
         // the local follow node, never the child chain (it is dispatched after
         // the checkpoint), so there is no child ref to aim at. The child braid is
         // reached from the thread row's `watch child` affordance, which reads the
@@ -915,12 +1010,12 @@ fn execution_entry(
     //   turn additionally offers retry — re-submitting its own stimulus as a
     //   continuation. timed_out / killed are inspectable but NOT retryable:
     //   the daemon refuses continuation for those settled statuses (v1).
-    let (action, secondary_action) = match event {
+    let (intent, secondary_intent) = match event {
         // Step INTO the spawned child (the dispatch edge): a child is a fresh
         // root, so its chain_root equals its own id. DrillThread pushes a return
         // frame, so Backspace walks back to this parent braid.
         FeedEventType::ChildThreadSpawned => (
-            meta.clone().map(|id| RyeOsAction::DrillThread {
+            meta.clone().map(|id| RyeOsUiIntent::DrillThread {
                 thread_id: id.clone(),
                 chain_root_id: id,
                 label: payload.and_then(|p| payload_text(p, "node")),
@@ -928,11 +1023,11 @@ fn execution_entry(
             None,
         ),
         FeedEventType::ThreadFailed => (
-            Some(inspect_action(&primary, record)),
-            retry_action(record, stimulus),
+            Some(inspect_intent(&primary, record)),
+            retry_intent(record, stimulus),
         ),
         FeedEventType::ThreadKilled | FeedEventType::ThreadTimedOut => {
-            (Some(inspect_action(&primary, record)), None)
+            (Some(inspect_intent(&primary, record)), None)
         }
         _ => (None, None),
     };
@@ -940,8 +1035,8 @@ fn execution_entry(
         primary,
         meta,
         tone,
-        action,
-        secondary_action,
+        intent,
+        secondary_intent,
     })
 }
 
@@ -956,32 +1051,32 @@ fn terminal_reason(status: &str, payload: Option<&Value>) -> String {
     }
 }
 
-/// The inspect action for an error terminal: the title is the visible line
+/// The inspect intent for an error terminal: the title is the visible line
 /// (carrying `failed — <reason>`), the detail is the FULL raw event —
 /// `{ event_type, thread_id, chain_root_id, chain_seq, payload, … }` — not
 /// just the payload, so inspecting a failure in an interleaved chain shows
 /// which turn (and sequence) it was.
-fn inspect_action(title: &str, record: &ProjectedRecord) -> RyeOsAction {
-    RyeOsAction::InspectSummary {
+fn inspect_intent(title: &str, record: &ProjectedRecord) -> RyeOsUiIntent {
+    RyeOsUiIntent::InspectSummary {
         title: title.to_string(),
         detail: record.raw.clone(),
     }
 }
 
-/// The retry action for a recoverable failed turn: re-submit that thread's own
+/// The retry intent for a recoverable failed turn: re-submit that thread's own
 /// stimulus as a continuation, retargeted at the selected failed thread.
 /// `None` unless BOTH the thread's chain coordinates and its stimulus text are
 /// known — a marker-only turn (`cognition_in` with no `content`) yields no
 /// retry input, and correlation is keyed by `thread_id` so interleaved chains
 /// never cross-attribute.
-fn retry_action(
+fn retry_intent(
     record: &ProjectedRecord,
     stimulus: &std::collections::BTreeMap<String, String>,
-) -> Option<RyeOsAction> {
+) -> Option<RyeOsUiIntent> {
     let thread_id = record.raw.get("thread_id").and_then(Value::as_str)?;
     let chain_root_id = record.raw.get("chain_root_id").and_then(Value::as_str)?;
     let input = stimulus.get(thread_id)?.clone();
-    Some(RyeOsAction::PrefillRetryTurn {
+    Some(RyeOsUiIntent::PrefillRetryTurn {
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         input,
@@ -1161,8 +1256,8 @@ fn apply_paired_runtime_entry(
                         primary: graph_step_summary(payload),
                         meta,
                         tone,
-                        action: None,
-                        secondary_action: None,
+                        intent: None,
+                        secondary_intent: None,
                     },
                     Some(&record),
                 );
@@ -1214,8 +1309,8 @@ fn apply_paired_runtime_entry(
                         primary: tool_call_summary(payload, &record),
                         meta,
                         tone,
-                        action: None,
-                        secondary_action: None,
+                        intent: None,
+                        secondary_intent: None,
                     },
                     Some(&record),
                 );
@@ -1279,7 +1374,7 @@ fn graph_step_result_meta(payload: &Value) -> Option<String> {
 }
 
 /// The stable identity of one tool exchange: the directive runtime keys by
-/// `call_id`; graph action nodes carry none, so their identity is composed
+/// `call_id`; graph intent nodes carry none, so their identity is composed
 /// from the run coordinates.
 fn tool_call_key(payload: &Value) -> String {
     payload_text(payload, "call_id").unwrap_or_else(|| {
@@ -1779,7 +1874,7 @@ mod tests {
         let Some(RyeOsTimelineEntryVm::Line {
             primary,
             meta,
-            action,
+            intent,
             ..
         }) = entry
         else {
@@ -1789,8 +1884,8 @@ mod tests {
         assert_eq!(meta.as_deref(), Some("T-child"));
         assert!(
             matches!(
-                action,
-                Some(RyeOsAction::DrillThread { thread_id, chain_root_id, label })
+                intent,
+                Some(RyeOsUiIntent::DrillThread { thread_id, chain_root_id, label })
                     if thread_id == "T-child" && chain_root_id == "T-child"
                         && label.as_deref() == Some("study")
             ),
@@ -1806,13 +1901,13 @@ mod tests {
             "payload": { "child_thread_id": "T-child" }
         }));
         let Some(RyeOsTimelineEntryVm::Line {
-            primary, action, ..
+            primary, intent, ..
         }) = entry
         else {
             panic!("expected a forked-subthread line");
         };
         assert_eq!(primary, "forked subthread");
-        assert!(matches!(action, Some(RyeOsAction::DrillThread { .. })));
+        assert!(matches!(intent, Some(RyeOsUiIntent::DrillThread { .. })));
     }
 
     #[test]
@@ -1851,7 +1946,7 @@ mod tests {
     fn graph_follow_suspend_renders_a_boundary_milestone_without_a_drill_in() {
         // The suspend event names only the local follow node (the child chain is
         // dispatched after the checkpoint), so it renders as an accent milestone
-        // with the follow node in the meta and NO action — there is no child ref
+        // with the follow node in the meta and NO intent — there is no child ref
         // to aim at (drill-in to the child is the row's `watch child` affordance).
         let entry = exec(json!({
             "event_type": "graph_follow_suspended",
@@ -1861,7 +1956,7 @@ mod tests {
             primary,
             meta,
             tone,
-            action,
+            intent,
             ..
         }) = entry
         else {
@@ -1871,7 +1966,7 @@ mod tests {
         assert_eq!(meta.as_deref(), Some("fetch"));
         assert!(matches!(tone, RyeOsTone::Accent));
         assert!(
-            action.is_none(),
+            intent.is_none(),
             "the suspend event carries no child ref to drill into"
         );
     }
@@ -1895,10 +1990,10 @@ mod tests {
         assert!(
             matches!(
                 entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, tone, action, .. }]
+                [RyeOsTimelineEntryVm::Line { primary, tone, intent, .. }]
                     if primary == "resumed with child result"
                         && matches!(tone, RyeOsTone::Accent)
-                        && action.is_none()
+                        && intent.is_none()
             ),
             "only the follow-resume boundary survives; the segment-cut continued is dropped: {entries:?}"
         );
@@ -1910,8 +2005,8 @@ mod tests {
         assert!(matches!(
             entry,
             Some(RyeOsTimelineEntryVm::Line {
-                action: None,
-                secondary_action: None,
+                intent: None,
+                secondary_intent: None,
                 ..
             })
         ));
@@ -1919,7 +2014,7 @@ mod tests {
 
     #[test]
     fn error_terminals_are_inspectable_but_completed_and_cancelled_are_not() {
-        // failed / timed_out / killed each carry an inspect (Enter) action whose
+        // failed / timed_out / killed each carry an inspect (Enter) intent whose
         // title is the visible line and whose detail is the FULL raw event.
         for event_type in ["thread_failed", "thread_timed_out", "thread_killed"] {
             let raw = json!({
@@ -1931,13 +2026,13 @@ mod tests {
             });
             let entry = exec(raw.clone());
             let Some(RyeOsTimelineEntryVm::Line {
-                primary, action, ..
+                primary, intent, ..
             }) = entry
             else {
                 panic!("expected a terminal line for {event_type}");
             };
-            match action {
-                Some(RyeOsAction::InspectSummary { title, detail }) => {
+            match intent {
+                Some(RyeOsUiIntent::InspectSummary { title, detail }) => {
                     assert_eq!(title, primary, "inspect title is the visible line");
                     assert_eq!(detail, raw, "inspect detail is the full raw event");
                 }
@@ -1951,8 +2046,8 @@ mod tests {
                 matches!(
                     entry,
                     Some(RyeOsTimelineEntryVm::Line {
-                        action: None,
-                        secondary_action: None,
+                        intent: None,
+                        secondary_intent: None,
                         ..
                     })
                 ),
@@ -1975,15 +2070,15 @@ mod tests {
         // failed + known stimulus → retry pre-fills that turn's own input,
         // retargeted at the selected failed thread.
         let Some(RyeOsTimelineEntryVm::Line {
-            secondary_action, ..
+            secondary_intent, ..
         }) = execution_entry(&raw_record(failed.clone()), &stimulus)
         else {
             panic!("expected a failed line");
         };
         assert!(
             matches!(
-                secondary_action,
-                Some(RyeOsAction::PrefillRetryTurn { thread_id, chain_root_id, input })
+                secondary_intent,
+                Some(RyeOsUiIntent::PrefillRetryTurn { thread_id, chain_root_id, input })
                     if thread_id == "T-1" && chain_root_id == "R-1" && input == "run the thing"
             ),
             "retry recovers the failed thread's own stimulus"
@@ -1992,15 +2087,15 @@ mod tests {
         // failed but stimulus unknown (marker-only turn / missing) → inspect
         // only, no retry input to offer.
         let Some(RyeOsTimelineEntryVm::Line {
-            action,
-            secondary_action,
+            intent,
+            secondary_intent,
             ..
         }) = execution_entry(&raw_record(failed), &std::collections::BTreeMap::new())
         else {
             panic!("expected a failed line");
         };
-        assert!(matches!(action, Some(RyeOsAction::InspectSummary { .. })));
-        assert!(secondary_action.is_none(), "no stimulus → no retry");
+        assert!(matches!(intent, Some(RyeOsUiIntent::InspectSummary { .. })));
+        assert!(secondary_intent.is_none(), "no stimulus → no retry");
 
         // timed_out / killed are inspectable but NOT retryable even with a known
         // stimulus — the daemon refuses continuation for those statuses (v1).
@@ -2012,16 +2107,16 @@ mod tests {
                 "payload": {}
             });
             let Some(RyeOsTimelineEntryVm::Line {
-                action,
-                secondary_action,
+                intent,
+                secondary_intent,
                 ..
             }) = execution_entry(&raw_record(raw), &stimulus)
             else {
                 panic!("expected a terminal line for {event_type}");
             };
-            assert!(matches!(action, Some(RyeOsAction::InspectSummary { .. })));
+            assert!(matches!(intent, Some(RyeOsUiIntent::InspectSummary { .. })));
             assert!(
-                secondary_action.is_none(),
+                secondary_intent.is_none(),
                 "{event_type} is inspectable but not retryable"
             );
         }
@@ -2052,8 +2147,8 @@ mod tests {
         let entries = timeline_entries(records);
         let retry = entries.iter().find_map(|entry| match entry {
             RyeOsTimelineEntryVm::Line {
-                secondary_action:
-                    Some(RyeOsAction::PrefillRetryTurn {
+                secondary_intent:
+                    Some(RyeOsUiIntent::PrefillRetryTurn {
                         input, thread_id, ..
                     }),
                 ..
@@ -2089,7 +2184,7 @@ mod tests {
             entries.iter().all(|entry| !matches!(
                 entry,
                 RyeOsTimelineEntryVm::Line {
-                    secondary_action: Some(_),
+                    secondary_intent: Some(_),
                     ..
                 }
             )),
@@ -2195,7 +2290,7 @@ mod tests {
         use super::super::content::{project_records, ViewBinding};
 
         // This intentionally keeps the shipped tool projection shape
-        // (`tool/call_id`) while feeding graph action events (`item_id/node/step`)
+        // (`tool/call_id`) while feeding graph intent events (`item_id/node/step`)
         // to prove the coalescer repairs the fallback from raw event_type lines.
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",

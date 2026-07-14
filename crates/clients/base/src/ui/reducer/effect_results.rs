@@ -14,13 +14,17 @@ impl RyeOsCore {
         let Some(expected) = self.pending_effects.remove(&result.id) else {
             return Vec::new();
         };
+        let completed_source_key = match &expected {
+            RyeOsEffectKind::FetchSource { tile_id, .. } => Some(tile_id.clone()),
+            _ => None,
+        };
 
         if !effect_result_kind_matches(&expected, &result.kind) {
             self.notice(
                 "RyeOS ignored a mismatched platform effect result.",
                 RyeOsTone::Warn,
             );
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
         if !result.ok {
@@ -28,12 +32,12 @@ impl RyeOsCore {
                 effect_failure_notice(&expected, result.error.as_deref()),
                 RyeOsTone::Danger,
             );
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
         if matches!(
             result.kind,
-            RyeOsEffectResultKind::ActionInvocation
+            RyeOsEffectResultKind::InvocationDispatch
                 | RyeOsEffectResultKind::ThreadCommandSubmitted
                 | RyeOsEffectResultKind::Invoked
         ) {
@@ -42,18 +46,45 @@ impl RyeOsCore {
                 .as_ref()
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            return self.apply_invocation_result(&expected, result.kind, data);
+            let effects = self.apply_invocation_result(&expected, result.kind, data);
+            return self.finish_source_effect(completed_source_key.as_deref(), effects);
         }
 
         let Some(data) = result.data else {
             self.bump_generation();
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         };
 
-        self.apply_source_result(&expected, result.kind, result.id, data)
+        let effects = self.apply_source_result(&expected, result.kind, result.id, data);
+        self.finish_source_effect(completed_source_key.as_deref(), effects)
     }
 
-    /// The command-result arms (`ActionInvocation` / `ThreadCommandSubmitted` /
+    fn finish_source_effect(
+        &mut self,
+        completed_source_key: Option<&str>,
+        mut effects: Vec<RyeOsEffect>,
+    ) -> Vec<RyeOsEffect> {
+        if let Some(effect) = completed_source_key
+            .and_then(|source_key| self.release_deferred_source_fetch(source_key))
+        {
+            effects.push(effect);
+        }
+        effects
+    }
+
+    /// Effect batches resolve concurrently, so an older shared-dataset
+    /// snapshot can arrive after a newer one; only the freshest may land.
+    fn dataset_is_latest(&mut self, key: &'static str, result_id: u64) -> bool {
+        let latest = self.data.dataset_epoch.entry(key).or_insert(0);
+        if result_id >= *latest {
+            *latest = result_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The command-result arms (`InvocationDispatch` / `ThreadCommandSubmitted` /
     /// `Invoked`) — a synthetic-`Null`-defaulted body that always resolves to a
     /// notice plus a refresh, never to the parse-and-store path.
     fn apply_invocation_result(
@@ -63,7 +94,7 @@ impl RyeOsCore {
         data: serde_json::Value,
     ) -> Vec<RyeOsEffect> {
         match kind {
-            RyeOsEffectResultKind::ActionInvocation => {
+            RyeOsEffectResultKind::InvocationDispatch => {
                 self.notice(effect_success_notice(expected, &data), RyeOsTone::Good);
                 vec![
                     self.emit(RyeOsEffectKind::FetchDimension),
@@ -254,45 +285,62 @@ impl RyeOsCore {
     ) -> Vec<RyeOsEffect> {
         match kind {
             RyeOsEffectResultKind::Dimension => {
-                self.apply_parsed::<RyeOsDimensionDto>(data, "dimension", |core, dimension| {
-                    core.data.dimension = Some(dimension);
-                });
+                if self.dataset_is_latest("dimension", result_id) {
+                    self.apply_parsed::<RyeOsDimensionDto>(data, "dimension", |core, dimension| {
+                        core.data.dimension = Some(dimension);
+                    });
+                }
             }
             RyeOsEffectResultKind::SourceData => {
                 if let RyeOsEffectKind::FetchSource { tile_id, .. } = expected {
-                    // Freshness guard: only the newest request for this key may
-                    // land. An older fetch (e.g. the previously selected thread's
-                    // section) resolving late is dropped, so a reused single-lens
-                    // tile never shows mixed data from two selections.
-                    let is_latest = self
+                    // Freshness guard, two clauses:
+                    // - the floor refuses stragglers from before the key's
+                    //   subject changed (lens swap, drill return, selection
+                    //   facet write) — mixed-subject data can never land;
+                    // - within one subject, responses land MONOTONICALLY
+                    //   against what is stored. Requiring the NEWEST request
+                    //   here instead would starve any view whose query
+                    //   latency exceeds the hint-refetch cadence into a
+                    //   permanent "loading" — every response would arrive
+                    //   already superseded.
+                    let floor = self
                         .data
-                        .source_epoch
+                        .source_floor
                         .get(tile_id)
-                        .map_or(true, |&latest| result_id >= latest);
-                    if is_latest {
+                        .copied()
+                        .unwrap_or(0);
+                    let stored = self.data.source_stored_epoch.get(tile_id).copied();
+                    if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
+                        self.data
+                            .source_stored_epoch
+                            .insert(tile_id.clone(), result_id);
                         self.rebuild_timeline_source_cache(tile_id);
                     }
                     self.bump_generation();
                 }
             }
             RyeOsEffectResultKind::Projects => {
-                self.apply_parsed::<super::dto::RyeOsProjectsDto>(
-                    data,
-                    "projects",
-                    |core, projects| {
-                        core.data.projects = Some(projects);
-                    },
-                );
+                if self.dataset_is_latest("projects", result_id) {
+                    self.apply_parsed::<super::dto::RyeOsProjectsDto>(
+                        data,
+                        "projects",
+                        |core, projects| {
+                            core.data.projects = Some(projects);
+                        },
+                    );
+                }
             }
             RyeOsEffectResultKind::Topology => {
-                self.apply_parsed::<RyeOsTopologyDto>(data, "topology", |core, topology| {
-                    core.data.topology = Some(topology);
-                });
+                if self.dataset_is_latest("topology", result_id) {
+                    self.apply_parsed::<RyeOsTopologyDto>(data, "topology", |core, topology| {
+                        core.data.topology = Some(topology);
+                    });
+                }
             }
-            RyeOsEffectResultKind::ActionInvocation
+            RyeOsEffectResultKind::InvocationDispatch
             | RyeOsEffectResultKind::ThreadCommandSubmitted
             | RyeOsEffectResultKind::Invoked => {
                 unreachable!("command results are handled before optional data extraction")
@@ -322,9 +370,11 @@ impl RyeOsCore {
                 return self.apply_project_opened(data);
             }
             RyeOsEffectResultKind::Threads => {
-                self.apply_parsed::<RyeOsThreadsDto>(data, "threads", |core, threads| {
-                    core.data.threads = Some(threads);
-                });
+                if self.dataset_is_latest("threads", result_id) {
+                    self.apply_parsed::<RyeOsThreadsDto>(data, "threads", |core, threads| {
+                        core.data.threads = Some(threads);
+                    });
+                }
             }
             RyeOsEffectResultKind::Items => {
                 self.apply_parsed::<RyeOsItemsDto>(data, "items", |core, items| {
@@ -335,7 +385,7 @@ impl RyeOsCore {
                         } = expected
                         {
                             core.data.tile_items.insert(tile_id.clone(), items.clone());
-                        } else {
+                        } else if core.dataset_is_latest("items", result_id) {
                             core.data.items = Some(items);
                         }
                     }
@@ -427,6 +477,9 @@ impl RyeOsCore {
         self.data.tile_files.clear();
         self.data.sources.clear();
         self.data.source_epoch.clear();
+        self.data.source_stored_epoch.clear();
+        self.data.source_floor.clear();
+        self.deferred_source_fetches.clear();
         self.data.timeline_sources.clear();
         self.data.file_read = None;
         self.pending_effects
@@ -512,9 +565,15 @@ const REFUSED_NOTICE: &str = "Delivery refused.";
 
 fn effect_success_notice(expected: &RyeOsEffectKind, data: &serde_json::Value) -> String {
     match expected {
-        RyeOsEffectKind::InvokeAction { command_id, .. } => {
-            let item_ref =
-                json_field_text(data, &["command_id"]).unwrap_or_else(|| command_id.clone());
+        RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
+            // `data.target.ref` is a path, not key alternatives — reaching
+            // for `json_field_text` here would stringify the whole target.
+            let item_ref = data
+                .get("target")
+                .and_then(|target| target.get("ref"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| item_ref.clone());
             format!("Ran {item_ref}.")
         }
         RyeOsEffectKind::SubmitThreadCommand {
@@ -531,8 +590,8 @@ fn effect_failure_notice(expected: &RyeOsEffectKind, error: Option<&str>) -> Str
         .and_then(effect_error_summary)
         .unwrap_or_else(|| "RyeOS platform effect failed".to_string());
     match expected {
-        RyeOsEffectKind::InvokeAction { command_id, .. } => {
-            format!("Run {command_id} failed: {reason}")
+        RyeOsEffectKind::DispatchInvocation { item_ref, .. } => {
+            format!("Run {item_ref} failed: {reason}")
         }
         RyeOsEffectKind::SubmitThreadCommand {
             thread_id,
@@ -633,8 +692,8 @@ fn effect_result_kind_matches(expected: &RyeOsEffectKind, actual: &RyeOsEffectRe
             RyeOsEffectKind::ReadFile { .. },
             RyeOsEffectResultKind::FileRead
         ) | (
-            RyeOsEffectKind::InvokeAction { .. },
-            RyeOsEffectResultKind::ActionInvocation
+            RyeOsEffectKind::DispatchInvocation { .. },
+            RyeOsEffectResultKind::InvocationDispatch
         ) | (
             RyeOsEffectKind::SubmitThreadCommand { .. },
             RyeOsEffectResultKind::ThreadCommandSubmitted
@@ -663,7 +722,8 @@ fn effect_depends_on_project_binding(kind: &RyeOsEffectKind) -> bool {
             | RyeOsEffectKind::FetchFileSpace { .. }
             | RyeOsEffectKind::ListFiles { .. }
             | RyeOsEffectKind::ReadFile { .. }
-            | RyeOsEffectKind::InvokeAction { .. }
+            | RyeOsEffectKind::DispatchInvocation { .. }
+            | RyeOsEffectKind::FetchSource { .. }
     )
 }
 
@@ -942,8 +1002,84 @@ mod tests {
         );
     }
 
+    /// Deliver a `SourceData` result carrying `{ "tag": <tag> }`.
+    fn deliver(core: &mut RyeOsCore, id: u64, tag: &str) {
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(serde_json::json!({ "tag": tag })),
+                error: None,
+            },
+        });
+    }
+
     #[test]
-    fn refetching_a_sections_view_clears_prior_section_data() {
+    fn superseded_first_response_still_lands_when_nothing_is_stored() {
+        // A refetch cadence faster than the query latency must not starve
+        // the view: the FIRST response to arrive renders even though a
+        // newer request is already in flight; the newer response then
+        // replaces it monotonically.
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/slow");
+        let older = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("fetch emitted");
+        let newer = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("fetch emitted");
+        assert!(newer.id > older.id);
+
+        deliver(&mut core, older.id, "first");
+        assert_eq!(
+            core.data.sources["K"]["tag"], "first",
+            "superseded-but-first response must render, not starve"
+        );
+        deliver(&mut core, newer.id, "second");
+        assert_eq!(core.data.sources["K"]["tag"], "second");
+    }
+
+    #[test]
+    fn facet_write_floor_refuses_pre_write_stragglers() {
+        // Even with the store empty after eviction, a response from a fetch
+        // issued BEFORE the facet write (the old subject) must not land.
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "rows",
+                "refresh": { "on_facet": "selection" },
+                "source": { "ref": "service:test/detail", "params": {}, "collection": "rows" }
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/detail".to_string(),
+        });
+        let key = tile_id.0.to_string();
+        let pre_write = core
+            .emit_fetch_source_keyed(key.clone(), "view:test/detail")
+            .pop()
+            .expect("fetch emitted");
+
+        let refetch = core.effects_for_facet("selection");
+        assert!(!refetch.is_empty(), "facet write refetches the subscriber");
+
+        deliver(&mut core, pre_write.id, "old-subject");
+        assert!(
+            core.data.sources.get(&key).is_none(),
+            "pre-write straggler must be refused by the floor"
+        );
+        let fresh = refetch.last().expect("refetch effect");
+        deliver(&mut core, fresh.id, "new-subject");
+        assert_eq!(core.data.sources[&key]["tag"], "new-subject");
+    }
+
+    #[test]
+    fn refetching_a_sections_view_keeps_prior_data_while_pending() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(
             &mut core,
@@ -965,13 +1101,57 @@ mod tests {
             .sources
             .insert(k1.clone(), serde_json::json!({ "stale": "B" }));
 
-        // Refetching (the lens reused for a new selection) drops each section's
-        // prior response so the previous selection can't render underneath, and
-        // emits a fresh fetch per section.
+        // Refetching keeps each section's prior response rendering while the
+        // fresh fetches are in flight — hint-driven activity refreshes would
+        // otherwise blank the view every coalesced tick. Staleness is the
+        // epoch guard's job (see the out-of-order straggler test above), not
+        // the emitter's.
         let effects = core.emit_fetch_source_keyed("K".to_string(), "view:test/detail");
-        assert!(core.data.sources.get(&k0).is_none());
-        assert!(core.data.sources.get(&k1).is_none());
-        assert_eq!(effects.len(), 2);
+        assert!(core.data.sources.contains_key(&k0));
+        assert!(core.data.sources.contains_key(&k1));
+        assert_eq!(effects.len(), 2, "one fetch per section");
+    }
+
+    #[test]
+    fn facet_write_evicts_prior_section_data_for_subscribed_views() {
+        // The counterpart guard to keeps-prior above: a facet write means
+        // the SUBJECT changed, and the old subject's sections must never
+        // render underneath the new selection — even if the refetch is
+        // skipped or fails.
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "sections",
+                "refresh": { "on_facet": "selection" },
+                "sections": [
+                    { "title": "A", "source": { "ref": "service:a" }, "projection": {} },
+                    { "title": "B", "source": { "ref": "service:b" }, "projection": {} }
+                ]
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/detail".to_string(),
+        });
+        let key = tile_id.0.to_string();
+        let k0 = crate::ui::content::section_source_key(&key, 0);
+        let k1 = crate::ui::content::section_source_key(&key, 1);
+        core.data
+            .sources
+            .insert(k0.clone(), serde_json::json!({ "stale": "A" }));
+        core.data
+            .sources
+            .insert(k1.clone(), serde_json::json!({ "stale": "B" }));
+
+        let effects = core.effects_for_facet("selection");
+
+        assert!(
+            !core.data.sources.contains_key(&k0),
+            "old subject's section payload must not survive a facet write"
+        );
+        assert!(!core.data.sources.contains_key(&k1));
+        assert_eq!(effects.len(), 2, "one fresh fetch per section");
     }
 
     #[test]
@@ -979,7 +1159,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenProject {
+                intent: RyeOsUiIntent::OpenProject {
                     local_id: "prj_1".to_string(),
                 },
             },
@@ -1032,7 +1212,7 @@ mod tests {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::AddCurrentProject,
+                intent: RyeOsUiIntent::AddCurrentProject,
             },
         });
         assert!(matches!(
@@ -1224,11 +1404,11 @@ mod tests {
     }
 
     #[test]
-    fn action_invocation_result_notices_and_refreshes() {
+    fn invocation_dispatch_result_notices_and_refreshes() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1243,10 +1423,10 @@ mod tests {
             result: RyeOsEffectResult {
                 id: invoke_id,
                 ok: true,
-                kind: RyeOsEffectResultKind::ActionInvocation,
+                kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: Some(serde_json::json!({
                     "status": "executed",
-                    "command_id": "tool:demo/run",
+                    "target": { "kind": "ref", "ref": "tool:demo/run" },
                     "invocation_id": "inv-1"
                 })),
                 error: None,
@@ -1267,11 +1447,11 @@ mod tests {
     }
 
     #[test]
-    fn action_invocation_failure_names_item_and_structured_error() {
+    fn invocation_dispatch_failure_names_item_and_structured_error() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1286,10 +1466,11 @@ mod tests {
             result: RyeOsEffectResult {
                 id: invoke_id,
                 ok: false,
-                kind: RyeOsEffectResultKind::ActionInvocation,
+                kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: None,
                 error: Some(
-                    "/ui/api/actions/invoke: 500 {\"message\":\"capability denied\"}".to_string(),
+                    "/ui/api/invocations/dispatch: 500 {\"message\":\"capability denied\"}"
+                        .to_string(),
                 ),
             },
         });
@@ -1302,11 +1483,11 @@ mod tests {
     }
 
     #[test]
-    fn action_invocation_success_without_body_still_notices_and_refreshes() {
+    fn invocation_dispatch_success_without_body_still_notices_and_refreshes() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         let invoke = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ExecuteItem {
+                intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
                     parameters: serde_json::json!({}),
                 },
@@ -1321,7 +1502,7 @@ mod tests {
             result: RyeOsEffectResult {
                 id: invoke_id,
                 ok: true,
-                kind: RyeOsEffectResultKind::ActionInvocation,
+                kind: RyeOsEffectResultKind::InvocationDispatch,
                 data: None,
                 error: None,
             },
@@ -1465,7 +1646,7 @@ mod tests {
         let mut core = RyeOsCore::new(session(), BrowserViewport::default(), 0);
         let old = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ReadFile {
+                intent: RyeOsUiIntent::ReadFile {
                     root: "project_ai".to_string(),
                     path: "README.md".to_string(),
                 },
@@ -1473,7 +1654,7 @@ mod tests {
         });
         let new = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::ReadFile {
+                intent: RyeOsUiIntent::ReadFile {
                     root: "user_ai".to_string(),
                     path: "README.md".to_string(),
                 },
@@ -1522,7 +1703,7 @@ mod tests {
         seed_view(&mut core, "view:ryeos/items/space");
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
-                action: RyeOsAction::OpenView {
+                intent: RyeOsUiIntent::OpenView {
                     view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },

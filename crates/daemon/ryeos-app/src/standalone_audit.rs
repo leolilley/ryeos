@@ -21,7 +21,7 @@ pub struct StandaloneAuditRecord {
     pub ts: String,
     /// Always "standalone".
     pub mode: &'static str,
-    /// Full service ref, e.g. "service:system/status".
+    /// Full service ref, e.g. "service:node/status".
     pub service_ref: String,
     /// Endpoint extracted from the service YAML.
     pub endpoint: String,
@@ -106,8 +106,8 @@ mod tests {
         let record = StandaloneAuditRecord {
             ts: "2026-01-01T00:00:00Z".into(),
             mode: "standalone",
-            service_ref: "service:system/status".into(),
-            endpoint: "system.status".into(),
+            service_ref: "service:node/status".into(),
+            endpoint: "node.status".into(),
             status: "success",
             error_message: None,
             uid: 1000,
@@ -122,7 +122,7 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 1);
         let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(parsed["service_ref"], "service:system/status");
+        assert_eq!(parsed["service_ref"], "service:node/status");
         assert_eq!(parsed["status"], "success");
     }
 

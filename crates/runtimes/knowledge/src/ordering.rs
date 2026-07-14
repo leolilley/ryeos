@@ -41,15 +41,16 @@ pub fn extends_first(root_ref: &str, edges: &[GraphEdge]) -> Vec<OrderedItem> {
 
     // Add references from root in edge declaration order
     for edge in edges {
-        if edge.from == root_ref && edge.kind == EdgeKind::References {
-            if !result.iter().any(|i| i.ref_id == edge.to) {
-                let depth = edge.depth_from_root.unwrap_or(1);
-                result.push(OrderedItem {
-                    ref_id: edge.to.clone(),
-                    role: ComposeRole::Reference,
-                    depth,
-                });
-            }
+        if edge.from == root_ref
+            && edge.kind == EdgeKind::References
+            && !result.iter().any(|i| i.ref_id == edge.to)
+        {
+            let depth = edge.depth_from_root.unwrap_or(1);
+            result.push(OrderedItem {
+                ref_id: edge.to.clone(),
+                role: ComposeRole::Reference,
+                depth,
+            });
         }
     }
 

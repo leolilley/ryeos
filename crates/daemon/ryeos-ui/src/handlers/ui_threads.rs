@@ -6,7 +6,9 @@
 //! auth means the ryeos-ui always sees all threads (admin context).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -15,7 +17,6 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
-use ryeos_app::thread_lifecycle::ThreadListView;
 use ryeos_engine::contracts::ProjectContext;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -24,6 +25,16 @@ fn default_limit() -> usize {
 }
 
 const MAX_THREAD_LIST_LIMIT: usize = 2_000;
+static THREAD_LIST_CALLS: AtomicU64 = AtomicU64::new(0);
+static THREAD_LIST_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+struct ThreadListInFlightGuard;
+
+impl Drop for ThreadListInFlightGuard {
+    fn drop(&mut self) {
+        THREAD_LIST_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Read an optional string filter param: absent, non-string, or empty/blank all
 /// mean "unfiltered" (`None`). The client sends `""` for an unset filter facet,
@@ -62,6 +73,10 @@ fn active_filter(params: &Value) -> bool {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let started = Instant::now();
+    let call = THREAD_LIST_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let in_flight = THREAD_LIST_IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+    let _in_flight_guard = ThreadListInFlightGuard;
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let limit = params
@@ -94,33 +109,35 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         // `active` narrows to live (non-terminal) threads. The filter accepts
         // bools for authored views and text for the TUI live-filter input.
         active_only: active_filter(&params),
-    };
-
-    let exclude_item_prefixes = string_list_filter(&params, "exclude_item_prefixes");
-    let project_filter = project_filter(&params, caller.project_root())?;
-    let needs_post_filter = !exclude_item_prefixes.is_empty() || project_filter.is_some();
-    let query_limit = if needs_post_filter {
-        MAX_THREAD_LIST_LIMIT
-    } else {
-        limit
+        exclude_item_prefixes: string_list_filter(&params, "exclude_item_prefixes"),
+        project_root: project_filter(&params, caller.project_root())?,
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
     // execution facts (`execution.supports_continuation`) the ryeos-ui gates on.
-    let mut threads = state
+    let threads = state
         .threads
-        .list_thread_views_query(query_limit, &filter, sort)?;
-    if needs_post_filter {
-        threads.retain(|row| {
-            let item_allowed = !exclude_item_prefixes
-                .iter()
-                .any(|prefix| row.item.item_ref.starts_with(prefix));
-            let project_allowed = project_filter
-                .as_ref()
-                .is_none_or(|project| row_matches_project(row, project));
-            item_allowed && project_allowed
-        });
-        threads.truncate(limit);
+        .list_thread_views_query(limit, &filter, sort)?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if elapsed_ms >= 250 || in_flight >= 4 {
+        tracing::warn!(
+            call,
+            in_flight,
+            elapsed_ms,
+            rows = threads.len(),
+            limit,
+            "slow or overlapping ryeos-ui thread-list reconciliation"
+        );
+    } else {
+        tracing::debug!(
+            call,
+            in_flight,
+            elapsed_ms,
+            rows = threads.len(),
+            limit,
+            "ryeos-ui thread-list reconciliation"
+        );
     }
 
     Ok(serde_json::json!({
@@ -148,25 +165,6 @@ fn canonicalize_project_filter(path: &str) -> Result<PathBuf> {
 fn canonicalize_existing_dir(path: &str) -> Result<PathBuf> {
     let canonical = Path::new(path).canonicalize()?;
     Ok(canonical)
-}
-
-fn row_matches_project(row: &ThreadListView, project: &Path) -> bool {
-    if let Some(row_project) = &row.project {
-        return Path::new(&row_project.path)
-            .canonicalize()
-            .is_ok_and(|path| path == project);
-    }
-    is_effectively_active(row)
-}
-
-fn is_effectively_active(row: &ThreadListView) -> bool {
-    row.follow
-        .as_ref()
-        .is_some_and(|follow| follow.role == "suspended_parent")
-        || !matches!(
-            row.item.status.as_str(),
-            "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-        )
 }
 
 #[derive(serde::Deserialize)]
@@ -373,6 +371,12 @@ fn follow_rows(follow: Option<&ryeos_app::thread_lifecycle::FollowFact>) -> Valu
         rows.extend(row("child thread", f.child_thread_id.clone()));
         rows.extend(row("child status", f.child_terminal_status.clone()));
         rows.extend(row(
+            "cohort progress",
+            f.cohort
+                .as_ref()
+                .map(|cohort| format!("{} done / {} expected", cohort.done, cohort.expected)),
+        ));
+        rows.extend(row(
             "resume successor",
             f.parent_successor_thread_id.clone(),
         ));
@@ -490,6 +494,10 @@ mod tests {
             // Child still running → no terminal status → the row is dropped.
             child_terminal_status: None,
             parent_successor_thread_id: Some("T-succ".to_string()),
+            cohort: Some(ryeos_app::thread_lifecycle::FollowCohortProgress {
+                done: 1,
+                expected: 3,
+            }),
         };
         let rows = follow_rows(Some(&f));
         let by_label: std::collections::HashMap<&str, &str> = rows
@@ -503,6 +511,7 @@ mod tests {
         assert_eq!(by_label["follow node"], "n_follow");
         assert_eq!(by_label["child chain"], "T-child");
         assert_eq!(by_label["resume successor"], "T-succ");
+        assert_eq!(by_label["cohort progress"], "1 done / 3 expected");
         // The still-running child contributes no terminal-status row.
         assert!(!by_label.contains_key("child status"));
     }
@@ -520,6 +529,7 @@ mod tests {
             child_chain_root_id: None,
             child_terminal_status: None,
             parent_successor_thread_id: Some("T-succ".to_string()),
+            cohort: None,
         };
         let rows = follow_rows(Some(&f));
         let arr = rows.as_array().unwrap();

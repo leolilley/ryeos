@@ -244,25 +244,6 @@ fn apply_fog(color: &Rgb, z: f32) -> Rgb {
 
 /// Draw an antialiased line using Wu's algorithm.
 fn draw_line_wu(buf: &mut [u8], x0: f32, y0: f32, x1: f32, y1: f32, color: &Rgb, opacity: f32) {
-    let mut x0 = x0;
-    let mut y0 = y0;
-    let x1 = x1;
-    let y1 = y1;
-
-    let steep = (y1 - y0).abs() > (x1 - x0).abs();
-
-    if steep {
-        std::mem::swap(&mut x0, &mut y0);
-        // We need to also swap x1/y1 for the steep case
-    }
-
-    let (x0, y0, x1, y1) = if steep {
-        (y0, x0, y1, x1) // already swapped x0↔y0, need to swap x1↔y1 too
-    } else {
-        (x0, y0, x1, y1)
-    };
-
-    // Re-do properly: just implement Wu directly
     let steep = (y1 - y0).abs() > (x1 - x0).abs();
     let (ax, ay, bx, by) = if steep {
         (y0, x0, y1, x1)

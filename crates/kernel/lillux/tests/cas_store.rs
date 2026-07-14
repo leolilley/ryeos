@@ -1,16 +1,14 @@
-//! Shard-path, blob-store, and atomic-write hardening for `lillux::cas`.
+//! Shard-path, blob-store, and batch-write hardening for `lillux::cas`.
 //!
 //! Companion to `cas_materialize_executable.rs`: exercises the content-
 //! addressed store's addressing math (`shard_path`, `valid_hash`), the
-//! `CasStore` blob round-trip and idempotency, and the crash-window
-//! guarantee of `atomic_write` / `atomic_write_batch` (a successful write
-//! leaves the target fully populated and no `.tmp.<pid>` sibling behind —
-//! a crash can only ever leave the temp, never a partial target).
+//! `CasStore` blob round-trip and idempotency, and the crash-window guarantee
+//! of `atomic_write_batch`.
 
 use std::fs;
 use std::path::Path;
 
-use lillux::cas::{atomic_write, atomic_write_batch, shard_path, valid_hash, CasStore};
+use lillux::cas::{atomic_write_batch, shard_path, valid_hash, CasStore};
 use lillux::sha256_hex;
 
 /// True when `dir` holds no atomic-write temp file (`*.tmp.<pid>`).
@@ -108,36 +106,6 @@ fn get_blob_absent_returns_none() {
 }
 
 // ── atomic write crash-window behavior ─────────────────────────────────
-
-#[test]
-fn atomic_write_creates_parents_and_leaves_no_temp() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let target = tmp.path().join("a").join("b").join("c").join("blob");
-
-    atomic_write(&target, b"payload").expect("write");
-
-    assert_eq!(fs::read(&target).expect("read"), b"payload");
-    assert!(
-        no_temp_files_left(target.parent().unwrap()),
-        "no temp file may survive a successful write"
-    );
-}
-
-#[test]
-fn atomic_write_replaces_existing_content() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let target = tmp.path().join("blob");
-
-    atomic_write(&target, b"first").expect("write 1");
-    atomic_write(&target, b"second").expect("write 2");
-
-    assert_eq!(
-        fs::read(&target).expect("read"),
-        b"second",
-        "rename replaces the target wholesale"
-    );
-    assert!(no_temp_files_left(tmp.path()));
-}
 
 #[test]
 fn atomic_write_batch_single_writes_and_cleans_up() {

@@ -4,6 +4,11 @@
 
 Lillux is a native Rust binary that provides the OS-level primitives beneath RYE. Every tool call in RYE eventually bottoms out in a Lillux primitive. It handles process lifecycle, content-addressed storage, cryptographic identity (signing, key management, and sealed secret envelopes), and time — nothing more. RYE never sees your secrets or environment variables; that happens at the Lillux level, below RYE entirely.
 
+Filesystem atomicity, flush, locking, and platform claims are defined in the
+[repository durability matrix](../../../docs/architecture/filesystem-durability.md).
+Batch writes and recursive removal are not multi-file atomic transactions, and
+directory durability is currently stronger on Unix than on non-Unix systems.
+
 ## Primitives
 
 | Primitive    | Command                                          | What it does                                                                     |
