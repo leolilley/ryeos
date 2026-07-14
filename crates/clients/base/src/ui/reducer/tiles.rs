@@ -210,6 +210,7 @@ impl RyeOsCore {
         self.data.tile_files.clear();
         self.data.tile_file_space.clear();
         self.data.sources.clear();
+        self.data.source_errors.clear();
         self.data.source_epoch.clear();
         self.data.source_stored_epoch.clear();
         self.data.source_floor.clear();
@@ -294,6 +295,7 @@ impl RyeOsCore {
             if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
                 let key = tile_id.0.to_string();
                 self.data.sources.remove(&key);
+                self.data.source_errors.remove(&key);
                 self.data.source_epoch.remove(&key);
                 self.data.source_stored_epoch.remove(&key);
                 self.data.timeline_sources.remove(&key);

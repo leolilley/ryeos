@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T02:18:23Z:c4532c769d21e068f43a14bcbfc10bbfc920a62b3f4bc2fcc7f271af95f4364e:PhTCUP2AUEVb+9KvwZbkxuZb5RIxUkmkZhkIZYRW3t42wb+jyEbmV5r9ynldd8u8hx4uRcBueWh13Y2+sOnJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T04:09:05Z:461e42f612af535926078ebe715656468a206e87aea2e4428a25d8c15c05a26d:amUTxxeHyGkMZOp/I2N2BP+L2+fcjVtBKYOqTpdadwHjAhWD+5uYaPRY7Jf2s0gTQWTmWyws0xYvbQ7TfzIhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -67,14 +67,14 @@ metadata:
       from: path
       key: description
     record_thread:
-      from: path
+      from: path_value
       key: record_thread
     ui_read_only:
-      from: path
+      from: path_value
       key: ui_read_only
     ui_dispatch:
       from: path
       key: ui_dispatch
     schema:
-      from: path
+      from: path_value
       key: schema
