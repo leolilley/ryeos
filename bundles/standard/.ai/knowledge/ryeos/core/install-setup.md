@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:e064200c1d998854d3cb14d15c37f575d764492a1ac9d69d4d3891fd1fa5e19e:uZiuoYEJdrusm+ElR3yJ8Ufui35qVaoN9TOdUNyQCdaZarzTz7ohjadE6NvnBvJ5JzJSFxwg8lCmCfmTPL6TCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:af09bf367d8afe45b3cd664ca37d326b4cd2e14c6989f3dd1dcea71b9f8c1947:GzQwwHsI55Mb7OudHkzL4WozIGYT74vQJVCoqS6tjDYpRaXaXjic0BQoxTeqwJ2gaH4AdhIeZWqeyixmg+I4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
-version: "3.0.0"
+version: "3.1.0"
 description: >
   How to install and set up ryEOS from package to initialized local node.
   Covers ryeos-node init, bundle discovery, trust pinning, identity, and
@@ -18,7 +18,7 @@ description: >
 yay -S ryeos
 ryeos init
 ryeos start
-ryeos status
+ryeos node status
 ```
 
 For packaged installs, `ryeos init` is the required setup command. It
@@ -29,7 +29,7 @@ ryeos init`.
 ## Lifecycle surface
 
 The user lifecycle surface is exactly `ryeos init`, `ryeos start`,
-`ryeos stop`, and `ryeos status`. There is no restart, enable/disable,
+`ryeos stop`, and `ryeos node status`. There is no restart, enable/disable,
 init-system integration, or separate probe command. Lifecycle commands
 are local-node operations and ignore `RYEOSD_URL`.
 
@@ -39,7 +39,8 @@ are local-node operations and ignore `RYEOSD_URL`.
 operator-owned setup. It creates layout, user key, node key, self-trust,
 official/additional publisher trust, discovers and plans bundles,
 installs and registers bundles, creates vault key material, writes
-default ingest-ignore config, and verifies post-init trust.
+create-once node policies (including the disabled strict sandbox policy), and
+verifies post-init trust.
 
 Daemon bootstrap can repair daemon-local artifacts after init, but it
 cannot install bundles or create operator trust artifacts and is not a
@@ -80,6 +81,7 @@ ryeos start
 <system-space>/.ai/node/vault/{private_key.pem,public_key.pem}
 <system-space>/.ai/node/auth/authorized_keys/<user>.toml
 <system-space>/.ai/node/config.yaml
+<system-space>/.ai/node/sandbox.yaml
 <system-space>/.ai/node/bundles/<name>.yaml
 <system-space>/.ai/node/ingest/ignore.yaml
 <system-space>/.ai/state/{operator.lock,lifecycle-start.lock,runtime.sqlite3,scheduler.sqlite3,objects,refs}
@@ -90,6 +92,11 @@ After `ryeos init`, `ryeos start` spawns `ryeosd`. The daemon verifies
 initialization before writing runtime state, acquires the state lock
 before unlinking sockets, repairs only daemon-local artifacts, then loads
 registered bundles and starts listeners.
+
+Bubblewrap is optional while the sandbox policy remains in its default
+`mode: disabled`. Install it before selecting `mode: enforce`, validate with
+`ryeos node doctor`, and restart. See [Execution
+Sandbox](node/execution-sandbox.md).
 
 For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator
 Init](node/operator-init.md), and [Identity Model](identity-model.md).

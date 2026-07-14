@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:d7cce1ea3f8ae2bc2a97eb9c5e85d9dd01174c007333a2d5063cbab1fe1dc3aa:0kbujKEJ/SX7xLzr1otzGrTd8d6bpnizMHPKdzpoCo4YnEdaEDnSHDBWekBlXPCxMgoOhhETZhtTNKcU1xAVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:612320d96f87de10ff4f9012a6d0c6ced8f4ce847dfe829ca17ca468b4b6fd29:1KcxZ68zSDi0eAfZVMGlx4ja6U+AxZ7cr8+EQWw2aYn2oFiFIFSad7h0L5+1EPBTa6YMEVMooEPhGbx8gcJVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
-version: "2.0.0"
+version: "2.1.0"
 description: >
   Daemon process lifecycle: strict startup ordering, local lifecycle RPC,
   daemon.json metadata, and shutdown cleanup.
@@ -31,12 +31,18 @@ initialization has been verified:
 6. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
    and fail when operator init artifacts are missing.
 7. Remove stale configured socket and ensure runtime paths.
-8. Two-phase node-config bootstrap, engine construction, service
-   self-check, route table build, listeners, scheduler, and metadata
+8. Two-phase node-config bootstrap, engine construction, and sandbox-policy
+   snapshot resolution. Invalid policy fails startup; disabled mode does not
+   require or inspect Bubblewrap.
+9. Service self-check, route table build, listeners, scheduler, and metadata
    write.
 
 The state-lock-before-socket-unlink ordering prevents a second daemon
 from unlinking the first daemon's live socket.
+
+The sandbox snapshot is immutable for the process lifetime. Operators validate
+edits with `ryeos node doctor` and restart before expecting a new policy
+generation. See [Execution Sandbox](../node/execution-sandbox.md).
 
 ## State lock
 

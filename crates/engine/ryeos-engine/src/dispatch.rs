@@ -28,7 +28,7 @@ pub fn execute_plan(
             PlanNode::DispatchSubprocess { spec, .. } => {
                 tracing::info!(cmd = %spec.cmd, "launching subprocess");
                 let start = std::time::Instant::now();
-                let completion = dispatch_subprocess(spec, plan.debug_raw, ctx)?;
+                let completion = dispatch_subprocess(spec, plan.debug_raw, &plan.root_ref, ctx)?;
                 let elapsed = start.elapsed();
                 tracing::debug!(
                     cmd = %spec.cmd,
@@ -71,9 +71,10 @@ pub fn execute_plan(
 fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
+    item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let request = sandbox_plan_request(spec, ctx)?;
+    let request = sandbox_plan_request(spec, item_ref, ctx)?;
     let capture = debug_raw.then(|| DebugCapture::from_spec(spec));
     let result = lillux::run(request);
     let debug = capture.map(|c| c.into_block(&result));
@@ -154,6 +155,7 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         stdin_data: spec.stdin_data.clone(),
         timeout: spec.timeout_secs as f64,
         limits: None,
+        inherited_fds: Vec::new(),
     })
 }
 
@@ -330,7 +332,7 @@ pub fn spawn_plan(
     if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
-                return spawn_subprocess(spec, plan.debug_raw, ctx);
+                return spawn_subprocess(spec, plan.debug_raw, &plan.root_ref, ctx);
             }
             PlanNode::Complete { .. } => {
                 return Err(EngineError::Internal(
@@ -345,9 +347,10 @@ pub fn spawn_plan(
 fn spawn_subprocess(
     spec: &PlanSubprocessSpec,
     debug_raw: bool,
+    item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    let request = sandbox_plan_request(spec, ctx)?;
+    let request = sandbox_plan_request(spec, item_ref, ctx)?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
     match lillux::spawn(request) {
@@ -369,22 +372,50 @@ fn spawn_subprocess(
 
 fn sandbox_plan_request(
     spec: &PlanSubprocessSpec,
+    item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
     let request = spec_to_request(spec)?;
-    let project_path = spec
-        .cwd
-        .as_deref()
-        .ok_or_else(|| EngineError::SandboxPolicyRefused {
-            reason: "executable plan requires an explicit working directory".to_string(),
-        })?;
-    crate::subprocess_spec::sandbox_lillux_request(
+    let mut verified_code = ctx.sandbox_verified_code.clone();
+    if let Some(command) = &spec.verified_command {
+        if !verified_code.contains(command) {
+            verified_code.push(command.clone());
+        }
+    }
+    let project_path = match &ctx.project_context {
+        crate::contracts::ProjectContext::LocalPath { path } => path.as_path(),
+        crate::contracts::ProjectContext::None
+        | crate::contracts::ProjectContext::SnapshotHash { .. }
+        | crate::contracts::ProjectContext::ProjectRef { .. }
+            if !ctx.sandbox.is_enforced() =>
+        {
+            // Disabled mode is an exact no-op. The value is never resolved or
+            // promoted into mount authority, but apply still accepts one
+            // uniform launch-context shape.
+            ctx.app_root.as_path()
+        }
+        crate::contracts::ProjectContext::None
+        | crate::contracts::ProjectContext::SnapshotHash { .. }
+        | crate::contracts::ProjectContext::ProjectRef { .. } => {
+            return Err(EngineError::SandboxPolicyRefused {
+                reason: "enforced executable plan requires an authoritative project context"
+                    .to_string(),
+            });
+        }
+    };
+    ctx.sandbox.apply(
         request,
-        ctx.sandbox_enabled,
-        &ctx.app_root,
-        project_path,
-        "tool:ryeos/internal/plan-subprocess",
-        &ctx.thread_id,
+        crate::sandbox::SandboxLaunchContext {
+            project_path,
+            project_authority: ctx.sandbox_project_authority,
+            state_root: ctx.sandbox_state_root.as_deref(),
+            checkpoint_dir: ctx.sandbox_checkpoint_dir.as_deref(),
+            bundle_roots: &ctx.sandbox_bundle_roots,
+            operator_trusted_keys_dir: ctx.sandbox_operator_trusted_keys_dir.as_deref(),
+            verified_code: &verified_code,
+            item_ref,
+            thread_id: &ctx.thread_id,
+        },
     )
 }
 
@@ -459,12 +490,19 @@ mod tests {
         fs::create_dir_all(&policy_dir).unwrap();
         fs::write(
             policy_dir.join("sandbox.yaml"),
-            "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\nwritable_paths: [\"{project}\"]\nallowed_env: [\"*\"]\nmax_open_files: 128\nmax_processes: 32\n",
+            "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /definitely/missing-bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
+        let sandbox = std::sync::Arc::new(crate::sandbox::SandboxRuntime::load(&app_root).unwrap());
         EngineContext {
             app_root,
-            sandbox_enabled: true,
+            sandbox,
+            sandbox_project_authority: crate::sandbox::SandboxProjectAuthority::External,
+            sandbox_state_root: None,
+            sandbox_checkpoint_dir: None,
+            sandbox_bundle_roots: Vec::new(),
+            sandbox_operator_trusted_keys_dir: None,
+            sandbox_verified_code: Vec::new(),
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),
@@ -505,6 +543,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
+                    verified_command: None,
                     args: vec!["hello world".into()],
                     cwd: Some(tempdir()),
                     env: HashMap::new(),
@@ -546,6 +585,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: "/bin/echo".into(),
+                    verified_command: None,
                     args: vec!["hello debug".into()],
                     cwd: Some(tempdir()),
                     env,
@@ -595,6 +635,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: host_executable("python3"),
+                    verified_command: None,
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -625,6 +666,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: "/bin/false".into(),
+                    verified_command: None,
                     args: Vec::new(),
                     cwd: Some(tempdir()),
                     env: HashMap::new(),
@@ -669,6 +711,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: host_executable("python3"),
+                    verified_command: None,
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -726,6 +769,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: host_executable("python3"),
+                    verified_command: None,
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env: HashMap::new(),
@@ -814,6 +858,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: host_executable("python3"),
+                    verified_command: None,
                     args: vec![script.to_string_lossy().to_string()],
                     cwd: Some(dir),
                     env,
@@ -845,6 +890,7 @@ mod tests {
                 id: PlanNodeId("entry:test".into()),
                 spec: PlanSubprocessSpec {
                     cmd: "/nonexistent/binary".into(),
+                    verified_command: None,
                     args: Vec::new(),
                     cwd: Some(tempdir()),
                     env: HashMap::new(),
@@ -861,7 +907,14 @@ mod tests {
             },
         ]);
 
-        let ctx = test_engine_context();
+        let mut ctx = test_engine_context();
+        fs::write(
+            ctx.app_root.join(".ai/node/sandbox.yaml"),
+            "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+        )
+        .unwrap();
+        ctx.sandbox =
+            std::sync::Arc::new(crate::sandbox::SandboxRuntime::load(&ctx.app_root).unwrap());
         let error = execute_plan(&plan, &ctx).unwrap_err();
         assert!(matches!(error, EngineError::SandboxPolicyRefused { .. }));
     }
@@ -885,6 +938,7 @@ mod tests {
         env.insert("RYEOS_CHAIN_ROOT_ID".into(), "chain:test".into());
         let spec = PlanSubprocessSpec {
             cmd: "/bin/echo".into(),
+            verified_command: None,
             args: vec!["hello".into()],
             cwd: None,
             env,

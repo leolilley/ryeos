@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-04T06:36:08Z:20651ffb354c0220f594594ffaf95ba99eec48f663dcc185543bb0c90eaf5a57:DaRDtDKu56exTGkj1QDADE2kdwKPlIoh9jLrAASCPgaC4GwsuQPjXTiHhCepsanpmSArjLn6rLWoyhRgj/PtCw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:436b8f23d806800ae18df9fefca4af01651bafe2f66eb9a8154252e3885c4fa6:0MnqM0ibaROD6UVzZpq6EewTECSvhl9iOOCE+ZWUtaF7/WUAI3fvBlrg5pM14SqXVGb6s5NVMe+yH5hccFRHBA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Tool Runtime Authority Model
 
 ## Status
@@ -97,6 +97,10 @@ callback enforcement      = daemon callback token effective_caps
 ```
 
 A future managed tool runtime may standardize launch behavior, sandboxing, streaming, cancellation, and resumability, but it should not itself be the source of authority. Authority should remain a daemon-side derivation from signed metadata and explicit delegation.
+
+Any future per-tool sandbox profile must only narrow the immutable node-owned
+policy. It cannot enable a disabled node boundary, add mounts/network access,
+or override node limits.
 
 ## Future triggers
 

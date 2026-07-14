@@ -10,6 +10,9 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub descriptor: &'a ryeos_engine::protocols::ProtocolDescriptor,
     pub binary: &'a str,
     pub project_path: &'a Path,
+    pub project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
+    pub state_root: Option<&'a Path>,
+    pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     pub envelope: &'a LaunchEnvelope,
     pub timeout_secs: u64,
     pub callback: &'a EnvelopeCallback,
@@ -19,7 +22,8 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub app_root: &'a Path,
-    pub sandbox_enabled: bool,
+    pub sandbox: &'a ryeos_engine::sandbox::SandboxRuntime,
+    pub verified_command: &'a ryeos_engine::sandbox::SandboxVerifiedCode,
     pub cas_root: &'a Path,
     /// Daemon-allocated checkpoint dir for a replay-aware runtime.
     pub checkpoint_dir: Option<&'a Path>,
@@ -32,6 +36,9 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         descriptor,
         binary,
         project_path,
+        project_authority,
+        state_root,
+        workspace_lifeline,
         envelope,
         timeout_secs,
         callback,
@@ -41,7 +48,8 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         thread_auth_token,
         roots,
         app_root,
-        sandbox_enabled,
+        sandbox,
+        verified_command,
         cas_root,
         checkpoint_dir,
         is_resume,
@@ -133,16 +141,24 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         .build();
 
     let request = super::super::lillux_bridge::to_lillux_request(&spec);
-    let request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
-        request,
-        sandbox_enabled,
-        app_root,
-        &spec.project_path,
-        &spec.item_ref.to_string(),
-        thread_id,
-    )
-    .map_err(|error| anyhow::anyhow!("sandbox_wrap failed: {error}"))?;
+    let request = sandbox
+        .apply(
+            request,
+            ryeos_engine::sandbox::SandboxLaunchContext {
+                project_path: &spec.project_path,
+                project_authority,
+                state_root,
+                checkpoint_dir,
+                bundle_roots: &envelope.roots.bundle_roots,
+                operator_trusted_keys_dir: Some(&envelope.roots.operator_trusted_keys_dir),
+                verified_code: std::slice::from_ref(verified_command),
+                item_ref: &envelope.resolution.root.resolved_ref,
+                thread_id,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!("sandbox apply failed: {error}"))?;
     let result = lillux::run(request);
+    drop(workspace_lifeline);
 
     if !result.success {
         return Ok(runtime_failure_result(&result.stderr, result.timed_out));

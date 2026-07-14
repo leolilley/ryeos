@@ -1160,9 +1160,16 @@ fn run_doctor(
         .err()
         .map(|e| format!("{e:#}"))
         .unwrap_or_default();
+    let sandbox = ryeos_engine::sandbox::SandboxRuntime::load(&app_root);
+    let sandbox_err = sandbox
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
 
     let report = ryeos_core_tools::actions::doctor::run_doctor(
         engine.as_ref().map_err(|_| engine_err.as_str()),
+        sandbox.as_ref().map_err(|_| sandbox_err.as_str()),
         &source_path,
         &dependency_roots,
         &operator_config_root,

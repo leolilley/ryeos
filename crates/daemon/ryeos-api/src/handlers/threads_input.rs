@@ -314,6 +314,10 @@ pub async fn handle(
         let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&directive)
             .map_err(|e| HandlerError::BadRequest(format!("directive ref: {e}")))?;
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_path.as_path().to_path_buf(),
+            state.engine.clone(),
+        );
         let _handle = crate::routes::launch::spawn_dispatch_launch(
             &state,
             parsed_ref,
@@ -322,6 +326,7 @@ pub async fn handle(
             ctx.fingerprint.clone(),
             ctx.scopes.clone(),
             thread_id.clone(),
+            launch_provenance,
             crate::routes::launch::DispatchLaunchOptions::default(),
         );
         return Ok(json!({

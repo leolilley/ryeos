@@ -431,22 +431,17 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         }
     }
 
-    // The daemon fails closed when its node-owned subprocess policy or backend
-    // is unavailable. Diagnose that boundary offline instead of making the
-    // operator infer it from a failed launch.
+    // Use the same policy loader as daemon and offline execution. Disabled is
+    // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
     if initialized {
         let policy_path = config
             .app_root
             .join(ryeos_engine::AI_DIR)
             .join("node/sandbox.yaml");
-        match inspect_sandbox_policy(&policy_path) {
+        match inspect_sandbox_policy(&config.app_root) {
             Ok(inspection) => checks.push(check(
                 "sandbox",
-                if inspection.has_warning {
-                    WARN
-                } else {
-                    OK
-                },
+                inspection.status,
                 inspection.detail,
             )),
             Err(error) => checks.push(check(
@@ -455,7 +450,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 serde_json::json!({
                     "policy": policy_path,
                     "error": format!("{error:#}"),
-                    "fix": "install Bubblewrap and repair the node policy; then run `ryeos node doctor` again",
+                    "fix": "repair `.ai/node/sandbox.yaml` (or set its mode to `disabled`); then run `ryeos node doctor` again",
                 }),
             )),
         }
@@ -605,6 +600,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                         // belong to the bundle-level `ryeos doctor <source>`.
                         let report = ryeos_core_tools::actions::doctor::run_doctor(
                             Err("node doctor runs static checks only"),
+                            Err("node doctor runs static checks only"),
                             &record.path,
                             &roots,
                             &operator_config_root,
@@ -695,113 +691,56 @@ fn check(
 #[derive(Debug)]
 struct SandboxPolicyInspection {
     detail: serde_json::Value,
-    has_warning: bool,
+    status: &'static str,
 }
 
-fn inspect_sandbox_policy(path: &std::path::Path) -> Result<SandboxPolicyInspection> {
-    use std::os::unix::fs::PermissionsExt;
+fn inspect_sandbox_policy(app_root: &std::path::Path) -> Result<SandboxPolicyInspection> {
+    use ryeos_engine::sandbox::{SandboxMode, SandboxRuntime};
 
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read sandbox policy {}", path.display()))?;
-    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
-        .with_context(|| format!("strictly parse sandbox policy {}", path.display()))?;
-    anyhow::ensure!(
-        policy.version == 1,
-        "unsupported sandbox policy version {} (expected 1)",
-        policy.version
-    );
-    anyhow::ensure!(
-        policy.backend_path.is_absolute(),
-        "sandbox backend path must be absolute: {}",
-        policy.backend_path.display()
-    );
-    let metadata = std::fs::metadata(&policy.backend_path).with_context(|| {
-        format!(
-            "sandbox backend {} is unavailable; install Bubblewrap (for example `sudo pacman -S bubblewrap` or `sudo apt install bubblewrap`)",
-            policy.backend_path.display()
-        )
-    })?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "sandbox backend is not a regular file: {}",
-        policy.backend_path.display()
-    );
-    anyhow::ensure!(
-        metadata.permissions().mode() & 0o111 != 0,
-        "sandbox backend is not executable: {}",
-        policy.backend_path.display()
-    );
-    let open_file_limits = policy
-        .max_open_files
-        .map(|max_open_files| lillux::SubprocessLimits {
-            max_open_files: Some(max_open_files),
-        });
-    let open_file_validation_error =
-        lillux::validate_subprocess_limits(open_file_limits.as_ref()).err();
-    let has_unenforced_process_limit = policy.max_processes.is_some();
-    let max_open_files_status = match (policy.max_open_files, open_file_validation_error.as_ref()) {
-        (None, _) => "not_configured",
-        (Some(_), None) => "enforced_on_spawn",
-        (Some(_), Some(_)) => "doctor_process_rejected",
+    let runtime = SandboxRuntime::load(app_root).map_err(|error| anyhow::anyhow!(error))?;
+    let inspection = runtime.inspection();
+    let enforced = runtime.mode() == SandboxMode::Enforce;
+    let open_files_status = match (enforced, inspection.limits.open_files) {
+        (false, _) => "inactive",
+        (true, None) => "not_configured",
+        (true, Some(_)) => "enforced_on_spawn",
     };
-    let max_processes_status = if has_unenforced_process_limit {
-        "configured_but_unenforced"
-    } else {
-        "not_configured"
-    };
-    let environment_mode = if policy.allowed_env.iter().any(|name| name == "*") {
-        "all_constructed"
-    } else {
-        "allowlist"
-    };
-
     Ok(SandboxPolicyInspection {
         detail: serde_json::json!({
-            "policy": path,
-            "version": policy.version,
-            "backend": policy.backend_path,
-            "backend_status": "regular executable",
-            "network": {
-                "allow_network": policy.allow_network,
-                "mode": if policy.allow_network { "host_shared" } else { "isolated" },
-            },
-            "environment": {
-                "mode": environment_mode,
-                "allowed_names": policy.allowed_env,
-            },
-            "writable_paths": policy.writable_paths,
-            "limits": {
-                "max_open_files": {
-                    "configured": policy.max_open_files,
-                    "status": max_open_files_status,
-                    "runtime_mechanism": if policy.max_open_files.is_some() {
+            "policy": runtime.source(),
+            "version": runtime.version(),
+            "mode": runtime.mode(),
+            "policy_digest": runtime.digest(),
+            "backend": inspection.backend,
+            "backend_status": if enforced { "captured_exact_executable_compatible" } else { "not_checked" },
+            "filesystem": inspection.filesystem,
+            "network": inspection.network,
+            "environment": inspection.environment,
+            "limits": inspection.limits,
+            "limit_enforcement": {
+                "open_files": {
+                    "configured": inspection.limits.open_files,
+                    "status": open_files_status,
+                    "runtime_mechanism": if enforced && inspection.limits.open_files.is_some() {
                         Some("RLIMIT_NOFILE (installed before exec; spawn fails closed on error)")
                     } else {
                         None
-                    },
-                    "doctor_process_validation": if policy.max_open_files.is_some() {
-                        Some(serde_json::json!({
-                            "status": if open_file_validation_error.is_some() {
-                                "rejected"
-                            } else {
-                                "accepted"
-                            },
-                            "error": open_file_validation_error,
-                            "note": "the daemon's service/container hard limit may differ",
-                        }))
+                    }
+                },
+                "verified_artifacts": {
+                    "file_bytes": inspection.limits.verified_artifact_file_bytes,
+                    "total_bytes": inspection.limits.verified_artifact_total_bytes,
+                    "files": inspection.limits.verified_artifact_files,
+                    "status": if enforced { "enforced_on_materialization" } else { "inactive" },
+                    "runtime_mechanism": if enforced {
+                        Some("metadata/read caps plus synchronized per-runtime file and byte accounting")
                     } else {
                         None
-                    },
-                },
-                "max_processes": {
-                    "configured": policy.max_processes,
-                    "status": max_processes_status,
-                    "mechanism": serde_json::Value::Null,
-                    "note": "accepted for policy compatibility but not enforced per sandbox; deferred to delegated cgroup v2 pids.max",
-                },
+                    }
+                }
             },
         }),
-        has_warning: has_unenforced_process_limit || open_file_validation_error.is_some(),
+        status: if enforced { OK } else { NA },
     })
 }
 
@@ -1036,17 +975,12 @@ fn default_app_root() -> PathBuf {
 mod tests {
     use super::*;
 
-    fn sandbox_policy(
-        backend: &std::path::Path,
-        version: u32,
-        max_open_files: u64,
-        max_processes: Option<u64>,
-    ) -> String {
-        let max_processes = max_processes
-            .map(|limit| format!("max_processes: {limit}\n"))
-            .unwrap_or_default();
+    fn sandbox_policy(backend: &std::path::Path, mode: &str, open_files: Option<u64>) -> String {
+        let open_files = open_files
+            .map(|limit| format!("  open_files: {limit}\n"))
+            .unwrap_or_else(|| "  open_files: null\n".to_string());
         format!(
-            "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths:\n  - \"{{project}}\"\nallowed_env:\n  - PATH\nmax_open_files: {max_open_files}\n{max_processes}",
+            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             backend.display(),
         )
     }
@@ -1078,131 +1012,91 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_doctor_accepts_absolute_regular_executable() {
+    fn sandbox_doctor_accepts_compatible_captured_backend() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".ai/node/identity")).unwrap();
+        std::fs::write(
+            temp.path().join(".ai/node/identity/public-identity.json"),
+            "{}",
+        )
+        .unwrap();
         let backend = temp.path().join("bwrap");
-        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            &backend,
+            b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 'bubblewrap 0.11.2' ;;\n  --help) echo '--bind-fd --ro-bind-fd --argv0' ;;\n  *) exit 2 ;;\nesac\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let policy = temp.path().join("sandbox.yaml");
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
         let max_open_files = supported_open_file_limit();
-        std::fs::write(&policy, sandbox_policy(&backend, 1, max_open_files, None)).unwrap();
-
-        let inspection = inspect_sandbox_policy(&policy).unwrap();
-        assert!(!inspection.has_warning);
-        assert_eq!(
-            inspection.detail["network"],
-            serde_json::json!({ "allow_network": false, "mode": "isolated" })
-        );
-        assert_eq!(
-            inspection.detail["environment"],
-            serde_json::json!({ "mode": "allowlist", "allowed_names": ["PATH"] })
-        );
-        assert_eq!(
-            inspection.detail["writable_paths"],
-            serde_json::json!(["{project}"])
-        );
-        assert_eq!(
-            inspection.detail["limits"]["max_open_files"],
-            serde_json::json!({
-                "configured": max_open_files,
-                "status": "enforced_on_spawn",
-                "runtime_mechanism": "RLIMIT_NOFILE (installed before exec; spawn fails closed on error)",
-                "doctor_process_validation": {
-                    "status": "accepted",
-                    "error": null,
-                    "note": "the daemon's service/container hard limit may differ",
-                },
-            })
-        );
-        assert_eq!(
-            inspection.detail["limits"]["max_processes"]["status"],
-            "not_configured"
-        );
-    }
-
-    #[test]
-    fn sandbox_doctor_warns_for_accepted_but_unenforced_process_limit() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let backend = temp.path().join("bwrap");
-        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let policy = temp.path().join("sandbox.yaml");
         std::fs::write(
             &policy,
-            sandbox_policy(&backend, 1, supported_open_file_limit(), Some(32)),
+            sandbox_policy(&backend, "enforce", Some(max_open_files)),
         )
         .unwrap();
 
-        let inspection = inspect_sandbox_policy(&policy).unwrap();
-        assert!(inspection.has_warning);
+        let inspection = inspect_sandbox_policy(temp.path()).unwrap();
+        assert_eq!(inspection.status, OK);
+        assert_eq!(inspection.detail["mode"], "enforce");
+        assert_eq!(inspection.detail["network"]["mode"], "isolated");
+        assert_eq!(inspection.detail["environment"]["allow"][0], "PATH");
+        assert_eq!(inspection.detail["filesystem"]["writable"][0], "{project}");
         assert_eq!(
-            inspection.detail["limits"]["max_processes"]["configured"],
-            32
-        );
-        assert_eq!(
-            inspection.detail["limits"]["max_processes"]["status"],
-            "configured_but_unenforced"
+            inspection.detail["limit_enforcement"]["open_files"]["status"],
+            "enforced_on_spawn"
         );
     }
 
     #[test]
-    fn sandbox_doctor_warns_when_its_process_rejects_the_open_file_limit() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn sandbox_doctor_reports_disabled_without_inspecting_backend() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = temp.path().join("bwrap");
-        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let policy = temp.path().join("sandbox.yaml");
-        let raw = sandbox_policy(&backend, 1, 128, None).replace(
-            "max_open_files: 128",
-            "max_open_files: 18446744073709551615",
-        );
-        std::fs::write(&policy, raw).unwrap();
+        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
+        std::fs::write(
+            &policy,
+            sandbox_policy(
+                std::path::Path::new("/definitely/missing-bwrap"),
+                "disabled",
+                Some(1024),
+            ),
+        )
+        .unwrap();
 
-        let inspection = inspect_sandbox_policy(&policy).unwrap();
-        assert!(inspection.has_warning);
+        let inspection = inspect_sandbox_policy(temp.path()).unwrap();
+        assert_eq!(inspection.status, NA);
+        assert_eq!(inspection.detail["mode"], "disabled");
+        assert_eq!(inspection.detail["backend_status"], "not_checked");
         assert_eq!(
-            inspection.detail["limits"]["max_open_files"]["status"],
-            "doctor_process_rejected"
-        );
-        assert_eq!(
-            inspection.detail["limits"]["max_open_files"]["doctor_process_validation"]["status"],
-            "rejected"
-        );
-        assert!(
-            inspection.detail["limits"]["max_open_files"]["doctor_process_validation"]["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("max_open_files"))
+            inspection.detail["limit_enforcement"]["open_files"]["status"],
+            "inactive"
         );
     }
 
     #[test]
     fn sandbox_doctor_rejects_unknown_fields_and_bad_backend() {
         let temp = tempfile::tempdir().unwrap();
-        let policy = temp.path().join("sandbox.yaml");
+        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
         std::fs::write(
             &policy,
             format!(
                 "{}unexpected: true\n",
-                sandbox_policy(std::path::Path::new("relative/bwrap"), 2, 128, Some(32))
+                sandbox_policy(std::path::Path::new("/missing/bwrap"), "disabled", None)
             ),
         )
         .unwrap();
 
-        let error = inspect_sandbox_policy(&policy).unwrap_err().to_string();
-        assert!(error.contains("strictly parse"));
+        let error = inspect_sandbox_policy(temp.path()).unwrap_err().to_string();
+        assert!(error.contains("unknown field"));
 
         std::fs::write(
             &policy,
-            sandbox_policy(std::path::Path::new("relative/bwrap"), 1, 128, Some(32)),
+            sandbox_policy(std::path::Path::new("relative/bwrap"), "enforce", None),
         )
         .unwrap();
-        assert!(inspect_sandbox_policy(&policy)
+        assert!(inspect_sandbox_policy(temp.path())
             .unwrap_err()
             .to_string()
             .contains("absolute"));

@@ -25,7 +25,7 @@ use ryeos_engine::trust::TrustStore;
 
 /// Boot the engine from the same sources the daemon uses.
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
-    let operator_config_root = roots::runtime_root().ok().map(|root| root.config());
+    let node_config_root = roots::runtime_root().ok().map(|root| root.config());
     // Match daemon boot semantics: content roots are the installed bundle
     // roots only. `RYEOS_APP_ROOT` is the daemon runtime state dir that
     // contains registrations and runtime state; treating it as a content
@@ -33,21 +33,27 @@ pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
     // which breaks bundle-local binary resolution for client launchers.
     let bundle_roots = discover_bundle_roots();
 
-    let trust_store = TrustStore::load(
-        project_path,
-        operator_config_root
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve app root"))?,
-    )
-    .with_context(|| "load trust store")?;
+    let node_config_root = node_config_root
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve app root"))?;
+    let node_trust_store =
+        TrustStore::load(None, node_config_root).with_context(|| "load node trust store")?;
+    let trust_store = match project_path {
+        Some(project_path) => node_trust_store
+            .with_project_keys(project_path)
+            .map(std::borrow::Cow::into_owned)
+            .with_context(|| "load project item trust")?,
+        None => node_trust_store.clone(),
+    };
 
-    let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
-    let (parsers, handlers) = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store)?;
+    let kinds = build_kind_registry(&bundle_roots, &node_trust_store)?;
+    let (parsers, handlers) = build_parser_dispatcher(&bundle_roots, &kinds, &node_trust_store)?;
     let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
         .with_context(|| "load composer registry")?;
 
     Ok(Engine::new(kinds, parsers, bundle_roots)
         .with_trust_store(trust_store)
+        .with_node_trust_store(node_trust_store)
         .with_composers(composers))
 }
 

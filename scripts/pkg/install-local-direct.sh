@@ -479,11 +479,69 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Source installs do not have a package manager to pull runtime dependencies.
-# Fail before builds, daemon stops, or filesystem installation if the mandatory
-# sandbox backend is absent.
-if ! command -v bwrap >/dev/null 2>&1; then
-    die "Bubblewrap is required for RyeOS subprocess sandboxing but 'bwrap' was not found in PATH. Install it first (Arch: sudo pacman -S bubblewrap; Debian/Ubuntu: sudo apt install bubblewrap; Fedora: sudo dnf install bubblewrap), then rerun this installer"
+# Source installs do not have a package manager to pull optional runtime tools.
+# Check the exact executable the node policy names; a different `bwrap` found
+# through PATH does not prove that the daemon's captured backend is compatible.
+bwrap_compatible() {
+    local executable="$1"
+    local output major minor help option
+
+    [[ -x "$executable" ]] || return 1
+    output="$("$executable" --version 2>/dev/null)" || return 1
+    [[ "$output" =~ ^bubblewrap[[:space:]]([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if (( 10#$major == 0 && 10#$minor < 11 )); then
+        return 1
+    fi
+    help="$("$executable" --help 2>&1)" || return 1
+    for option in --bind-fd --ro-bind-fd --argv0; do
+        grep -Eq "(^|[[:space:]])${option}([[:space:]]|$)" <<<"$help" || return 1
+    done
+}
+
+sandbox_app_root="${RYEOS_APP_ROOT:-$invoking_user_home/.local/share/ryeos}"
+sandbox_policy="$sandbox_app_root/.ai/node/sandbox.yaml"
+sandbox_backend="/usr/bin/bwrap"
+sandbox_mode="disabled"
+if [[ -f "$sandbox_policy" ]]; then
+    configured_backend="$(
+        sed -n 's/^[[:space:]]*executable:[[:space:]]*//p' "$sandbox_policy" | head -n1
+    )"
+    configured_backend="${configured_backend%%#*}"
+    configured_backend="${configured_backend#"${configured_backend%%[![:space:]]*}"}"
+    configured_backend="${configured_backend%"${configured_backend##*[![:space:]]}"}"
+    configured_backend="${configured_backend#\"}"
+    configured_backend="${configured_backend%\"}"
+    configured_backend="${configured_backend#\'}"
+    configured_backend="${configured_backend%\'}"
+    configured_backend="${configured_backend%"${configured_backend##*[![:space:]]}"}"
+    [[ -z "$configured_backend" ]] || sandbox_backend="$configured_backend"
+    configured_mode="$(
+        sed -n 's/^[[:space:]]*mode:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$sandbox_policy" | head -n1
+    )"
+    configured_mode="${configured_mode#\"}"
+    configured_mode="${configured_mode%\"}"
+    configured_mode="${configured_mode#\'}"
+    configured_mode="${configured_mode%\'}"
+    [[ -z "$configured_mode" ]] || sandbox_mode="$configured_mode"
+fi
+
+if ! bwrap_compatible "$sandbox_backend"; then
+    echo "[install-local-direct] warning: node sandbox backend '$sandbox_backend' is missing or incompatible" >&2
+    echo "[install-local-direct] RyeOS enforcement requires Bubblewrap 0.11.0+ with exact help tokens: --bind-fd --ro-bind-fd --argv0" >&2
+    if [[ "$sandbox_backend" == "/usr/bin/bwrap" ]]; then
+        echo "[install-local-direct] install a current bubblewrap package that provides /usr/bin/bwrap (Arch: sudo pacman -S bubblewrap), or keep mode: disabled" >&2
+    else
+        echo "[install-local-direct] install a compatible binary at the configured path, change '$sandbox_policy' to executable: /usr/bin/bwrap after installing it there, or keep mode: disabled" >&2
+    fi
+    if [[ "$sandbox_mode" == "enforce" ]]; then
+        die "sandbox policy is enforced, so installation cannot continue with an incompatible configured backend"
+    fi
+    if [[ "$sandbox_mode" != "disabled" ]]; then
+        die "sandbox policy mode '$sandbox_mode' is not a valid disabled opt-out; repair '$sandbox_policy' before continuing"
+    fi
+    echo "[install-local-direct] continuing because the node sandbox policy is disabled" >&2
 fi
 
 cd "$repo_root"

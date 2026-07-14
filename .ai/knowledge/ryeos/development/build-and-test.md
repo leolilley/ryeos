@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-13T07:43:47Z:4d61a42e541c6686aee56eef149c47ee3d3bd82055b40a1533b7166953f0d8f3:/C+ORQuvjz+yX6eMIs21j0zjH8c7zJ0AUvKJEZS4J7t7WdgOhSQqSt7qSlVwu24gcwmuATDeTvewrqFaB5KwBw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:281e7445e7e2835f2a1acedcdc1983bedf9715986d800ec46675476bd78757d5:3tKUXs498qZm3HAVvqm+x5vaAZTb/j+L/ruqXwNrehYWJgiH6X9/x1hhvOaB7hRzbPh16AmN9mgnEx/vJtLpCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -130,10 +130,16 @@ Post-install smoke:
 
 ```bash
 command -v ryeos                 # should be /usr/bin/ryeos
-ryeos status
+ryeos node status
+ryeos node doctor --json
 ryeos execute tool:ryeos/core/identity/public_key
 script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
+
+The generated sandbox policy is disabled by default. `node doctor` uses the
+production policy loader; after changing mode or policy contents, restart the
+node before judging execution behavior. See [Execution
+Sandbox](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-sandbox.md).
 
 If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
 work around it by adding kind-specific CLI dispatch logic.

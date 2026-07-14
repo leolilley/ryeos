@@ -4,13 +4,30 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 const DEFAULT_SANDBOX_POLICY: &str = r#"version: 1
-backend_path: /usr/bin/bwrap
-allow_network: true
-writable_paths:
-  - "{project}"
-allowed_env:
-  - "*"
-max_open_files: 1024
+mode: disabled
+backend:
+  kind: bubblewrap
+  executable: /usr/bin/bwrap
+filesystem:
+  readable:
+    - "{node_public_identity}"
+    - "{daemon_socket}"
+    - "{bundle_roots}"
+    - "{operator_trusted_keys}"
+    - "{verified_code}"
+  writable:
+    - "{project}"
+    - "{checkpoint_dir}"
+network:
+  mode: host
+environment:
+  allow:
+    - "*"
+limits:
+  open_files: 1024
+  verified_artifact_file_bytes: 67108864
+  verified_artifact_total_bytes: 268435456
+  verified_artifact_files: 4096
 "#;
 
 struct NodeDefaultPaths {
@@ -99,11 +116,38 @@ mod tests {
 
     #[test]
     fn sandbox_default_preserves_execution_policy() {
-        assert!(DEFAULT_SANDBOX_POLICY.contains("backend_path: /usr/bin/bwrap"));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("allow_network: true"));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("  - \"{project}\""));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("  - \"*\""));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("max_open_files: 1024"));
-        assert!(!DEFAULT_SANDBOX_POLICY.contains("max_processes:"));
+        let policy: ryeos_engine::sandbox::SandboxPolicy =
+            serde_yaml::from_str(DEFAULT_SANDBOX_POLICY).unwrap();
+
+        assert_eq!(policy.version, 1);
+        assert_eq!(policy.mode, ryeos_engine::sandbox::SandboxMode::Disabled);
+        assert_eq!(
+            policy.backend.kind,
+            ryeos_engine::sandbox::SandboxBackendKind::Bubblewrap
+        );
+        assert_eq!(policy.backend.executable, Path::new("/usr/bin/bwrap"));
+        assert_eq!(
+            policy.filesystem.readable,
+            vec![
+                "{node_public_identity}".to_string(),
+                "{daemon_socket}".to_string(),
+                "{bundle_roots}".to_string(),
+                "{operator_trusted_keys}".to_string(),
+                "{verified_code}".to_string(),
+            ]
+        );
+        assert_eq!(
+            policy.filesystem.writable,
+            vec!["{project}".to_string(), "{checkpoint_dir}".to_string()]
+        );
+        assert_eq!(
+            policy.network.mode,
+            ryeos_engine::sandbox::SandboxNetworkMode::Host
+        );
+        assert_eq!(policy.environment.allow, vec!["*".to_string()]);
+        assert_eq!(policy.limits.open_files, Some(1024));
+        assert_eq!(policy.limits.verified_artifact_file_bytes, 67_108_864);
+        assert_eq!(policy.limits.verified_artifact_total_bytes, 268_435_456);
+        assert_eq!(policy.limits.verified_artifact_files, 4_096);
     }
 }

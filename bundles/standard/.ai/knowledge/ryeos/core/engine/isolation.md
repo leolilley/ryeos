@@ -1,19 +1,31 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:9c7cc3b735deb05f65e49c9bb5752da1b8fbad7f0b19335428fae5a55b4bb718:Ag0W+870bzY4I2oosAYFwzqFXq43p4zM/mcr4wcLJll2LzIA++p+iiUpV33tWBktEMTvs7mcxopPMI65akjtAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:b2ce588a96a54932d6bdd3b38678d70200d73795c9c7fc7601ef4a475ead757a:bANALMrRSPRcWUoDTW7wioB76TcS1zIr0HIle6L+U2o4ONTHlKKAU8csT+WHVgc+k9cwXZhdr0jfGtUkhvHLCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
 tags: [architecture, isolation, hermetic, env, security, subprocess]
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  Hermetic execution properties — env_clear, explicit env injection,
-  per-route semaphores, callback capability boundaries, and the
-  subprocess env allowlist.
+  Hermetic execution and optional OS isolation — env_clear, explicit env
+  injection, node-owned Bubblewrap policy, per-route semaphores, and callback
+  capability boundaries.
 ---
 
 # Execution Isolation
 
 Rye OS enforces isolation at multiple layers to prevent privilege
 escalation, secret leakage, and environment-dependent behavior.
+
+## Node-owned OS sandbox
+
+Tool and runtime item launches can additionally pass through the immutable strict
+node sandbox snapshot. The default mode is disabled. In enforce mode, the
+node—not the item—owns Bubblewrap filesystem/network policy, environment
+filtering, and the Lillux open-file cap. Policy is resolved once at startup and
+shared across launch paths; edits require restart. Parser/composer handlers are
+trusted engine infrastructure and retain the hermetic handler boundary below.
+
+See [Execution Sandbox](../node/execution-sandbox.md) for the complete node-owner
+schema, pickup behavior, diagnostics, and security limits.
 
 ## Hermetic Handler Execution
 

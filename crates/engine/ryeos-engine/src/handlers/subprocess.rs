@@ -63,6 +63,7 @@ pub(crate) fn run_handler_subprocess(
         stdin_data: Some(request_json),
         timeout: timeout.as_secs_f64(),
         limits: None,
+        inherited_fds: Vec::new(),
     };
 
     let output = lillux::exec::lib_run(req);

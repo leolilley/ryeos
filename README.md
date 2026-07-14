@@ -5,7 +5,7 @@
 RyeOS is portable verified execution. That portability describes signed
 execution data moving between compatible nodes; the current production
 distribution is Linux x86-64. See the
-[platform support matrix](docs/platform-support.md).
+[platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md).
 
 (_RYE Your Execution_.)
 
@@ -22,8 +22,9 @@ another node carries its trust with it instead of borrowing the machine's.
 That is the whole idea. Everything in this repository is that one property
 at a different layer:
 
-- **Signed items and bundles** — behavior you can install and trust,
-  because what runs is exactly what was signed.
+- **Signed items and bundles** — behavior you can install and trust because
+  resolution verifies its signature and content identity. Enforced sandboxing
+  additionally pins verified entry bytes through execution.
 - **Threads** — every execution has an identity and a durable event log.
   The log _is_ the run: tail it live, replay it, resume it, cancel it.
 - **Keys** — the only actors. An operator, a node, an agent: each is a
@@ -151,7 +152,7 @@ authority lives in the target node's authorized-key store.
 The supported production target is Linux x86-64 with glibc. Official container
 images are currently `linux/amd64`, and packaged bundle executables target
 `x86_64-unknown-linux-gnu`. Other targets are tracked in the
-[platform support matrix](docs/platform-support.md) and must not silently bypass
+[platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
 the sandbox or durability contracts.
 
 ### Arch Linux / AUR
@@ -167,11 +168,13 @@ ryeos node status
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
 into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. The package installs Bubblewrap,
-which RyeOS requires for fail-closed subprocess sandboxing on Linux. `ryeos
-start` launches `ryeosd`. See the
-[execution sandbox contract](docs/security/execution-sandbox.md) before
-tightening the node-owned policy.
+vault material, and writes node configuration. Unprivileged Bubblewrap 0.11.0+
+is an optional package dependency: the sandbox policy defaults to
+`mode: disabled`, and it is required only when an operator selects
+`mode: enforce`. `ryeos start`
+launches `ryeosd`. See the
+[execution sandbox contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-sandbox.md) before
+enabling or tightening the node-owned policy.
 
 The user lifecycle surface is intentionally small:
 
@@ -196,19 +199,37 @@ entrypoint runs `ryeos init` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
 so keys, trust, and runtime state survive redeploys. Release containers rely
 only on the official publisher key compiled into `ryeos`; the entrypoint does
-not infer trust from files baked into the image. Bubblewrap needs namespace
-operations that Docker's default profile blocks. Run the image with the
-documented capability and seccomp settings, and keep `/data` on a named volume:
+not infer trust from files baked into the image. The initialized sandbox policy
+defaults to disabled, so the normal container profile needs no extra namespace
+capabilities. Bubblewrap remains installed in the image for operators who opt
+in to enforcement. Keep `/data` on a named volume:
 
 ```bash
 docker volume create ryeos-data
 docker run -d --name ryeos \
-  --cap-add SYS_ADMIN \
-  --security-opt seccomp=unconfined \
   -p 8000:8000 \
   -v ryeos-data:/data \
   ghcr.io/leolilley/ryeos-standard:latest
 docker exec ryeos ryeos node status
+```
+
+To opt in to enforced Bubblewrap isolation, change the node-owned policy,
+recreate the container with the required namespace/AppArmor profile, and
+verify both the running daemon's immutable snapshot and the backend check:
+
+```bash
+docker exec ryeos sed -i 's/^mode: disabled$/mode: enforce/' \
+  /data/app/.ai/node/sandbox.yaml
+docker rm -f ryeos
+docker run -d --name ryeos \
+  --cap-add SYS_ADMIN \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  -p 8000:8000 \
+  -v ryeos-data:/data \
+  ghcr.io/leolilley/ryeos-standard:latest
+docker exec ryeos ryeos daemon status
+docker exec ryeos ryeos node doctor --json
 ```
 
 A locally built image signed by a development or custom publisher requires an
@@ -223,18 +244,20 @@ not use it for release images. See the
 [publisher trust boundary](docs/security/publisher-trust.md) for the complete
 operator contract.
 
-The release gate exercises init, daemon readiness, an actual sandboxed signed
-tool, and restart recovery with this deployment profile. Back up the
+The release gate exercises two distinct profiles: default-disabled startup and
+signed execution without extra capabilities, then explicitly enforced startup,
+verification of the running daemon's sandbox snapshot, backend diagnostics, and
+signed execution with the namespace/AppArmor capability profile. Back up the
 `ryeos-data` volume before upgrades; it contains node identity, trust, vault,
 and durable execution state.
 
 ### From source
 
-Source installs require Bubblewrap (`bwrap`) for fail-closed subprocess
-sandboxing. Install it before running the installer, for example `sudo pacman
--S bubblewrap` on Arch, `sudo apt install bubblewrap` on Debian/Ubuntu, or
-`sudo dnf install bubblewrap` on Fedora. The installer checks this prerequisite
-before building or changing the installed node.
+Source installs do not require Bubblewrap while the sandbox policy remains in
+its default disabled mode. The installer emits an advisory when `bwrap` is
+absent but continues. Install unprivileged Bubblewrap 0.11.0 or newer before
+selecting `mode: enforce`, for example with `sudo pacman -S bubblewrap` on
+Arch or a current Debian/Ubuntu/Fedora package that meets that version.
 
 ```bash
 git clone https://github.com/leolilley/ryeos.git

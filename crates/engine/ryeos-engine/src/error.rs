@@ -178,6 +178,9 @@ pub enum EngineError {
     )]
     BinManifestMissing { bundle_root: String },
 
+    #[error("binary `{bin}` bundle executor manifest is invalid: {reason}")]
+    BinManifestInvalid { bin: String, reason: String },
+
     #[error("binary `{bin}` not in manifest (triple {triple})")]
     BinNotInManifest { bin: String, triple: String },
 

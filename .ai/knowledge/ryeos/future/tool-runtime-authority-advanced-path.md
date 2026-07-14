@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-04T06:46:29Z:61b8fa494421a0118a7c5cf7f0f6445fe53af8adde6e0838c3351c326056a6fa:4Qt/oElhTa8b8l6Ykaope3SaWOTyFwZcnw278kfSbpdDOAQIf3pBDOihKhXiW7esF4UYdf1l0PGfufGHG6FjDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:98ac08b67e72955bed2d8debf73c5f30f2f1aeac4a1a31c47bdccf0d85722594:s+2DCfU/fMxQvR/7r2e3qR1ldo4n0XmqTQxkgjgxXZBKpceQFfaEGBNjeG2p4FMheDx0fhavbOkfBrlQZGofCw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
@@ -43,6 +43,10 @@ callback enforcement      = daemon callback token effective_caps
 ```
 
 A managed tool runtime can standardize process behavior, but it should not be the source of permission. Authority should be minted by the daemon from signed metadata and explicit delegation.
+
+Likewise, any future per-tool sandbox profile is an intersecting restriction
+beneath the immutable node policy, never item-authored authority to enable or
+broaden mounts, network, environment, or limits.
 
 ## Authority model sketch
 

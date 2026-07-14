@@ -18,6 +18,10 @@ post_install() {
     echo "The packaged bundle artifact is signed by the official publisher."
     echo "ryeos init verifies it against the publisher key built into the binary;"
     echo "no packaged trust-file override is used."
+    echo
+    echo "The node sandbox policy defaults to mode: disabled."
+    echo "Install the optional unprivileged bubblewrap>=0.11.0 dependency before changing"
+    echo "<app-root>/.ai/node/sandbox.yaml to mode: enforce."
 }
 
 post_upgrade() {

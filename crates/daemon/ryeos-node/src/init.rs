@@ -333,30 +333,86 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .cloned()
             .unwrap_or_default();
         let registration = bundle_registration_value(&target, &grants);
+        // Source-set preflight above validates the complete graph before init
+        // mutates any installed bundle. Re-verify each completed staging tree
+        // against the dependency generations already installed in plan order,
+        // so a source mutation racing the copy cannot reach activation.
+        let installed_dependency_roots: Vec<PathBuf> = plan
+            .install_order
+            .iter()
+            .filter(|dependency_name| {
+                planned
+                    .dependency_closure
+                    .contains(dependency_name.as_str())
+            })
+            .map(|dependency_name| {
+                opts.app_root
+                    .join(ryeos_engine::AI_DIR)
+                    .join("bundles")
+                    .join(dependency_name)
+            })
+            .collect();
 
         if target.exists() {
             // Bundle already installed. Registration continues to name the
             // same canonical path, so publish it before the atomic tree
             // exchange; every observable generation remains registered.
             verify_bundle_structure(&target)?;
-            replace_bundle(source_path, &target, &transaction, registration.clone()).with_context(
-                || {
-                    format!(
-                        "atomic replace {}: {} -> {}",
+            replace_bundle(
+                source_path,
+                &target,
+                &transaction,
+                registration.clone(),
+                |staging| {
+                    if opts.skip_preflight {
+                        return Ok(());
+                    }
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                        staging,
                         name,
-                        source_path.display(),
-                        target.display()
+                        &installed_dependency_roots,
+                        &operator_config_root,
                     )
+                    .with_context(|| {
+                        format!(
+                            "preflight verification refused completed {} replacement staging tree",
+                            name
+                        )
+                    })
                 },
-            )?;
+            )
+            .with_context(|| {
+                format!(
+                    "atomic replace {}: {} -> {}",
+                    name,
+                    source_path.display(),
+                    target.display()
+                )
+            })?;
         } else {
             install_bundle(
                 &opts.app_root,
                 name,
                 source_path,
-                true,
                 &transaction,
                 registration.clone(),
+                |staging| {
+                    if opts.skip_preflight {
+                        return Ok(());
+                    }
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                        staging,
+                        name,
+                        &installed_dependency_roots,
+                        &operator_config_root,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "preflight verification refused completed {} install staging tree",
+                            name
+                        )
+                    })
+                },
             )?;
         }
         transaction.commit_present(&node_key)?;

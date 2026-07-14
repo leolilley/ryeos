@@ -1266,11 +1266,11 @@ pub(crate) async fn dispatch_method(
             .app_root
             .join(ryeos_engine::AI_DIR)
             .join("state");
-        let executor_path = crate::execution::launch::resolve_native_executor_path(
+        let executor = crate::execution::launch::materialize_native_executor(
             &bundle_roots,
             &executor_ref,
             &cache_root,
-            &ctx.engine.trust_store,
+            &ctx.engine.node_trust_store,
             ryeos_engine::resolution::TrustClass::TrustedBundle,
         )
         .map_err(|e| DispatchError::RuntimeMaterializationFailed {
@@ -1278,7 +1278,11 @@ pub(crate) async fn dispatch_method(
             detail: e.to_string(),
         })?;
 
-        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let executor_path_str = executor.path.to_string_lossy().to_string();
+        let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+            source_path: executor.path,
+            content_hash: executor.content_hash,
+        }];
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
@@ -1297,18 +1301,34 @@ pub(crate) async fn dispatch_method(
             stdin_data: Some(stdin_data),
             timeout: 120.0,
             limits: None,
+            inherited_fds: Vec::new(),
         };
-        let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
-            subprocess_request,
-            &state.config.app_root,
-            request.project_path,
-            &canonical_ref.to_string(),
-            &thread_id,
-        )
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-        let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
-            .await
-            .map_err(|e| DispatchError::Internal(e.into()))?;
+        let item_ref = canonical_ref.to_string();
+        let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+        let subprocess_request = state
+            .sandbox
+            .apply(
+                subprocess_request,
+                ryeos_engine::sandbox::SandboxLaunchContext {
+                    project_path: request.project_path,
+                    project_authority: request.provenance.sandbox_project_authority(),
+                    state_root: request.provenance.state_root_override(),
+                    checkpoint_dir: None,
+                    bundle_roots: &bundle_roots,
+                    operator_trusted_keys_dir: Some(&operator_trusted_keys_dir),
+                    verified_code: &sandbox_verified_code,
+                    item_ref: &item_ref,
+                    thread_id: &thread_id,
+                },
+            )
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let workspace_lifeline = request.provenance.workspace_lifeline();
+        let result = tokio::task::spawn_blocking(move || {
+            let _workspace_lifeline = workspace_lifeline;
+            lillux::run(subprocess_request)
+        })
+        .await
+        .map_err(|e| DispatchError::Internal(e.into()))?;
 
         // Process the runtime result. On failure, return `Err` and let the
         // cleanup below finalize the thread; on success the runtime already
@@ -1587,7 +1607,7 @@ pub async fn dispatch_service(
                 request.params.clone(),
                 &verified,
                 request.project_path,
-            );
+            )?;
 
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
@@ -2768,7 +2788,8 @@ metadata:
         schema: Option<Value>,
     ) -> ryeos_engine::contracts::VerifiedItem {
         let source_path = tempdir().join("status.yaml");
-        fs::write(&source_path, "kind: service\nendpoint: project.status\n").unwrap();
+        let source = "kind: service\nendpoint: project.status\n";
+        fs::write(&source_path, source).unwrap();
         let mut extra = std::collections::HashMap::new();
         if let Some(schema) = schema {
             extra.insert("schema".to_string(), schema);
@@ -2783,7 +2804,7 @@ metadata:
                 resolved_from: "system".into(),
                 shadowed: Vec::new(),
                 materialized_project_root: None,
-                content_hash: lillux::cas::sha256_hex(b"test"),
+                content_hash: ryeos_engine::item_resolution::content_hash(source),
                 signature_header: None,
                 source_format: ryeos_engine::contracts::ResolvedSourceFormat {
                     extension: ".yaml".into(),
@@ -2810,6 +2831,7 @@ metadata:
         fs::write(&source_path, body).unwrap();
         let mut verified = verified_service_with_schema(None);
         verified.resolved.source_path = source_path;
+        verified.resolved.content_hash = ryeos_engine::item_resolution::content_hash(body);
         verified
     }
 
@@ -2823,7 +2845,8 @@ metadata:
             json!({"provider": "zen"}),
             &verified,
             Path::new("/tmp/project"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(params["project_path"], "/tmp/project");
         assert_eq!(params["provider"], "zen");
@@ -2836,7 +2859,8 @@ metadata:
             json!({"project_path": "/explicit"}),
             &verified,
             Path::new("/tmp/project"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(params["project_path"], "/explicit");
     }
@@ -2848,7 +2872,8 @@ metadata:
             json!({"project_path": ""}),
             &verified,
             Path::new("/tmp/project"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(params["project_path"], "/tmp/project");
     }
@@ -2860,7 +2885,8 @@ metadata:
             json!({"project_path": null}),
             &verified,
             Path::new("/tmp/project"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(params["project_path"], "/tmp/project");
     }
@@ -2872,7 +2898,8 @@ metadata:
             json!({"provider": "zen"}),
             &verified,
             Path::new("/tmp/project"),
-        );
+        )
+        .unwrap();
 
         assert!(params.get("project_path").is_none());
     }
@@ -2883,9 +2910,32 @@ metadata:
             "# ryeos:signed:test\nkind: service\nendpoint: project.status\nschema:\n  project_path: string\n",
         );
         let params =
-            service_params_with_project_path(json!({}), &verified, Path::new("/tmp/project"));
+            service_params_with_project_path(json!({}), &verified, Path::new("/tmp/project"))
+                .unwrap();
 
         assert_eq!(params["project_path"], "/tmp/project");
+    }
+
+    #[test]
+    fn service_project_path_rejects_source_changed_after_verification() {
+        let verified = verified_service_with_body(
+            "kind: service\nendpoint: project.status\nschema:\n  project_path: string\n",
+        );
+        fs::write(
+            &verified.resolved.source_path,
+            "kind: service\nendpoint: project.status\nschema:\n  provider: string\n",
+        )
+        .unwrap();
+
+        let error =
+            service_params_with_project_path(json!({}), &verified, Path::new("/tmp/project"))
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            DispatchError::SchemaMisconfigured { ref detail, .. }
+                if detail.contains("changed after verification")
+        ));
     }
 
     fn write_signed_manifest(ai_dir: &std::path::Path, body: &str) {
@@ -4220,6 +4270,7 @@ requires:
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: content.to_string(),
+            source_content_digest: digest.clone(),
             raw_content_digest: digest,
         }
     }

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:435f4b883248d1b439c99eed46c4f5155eed98f3aadc98cc7f7380552358c34a:os4FLs8xJZG1gWdCEjAiRf4UE7uhyXXYBW0iKu5edyBg5XI7r1+Z7B+5q5JNyT8Vc5gI/3lzQAj7sRFaiVRHAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:3a10e0a5811e73b72d933009e52a88d520ea93c0b9364f1cc3c191550bfd67f5:vuPIJfuKtBmALVqkXfPrkpK6nuiX6kxeG5RGkZufpyYAHBxUjeLmeHwZLMfN+HW4pQpv6XUUbSOXSghZTsRTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.5.0"
+version: "3.6.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -21,6 +21,7 @@ See also:
 - [Identity Model](../identity-model.md) for the four trust layers and request authentication flow.
 - [Spaces](../spaces.md) for project/system resolution.
 - [Execution Provenance](../execution/provenance.md) for local vs pushed-head execution source invariants.
+- [Execution Sandbox](../node/execution-sandbox.md) for the target node's immutable subprocess boundary.
 - [HTTP API](../node/http-api.md) and [Services: remote](../services/remote.md) for route/service mappings.
 
 ## v1 Trust Boundary
@@ -423,6 +424,13 @@ A `pushed_head` request resolves only against the pushed project
 checkout plus the remote's registered bundle roots. There is no
 operator user space to fall through to — user-tier resolution does not
 exist in the single-app-root model.
+
+Executable tool/runtime launches then pass through the target node's sandbox
+snapshot exactly like local launches. Remote content cannot enable or weaken
+that policy. The default readable placeholders expose only the verified bundle
+roots, resolved pushed item source, operator trust directory, and any exact
+callback socket required by the managed launch; the request-owned checkout is
+the writable project.
 
 ### Borrowed workspace for callbacks
 

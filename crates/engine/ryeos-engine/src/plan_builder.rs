@@ -151,27 +151,21 @@ fn resolve_executor_chain(
                 ))
             })?;
 
-        // Verify trust/integrity of this chain hop
+        // Verify the signature on every executor-chain hop with the same
+        // cryptographic path used for requested items. A claimed fingerprint
+        // is metadata, not proof of identity.
         let sig_header =
             crate::item_resolution::parse_signature_header(&content, &source_format.signature);
         let trust_class = match &sig_header {
             Some(header) => {
-                if let Some(actual_hash) =
-                    crate::trust::content_hash_after_signature(&content, &source_format.signature)
-                {
-                    if actual_hash != header.content_hash {
-                        return Err(EngineError::ContentHashMismatch {
-                            canonical_ref: resolved_id.clone(),
-                            expected: header.content_hash.clone(),
-                            actual: actual_hash,
-                        });
-                    }
-                }
-                if trust_store.is_trusted(&header.signer_fingerprint) {
-                    ContractTrustClass::Trusted
-                } else {
-                    ContractTrustClass::Untrusted
-                }
+                let (trust_class, _) = crate::trust::verify_item_signature(
+                    &content,
+                    header,
+                    &source_format.signature,
+                    trust_store,
+                )
+                .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
+                trust_class
             }
             None => ContractTrustClass::Unsigned,
         };
@@ -392,6 +386,7 @@ pub struct BuildPlanInput<'a> {
     pub roots: &'a ResolutionRoots,
     pub registry_fingerprint: &'a str,
     pub trust_store: &'a TrustStore,
+    pub node_trust_store: &'a TrustStore,
     pub host_env: &'a HostEnvBindings,
 }
 
@@ -411,6 +406,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         roots,
         registry_fingerprint,
         trust_store,
+        node_trust_store,
         host_env,
     } = input;
     let resolved = &item.resolved;
@@ -427,6 +423,14 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
                 resolved.source_path.display()
             ))
         })?;
+        let actual = crate::item_resolution::content_hash(&content);
+        if actual != resolved.content_hash {
+            return Err(EngineError::ContentHashMismatch {
+                canonical_ref: canonical_ref.clone(),
+                expected: resolved.content_hash.clone(),
+                actual,
+            });
+        }
         parsers.dispatch(
             &resolved.source_format.parser,
             &content,
@@ -553,6 +557,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         parsers,
         kinds,
         trust_store,
+        node_trust_store,
         roots,
         root_trust_class,
     )?;
@@ -976,6 +981,7 @@ config:
             roots: &roots,
             registry_fingerprint: "fp:test",
             trust_store: &ts,
+            node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
         })
         .unwrap();
@@ -1024,6 +1030,7 @@ config:
             roots: &roots,
             registry_fingerprint: "fp:test",
             trust_store: &ts,
+            node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
         })
         .unwrap_err();
@@ -1091,6 +1098,7 @@ config:
             roots: &roots,
             registry_fingerprint: "fp:test",
             trust_store: &ts,
+            node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
         })
         .unwrap_err();
@@ -1134,6 +1142,7 @@ config:
             roots: &roots,
             registry_fingerprint: "fp:test",
             trust_store: &TrustStore::empty(),
+            node_trust_store: &TrustStore::empty(),
             host_env: &HostEnvBindings::default(),
         })
         .unwrap_err();
@@ -1203,6 +1212,7 @@ config:
             &parsers,
             &kinds,
             &ts,
+            &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
         )
@@ -1252,6 +1262,7 @@ config:
             None,
             &parsers,
             &kinds,
+            &ts,
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
@@ -1303,6 +1314,7 @@ config:
             &parsers,
             &kinds,
             &ts,
+            &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
         )
@@ -1346,6 +1358,7 @@ config:
             Some(&project),
             &parsers,
             &kinds,
+            &ts,
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
@@ -1396,6 +1409,7 @@ config:
             None,
             &parsers,
             &kinds,
+            &ts,
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
@@ -1486,6 +1500,7 @@ config:
             roots: &roots,
             registry_fingerprint: "fp:test",
             trust_store: &ts,
+            node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
         })
         .unwrap_err();
@@ -1681,6 +1696,7 @@ category: ryeos/core/subprocess\n";
             roots: &roots,
             registry_fingerprint: "fp:test",
             trust_store: &ts,
+            node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
         })
         .expect("build_plan should succeed for valid 3-hop chain");

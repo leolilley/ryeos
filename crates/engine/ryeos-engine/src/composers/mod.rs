@@ -464,6 +464,7 @@ composer: {composer}
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: String::new(),
+            source_content_digest: String::new(),
             raw_content_digest: String::new(),
         };
         let view = reg.compose("directive", &anc, &parsed, &[], &[]).unwrap();

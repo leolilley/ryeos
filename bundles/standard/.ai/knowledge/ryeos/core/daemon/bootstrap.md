@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:1b58275764e2af34802201aa661639c616f237222521c7a40146b035d09eabd8:HYJCGFpZiBK8eijBiUkb/uDD8slGt+ffgfL6KOVKNmGJ/aazrZWZaL03OMGLmKtT/ifmj+IziKYliG4VOQCtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:3dff64e5973870f09cb9a438f9bd9079086036dc5cb3585ff795ea794264d90f:uByx/L73+WRoIPvWE/fR5FEtOhLnngnzhYC/6G5PtR0l3IiOp3gnbp1tK9bQPcf/Na54K/RPlayLjyuZnGL6Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]
-version: "2.0.0"
+version: "2.1.0"
 description: >
   Daemon bootstrap order, operator-init vs daemon-repair boundaries,
   raw YAML loading, and section table assembly.
@@ -19,7 +19,8 @@ only daemon-local artifacts.
 `ryeos init` owns user signing key, node signing key, user/node
 self-trust docs, publisher trust pinning, bundle discovery/planning,
 install, signed registrations, vault key creation, and post-init trust
-verification.
+verification. It also creates node-owned defaults such as
+`.ai/node/sandbox.yaml` only when absent.
 
 `bootstrap::repair_daemon_local` owns only daemon-local repair after
 init-state verification. It first checks that operator signing key, node
@@ -43,6 +44,12 @@ Initialization requires at least one signed bundle registration in
 startup on a fresh machine fails closed before tracing, socket cleanup,
 runtime directory creation, or engine bootstrap. The removed `--init-only`
 daemon path is not part of the system anymore.
+
+After bootstrap configuration is resolved, the daemon strictly loads one
+sandbox-policy snapshot. An invalid strict policy fails startup. Disabled mode does
+not inspect Bubblewrap; enforced mode resolves the backend and resource limit
+before listeners accept execution. Startup never rewrites the operator policy.
+See [Execution Sandbox](../node/execution-sandbox.md).
 
 ## Two-layer engine bootstrap
 

@@ -6,13 +6,15 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+
+pub(crate) const EXPORTED_BUNDLE_ENTRY_KIND_FILE: &str = "file";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,9 +37,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         .map(|b| b.path.clone())
         .ok_or(HandlerError::NotFound)?;
 
-    if !bundle_path.is_dir() {
+    let bundle_metadata = std::fs::symlink_metadata(&bundle_path).map_err(|error| {
+        HandlerError::Internal(format!(
+            "read bundle path metadata {}: {error}",
+            bundle_path.display()
+        ))
+    })?;
+    if bundle_metadata.file_type().is_symlink() || !bundle_metadata.file_type().is_dir() {
         return Err(HandlerError::Internal(format!(
-            "bundle path {} does not exist or is not a directory",
+            "bundle path {} is not a real directory",
             bundle_path.display()
         )));
     }
@@ -69,7 +77,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
     }))
 }
 
-/// Recursively walk a directory, store each file as a blob in CAS.
+/// Recursively walk a directory, store each regular file as a blob in CAS.
 fn walk_and_ingest(
     base: &std::path::Path,
     current: &std::path::Path,
@@ -82,28 +90,70 @@ fn walk_and_ingest(
     {
         let entry = entry?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("read metadata {}", path.display()))?;
+        let file_type = metadata.file_type();
         let rel = path
             .strip_prefix(base)
             .context("strip_prefix")?
-            .to_string_lossy()
+            .to_str()
+            .with_context(|| format!("bundle entry path is not valid UTF-8: {}", path.display()))?
             .to_string();
 
-        if path.is_dir() {
+        if file_type.is_symlink() {
+            bail!(
+                "bundle export refuses symlink entry '{}' at {}",
+                rel,
+                path.display()
+            );
+        }
+        if file_type.is_dir() {
             walk_and_ingest(base, &path, cas, entries, total_bytes)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
+            let mode = validated_unix_file_mode(&metadata, &path)?;
             let bytes =
                 std::fs::read(&path).with_context(|| format!("read file {}", path.display()))?;
-            *total_bytes += bytes.len() as u64;
+            *total_bytes = (*total_bytes)
+                .checked_add(u64::try_from(bytes.len()).context("bundle file size exceeds u64")?)
+                .context("bundle export total size overflow")?;
             let hash = cas.store_blob(&bytes)?;
             entries.push(serde_json::json!({
+                "kind": EXPORTED_BUNDLE_ENTRY_KIND_FILE,
                 "path": rel,
                 "hash": hash,
                 "size": bytes.len(),
+                "mode": mode,
             }));
+        } else {
+            bail!(
+                "bundle export refuses non-regular entry '{}' at {}",
+                rel,
+                path.display()
+            );
         }
-        // Skip symlinks — not expected in bundles.
     }
     Ok(())
+}
+
+fn validated_unix_file_mode(metadata: &std::fs::Metadata, path: &std::path::Path) -> Result<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mode = metadata.permissions().mode() & 0o7777;
+        if mode & !0o777 != 0 {
+            bail!(
+                "bundle export refuses special permission bits on {} ({mode:#o})",
+                path.display()
+            );
+        }
+        Ok(mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (metadata, path);
+        bail!("bundle export requires Unix file-mode support")
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

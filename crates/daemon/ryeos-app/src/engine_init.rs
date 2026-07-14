@@ -108,17 +108,30 @@ pub fn build_engine_for_roots(
         }
     }
 
-    // 4. Load trust store. Trust comes from project + operator config only.
+    // 4. Load two deliberately separate trust snapshots. Installed bundle
+    // executable/bootstrap authority is node-only. Project keys and a
+    // caller-scoped overlay may authorize project items, but can never expand
+    // the node's executable or registry authority.
     //    Bundle-internal trust dirs are warning-only and never loaded.
     //    Trust store loads BEFORE kind schemas because kind
     //    schema verification requires the trust store. Both use raw
     //    filesystem scanning (no item resolution dependency), so there
     //    is no bootstrap cycle.
-    let operator_config_root = config.runtime_root().config();
+    let node_config_root = config.runtime_root().config();
     TrustStore::warn_ignored_bundle_trust_dirs(&bundle_roots);
-    let trust_store = match TrustStore::load(project_root, &operator_config_root) {
+    let node_trust_store = TrustStore::load(None, &node_config_root).map_err(|err| {
+        tracing::error!(error = %err, "failed to load node trust store");
+        anyhow::anyhow!("failed to load node trust store: {err}")
+    })?;
+    tracing::info!(count = node_trust_store.len(), "loaded node trust store");
+    let trust_store = match project_root {
+        Some(project_root) => node_trust_store
+            .with_project_keys(project_root)
+            .map(std::borrow::Cow::into_owned),
+        None => Ok(node_trust_store.clone()),
+    };
+    let trust_store = match trust_store {
         Ok(mut store) => {
-            tracing::info!(count = store.len(), "loaded operator trust store");
             if let Some(overlay) = trust_overlay {
                 // Caller-scoped overlay: pins the caller trusts but the
                 // remote does not — never written to the remote's
@@ -134,16 +147,33 @@ pub fn build_engine_for_roots(
             store
         }
         Err(err) => {
-            tracing::error!(error = %err, "failed to load trust store");
-            anyhow::bail!("failed to load trust store: {err}");
+            tracing::error!(error = %err, "failed to load project item trust store");
+            anyhow::bail!("failed to load project item trust store: {err}");
         }
     };
+
+    // Re-admit every installed executable set on each engine bootstrap.
+    // Install preflight protects activation; this catches post-install drift,
+    // manual bundle registration, missing/extra executables or sidecars, and
+    // changed CAS authorization material before any registry can select it.
+    for bundle_root in &bundle_roots {
+        ryeos_engine::binary_resolver::verify_bundle_executor_manifest(
+            bundle_root,
+            &node_trust_store,
+        )
+        .with_context(|| {
+            format!(
+                "installed bundle executor admission failed for {}",
+                bundle_root.display()
+            )
+        })?;
+    }
 
     // 5. Load kind registry from filesystem (requires trust store for verification)
     let kinds = if schema_roots.is_empty() {
         anyhow::bail!("no kind schema roots found; set app_root or RYEOS_APP_ROOT to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
     } else {
-        KindRegistry::load_base(&schema_roots, &trust_store)
+        KindRegistry::load_base(&schema_roots, &node_trust_store)
             .context("failed to load kind schemas")?
     };
 
@@ -160,7 +190,7 @@ pub fn build_engine_for_roots(
     //    the kind schemas.
     let parser_search_roots: Vec<PathBuf> = bundle_roots.clone();
     let (parser_tools, parser_duplicates) =
-        ParserRegistry::load_base(&parser_search_roots, &trust_store, &kinds)
+        ParserRegistry::load_base(&parser_search_roots, &node_trust_store, &kinds)
             .context("failed to load parser tool descriptors")?;
     tracing::info!(
         count = parser_tools.len(),
@@ -182,7 +212,7 @@ pub fn build_engine_for_roots(
         .map(|r| (r.clone(), TrustClass::TrustedBundle))
         .collect();
 
-    let handler_registry = HandlerRegistry::load_base(&tagged_roots, &trust_store)
+    let handler_registry = HandlerRegistry::load_base(&tagged_roots, &node_trust_store)
         .context("failed to load handler descriptors from bundle roots")?;
     tracing::info!(
         count = handler_registry.iter().count(),
@@ -194,7 +224,7 @@ pub fn build_engine_for_roots(
     //     failure: dispatch routes through protocol descriptors for
     //     subprocess wire contracts, and silently degrading to an empty
     //     registry produces confusing errors downstream.
-    let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, &trust_store)
+    let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, &node_trust_store)
         .context("failed to load protocol descriptors from bundle roots")?;
     tracing::info!(
         count = protocol_registry.iter().count(),
@@ -259,7 +289,7 @@ pub fn build_engine_for_roots(
     // `kind: runtime` YAMLs. Fail-closed on any verification error or
     // multi-default conflict — runtime catalog drift is a startup-time
     // problem, not a per-request one.
-    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &trust_store, &kinds)
+    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &node_trust_store, &kinds)
         .context("failed to build runtime registry")?;
     tracing::info!(
         count = runtimes.all().count(),
@@ -269,6 +299,7 @@ pub fn build_engine_for_roots(
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
+        .with_node_trust_store(node_trust_store)
         .with_composers(composers)
         .with_protocols(protocol_registry)
         .with_runtimes(runtimes)

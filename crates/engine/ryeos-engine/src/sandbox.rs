@@ -1,0 +1,3459 @@
+//! Node-owned subprocess sandbox policy and its immutable runtime form.
+//!
+//! The policy has one fixed source: `<app-root>/.ai/node/sandbox.yaml`.
+//! [`SandboxRuntime::load`] reads, strictly parses, and resolves that policy
+//! once. Launch paths then share the resolved runtime and call [`SandboxRuntime::apply`]
+//! without reopening operator configuration at the process boundary.
+
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+
+use crate::canonical_ref::CanonicalRef;
+use crate::error::EngineError;
+
+pub const SANDBOX_POLICY_VERSION: u32 = 1;
+pub const SANDBOX_POLICY_RELATIVE_PATH: &str = "node/sandbox.yaml";
+const VERIFIED_CODE_SANDBOX_ROOT: &str = "/run/ryeos/verified-code";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxPolicy {
+    pub version: u32,
+    pub mode: SandboxMode,
+    pub backend: SandboxBackendPolicy,
+    pub filesystem: SandboxFilesystemPolicy,
+    pub network: SandboxNetworkPolicy,
+    pub environment: SandboxEnvironmentPolicy,
+    pub limits: SandboxLimitsPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    Disabled,
+    Enforce,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxBackendPolicy {
+    pub kind: SandboxBackendKind,
+    pub executable: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackendKind {
+    Bubblewrap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxFilesystemPolicy {
+    pub readable: Vec<String>,
+    pub writable: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxNetworkPolicy {
+    pub mode: SandboxNetworkMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetworkMode {
+    Host,
+    Isolated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxEnvironmentPolicy {
+    pub allow: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxLimitsPolicy {
+    pub open_files: Option<u64>,
+    pub verified_artifact_file_bytes: u64,
+    pub verified_artifact_total_bytes: u64,
+    pub verified_artifact_files: u64,
+}
+
+/// Backend resolution facts and the exact policy snapshot used by a runtime.
+///
+/// Doctor and status surfaces consume this value rather than reparsing the
+/// source file with a second implementation. `resolved_executable` is absent
+/// while the sandbox is disabled because disabled policy does not inspect the
+/// configured backend.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SandboxInspection {
+    pub source: Option<PathBuf>,
+    pub version: u32,
+    pub mode: SandboxMode,
+    pub digest: Option<String>,
+    pub backend: SandboxBackendInspection,
+    pub filesystem: SandboxFilesystemPolicy,
+    pub network: SandboxNetworkPolicy,
+    pub environment: SandboxEnvironmentPolicy,
+    pub limits: SandboxLimitsPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SandboxBackendInspection {
+    pub kind: SandboxBackendKind,
+    pub configured_executable: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_executable: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub captured_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxRuntimeState {
+    Disabled,
+    Enforced,
+}
+
+/// A strictly parsed, immutable sandbox snapshot shared by process launches.
+#[derive(Debug, Clone)]
+pub struct SandboxRuntime {
+    inspection: SandboxInspection,
+    state: SandboxRuntimeState,
+    /// Canonical host path used for authority and overlap checks.
+    app_root: Option<PathBuf>,
+    /// Operator/config spelling recreated inside the sandbox namespace.
+    app_root_destination: Option<PathBuf>,
+    daemon_socket: Option<PathBuf>,
+    verified_artifacts: Option<Arc<VerifiedArtifactStore>>,
+    /// Exact startup-captured backend inode executed for every enforced apply.
+    backend_handle: Option<Arc<std::fs::File>>,
+}
+
+#[derive(Debug)]
+struct VerifiedArtifactStore {
+    root: PathBuf,
+    stores_root: PathBuf,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    max_files: u64,
+    usage: std::sync::Mutex<VerifiedArtifactUsage>,
+    #[cfg(unix)]
+    _lifetime_lock: std::fs::File,
+}
+
+#[derive(Debug, Default)]
+struct VerifiedArtifactUsage {
+    total_bytes: u64,
+    files: u64,
+    entries: std::collections::HashMap<String, (String, u64)>,
+}
+
+impl Drop for VerifiedArtifactStore {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            let cleanup_lock_path = self.stores_root.join(".cleanup.lock");
+            if let Ok(cleanup_lock) = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&cleanup_lock_path)
+            {
+                if unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                    let _ = std::fs::remove_dir_all(&self.root);
+                }
+            }
+            return;
+        }
+        #[cfg(not(unix))]
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl VerifiedArtifactStore {
+    fn create(app_root: &Path, limits: &SandboxLimitsPolicy) -> Result<Self, EngineError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (app_root, limits);
+            return Err(refused(
+                "verified-code artifact stores require Unix file locking".to_string(),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(0);
+
+            let stores_root = app_root
+                .join(crate::AI_DIR)
+                .join("state/cache/verified-code");
+            create_directory_tree_without_symlinks(
+                app_root,
+                Path::new(".ai/state/cache/verified-code"),
+            )?;
+            std::fs::set_permissions(&stores_root, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| {
+                    refused(format!(
+                        "verified-code store root {} cannot be protected: {error}",
+                        stores_root.display()
+                    ))
+                })?;
+
+            // Serialize generation creation with stale-generation cleanup so
+            // another process never observes a new directory before its
+            // lifetime lock is held.
+            let cleanup_lock_path = stores_root.join(".cleanup.lock");
+            let cleanup_lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&cleanup_lock_path)
+                .map_err(|error| {
+                    refused(format!(
+                        "verified-code cleanup lock {} cannot be opened: {error}",
+                        cleanup_lock_path.display()
+                    ))
+                })?;
+            if unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(refused(format!(
+                    "verified-code cleanup lock {} cannot be acquired: {}",
+                    cleanup_lock_path.display(),
+                    std::io::Error::last_os_error()
+                )));
+            }
+
+            let generation = format!(
+                "{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+                NEXT_STORE_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let root = stores_root.join(generation);
+            std::fs::create_dir(&root).map_err(|error| {
+                refused(format!(
+                    "verified-code generation {} cannot be created: {error}",
+                    root.display()
+                ))
+            })?;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    refused(format!(
+                        "verified-code generation {} cannot be protected: {error}",
+                        root.display()
+                    ))
+                },
+            )?;
+            let lifetime_path = root.join(".lifetime.lock");
+            let lifetime_lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&lifetime_path)
+                .map_err(|error| {
+                    refused(format!(
+                        "verified-code lifetime lock {} cannot be opened: {error}",
+                        lifetime_path.display()
+                    ))
+                })?;
+            if unsafe { libc::flock(lifetime_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
+            {
+                return Err(refused(format!(
+                    "verified-code lifetime lock {} cannot be acquired: {}",
+                    lifetime_path.display(),
+                    std::io::Error::last_os_error()
+                )));
+            }
+
+            for entry in std::fs::read_dir(&stores_root).map_err(|error| {
+                refused(format!(
+                    "verified-code store root {} cannot be read: {error}",
+                    stores_root.display()
+                ))
+            })? {
+                let entry = entry.map_err(|error| {
+                    refused(format!("verified-code store entry cannot be read: {error}"))
+                })?;
+                let stale_root = entry.path();
+                if stale_root == root
+                    || !entry
+                        .file_type()
+                        .map_err(|error| {
+                            refused(format!(
+                                "verified-code store entry {} cannot be inspected: {error}",
+                                stale_root.display()
+                            ))
+                        })?
+                        .is_dir()
+                {
+                    continue;
+                }
+                let stale_lifetime = stale_root.join(".lifetime.lock");
+                let stale_lock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&stale_lifetime);
+                let is_stale = match stale_lock {
+                    Ok(stale_lock) => unsafe {
+                        libc::flock(stale_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0
+                    },
+                    Err(_) => true,
+                };
+                if is_stale {
+                    std::fs::remove_dir_all(&stale_root).map_err(|error| {
+                        refused(format!(
+                            "stale verified-code generation {} cannot be removed: {error}",
+                            stale_root.display()
+                        ))
+                    })?;
+                }
+            }
+
+            Ok(Self {
+                root,
+                stores_root,
+                max_file_bytes: limits.verified_artifact_file_bytes,
+                max_total_bytes: limits.verified_artifact_total_bytes,
+                max_files: limits.verified_artifact_files,
+                usage: std::sync::Mutex::new(VerifiedArtifactUsage::default()),
+                _lifetime_lock: lifetime_lock,
+            })
+        }
+    }
+
+    fn read_source(
+        &self,
+        kind: &str,
+        path: &Path,
+    ) -> Result<(Vec<u8>, std::fs::Metadata), EngineError> {
+        read_regular_file_bytes_limited(kind, path, self.max_file_bytes)
+    }
+
+    fn materialize(
+        &self,
+        name: &str,
+        expected_hash: &str,
+        content: &[u8],
+    ) -> Result<PathBuf, EngineError> {
+        let mut components = Path::new(name).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return Err(refused(format!(
+                "verified artifact name `{name}` is not one safe path component"
+            )));
+        }
+        let content_len = u64::try_from(content.len()).map_err(|_| {
+            refused(format!(
+                "verified artifact `{name}` size cannot be represented"
+            ))
+        })?;
+        if content_len > self.max_file_bytes {
+            return Err(refused(format!(
+                "verified artifact `{name}` is {content_len} bytes, exceeding per-file limit {}",
+                self.max_file_bytes
+            )));
+        }
+        let actual_hash = lillux::cas::sha256_hex(content);
+        if actual_hash != expected_hash {
+            return Err(refused(format!(
+                "verified artifact `{name}` content hash mismatch (expected {expected_hash}, got {actual_hash})"
+            )));
+        }
+
+        let mut usage = self
+            .usage
+            .lock()
+            .map_err(|_| refused("verified artifact accounting lock is poisoned".to_string()))?;
+        let artifact = self.root.join(name);
+        if let Some((recorded_hash, recorded_len)) = usage.entries.get(name) {
+            if recorded_hash != expected_hash || *recorded_len != content_len {
+                return Err(refused(format!(
+                    "verified artifact name `{name}` was reused for different content"
+                )));
+            }
+            let (existing, _) = read_regular_file_bytes_limited(
+                "verified artifact",
+                &artifact,
+                self.max_file_bytes,
+            )?;
+            if lillux::cas::sha256_hex(&existing) != expected_hash {
+                return Err(refused(format!(
+                    "verified artifact {} failed its content-address check",
+                    artifact.display()
+                )));
+            }
+            return Ok(artifact);
+        }
+
+        let next_files = usage
+            .files
+            .checked_add(1)
+            .ok_or_else(|| refused("verified artifact file accounting overflowed".to_string()))?;
+        let next_total = usage
+            .total_bytes
+            .checked_add(content_len)
+            .ok_or_else(|| refused("verified artifact byte accounting overflowed".to_string()))?;
+        if next_files > self.max_files {
+            return Err(refused(format!(
+                "verified artifact store would exceed file limit {}",
+                self.max_files
+            )));
+        }
+        if next_total > self.max_total_bytes {
+            return Err(refused(format!(
+                "verified artifact store would exceed total-byte limit {}",
+                self.max_total_bytes
+            )));
+        }
+
+        if artifact.exists() {
+            let (existing, _) = read_regular_file_bytes_limited(
+                "verified artifact",
+                &artifact,
+                self.max_file_bytes,
+            )?;
+            if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
+                return Err(refused(format!(
+                    "verified artifact {} exists with unexpected content",
+                    artifact.display()
+                )));
+            }
+        } else {
+            lillux::atomic_write_private(&artifact, content).map_err(|error| {
+                refused(format!(
+                    "verified artifact {} cannot be written: {error}",
+                    artifact.display()
+                ))
+            })?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o500)).map_err(
+                |error| {
+                    refused(format!(
+                        "verified artifact {} cannot be protected: {error}",
+                        artifact.display()
+                    ))
+                },
+            )?;
+        }
+        let (captured, _) =
+            read_regular_file_bytes_limited("verified artifact", &artifact, self.max_file_bytes)?;
+        if lillux::cas::sha256_hex(&captured) != expected_hash {
+            return Err(refused(format!(
+                "verified artifact {} failed its content-address check",
+                artifact.display()
+            )));
+        }
+        usage.files = next_files;
+        usage.total_bytes = next_total;
+        usage
+            .entries
+            .insert(name.to_string(), (expected_hash.to_string(), content_len));
+        Ok(artifact)
+    }
+}
+
+/// Provenance of the writable project root presented to one launch.
+///
+/// `RuntimeWorkspace` is set only by daemon-owned execution provenance. It
+/// permits that exact workspace beneath the otherwise protected runtime cache;
+/// caller-selected live paths always use `External`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxProjectAuthority {
+    External,
+    RuntimeWorkspace,
+}
+
+/// Verified file identity for executable code used by one launch.
+///
+/// The source path records the host-side provenance. Enforced apply re-reads
+/// it, requires the already-verified whole-file digest to match, materializes
+/// those exact bytes into node-owned content-addressed storage, and executes
+/// the artifact from a synthetic read-only code namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxVerifiedCode {
+    pub source_path: PathBuf,
+    pub content_hash: String,
+}
+
+/// Per-launch facts used to resolve policy placeholders and record provenance.
+#[derive(Debug, Clone, Copy)]
+pub struct SandboxLaunchContext<'a> {
+    pub project_path: &'a Path,
+    pub project_authority: SandboxProjectAuthority,
+    pub state_root: Option<&'a Path>,
+    pub checkpoint_dir: Option<&'a Path>,
+    pub bundle_roots: &'a [PathBuf],
+    pub operator_trusted_keys_dir: Option<&'a Path>,
+    pub verified_code: &'a [SandboxVerifiedCode],
+    pub item_ref: &'a str,
+    pub thread_id: &'a str,
+}
+
+#[derive(Debug, Clone)]
+struct ReadableMount {
+    source: PathBuf,
+    destination: PathBuf,
+    source_handle: Arc<std::fs::File>,
+}
+
+impl PartialEq for ReadableMount {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.destination == other.destination
+    }
+}
+
+impl Eq for ReadableMount {}
+
+#[derive(Debug, Clone)]
+struct PreparedVerifiedCode {
+    original: PathBuf,
+    canonical_source: PathBuf,
+    mirror: Option<ReadableMount>,
+    artifact: ReadableMount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WritableMountAuthority {
+    Policy,
+    DaemonCheckpoint,
+}
+
+#[derive(Debug, Clone)]
+struct WritableMount {
+    source: PathBuf,
+    destination: PathBuf,
+    authority: WritableMountAuthority,
+    source_handle: Arc<std::fs::File>,
+}
+
+impl SandboxRuntime {
+    /// Load the node-owned policy from its fixed path and resolve its runtime.
+    ///
+    /// Missing files, malformed YAML, unknown fields, and unsupported versions
+    /// are errors in both modes. Disabled mode deliberately does not inspect or
+    /// canonicalize the configured backend. Enforced mode validates all static
+    /// backend and limit facts before this value is returned.
+    pub fn load(app_root: &Path) -> Result<Self, EngineError> {
+        Self::load_inner(app_root, None)
+    }
+
+    /// Load the daemon snapshot and pin its configured callback socket path.
+    /// The socket itself is resolved only for launches that request callback
+    /// IPC, because the listener may not exist yet at policy-load time.
+    pub fn load_for_daemon(app_root: &Path, daemon_socket: &Path) -> Result<Self, EngineError> {
+        if !daemon_socket.is_absolute() {
+            return Err(refused(format!(
+                "daemon socket path must be absolute: {}",
+                daemon_socket.display()
+            )));
+        }
+        let socket_parent = daemon_socket.parent().ok_or_else(|| {
+            refused(format!(
+                "daemon socket path has no parent: {}",
+                daemon_socket.display()
+            ))
+        })?;
+        let canonical_parent = canonicalize_launch_path("daemon socket parent", socket_parent)?;
+        let socket_name = daemon_socket.file_name().ok_or_else(|| {
+            refused(format!(
+                "daemon socket path has no file name: {}",
+                daemon_socket.display()
+            ))
+        })?;
+        Self::load_inner(app_root, Some(canonical_parent.join(socket_name)))
+    }
+
+    fn load_inner(app_root: &Path, daemon_socket: Option<PathBuf>) -> Result<Self, EngineError> {
+        // Bind the policy bytes and all later authority checks to one canonical
+        // app-root identity. The operator spelling remains the namespace
+        // destination, but it is never used as the host-side authority root.
+        let runtime_app_root = canonicalize_context_mount("app root", app_root)?;
+        validate_existing_directory_tree_without_symlinks(
+            &runtime_app_root,
+            Path::new(".ai/node"),
+            "sandbox policy parent",
+        )?;
+        let source = runtime_app_root
+            .join(crate::AI_DIR)
+            .join(SANDBOX_POLICY_RELATIVE_PATH);
+        let mut file = open_policy_file(&source)?;
+        let mut raw = String::new();
+        file.read_to_string(&mut raw)
+            .map_err(|error| EngineError::SandboxPolicyRefused {
+                reason: format!(
+                    "node sandbox policy is required at {}: {error}",
+                    source.display()
+                ),
+            })?;
+        let policy: SandboxPolicy =
+            serde_yaml::from_str(&raw).map_err(|error| EngineError::SandboxPolicyRefused {
+                reason: format!("invalid node sandbox policy {}: {error}", source.display()),
+            })?;
+        let digest = format!("sha256:{}", lillux::sha256_hex(raw.as_bytes()));
+        let observed_app_root = canonicalize_context_mount("app root", app_root)?;
+        if observed_app_root != runtime_app_root {
+            return Err(refused(format!(
+                "app root {} changed while its sandbox policy was being loaded",
+                app_root.display()
+            )));
+        }
+        Self::resolve(
+            policy,
+            Some(source),
+            Some(digest),
+            Some(runtime_app_root),
+            Some(app_root.to_path_buf()),
+            daemon_socket,
+        )
+    }
+
+    pub fn source(&self) -> Option<&Path> {
+        self.inspection.source.as_deref()
+    }
+
+    pub fn version(&self) -> u32 {
+        self.inspection.version
+    }
+
+    pub fn mode(&self) -> SandboxMode {
+        self.inspection.mode
+    }
+
+    pub fn digest(&self) -> Option<&str> {
+        self.inspection.digest.as_deref()
+    }
+
+    pub fn inspection(&self) -> &SandboxInspection {
+        &self.inspection
+    }
+
+    /// Load and resolve a policy for an inspection-only caller such as doctor.
+    /// This shares the production parser and validator rather than maintaining
+    /// a second diagnostic interpretation of the policy.
+    pub fn inspect(app_root: &Path) -> Result<SandboxInspection, EngineError> {
+        Self::load(app_root).map(|runtime| runtime.inspection)
+    }
+
+    pub fn is_enforced(&self) -> bool {
+        self.state == SandboxRuntimeState::Enforced
+    }
+
+    /// Apply this immutable policy snapshot to one executable request.
+    pub fn apply(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: SandboxLaunchContext<'_>,
+    ) -> Result<lillux::SubprocessRequest, EngineError> {
+        if !request.timeout.is_finite() || request.timeout < 0.0 {
+            return Err(refused(format!(
+                "invalid subprocess timeout {}",
+                request.timeout
+            )));
+        }
+        if self.state == SandboxRuntimeState::Disabled {
+            // Opt-out is deliberately exact: no namespace, mount, environment,
+            // path, descriptor, or limit rewriting occurs in disabled mode.
+            return Ok(request);
+        }
+        if !request.inherited_fds.is_empty() {
+            return Err(refused(
+                "enforced sandbox launches cannot inherit caller-supplied file descriptors"
+                    .to_string(),
+            ));
+        }
+
+        let _item_ref = CanonicalRef::parse(context.item_ref).map_err(|error| {
+            refused(format!(
+                "invalid sandbox item reference `{}`: {error}",
+                context.item_ref
+            ))
+        })?;
+        // Retained in the launch context even though Bubblewrap does not need it
+        // in argv. Audit surfaces can attach it without expanding policy input.
+        let _thread_id = context.thread_id;
+        validate_thread_path_component(context.thread_id)?;
+
+        let lillux::SubprocessRequest {
+            cmd,
+            mut args,
+            cwd,
+            mut envs,
+            stdin_data,
+            timeout,
+            limits,
+            mut inherited_fds,
+        } = request;
+
+        let project_destination = context.project_path.to_path_buf();
+        let cwd_destination = cwd
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| project_destination.clone());
+        let canonical_project = canonicalize_context_mount("project", &project_destination)?;
+        let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
+
+        let mut environment_names = std::collections::HashSet::new();
+        if let Some((duplicate, _)) = envs
+            .iter()
+            .find(|(name, _)| !environment_names.insert(name.as_str()))
+        {
+            return Err(refused(format!(
+                "environment variable `{duplicate}` is present more than once"
+            )));
+        }
+        if let Some((name, _)) = envs.iter().find(|(name, value)| {
+            name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0')
+        }) {
+            return Err(refused(format!(
+                "environment variable `{name}` has an invalid name or value"
+            )));
+        }
+        if let Some((name, _)) = envs.iter().find(|(name, _)| {
+            name != "TMPDIR" && !environment_name_allowed(&self.inspection.environment, name)
+        }) {
+            return Err(refused(format!(
+                "environment variable `{name}` is not allowed by node policy"
+            )));
+        }
+
+        let backend_path = self
+            .inspection
+            .backend
+            .resolved_executable
+            .as_ref()
+            .expect("enforced sandbox runtime has a resolved backend");
+        let backend_handle = self
+            .backend_handle
+            .as_ref()
+            .expect("enforced sandbox runtime has a captured backend handle");
+        let canonical_state_root = context
+            .state_root
+            .map(|path| canonicalize_context_mount("state root", path))
+            .transpose()?;
+        let canonical_checkpoint_dir = context
+            .checkpoint_dir
+            .map(|path| canonicalize_context_mount("checkpoint directory", path))
+            .transpose()?;
+        if let Some(checkpoint_dir) = &canonical_checkpoint_dir {
+            let expected = self
+                .app_root
+                .as_deref()
+                .expect("enforced sandbox runtime has an app root")
+                .join("threads")
+                .join(context.thread_id)
+                .join("checkpoints");
+            let expected = canonicalize_launch_path("expected checkpoint directory", &expected)?;
+            let configured_expected = self
+                .app_root
+                .as_deref()
+                .expect("enforced sandbox runtime has an app root")
+                .join("threads")
+                .join(context.thread_id)
+                .join("checkpoints");
+            if expected != configured_expected {
+                return Err(refused(format!(
+                    "daemon checkpoint path {} traverses a symlink",
+                    configured_expected.display()
+                )));
+            }
+            if checkpoint_dir != &expected {
+                return Err(refused(format!(
+                    "checkpoint directory {} does not match daemon-owned path {}",
+                    checkpoint_dir.display(),
+                    expected.display()
+                )));
+            }
+        }
+        let resolved_writable_mounts = self
+            .inspection
+            .filesystem
+            .writable
+            .iter()
+            .map(|configured| {
+                resolve_writable_mount(
+                    configured,
+                    &project_destination,
+                    &canonical_project,
+                    &cwd_destination,
+                    &canonical_cwd,
+                    context.checkpoint_dir,
+                    canonical_checkpoint_dir.as_deref(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut writable_mounts = Vec::<WritableMount>::new();
+        for mount in resolved_writable_mounts.into_iter().flatten() {
+            if let Some(existing) = writable_mounts.iter_mut().find(|existing| {
+                existing.source == mount.source && existing.destination == mount.destination
+            }) {
+                if mount.authority == WritableMountAuthority::DaemonCheckpoint {
+                    existing.authority = mount.authority;
+                }
+            } else {
+                writable_mounts.push(mount);
+            }
+        }
+        writable_mounts.sort_by(|left, right| {
+            left.destination
+                .cmp(&right.destination)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        for mount in &writable_mounts {
+            validate_writable_mount(
+                &mount.source,
+                self.app_root.as_deref(),
+                backend_path,
+                self.daemon_socket.as_deref(),
+                &canonical_project,
+                context.project_authority,
+                mount.authority,
+                canonical_checkpoint_dir.as_deref(),
+            )?;
+        }
+        let mut prepared_code = Vec::with_capacity(context.verified_code.len() + 1);
+        for verified in context.verified_code {
+            let prepared = self.prepare_verified_code(
+                verified,
+                &project_destination,
+                &canonical_project,
+                context.bundle_roots,
+            )?;
+            rewrite_verified_code_references(
+                &mut args,
+                &mut envs,
+                &verified.source_path,
+                &prepared.canonical_source,
+                &prepared.artifact.destination,
+            )?;
+            prepared_code.push(prepared);
+        }
+
+        let lexical_command = PathBuf::from(&cmd);
+        if !lexical_command.is_absolute() {
+            return Err(refused(format!(
+                "command path must be absolute: {}",
+                lexical_command.display()
+            )));
+        }
+        let canonical_command = canonicalize_context_mount("command", &lexical_command)?;
+        // Preserve argv[0] only when the requested command spelling traversed
+        // a symlink. This retains virtual-environment launcher semantics while
+        // the executable itself comes from the already-resolved target.
+        let command_argv0 = (lexical_command != canonical_command).then(|| cmd.clone());
+        let verified_command = prepared_code.iter().find(|prepared| {
+            lexical_command == prepared.original || canonical_command == prepared.canonical_source
+        });
+        let (command_path, command_is_on_system_surface) = if let Some(prepared) = verified_command
+        {
+            (prepared.artifact.destination.clone(), false)
+        } else {
+            let on_system_surface = is_lexically_on_system_runtime_surface(&lexical_command)
+                && is_on_system_runtime_surface(&canonical_command);
+            if on_system_surface {
+                (canonical_command, true)
+            } else {
+                let is_runtime_workspace_project_code = context.project_authority
+                    == SandboxProjectAuthority::RuntimeWorkspace
+                    && lexical_command.starts_with(&project_destination);
+                let is_node_code = self.app_root.as_deref().is_some_and(|root| {
+                    canonical_command.starts_with(root)
+                        && !(is_runtime_workspace_project_code
+                            && canonical_command.starts_with(&canonical_project))
+                }) || self.app_root_destination.as_deref().is_some_and(|root| {
+                    lexical_command.starts_with(root) && !is_runtime_workspace_project_code
+                });
+                let is_bundle_code = context.bundle_roots.iter().any(|root| {
+                    lexical_command.starts_with(root)
+                        || std::fs::canonicalize(root)
+                            .ok()
+                            .is_some_and(|root| canonical_command.starts_with(root))
+                });
+                if is_node_code || is_bundle_code {
+                    return Err(refused(format!(
+                        "node or bundle executable {} lacks a verified content identity",
+                        canonical_command.display()
+                    )));
+                }
+                // Operator/project executables such as a virtual-environment
+                // interpreter are not signed bundle material. Capture the
+                // exact opened bytes now and execute only the immutable copy.
+                let prepared = self.prepare_current_command(
+                    &canonical_command,
+                    &project_destination,
+                    &canonical_project,
+                    context.bundle_roots,
+                )?;
+                let command_path = prepared.artifact.destination.clone();
+                prepared_code.push(prepared);
+                (command_path, false)
+            }
+        };
+        let mut verified_code_mounts = prepared_code
+            .iter()
+            .filter_map(|prepared| prepared.mirror.clone())
+            .chain(
+                prepared_code
+                    .iter()
+                    .map(|prepared| prepared.artifact.clone()),
+            )
+            .collect::<Vec<_>>();
+        verified_code_mounts.sort_by(|left, right| {
+            left.destination
+                .cmp(&right.destination)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        verified_code_mounts.dedup();
+        let requested_daemon_socket = envs
+            .iter()
+            .find(|(name, _)| name == "RYEOSD_SOCKET_PATH")
+            .map(|(_, value)| PathBuf::from(value));
+        let canonical_requested_daemon_socket = requested_daemon_socket
+            .as_deref()
+            .map(|requested| {
+                let configured = self.daemon_socket.as_deref().ok_or_else(|| {
+                    refused(
+                        "sandbox launch requested daemon IPC without a daemon-pinned socket path"
+                            .to_string(),
+                    )
+                })?;
+                let canonical = canonicalize_context_mount("requested daemon socket", requested)?;
+                if canonical != configured {
+                    return Err(refused(format!(
+                        "sandbox launch requested daemon socket {}, expected {}",
+                        requested.display(),
+                        configured.display()
+                    )));
+                }
+                Ok(canonical)
+            })
+            .transpose()?;
+        let mut readable_mounts = self
+            .inspection
+            .filesystem
+            .readable
+            .iter()
+            .map(|configured| {
+                resolve_readable_mounts(
+                    configured,
+                    &project_destination,
+                    &canonical_project,
+                    &cwd_destination,
+                    &canonical_cwd,
+                    self.app_root.as_deref(),
+                    self.app_root_destination.as_deref(),
+                    self.daemon_socket.as_deref(),
+                    requested_daemon_socket.as_deref(),
+                    context.bundle_roots,
+                    context.operator_trusted_keys_dir,
+                    &verified_code_mounts,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        readable_mounts.sort_by(|left, right| {
+            left.destination
+                .cmp(&right.destination)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        readable_mounts.dedup();
+        for required in &verified_code_mounts {
+            if !readable_mounts.iter().any(|mount| mount == required) {
+                return Err(refused(format!(
+                    "verified code {} is not pinned read-only by the node sandbox policy",
+                    required.destination.display()
+                )));
+            }
+        }
+        for (kind, required_destination, required_source) in [
+            (
+                "state root",
+                context.state_root,
+                canonical_state_root.as_deref(),
+            ),
+            (
+                "checkpoint directory",
+                context.checkpoint_dir,
+                canonical_checkpoint_dir.as_deref(),
+            ),
+        ] {
+            if let (Some(required_destination), Some(required_source)) =
+                (required_destination, required_source)
+            {
+                if !writable_mounts.iter().any(|mount| {
+                    required_source.starts_with(&mount.source)
+                        && required_destination.starts_with(&mount.destination)
+                }) {
+                    return Err(refused(format!(
+                        "{kind} {} is not writable under the node sandbox policy",
+                        required_destination.display()
+                    )));
+                }
+            }
+        }
+        if let (Some(requested), Some(canonical_requested)) = (
+            requested_daemon_socket.as_deref(),
+            canonical_requested_daemon_socket.as_deref(),
+        ) {
+            let socket_is_visible = readable_mounts
+                .iter()
+                .any(|mount| mount.source == canonical_requested && mount.destination == requested);
+            if !socket_is_visible {
+                return Err(refused(format!(
+                    "daemon socket {} is not readable under the node sandbox policy",
+                    requested.display()
+                )));
+            }
+        }
+        let cwd_is_visible = writable_mounts.iter().any(|mount| {
+            canonical_cwd.starts_with(&mount.source)
+                && cwd_destination.starts_with(&mount.destination)
+        }) || readable_mounts.iter().any(|mount| {
+            canonical_cwd.starts_with(&mount.source)
+                && cwd_destination.starts_with(&mount.destination)
+        });
+        if !cwd_is_visible {
+            return Err(refused(format!(
+                "working directory {} is not visible through a readable or writable node-policy mount",
+                cwd_destination.display()
+            )));
+        }
+        let mut sandbox_args = vec![
+            "--die-with-parent".to_string(),
+            "--new-session".to_string(),
+            "--clearenv".to_string(),
+            "--unshare-user".to_string(),
+            "--unshare-ipc".to_string(),
+            "--unshare-uts".to_string(),
+        ];
+        // Deliberately retain the host PID namespace: managed runtimes attach
+        // their own PID over the pinned UDS, and the daemon must be able to use
+        // that value for host-side PGID cancellation and reconciliation.
+        if self.inspection.network.mode == SandboxNetworkMode::Isolated {
+            sandbox_args.push("--unshare-net".to_string());
+        }
+        sandbox_args.extend(["--tmpfs".to_string(), "/".to_string()]);
+
+        // Only the OS runtime surface and exact verified executable are visible.
+        // System sources are fd-pinned as well: even privileged host updates
+        // cannot redirect a validated mount pathname between apply and spawn.
+        let mut system_readable_mounts = Vec::new();
+        for path in ["/usr", "/bin", "/lib", "/lib64"] {
+            let destination = PathBuf::from(path);
+            if destination.exists() {
+                let source = canonicalize_launch_path("system runtime mount", &destination)?;
+                let source_handle = pin_mount_source("system runtime mount", &source)?;
+                sandbox_args.extend([
+                    "--ro-bind-fd".to_string(),
+                    mount_fd_arg(&source_handle),
+                    destination.to_string_lossy().into_owned(),
+                ]);
+                system_readable_mounts.push(ReadableMount {
+                    source,
+                    destination,
+                    source_handle,
+                });
+            }
+        }
+        sandbox_args.extend(["--dir".to_string(), "/etc".to_string()]);
+        // Retaining host PIDs is required by the current cancellation
+        // protocol, but exposing the host procfs would let a same-UID workload
+        // escape the selected filesystem surface through another process's
+        // `root`, `cwd`, or `fd` links. Present an empty compatibility
+        // directory instead; RyeOS does not claim PID/signal isolation.
+        sandbox_args.extend(["--dir".to_string(), "/proc".to_string()]);
+        for path in [
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
+            "/etc/resolv.conf",
+            "/etc/ssl",
+        ] {
+            let destination = PathBuf::from(path);
+            if destination.exists() {
+                let source = canonicalize_launch_path("system configuration mount", &destination)?;
+                let source_handle = pin_mount_source("system configuration mount", &source)?;
+                sandbox_args.extend([
+                    "--ro-bind-fd".to_string(),
+                    mount_fd_arg(&source_handle),
+                    destination.to_string_lossy().into_owned(),
+                ]);
+                system_readable_mounts.push(ReadableMount {
+                    source,
+                    destination,
+                    source_handle,
+                });
+            }
+        }
+
+        if !command_is_on_system_surface {
+            append_parent_directories(&mut sandbox_args, &command_path);
+        }
+
+        sandbox_args.extend(["--dev".to_string(), "/dev".to_string()]);
+        sandbox_args.extend(["--tmpfs".to_string(), "/tmp".to_string()]);
+        for mount in &readable_mounts {
+            append_parent_directories(&mut sandbox_args, &mount.destination);
+        }
+        for mount in &writable_mounts {
+            append_parent_directories(&mut sandbox_args, &mount.destination);
+        }
+        inherited_fds.extend(
+            writable_mounts
+                .iter()
+                .map(|mount| mount.source_handle.clone()),
+        );
+        inherited_fds.extend(
+            readable_mounts
+                .iter()
+                .map(|mount| mount.source_handle.clone()),
+        );
+        inherited_fds.extend(
+            system_readable_mounts
+                .iter()
+                .map(|mount| mount.source_handle.clone()),
+        );
+        inherited_fds.push(backend_handle.clone());
+        for mount in &writable_mounts {
+            sandbox_args.extend([
+                "--bind-fd".to_string(),
+                mount_fd_arg(&mount.source_handle),
+                mount.destination.to_string_lossy().into_owned(),
+            ]);
+        }
+        // Read-only policy always wins over an overlapping writable ancestor.
+        // Verified code is held back for a dedicated final overlay below.
+        for mount in readable_mounts
+            .iter()
+            .filter(|mount| !verified_code_mounts.contains(mount))
+        {
+            sandbox_args.extend([
+                "--ro-bind-fd".to_string(),
+                mount_fd_arg(&mount.source_handle),
+                mount.destination.to_string_lossy().into_owned(),
+            ]);
+        }
+        // Install verified root files, verified executables, and captured
+        // project/operator executables last. No ordinary policy mount can
+        // override these synthetic destinations.
+        for mount in &verified_code_mounts {
+            sandbox_args.extend([
+                "--ro-bind-fd".to_string(),
+                mount_fd_arg(&mount.source_handle),
+                mount.destination.to_string_lossy().into_owned(),
+            ]);
+        }
+
+        for (name, value) in &envs {
+            if name == "TMPDIR" {
+                continue;
+            }
+            sandbox_args.extend(["--setenv".to_string(), name.clone(), value.clone()]);
+        }
+        // `/tmp` is a private tmpfs in every enforced launch. Pin the standard
+        // Unix temporary-directory contract to that namespace-local path so an
+        // inherited host TMPDIR cannot make a runtime cache silently disappear.
+        sandbox_args.extend([
+            "--setenv".to_string(),
+            "TMPDIR".to_string(),
+            "/tmp".to_string(),
+        ]);
+
+        sandbox_args.push("--chdir".to_string());
+        sandbox_args.push(cwd_destination.to_string_lossy().into_owned());
+        if let Some(argv0) = command_argv0 {
+            sandbox_args.extend(["--argv0".to_string(), argv0]);
+        }
+        sandbox_args.push("--".to_string());
+        sandbox_args.push(command_path.to_string_lossy().into_owned());
+        sandbox_args.append(&mut args);
+
+        let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
+        let effective_open_files = match (self.inspection.limits.open_files, requested_open_files) {
+            (Some(policy), Some(requested)) => Some(policy.min(requested)),
+            (Some(policy), None) => Some(policy),
+            (None, Some(requested)) => Some(requested),
+            (None, None) => None,
+        };
+        let limits = effective_open_files
+            .map(|open_files| lillux::SubprocessLimits {
+                max_open_files: Some(open_files),
+            })
+            .or(limits);
+
+        Ok(lillux::SubprocessRequest {
+            cmd: format!("/proc/self/fd/{}", mount_fd_arg(backend_handle)),
+            args: sandbox_args,
+            cwd: Some(canonical_cwd.to_string_lossy().into_owned()),
+            // Never expose the target environment to Bubblewrap's own dynamic
+            // loader. `--clearenv`/`--setenv` constructs it inside the sandbox.
+            envs: Vec::new(),
+            stdin_data,
+            timeout,
+            limits,
+            inherited_fds,
+        })
+    }
+
+    fn resolve(
+        policy: SandboxPolicy,
+        source: Option<PathBuf>,
+        digest: Option<String>,
+        app_root: Option<PathBuf>,
+        app_root_destination: Option<PathBuf>,
+        daemon_socket: Option<PathBuf>,
+    ) -> Result<Self, EngineError> {
+        if policy.version != SANDBOX_POLICY_VERSION {
+            return Err(refused(format!(
+                "unsupported node sandbox policy version {} (expected {})",
+                policy.version, SANDBOX_POLICY_VERSION
+            )));
+        }
+        validate_policy_semantics(&policy)?;
+
+        let state = match policy.mode {
+            SandboxMode::Disabled => SandboxRuntimeState::Disabled,
+            SandboxMode::Enforce => SandboxRuntimeState::Enforced,
+        };
+        if state == SandboxRuntimeState::Enforced {
+            validate_enforced_limits(&policy.limits)?;
+        }
+        let verified_artifacts = if state == SandboxRuntimeState::Enforced {
+            let app_root = app_root.as_deref().ok_or_else(|| {
+                refused("enforced sandbox runtime requires an app root".to_string())
+            })?;
+            Some(Arc::new(VerifiedArtifactStore::create(
+                app_root,
+                &policy.limits,
+            )?))
+        } else {
+            None
+        };
+        let (resolved_executable, backend_handle, captured_digest, captured_version) =
+            match policy.mode {
+                SandboxMode::Disabled => (None, None, None, None),
+                SandboxMode::Enforce => {
+                    let artifacts = verified_artifacts
+                        .as_deref()
+                        .expect("enforced sandbox runtime has a verified artifact store");
+                    let (resolved, artifact, digest, version) =
+                        resolve_backend(&policy.backend, artifacts)?;
+                    (Some(resolved), Some(artifact), Some(digest), Some(version))
+                }
+            };
+        Ok(Self {
+            inspection: SandboxInspection {
+                source,
+                version: policy.version,
+                mode: policy.mode,
+                digest,
+                backend: SandboxBackendInspection {
+                    kind: policy.backend.kind,
+                    configured_executable: policy.backend.executable,
+                    resolved_executable,
+                    captured_digest,
+                    captured_version,
+                },
+                filesystem: policy.filesystem,
+                network: policy.network,
+                environment: policy.environment,
+                limits: policy.limits,
+            },
+            state,
+            app_root,
+            app_root_destination,
+            daemon_socket,
+            verified_artifacts,
+            backend_handle,
+        })
+    }
+
+    fn prepare_verified_code(
+        &self,
+        verified: &SandboxVerifiedCode,
+        project_destination: &Path,
+        canonical_project: &Path,
+        bundle_roots: &[PathBuf],
+    ) -> Result<PreparedVerifiedCode, EngineError> {
+        if !verified.source_path.is_absolute() {
+            return Err(refused(format!(
+                "verified code path must be absolute: {}",
+                verified.source_path.display()
+            )));
+        }
+        if verified.content_hash.len() != 64
+            || !verified
+                .content_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(refused(format!(
+                "verified code has invalid SHA-256 digest `{}`",
+                verified.content_hash
+            )));
+        }
+        let artifacts = self
+            .verified_artifacts
+            .as_deref()
+            .expect("enforced sandbox runtime has a verified artifact store");
+        let canonical_source = canonicalize_context_mount("code source", &verified.source_path)?;
+        let (content, _) = artifacts.read_source("verified code", &verified.source_path)?;
+        let actual_hash = lillux::cas::sha256_hex(&content);
+        if actual_hash != verified.content_hash {
+            return Err(refused(format!(
+                "verified code {} changed after verification (expected {}, got {})",
+                verified.source_path.display(),
+                verified.content_hash,
+                actual_hash
+            )));
+        }
+        let observed_source = canonicalize_context_mount("code source", &verified.source_path)?;
+        if observed_source != canonical_source {
+            return Err(refused(format!(
+                "verified code {} changed filesystem identity while its bytes were captured",
+                verified.source_path.display()
+            )));
+        }
+        self.prepare_code_bytes(
+            &verified.source_path,
+            Some(&canonical_source),
+            &verified.content_hash,
+            &content,
+            project_destination,
+            canonical_project,
+            bundle_roots,
+        )
+    }
+
+    fn prepare_current_command(
+        &self,
+        command: &Path,
+        project_destination: &Path,
+        canonical_project: &Path,
+        bundle_roots: &[PathBuf],
+    ) -> Result<PreparedVerifiedCode, EngineError> {
+        let artifacts = self
+            .verified_artifacts
+            .as_deref()
+            .expect("enforced sandbox runtime has a verified artifact store");
+        let (content, metadata) = artifacts.read_source("command", command)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(refused(format!(
+                    "command {} is not executable",
+                    command.display()
+                )));
+            }
+        }
+        let content_hash = lillux::cas::sha256_hex(&content);
+        self.prepare_code_bytes(
+            command,
+            Some(command),
+            &content_hash,
+            &content,
+            project_destination,
+            canonical_project,
+            bundle_roots,
+        )
+    }
+
+    fn prepare_code_bytes(
+        &self,
+        original: &Path,
+        expected_canonical_source: Option<&Path>,
+        content_hash: &str,
+        content: &[u8],
+        project_destination: &Path,
+        canonical_project: &Path,
+        bundle_roots: &[PathBuf],
+    ) -> Result<PreparedVerifiedCode, EngineError> {
+        let canonical_source = canonicalize_context_mount("code source", original)?;
+        if expected_canonical_source.is_some_and(|expected| expected != canonical_source) {
+            return Err(refused(format!(
+                "code source {} changed filesystem identity before materialization",
+                original.display()
+            )));
+        }
+        let (mirror, destination) = code_namespace_layout(
+            original,
+            &canonical_source,
+            project_destination,
+            canonical_project,
+            bundle_roots,
+        )?;
+        let artifact_root = self
+            .verified_artifacts
+            .as_deref()
+            .expect("enforced sandbox runtime has a verified artifact store");
+        let artifact = artifact_root.materialize(content_hash, content_hash, content)?;
+        let artifact_source = canonicalize_launch_path("verified-code artifact", &artifact)?;
+        let artifact = ReadableMount {
+            source_handle: pin_mount_source("verified-code artifact", &artifact_source)?,
+            source: artifact_source,
+            destination,
+        };
+        Ok(PreparedVerifiedCode {
+            original: original.to_path_buf(),
+            canonical_source,
+            mirror,
+            artifact,
+        })
+    }
+}
+
+/// Disabled runtime used by in-memory fixtures that have no node filesystem.
+/// Production composition must call [`SandboxRuntime::load`].
+impl Default for SandboxRuntime {
+    fn default() -> Self {
+        Self::resolve(
+            SandboxPolicy {
+                version: SANDBOX_POLICY_VERSION,
+                mode: SandboxMode::Disabled,
+                backend: SandboxBackendPolicy {
+                    kind: SandboxBackendKind::Bubblewrap,
+                    executable: PathBuf::from("/usr/bin/bwrap"),
+                },
+                filesystem: SandboxFilesystemPolicy {
+                    readable: vec![
+                        "{node_public_identity}".to_string(),
+                        "{daemon_socket}".to_string(),
+                        "{bundle_roots}".to_string(),
+                        "{operator_trusted_keys}".to_string(),
+                        "{verified_code}".to_string(),
+                    ],
+                    writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],
+                },
+                network: SandboxNetworkPolicy {
+                    mode: SandboxNetworkMode::Host,
+                },
+                environment: SandboxEnvironmentPolicy {
+                    allow: vec!["*".to_string()],
+                },
+                limits: SandboxLimitsPolicy {
+                    open_files: Some(1024),
+                    verified_artifact_file_bytes: 67_108_864,
+                    verified_artifact_total_bytes: 268_435_456,
+                    verified_artifact_files: 4_096,
+                },
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("compiled disabled sandbox fixture policy is valid")
+    }
+}
+
+fn resolve_backend(
+    policy: &SandboxBackendPolicy,
+    artifacts: &VerifiedArtifactStore,
+) -> Result<(PathBuf, Arc<std::fs::File>, String, String), EngineError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (policy, artifacts);
+        return Err(refused(
+            "Bubblewrap sandbox enforcement is supported only on Linux".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if !policy.executable.is_absolute() {
+            return Err(refused(format!(
+                "sandbox backend executable must be absolute: {}",
+                policy.executable.display()
+            )));
+        }
+        let executable = std::fs::canonicalize(&policy.executable).map_err(|error| {
+            refused(format!(
+                "sandbox backend {} cannot be resolved: {error}",
+                policy.executable.display()
+            ))
+        })?;
+        let (content, metadata) = artifacts.read_source("sandbox backend", &executable)?;
+        if !metadata.is_file() {
+            return Err(refused(format!(
+                "sandbox backend {} is not a file",
+                executable.display()
+            )));
+        }
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(refused(format!(
+                "sandbox backend {} is not executable",
+                executable.display()
+            )));
+        }
+        if metadata.permissions().mode() & 0o6000 != 0 {
+            return Err(refused(format!(
+                "sandbox backend {} must not be setuid or setgid",
+                executable.display()
+            )));
+        }
+        reject_file_capabilities("sandbox backend", &executable)?;
+        let content_hash = lillux::cas::sha256_hex(&content);
+        let artifact =
+            artifacts.materialize(&format!("backend-{content_hash}"), &content_hash, &content)?;
+        let artifact = canonicalize_launch_path("sandbox backend artifact", &artifact)?;
+        let handle = pin_mount_source("sandbox backend artifact", &artifact)?;
+        let version = probe_bubblewrap_backend(&handle)?;
+        Ok((
+            executable,
+            handle,
+            format!("sha256:{content_hash}"),
+            version,
+        ))
+    }
+}
+
+fn probe_bubblewrap_backend(handle: &Arc<std::fs::File>) -> Result<String, EngineError> {
+    let command = format!("/proc/self/fd/{}", mount_fd_arg(handle));
+    let run = |argument: &str| {
+        lillux::lib_run(lillux::SubprocessRequest {
+            cmd: command.clone(),
+            args: vec![argument.to_string()],
+            cwd: Some("/".to_string()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: None,
+            inherited_fds: vec![handle.clone()],
+        })
+    };
+
+    let version_result = run("--version");
+    if !version_result.success {
+        return Err(refused(format!(
+            "captured sandbox backend failed its version probe: {}",
+            version_result.stderr.trim()
+        )));
+    }
+    let version = version_result
+        .stdout
+        .trim()
+        .strip_prefix("bubblewrap ")
+        .filter(|version| !version.is_empty() && !version.chars().any(char::is_whitespace))
+        .ok_or_else(|| {
+            refused(format!(
+                "captured sandbox backend returned an invalid version: `{}`",
+                version_result.stdout.trim()
+            ))
+        })?;
+    require_bubblewrap_version(version)?;
+
+    let help_result = run("--help");
+    if !help_result.success {
+        return Err(refused(format!(
+            "captured sandbox backend failed its feature probe: {}",
+            help_result.stderr.trim()
+        )));
+    }
+    let help = format!("{}\n{}", help_result.stdout, help_result.stderr);
+    let help_tokens = help
+        .split_whitespace()
+        .collect::<std::collections::HashSet<_>>();
+    for required in ["--bind-fd", "--ro-bind-fd", "--argv0"] {
+        if !help_tokens.contains(required) {
+            return Err(refused(format!(
+                "captured sandbox backend does not support required option {required}"
+            )));
+        }
+    }
+    Ok(version.to_string())
+}
+
+fn require_bubblewrap_version(version: &str) -> Result<(), EngineError> {
+    let mut parts = version.split('.');
+    let parse_part = |part: Option<&str>, name: &str| {
+        let part = part.unwrap_or_default();
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(refused(format!(
+                "captured sandbox backend has invalid {name} version component `{version}`"
+            )));
+        }
+        part.parse::<u64>().map_err(|_| {
+            refused(format!(
+                "captured sandbox backend has invalid {name} version component `{version}`"
+            ))
+        })
+    };
+    let parsed = (
+        parse_part(parts.next(), "major")?,
+        parse_part(parts.next(), "minor")?,
+        parse_part(parts.next(), "patch")?,
+    );
+    if parts.next().is_some() {
+        return Err(refused(format!(
+            "captured sandbox backend version `{version}` must use major.minor.patch"
+        )));
+    }
+    if parsed < (0, 11, 0) {
+        return Err(refused(format!(
+            "captured sandbox backend version {version} is unsupported; Bubblewrap 0.11.0 or newer is required"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_file_capabilities(kind: &str, path: &Path) -> Result<(), EngineError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (kind, path);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            refused(format!(
+                "{kind} path contains an interior NUL: {}",
+                path.display()
+            ))
+        })?;
+        let attribute = c"security.capability";
+        let result =
+            unsafe { libc::getxattr(c_path.as_ptr(), attribute.as_ptr(), std::ptr::null_mut(), 0) };
+        if result >= 0 {
+            return Err(refused(format!(
+                "{kind} {} must not carry Linux file capabilities",
+                path.display()
+            )));
+        }
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error();
+        if code != Some(libc::ENODATA)
+            && code != Some(libc::ENOTSUP)
+            && code != Some(libc::EOPNOTSUPP)
+        {
+            return Err(refused(format!(
+                "{kind} {} capabilities cannot be inspected: {error}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_policy_semantics(policy: &SandboxPolicy) -> Result<(), EngineError> {
+    if !policy.backend.executable.is_absolute() {
+        return Err(refused(format!(
+            "sandbox backend executable must be absolute: {}",
+            policy.backend.executable.display()
+        )));
+    }
+    for configured in &policy.filesystem.readable {
+        if configured != "{project}"
+            && configured != "{cwd}"
+            && configured != "{node_public_identity}"
+            && configured != "{daemon_socket}"
+            && configured != "{bundle_roots}"
+            && configured != "{operator_trusted_keys}"
+            && configured != "{verified_code}"
+            && !Path::new(configured).is_absolute()
+        {
+            return Err(refused(format!(
+                "sandbox readable path `{configured}` must be absolute or use {{project}}/{{cwd}}/{{node_public_identity}}/{{daemon_socket}}/{{bundle_roots}}/{{operator_trusted_keys}}/{{verified_code}}"
+            )));
+        }
+    }
+    for configured in &policy.filesystem.writable {
+        if configured != "{project}"
+            && configured != "{cwd}"
+            && configured != "{checkpoint_dir}"
+            && !Path::new(configured).is_absolute()
+        {
+            return Err(refused(format!(
+                "sandbox writable path `{configured}` must be absolute or use {{project}}/{{cwd}}/{{checkpoint_dir}}"
+            )));
+        }
+    }
+    for allowed in &policy.environment.allow {
+        let wildcard_count = allowed.bytes().filter(|byte| *byte == b'*').count();
+        let valid = !allowed.is_empty()
+            && (wildcard_count == 0
+                || allowed == "*"
+                || (wildcard_count == 1 && allowed.ends_with('*')));
+        if !valid {
+            return Err(refused(format!(
+                "sandbox environment allow pattern `{allowed}` must be exact, `*`, or a prefix ending in one `*`"
+            )));
+        }
+    }
+    validate_artifact_limits(&policy.limits)?;
+    Ok(())
+}
+
+fn validate_artifact_limits(policy: &SandboxLimitsPolicy) -> Result<(), EngineError> {
+    if policy.verified_artifact_file_bytes == 0 {
+        return Err(refused(
+            "sandbox verified-artifact per-file byte limit must be greater than zero".to_string(),
+        ));
+    }
+    if policy.verified_artifact_total_bytes < policy.verified_artifact_file_bytes {
+        return Err(refused(format!(
+            "sandbox verified-artifact total-byte limit {} is below per-file limit {}",
+            policy.verified_artifact_total_bytes, policy.verified_artifact_file_bytes
+        )));
+    }
+    if policy.verified_artifact_files == 0 {
+        return Err(refused(
+            "sandbox verified-artifact file limit must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_enforced_limits(policy: &SandboxLimitsPolicy) -> Result<(), EngineError> {
+    let limits = policy
+        .open_files
+        .map(|open_files| lillux::SubprocessLimits {
+            max_open_files: Some(open_files),
+        });
+    lillux::validate_subprocess_limits(limits.as_ref()).map_err(|reason| {
+        refused(format!(
+            "sandbox open-file limit is not enforceable: {reason}"
+        ))
+    })
+}
+
+fn environment_name_allowed(policy: &SandboxEnvironmentPolicy, name: &str) -> bool {
+    policy.allow.iter().any(|allowed| {
+        allowed == "*"
+            || allowed == name
+            || allowed
+                .strip_suffix('*')
+                .is_some_and(|prefix| name.starts_with(prefix))
+    })
+}
+
+fn rewrite_verified_code_references(
+    args: &mut [String],
+    envs: &mut [(String, String)],
+    source: &Path,
+    canonical_source: &Path,
+    destination: &Path,
+) -> Result<(), EngineError> {
+    let source = source.to_str().ok_or_else(|| {
+        refused(format!(
+            "verified code path is not valid UTF-8: {}",
+            source.display()
+        ))
+    })?;
+    let destination = destination.to_str().ok_or_else(|| {
+        refused(format!(
+            "verified code namespace path is not valid UTF-8: {}",
+            destination.display()
+        ))
+    })?;
+    for value in args
+        .iter_mut()
+        .chain(envs.iter_mut().map(|(_, value)| value))
+    {
+        if let Some(rewritten) = replace_delimited_path(value, source, destination) {
+            *value = rewritten;
+        } else {
+            let exact_path = Path::new(value);
+            if exact_path.is_absolute()
+                && std::fs::canonicalize(exact_path)
+                    .ok()
+                    .is_some_and(|path| path == canonical_source)
+            {
+                *value = destination.to_string();
+            } else if let Some((prefix, path)) = value.split_once('=') {
+                let path = Path::new(path);
+                if path.is_absolute()
+                    && std::fs::canonicalize(path)
+                        .ok()
+                        .is_some_and(|path| path == canonical_source)
+                {
+                    *value = format!("{prefix}={destination}");
+                }
+            }
+        }
+
+        if value.contains(source)
+            || canonical_source
+                .to_str()
+                .is_some_and(|canonical| value.contains(canonical))
+            || contains_canonical_path_reference(value, canonical_source)
+        {
+            return Err(refused(format!(
+                "verified code reference in argument or environment value cannot be rewritten safely: {value:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Detect absolute path spellings (including symlink aliases) embedded in a
+/// structured value. Any alias that still resolves to verified code after the
+/// supported rewrite forms is refused rather than allowed to reopen live bytes.
+fn contains_canonical_path_reference(value: &str, canonical_source: &Path) -> bool {
+    fn terminates_path(character: char) -> bool {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '=' | ':'
+                    | ';'
+                    | ','
+                    | '"'
+                    | '\''
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '('
+                    | ')'
+                    | '?'
+                    | '&'
+                    | '|'
+            )
+    }
+
+    value
+        .char_indices()
+        .filter(|(_, character)| *character == '/')
+        .any(|(start, _)| {
+            let suffix = &value[start..];
+            suffix
+                .char_indices()
+                .skip(1)
+                .filter_map(|(index, character)| terminates_path(character).then_some(index))
+                .chain(std::iter::once(suffix.len()))
+                .any(|end| {
+                    let candidate = Path::new(&suffix[..end]);
+                    std::fs::canonicalize(candidate)
+                        .ok()
+                        .is_some_and(|path| path == canonical_source)
+                })
+        })
+}
+
+/// Replace a verified file path only when it occupies a complete token inside
+/// an argument or structured environment value. A raw substring replacement
+/// would also rewrite unrelated paths such as `entry.py.backup`.
+fn replace_delimited_path(value: &str, source: &str, destination: &str) -> Option<String> {
+    if source.is_empty() {
+        return None;
+    }
+
+    fn boundary(character: Option<char>) -> bool {
+        character.is_none_or(|character| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '=' | ':' | ';' | ',' | '"' | '\'' | '[' | ']' | '{' | '}' | '(' | ')'
+                )
+        })
+    }
+
+    let mut cursor = 0;
+    let mut rewritten = String::with_capacity(value.len());
+    let mut changed = false;
+    while let Some(relative_start) = value[cursor..].find(source) {
+        let start = cursor + relative_start;
+        let end = start + source.len();
+        if boundary(value[..start].chars().next_back()) && boundary(value[end..].chars().next()) {
+            rewritten.push_str(&value[cursor..start]);
+            rewritten.push_str(destination);
+            cursor = end;
+            changed = true;
+        } else {
+            let first_len = value[start..]
+                .chars()
+                .next()
+                .expect("a non-empty source match has one character")
+                .len_utf8();
+            rewritten.push_str(&value[cursor..start + first_len]);
+            cursor = start + first_len;
+        }
+    }
+    rewritten.push_str(&value[cursor..]);
+    changed.then_some(rewritten)
+}
+
+fn is_on_system_runtime_surface(path: &Path) -> bool {
+    ["/usr", "/bin", "/lib", "/lib64"]
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| path.starts_with(root))
+}
+
+fn is_lexically_on_system_runtime_surface(path: &Path) -> bool {
+    ["/usr", "/bin", "/sbin", "/lib", "/lib64"]
+        .iter()
+        .any(|root| path.starts_with(root))
+}
+
+fn code_namespace_layout(
+    original: &Path,
+    canonical_source: &Path,
+    project_destination: &Path,
+    canonical_project: &Path,
+    bundle_roots: &[PathBuf],
+) -> Result<(Option<ReadableMount>, PathBuf), EngineError> {
+    let mut candidates = vec![(
+        canonical_project.to_path_buf(),
+        project_destination.to_path_buf(),
+    )];
+    for bundle_root in bundle_roots {
+        candidates.push((
+            canonicalize_context_mount("bundle root", bundle_root)?,
+            bundle_root.clone(),
+        ));
+    }
+    let selected = candidates
+        .into_iter()
+        .filter(|(canonical, _)| canonical_source.starts_with(canonical))
+        .max_by_key(|(canonical, _)| canonical.components().count());
+
+    let Some((authority_source, authority_destination)) = selected else {
+        let file_name = canonical_source.file_name().ok_or_else(|| {
+            refused(format!(
+                "code source {} has no file name",
+                canonical_source.display()
+            ))
+        })?;
+        let authority_id = lillux::cas::sha256_hex(canonical_source.as_os_str().as_encoded_bytes());
+        let namespace_root = PathBuf::from(VERIFIED_CODE_SANDBOX_ROOT).join(authority_id);
+        return Ok((None, namespace_root.join(file_name)));
+    };
+    let relative = original
+        .strip_prefix(&authority_destination)
+        .ok()
+        .or_else(|| canonical_source.strip_prefix(&authority_source).ok())
+        .ok_or_else(|| {
+            refused(format!(
+                "code source {} is not beneath namespace authority {}",
+                original.display(),
+                authority_destination.display()
+            ))
+        })?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(refused(format!(
+            "code source {} has an unsafe namespace-relative path",
+            original.display()
+        )));
+    }
+    let authority_id = lillux::cas::sha256_hex(authority_source.as_os_str().as_encoded_bytes());
+    let namespace_root = PathBuf::from(VERIFIED_CODE_SANDBOX_ROOT).join(authority_id);
+    Ok((
+        Some(ReadableMount {
+            source_handle: pin_mount_source("code authority", &authority_source)?,
+            source: authority_source,
+            destination: namespace_root.clone(),
+        }),
+        namespace_root.join(relative),
+    ))
+}
+
+fn read_regular_file_bytes_limited(
+    kind: &str,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, std::fs::Metadata), EngineError> {
+    if !path.is_absolute() {
+        return Err(refused(format!(
+            "{kind} path must be absolute: {}",
+            path.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+    }
+    .map_err(|error| {
+        refused(format!(
+            "{kind} {} cannot be opened: {error}",
+            path.display()
+        ))
+    })?;
+
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        refused(format!(
+            "{kind} {} cannot be opened: {error}",
+            path.display()
+        ))
+    })?;
+
+    let metadata = file.metadata().map_err(|error| {
+        refused(format!(
+            "{kind} {} cannot be inspected: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(refused(format!(
+            "{kind} {} must be a regular non-symlink file",
+            path.display()
+        )));
+    }
+    if metadata.len() > max_bytes {
+        return Err(refused(format!(
+            "{kind} {} is {} bytes, exceeding configured per-file limit {max_bytes}",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    let mut content = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut content)
+        .map_err(|error| refused(format!("{kind} {} cannot be read: {error}", path.display())))?;
+    if u64::try_from(content.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(refused(format!(
+            "{kind} {} grew beyond configured per-file limit {max_bytes} while being read",
+            path.display()
+        )));
+    }
+    Ok((content, metadata))
+}
+
+fn canonicalize_launch_path(kind: &str, path: &Path) -> Result<PathBuf, EngineError> {
+    std::fs::canonicalize(path).map_err(|error| {
+        refused(format!(
+            "{kind} path {} cannot be resolved: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn create_directory_tree_without_symlinks(root: &Path, relative: &Path) -> Result<(), EngineError> {
+    if !root.is_absolute()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(refused(format!(
+            "unsafe verified-code directory root {} and relative path {}",
+            root.display(),
+            relative.display()
+        )));
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            unreachable!("relative path components were validated")
+        };
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(refused(format!(
+                    "verified-code directory {} must be a non-symlink directory",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|error| {
+                    refused(format!(
+                        "verified-code directory {} cannot be created: {error}",
+                        current.display()
+                    ))
+                })?;
+            }
+            Err(error) => {
+                return Err(refused(format!(
+                    "verified-code directory {} cannot be inspected: {error}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_existing_directory_tree_without_symlinks(
+    root: &Path,
+    relative: &Path,
+    kind: &str,
+) -> Result<(), EngineError> {
+    if !root.is_absolute()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(refused(format!(
+            "unsafe {kind} root {} and relative path {}",
+            root.display(),
+            relative.display()
+        )));
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            unreachable!("relative path components were validated")
+        };
+        current.push(component);
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            refused(format!(
+                "{kind} {} cannot be inspected: {error}",
+                current.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(refused(format!(
+                "{kind} {} must be a non-symlink directory",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Open one already-canonical mount source and retain an inheritable O_PATH
+/// descriptor for Bubblewrap. Validation and mount execution therefore refer
+/// to the same kernel object; a pathname swap after this point cannot redirect
+/// the bind to a protected node path.
+fn pin_mount_source(kind: &str, path: &Path) -> Result<Arc<std::fs::File>, EngineError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (kind, path);
+        return Err(refused(
+            "fd-pinned sandbox mounts are supported only on Linux".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            refused(format!(
+                "{kind} path contains an interior NUL: {}",
+                path.display()
+            ))
+        })?;
+        let mut fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(refused(format!(
+                "{kind} {} cannot be pinned: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        if fd <= libc::STDERR_FILENO {
+            let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+            let duplicate_error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            if duplicated < 0 {
+                return Err(refused(format!(
+                    "{kind} {} descriptor cannot be moved above stdio: {duplicate_error}",
+                    path.display()
+                )));
+            }
+            fd = duplicated;
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let metadata = file.metadata().map_err(|error| {
+            refused(format!(
+                "pinned {kind} {} cannot be inspected: {error}",
+                path.display()
+            ))
+        })?;
+        let file_type = metadata.file_type();
+        if !(file_type.is_file() || file_type.is_dir() || file_type.is_socket()) {
+            return Err(refused(format!(
+                "{kind} {} must be a regular file, directory, or Unix socket",
+                path.display()
+            )));
+        }
+
+        let fd_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let observed = std::fs::read_link(&fd_path).map_err(|error| {
+            refused(format!(
+                "pinned {kind} {} cannot be resolved through {}: {error}",
+                path.display(),
+                fd_path.display()
+            ))
+        })?;
+        if observed != path {
+            return Err(refused(format!(
+                "{kind} {} changed while it was being pinned (opened {})",
+                path.display(),
+                observed.display()
+            )));
+        }
+
+        Ok(Arc::new(file))
+    }
+}
+
+fn mount_fd_arg(handle: &Arc<std::fs::File>) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        return handle.as_raw_fd().to_string();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = handle;
+        unreachable!("enforced sandbox mounts are Linux-only")
+    }
+}
+
+fn open_policy_file(source: &Path) -> Result<std::fs::File, EngineError> {
+    let source_metadata =
+        std::fs::symlink_metadata(source).map_err(|error| EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "node sandbox policy is required at {}: {error}",
+                source.display()
+            ),
+        })?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err(refused(format!(
+            "node sandbox policy {} must be a regular non-symlink file",
+            source.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            // NOFOLLOW closes the final-component swap between the metadata
+            // check and open. NONBLOCK keeps a malicious FIFO swap from
+            // stalling node startup before the post-open file-type check.
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(source)
+    };
+
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(source);
+
+    let file = file.map_err(|error| EngineError::SandboxPolicyRefused {
+        reason: format!(
+            "node sandbox policy is required at {}: {error}",
+            source.display()
+        ),
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "node sandbox policy {} cannot be inspected: {error}",
+                source.display()
+            ),
+        })?;
+    if !metadata.is_file() {
+        return Err(refused(format!(
+            "node sandbox policy {} must be a regular non-symlink file",
+            source.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn resolve_writable_mount(
+    configured: &str,
+    project_destination: &Path,
+    canonical_project: &Path,
+    cwd_destination: &Path,
+    canonical_cwd: &Path,
+    checkpoint_destination: Option<&Path>,
+    canonical_checkpoint_dir: Option<&Path>,
+) -> Result<Option<WritableMount>, EngineError> {
+    let authority = if configured == "{checkpoint_dir}" {
+        WritableMountAuthority::DaemonCheckpoint
+    } else {
+        WritableMountAuthority::Policy
+    };
+    let (source, destination) = match configured {
+        "{project}" => (
+            canonical_project.to_path_buf(),
+            project_destination.to_path_buf(),
+        ),
+        "{cwd}" => (canonical_cwd.to_path_buf(), cwd_destination.to_path_buf()),
+        "{checkpoint_dir}" => match (canonical_checkpoint_dir, checkpoint_destination) {
+            (Some(source), Some(destination)) => (source.to_path_buf(), destination.to_path_buf()),
+            (None, None) => return Ok(None),
+            _ => {
+                return Err(refused(
+                    "sandbox checkpoint source/destination mismatch".to_string(),
+                ))
+            }
+        },
+        other => {
+            let destination = PathBuf::from(other);
+            let source = std::fs::canonicalize(&destination).map_err(|error| {
+                refused(format!(
+                    "sandbox path {} cannot be resolved: {error}",
+                    destination.display()
+                ))
+            })?;
+            (source, destination)
+        }
+    };
+    if !destination.is_absolute() {
+        return Err(refused(format!(
+            "sandbox path `{}` is not absolute",
+            destination.display()
+        )));
+    }
+    let source_handle = pin_mount_source("writable mount", &source)?;
+    Ok(Some(WritableMount {
+        source,
+        destination,
+        authority,
+        source_handle,
+    }))
+}
+
+fn resolve_readable_mounts(
+    configured: &str,
+    project_destination: &Path,
+    canonical_project: &Path,
+    cwd_destination: &Path,
+    canonical_cwd: &Path,
+    app_root: Option<&Path>,
+    app_root_destination: Option<&Path>,
+    daemon_socket: Option<&Path>,
+    requested_daemon_socket: Option<&Path>,
+    bundle_roots: &[PathBuf],
+    operator_trusted_keys_dir: Option<&Path>,
+    verified_code_mounts: &[ReadableMount],
+) -> Result<Vec<ReadableMount>, EngineError> {
+    if configured == "{node_public_identity}" {
+        let source_path = app_root
+            .ok_or_else(|| {
+                refused(
+                    "sandbox runtime cannot resolve {node_public_identity} without an app root"
+                        .to_string(),
+                )
+            })?
+            .join(crate::AI_DIR)
+            .join("node/identity/public-identity.json");
+        let destination = app_root_destination
+            .ok_or_else(|| {
+                refused(
+                    "sandbox runtime cannot resolve {node_public_identity} destination without an app root"
+                        .to_string(),
+                )
+            })?
+            .join(crate::AI_DIR)
+            .join("node/identity/public-identity.json");
+        let metadata = std::fs::symlink_metadata(&source_path).map_err(|error| {
+            refused(format!(
+                "node public identity {} cannot be inspected: {error}",
+                source_path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(refused(format!(
+                "node public identity {} must be a regular non-symlink file",
+                source_path.display()
+            )));
+        }
+        let source = std::fs::canonicalize(&source_path).map_err(|error| {
+            refused(format!(
+                "node public identity {} cannot be resolved: {error}",
+                source_path.display()
+            ))
+        })?;
+        if source != source_path {
+            return Err(refused(format!(
+                "node public identity path {} traverses a symlink",
+                source_path.display()
+            )));
+        }
+        let source_handle = pin_mount_source("node public identity", &source)?;
+        return Ok(vec![ReadableMount {
+            source,
+            destination,
+            source_handle,
+        }]);
+    }
+
+    if configured == "{daemon_socket}" {
+        let Some(requested) = requested_daemon_socket else {
+            return Ok(Vec::new());
+        };
+        let configured = daemon_socket.ok_or_else(|| {
+            refused(
+                "sandbox launch requested daemon IPC without a daemon-pinned socket path"
+                    .to_string(),
+            )
+        })?;
+        if !requested.is_absolute() {
+            return Err(refused(format!(
+                "requested daemon socket path must be absolute: {}",
+                requested.display()
+            )));
+        }
+        let requested_source = std::fs::canonicalize(requested).map_err(|error| {
+            refused(format!(
+                "requested daemon socket {} cannot be resolved: {error}",
+                requested.display()
+            ))
+        })?;
+        if requested_source != configured {
+            return Err(refused(format!(
+                "sandbox launch requested daemon socket {}, expected {}",
+                requested.display(),
+                configured.display()
+            )));
+        }
+        let metadata = std::fs::symlink_metadata(configured).map_err(|error| {
+            refused(format!(
+                "daemon socket {} cannot be inspected: {error}",
+                configured.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt as _;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+                return Err(refused(format!(
+                    "daemon socket {} must be a non-symlink Unix socket",
+                    configured.display()
+                )));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            return Err(refused(
+                "daemon socket mounts are supported only on Unix".to_string(),
+            ));
+        }
+        let source = std::fs::canonicalize(configured).map_err(|error| {
+            refused(format!(
+                "daemon socket {} cannot be resolved: {error}",
+                configured.display()
+            ))
+        })?;
+        let source_handle = pin_mount_source("daemon socket", &source)?;
+        return Ok(vec![ReadableMount {
+            source,
+            destination: requested.to_path_buf(),
+            source_handle,
+        }]);
+    }
+
+    if configured == "{bundle_roots}" {
+        return bundle_roots
+            .iter()
+            .map(|destination| {
+                let source = canonicalize_context_mount("bundle root", destination)?;
+                let source_handle = pin_mount_source("bundle root", &source)?;
+                Ok(ReadableMount {
+                    source,
+                    destination: destination.to_path_buf(),
+                    source_handle,
+                })
+            })
+            .collect();
+    }
+
+    if configured == "{operator_trusted_keys}" {
+        let Some(destination) = operator_trusted_keys_dir else {
+            return Ok(Vec::new());
+        };
+        let source = canonicalize_context_mount("operator trusted-keys directory", destination)?;
+        let source_handle = pin_mount_source("operator trusted-keys directory", &source)?;
+        return Ok(vec![ReadableMount {
+            source,
+            destination: destination.to_path_buf(),
+            source_handle,
+        }]);
+    }
+
+    if configured == "{verified_code}" {
+        return Ok(verified_code_mounts.to_vec());
+    }
+
+    let destination = match configured {
+        "{project}" => project_destination.to_path_buf(),
+        "{cwd}" => cwd_destination.to_path_buf(),
+        other => PathBuf::from(other),
+    };
+    if !destination.is_absolute() && !matches!(configured, "{project}" | "{cwd}") {
+        return Err(refused(format!(
+            "sandbox path `{}` is not absolute",
+            destination.display()
+        )));
+    }
+    let source = std::fs::canonicalize(&destination).map_err(|error| {
+        refused(format!(
+            "sandbox readable path {} cannot be resolved: {error}",
+            destination.display()
+        ))
+    })?;
+    let source_handle = pin_mount_source("readable mount", &source)?;
+    Ok(vec![ReadableMount {
+        destination,
+        source,
+        source_handle,
+    }])
+}
+
+fn canonicalize_context_mount(kind: &str, path: &Path) -> Result<PathBuf, EngineError> {
+    if !path.is_absolute() {
+        return Err(refused(format!(
+            "sandbox {kind} path must be absolute: {}",
+            path.display()
+        )));
+    }
+    canonicalize_launch_path(kind, path)
+}
+
+fn validate_thread_path_component(thread_id: &str) -> Result<(), EngineError> {
+    use std::path::Component;
+
+    let mut components = Path::new(thread_id).components();
+    let is_single_normal_component =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if thread_id.is_empty() || !is_single_normal_component {
+        return Err(refused(format!(
+            "sandbox thread id must be one normal path component: `{thread_id}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_writable_mount(
+    path: &Path,
+    app_root: Option<&Path>,
+    backend: &Path,
+    daemon_socket: Option<&Path>,
+    canonical_project: &Path,
+    project_authority: SandboxProjectAuthority,
+    mount_authority: WritableMountAuthority,
+    canonical_checkpoint_dir: Option<&Path>,
+) -> Result<(), EngineError> {
+    if path == Path::new("/") {
+        return Err(refused(
+            "sandbox writable path `/` would expose the entire host".to_string(),
+        ));
+    }
+
+    if let Some(app_root) = app_root {
+        let configured_execution_root = app_root.join(crate::AI_DIR).join("state/cache/executions");
+        let execution_root =
+            std::fs::canonicalize(&configured_execution_root).unwrap_or(configured_execution_root);
+        let is_exact_runtime_workspace = project_authority
+            == SandboxProjectAuthority::RuntimeWorkspace
+            && canonical_project.parent() == Some(execution_root.as_path())
+            && path.starts_with(canonical_project);
+        let is_exact_daemon_checkpoint = mount_authority
+            == WritableMountAuthority::DaemonCheckpoint
+            && canonical_checkpoint_dir == Some(path);
+        if paths_overlap(path, app_root)
+            && !is_exact_runtime_workspace
+            && !is_exact_daemon_checkpoint
+        {
+            return Err(refused(format!(
+                "sandbox writable path {} overlaps protected app root {}",
+                path.display(),
+                app_root.display()
+            )));
+        }
+    }
+    if paths_overlap(path, backend) {
+        return Err(refused(format!(
+            "sandbox writable path {} overlaps sandbox backend {}",
+            path.display(),
+            backend.display()
+        )));
+    }
+    if let Some(socket) = daemon_socket {
+        if paths_overlap(path, socket) {
+            return Err(refused(format!(
+                "sandbox writable path {} overlaps protected daemon socket {}",
+                path.display(),
+                socket.display()
+            )));
+        }
+    }
+
+    for protected in [
+        "/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/usr", "/bin", "/sbin", "/lib", "/lib64",
+    ] {
+        let protected = Path::new(protected);
+        if protected.exists() {
+            let protected = std::fs::canonicalize(protected).unwrap_or_else(|_| protected.into());
+            if paths_overlap(path, &protected) {
+                return Err(refused(format!(
+                    "sandbox writable path {} overlaps protected system root {}",
+                    path.display(),
+                    protected.display()
+                )));
+            }
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(home) = std::fs::canonicalize(home) {
+            // Projects beneath HOME are normal; HOME itself or an ancestor is
+            // too broad because it would expose unrelated credentials/config.
+            if home.starts_with(path) {
+                return Err(refused(format!(
+                    "sandbox writable path {} contains protected home directory {}",
+                    path.display(),
+                    home.display()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn append_parent_directories(args: &mut Vec<String>, path: &Path) {
+    let mut parents = path
+        .ancestors()
+        .skip(1)
+        .filter(|parent| *parent != Path::new("/"))
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    parents.reverse();
+    for parent in parents {
+        args.extend(["--dir".to_string(), parent.to_string_lossy().into_owned()]);
+    }
+}
+
+fn refused(reason: String) -> EngineError {
+    EngineError::SandboxPolicyRefused { reason }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy_yaml(mode: &str, executable: &Path) -> String {
+        format!(
+            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  readable: []\n  writable: [\"{{project}}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"PATH\"]\nlimits:\n  open_files: 128\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            executable.display()
+        )
+    }
+
+    fn write_policy(app_root: &Path, body: &str) {
+        std::fs::create_dir_all(app_root.join(".ai/node")).unwrap();
+        std::fs::write(app_root.join(".ai/node/sandbox.yaml"), body).unwrap();
+    }
+
+    fn request(project: &Path) -> lillux::SubprocessRequest {
+        lillux::SubprocessRequest {
+            cmd: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "true".to_string()],
+            cwd: Some(project.to_string_lossy().into_owned()),
+            envs: vec![("PATH".to_string(), "/usr/bin".to_string())],
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn verified_path_rewrite_requires_token_boundaries() {
+        assert_eq!(
+            replace_delimited_path(
+                "--entry=/project/entry.py",
+                "/project/entry.py",
+                "/run/verified/entry.py"
+            )
+            .as_deref(),
+            Some("--entry=/run/verified/entry.py")
+        );
+        assert_eq!(
+            replace_delimited_path(
+                "{\"entry\":\"/project/entry.py\"}",
+                "/project/entry.py",
+                "/run/verified/entry.py"
+            )
+            .as_deref(),
+            Some("{\"entry\":\"/run/verified/entry.py\"}")
+        );
+        assert_eq!(
+            replace_delimited_path(
+                "/project/entry.py.backup",
+                "/project/entry.py",
+                "/run/verified/entry.py"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn verified_path_rewrite_refuses_ambiguous_live_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("entry.py");
+        std::fs::write(&source, b"print('verified')\n").unwrap();
+        let canonical_source = std::fs::canonicalize(&source).unwrap();
+        let destination = Path::new("/run/ryeos/verified-code/entry.py");
+        let mut args = vec![format!("{}.backup", source.display())];
+        let mut envs = Vec::new();
+
+        let error = rewrite_verified_code_references(
+            &mut args,
+            &mut envs,
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be rewritten safely"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_path_rewrite_refuses_embedded_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("entry.py");
+        std::fs::write(&source, b"print('verified')\n").unwrap();
+        let alias = root.path().join("entry:alias.py");
+        symlink(&source, &alias).unwrap();
+        let canonical_source = std::fs::canonicalize(&source).unwrap();
+        let destination = Path::new("/run/ryeos/verified-code/entry.py");
+        let mut args = vec![format!("file://{},next", alias.display())];
+        let mut envs = Vec::new();
+
+        let error = rewrite_verified_code_references(
+            &mut args,
+            &mut envs,
+            &source,
+            &canonical_source,
+            destination,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot be rewritten safely"));
+    }
+
+    #[test]
+    fn disabled_runtime_does_not_inspect_missing_backend() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("disabled", Path::new("/definitely/missing-bwrap")),
+        );
+
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        assert_eq!(runtime.mode(), SandboxMode::Disabled);
+        assert!(!runtime.is_enforced());
+        let expected_source = app_root.path().join(".ai/node/sandbox.yaml");
+        assert_eq!(runtime.source(), Some(expected_source.as_path()));
+        assert!(runtime.digest().unwrap().starts_with("sha256:"));
+        assert!(runtime.inspection().backend.resolved_executable.is_none());
+    }
+
+    #[test]
+    fn disabled_apply_is_an_exact_noop() {
+        let runtime = SandboxRuntime::default();
+        let project = tempfile::tempdir().unwrap();
+        let original = request(project.path());
+        let applied = runtime
+            .apply(
+                original,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        assert_eq!(applied.cmd, "/bin/sh");
+        assert_eq!(applied.args, ["-c", "true"]);
+        assert!(applied.limits.is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforced_runtime_resolves_backend_and_applies_limits() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let applied = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        assert!(runtime.is_enforced());
+        assert_eq!(
+            runtime.inspection().backend.resolved_executable,
+            Some(std::fs::canonicalize("/usr/bin/bwrap").unwrap())
+        );
+        assert!(runtime
+            .inspection()
+            .backend
+            .captured_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
+        assert!(runtime
+            .inspection()
+            .backend
+            .captured_version
+            .as_deref()
+            .is_some_and(|version| !version.is_empty()));
+        assert!(applied.args.iter().any(|arg| arg == "--unshare-user"));
+        assert!(applied.args.iter().any(|arg| arg == "--unshare-ipc"));
+        assert!(applied.args.iter().any(|arg| arg == "--unshare-uts"));
+        assert!(applied.args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(applied.args.iter().any(|arg| arg == "--clearenv"));
+        assert!(applied
+            .args
+            .windows(3)
+            .any(|args| args == ["--setenv", "PATH", "/usr/bin"]));
+        assert!(applied.envs.is_empty());
+        assert_eq!(
+            applied.limits,
+            Some(lillux::SubprocessLimits {
+                max_open_files: Some(128),
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforced_runtime_keeps_the_stricter_existing_open_file_limit() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+        let mut request = request(project.path());
+        request.limits = Some(lillux::SubprocessLimits {
+            max_open_files: Some(64),
+        });
+
+        let applied = runtime
+            .apply(
+                request,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            applied.limits,
+            Some(lillux::SubprocessLimits {
+                max_open_files: Some(64),
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforced_runtime_pins_tmpdir_to_its_private_tmpfs() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("allow: [\"PATH\"]", "allow: [\"PATH\", \"TMPDIR\"]");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+        let mut subprocess = request(project.path());
+        subprocess
+            .envs
+            .push(("TMPDIR".to_string(), "/host/tmp".to_string()));
+
+        let applied = runtime
+            .apply(
+                subprocess,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        let tmpdir_bindings = applied
+            .args
+            .windows(3)
+            .filter(|args| args[0] == "--setenv" && args[1] == "TMPDIR")
+            .collect::<Vec<_>>();
+        assert_eq!(tmpdir_bindings.len(), 1);
+        assert_eq!(tmpdir_bindings[0][2], "/tmp");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn readable_project_is_sufficient_to_make_the_working_directory_visible() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("readable: []", "readable: [\"{project}\"]")
+            .replace("writable: [\"{project}\"]", "writable: []");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let applied = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        let project = std::fs::canonicalize(project.path()).unwrap();
+        assert!(applied.args.windows(3).any(|args| {
+            args[0] == "--ro-bind-fd" && args[2] == project.to_string_lossy().as_ref()
+        }));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn only_an_exact_daemon_runtime_workspace_may_overlap_the_app_root() {
+        let app_root = tempfile::tempdir().unwrap();
+        let execution_root = app_root.path().join(".ai/state/cache/executions");
+        let workspace = execution_root.join("no-project-test");
+        std::fs::create_dir_all(workspace.join(".ai")).unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        runtime
+            .apply(
+                request(&workspace),
+                SandboxLaunchContext {
+                    project_path: &workspace,
+                    project_authority: SandboxProjectAuthority::RuntimeWorkspace,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        let sibling = app_root.path().join(".ai/state/cache/not-an-execution");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let error = runtime
+            .apply(
+                request(&sibling),
+                SandboxLaunchContext {
+                    project_path: &sibling,
+                    project_authority: SandboxProjectAuthority::RuntimeWorkspace,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("protected app root"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn node_public_identity_placeholder_mounts_only_the_public_document() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let public_identity = app_root
+            .path()
+            .join(".ai/node/identity/public-identity.json");
+        std::fs::create_dir_all(public_identity.parent().unwrap()).unwrap();
+        std::fs::write(&public_identity, b"{}").unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("readable: []", "readable: [\"{node_public_identity}\"]");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let applied = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        let public_identity = std::fs::canonicalize(public_identity).unwrap();
+        let public_identity = public_identity.to_string_lossy();
+        assert!(applied
+            .args
+            .windows(3)
+            .any(|args| { args[0] == "--ro-bind-fd" && args[2] == public_identity.as_ref() }));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", unix))]
+    fn node_public_identity_placeholder_rejects_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let identity_dir = app_root.path().join(".ai/node/identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        let private_key = identity_dir.join("private_key.pem");
+        std::fs::write(&private_key, b"private").unwrap();
+        symlink(&private_key, identity_dir.join("public-identity.json")).unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("readable: []", "readable: [\"{node_public_identity}\"]");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let error = match runtime.apply(
+            request(project.path()),
+            SandboxLaunchContext {
+                project_path: project.path(),
+                project_authority: SandboxProjectAuthority::External,
+                state_root: None,
+                checkpoint_dir: None,
+                bundle_roots: &[],
+                operator_trusted_keys_dir: None,
+                verified_code: &[],
+                item_ref: "tool:test/probe",
+                thread_id: "T-test",
+            },
+        ) {
+            Ok(_) => panic!("symlinked public identity must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("regular non-symlink file"));
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", unix))]
+    fn daemon_socket_placeholder_mounts_only_the_pinned_socket() {
+        use std::os::unix::net::UnixListener;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let socket_root = tempfile::tempdir().unwrap();
+        let socket = socket_root.path().join("ryeosd.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("readable: []", "readable: [\"{daemon_socket}\"]")
+            .replace(
+                "allow: [\"PATH\"]",
+                "allow: [\"PATH\", \"RYEOSD_SOCKET_PATH\"]",
+            );
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load_for_daemon(app_root.path(), &socket).unwrap();
+        let mut request = request(project.path());
+        request.envs.push((
+            "RYEOSD_SOCKET_PATH".to_string(),
+            socket.to_string_lossy().into_owned(),
+        ));
+
+        let applied = runtime
+            .apply(
+                request,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        assert!(applied.args.windows(3).any(|args| {
+            args[0] == "--ro-bind-fd" && args[2] == socket.to_string_lossy().as_ref()
+        }));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforced_runtime_rejects_the_app_root_as_a_writable_project() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let error = runtime
+            .apply(
+                request(app_root.path()),
+                SandboxLaunchContext {
+                    project_path: app_root.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("protected app root"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn policy_source_must_not_be_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let policy_dir = app_root.path().join(".ai/node");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let real_policy = policy_dir.join("real-sandbox.yaml");
+        std::fs::write(
+            &real_policy,
+            policy_yaml("disabled", Path::new("/definitely/missing-bwrap")),
+        )
+        .unwrap();
+        symlink(&real_policy, policy_dir.join("sandbox.yaml")).unwrap();
+
+        let error = SandboxRuntime::load(app_root.path()).unwrap_err();
+
+        assert!(error.to_string().contains("regular non-symlink file"));
+    }
+
+    #[test]
+    fn strict_schema_rejects_unsupported_versions_and_unknown_limit_fields() {
+        let app_root = tempfile::tempdir().unwrap();
+        let unsupported =
+            policy_yaml("disabled", Path::new("/missing")).replacen("version: 1", "version: 99", 1);
+        write_policy(app_root.path(), &unsupported);
+        let error = SandboxRuntime::load(app_root.path()).unwrap_err();
+        assert!(error.to_string().contains("expected 1"));
+
+        let unknown = policy_yaml("disabled", Path::new("/missing"))
+            .replace("  open_files: 128", "  open_files: 128\n  max_processes: 4");
+        write_policy(app_root.path(), &unknown);
+        let error = SandboxRuntime::load(app_root.path()).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn host_network_mode_does_not_create_a_network_namespace() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("mode: isolated", "mode: host");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let applied = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        assert!(!applied.args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn verified_code_uses_an_exact_final_synthetic_overlay() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("entry.py");
+        let content = b"print('verified')\n";
+        std::fs::write(&source, content).unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("readable: []", "readable: [\"{verified_code}\"]");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+        let verified = [SandboxVerifiedCode {
+            source_path: source.clone(),
+            content_hash: lillux::cas::sha256_hex(content),
+        }];
+        let mut subprocess = request(project.path());
+        subprocess.args = vec![source.to_string_lossy().into_owned()];
+
+        let applied = runtime
+            .apply(
+                subprocess,
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &verified,
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap();
+
+        let canonical_project = std::fs::canonicalize(project.path()).unwrap();
+        let authority_id =
+            lillux::cas::sha256_hex(canonical_project.as_os_str().as_encoded_bytes());
+        let namespace_root = PathBuf::from(VERIFIED_CODE_SANDBOX_ROOT).join(authority_id);
+        let destination = namespace_root.join("entry.py");
+        let destination_text = destination.to_string_lossy();
+        assert!(applied
+            .args
+            .iter()
+            .any(|arg| arg == destination_text.as_ref()));
+
+        let writable_index = applied
+            .args
+            .windows(3)
+            .position(|args| {
+                args[0] == "--bind-fd" && args[2] == project.path().to_string_lossy().as_ref()
+            })
+            .unwrap();
+        let mirror_index = applied
+            .args
+            .windows(3)
+            .position(|args| {
+                args[0] == "--ro-bind-fd" && args[2] == namespace_root.to_string_lossy().as_ref()
+            })
+            .unwrap();
+        let artifact_index = applied
+            .args
+            .windows(3)
+            .position(|args| args[0] == "--ro-bind-fd" && args[2] == destination_text.as_ref())
+            .unwrap();
+        assert!(writable_index < mirror_index);
+        assert!(mirror_index < artifact_index);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn verified_code_change_after_verification_is_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("entry.py");
+        std::fs::write(&source, b"before\n").unwrap();
+        let verified = [SandboxVerifiedCode {
+            source_path: source.clone(),
+            content_hash: lillux::cas::sha256_hex(b"before\n"),
+        }];
+        std::fs::write(&source, b"after\n").unwrap();
+        let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
+            .replace("readable: []", "readable: [\"{verified_code}\"]");
+        write_policy(app_root.path(), &policy);
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let error = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &verified,
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("changed after verification"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn verified_code_requires_the_policy_surface() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("entry.py");
+        let content = b"print('verified')\n";
+        std::fs::write(&source, content).unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+        let verified = [SandboxVerifiedCode {
+            source_path: source,
+            content_hash: lillux::cas::sha256_hex(content),
+        }];
+
+        let error = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &verified,
+                    item_ref: "tool:test/probe",
+                    thread_id: "T-test",
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not pinned read-only"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn thread_id_path_traversal_is_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            &policy_yaml("enforce", Path::new("/usr/bin/bwrap")),
+        );
+        let runtime = SandboxRuntime::load(app_root.path()).unwrap();
+
+        let error = runtime
+            .apply(
+                request(project.path()),
+                SandboxLaunchContext {
+                    project_path: project.path(),
+                    project_authority: SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    bundle_roots: &[],
+                    operator_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:test/probe",
+                    thread_id: "../T-test",
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("one normal path component"));
+    }
+}

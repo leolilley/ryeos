@@ -1909,6 +1909,41 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection())
     }
 
+    /// Immutable project snapshots required by active or queued runtimes.
+    ///
+    /// These runtime-DB references are not signed CAS heads, so online GC must
+    /// add them as daemon-authoritative transient roots. Retain both fields
+    /// defensively if a record carries both; resume selection intentionally
+    /// chooses one, while reachability must not collect either active pin.
+    pub fn active_resume_snapshot_roots(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        let statuses = [
+            ThreadStatus::Created.as_str(),
+            ThreadStatus::Running.as_str(),
+        ];
+        let rows = queries::list_threads_by_status(g.state_db.projection(), &statuses)?;
+        let mut roots = std::collections::BTreeSet::new();
+        for row in rows {
+            let Some(metadata) = g
+                .runtime_db
+                .get_runtime_info(&row.thread_id)?
+                .and_then(|info| info.launch_metadata)
+            else {
+                continue;
+            };
+            let Some(resume) = metadata.resume_context else {
+                continue;
+            };
+            if let Some(hash) = resume.original_snapshot_hash {
+                roots.insert(hash);
+            }
+            if let Some(pushed) = resume.original_pushed_head_ref {
+                roots.insert(pushed.snapshot_hash);
+            }
+        }
+        Ok(roots.into_iter().collect())
+    }
+
     /// Read a thread's persisted launch metadata (resume context), if any.
     pub fn get_launch_metadata(
         &self,

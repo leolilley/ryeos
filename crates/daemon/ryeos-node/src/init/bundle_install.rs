@@ -4,9 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use ryeos_engine::trust::TrustStore;
-
-use super::OFFICIAL_PUBLISHER_FP;
 
 /// Verify that an existing bundle directory has the expected `.ai/` structure.
 pub(super) fn verify_bundle_structure(target: &Path) -> Result<()> {
@@ -30,6 +27,7 @@ pub(super) fn replace_bundle(
     target: &Path,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
+    validate_staging: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
     let parent = target
         .parent()
@@ -47,6 +45,9 @@ pub(super) fn replace_bundle(
         }
         copy_dir_recursive(source, &staging)
             .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
+        // Re-read the completed copy rather than trusting the earlier source
+        // preflight; this catches source changes that raced the copy.
+        validate_staging(&staging)?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         transaction.begin_present(
@@ -76,41 +77,18 @@ pub(super) fn replace_bundle(
 /// Install a bundle by copy + signed `kind: node` registration.
 ///
 /// Mirrors `service:bundle/install` semantics but runs in-process (no daemon
-/// required). The official publisher trust must already be pinned so
-/// preflight verification passes.
+/// required). Init verifies the complete source set before calling this helper;
+/// `validate_staging` re-verifies the completed copy before activation.
 ///
 /// Returns the canonical path of the installed bundle.
 pub(super) fn install_bundle(
     app_root: &Path,
     name: &str,
     source: &Path,
-    skip_preflight: bool,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
+    validate_staging: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<PathBuf> {
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    if !skip_preflight {
-        // Preflight: load trust store from operator config.
-        let trust_store =
-            TrustStore::load(None, &operator_config_root).context("preflight: load trust store")?;
-        if !trust_store.is_trusted(OFFICIAL_PUBLISHER_FP) {
-            bail!(
-                "internal error: official publisher key {} not in trust store \
-                 after `ryeos init` pinned it — trust dir at {}",
-                OFFICIAL_PUBLISHER_FP,
-                operator_config_root.join("keys").join("trusted").display()
-            );
-        }
-
-        // Verify every signable item in the source bundle against the trust store.
-        ryeos_bundle::preflight::preflight_verify_bundle_in_context(
-            source,
-            &[app_root.to_path_buf()],
-            &operator_config_root,
-        )
-        .with_context(|| format!("preflight verification of {} bundle", name))?;
-    }
-
     // Copy bundle into <app_root>/.ai/bundles/<name>/
     let target = app_root
         .join(ryeos_engine::AI_DIR)
@@ -135,6 +113,9 @@ pub(super) fn install_bundle(
         }
         copy_dir_recursive(source, &staging)
             .with_context(|| format!("stage {} at {}", name, staging.display()))?;
+        // Re-read the completed copy rather than trusting the earlier source
+        // preflight; this catches source changes that raced the copy.
+        validate_staging(&staging)?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         transaction.begin_present(

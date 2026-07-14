@@ -391,6 +391,11 @@ async fn main() -> Result<()> {
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load_for_daemon(&config.app_root, &config.uds_path)
+            .context("load node sandbox policy")?,
+    );
+
     // Bind the TCP listener BEFORE constructing AppState so the
     // status endpoint reports the actual bound address (when the
     // operator passes `:0`, the kernel assigns an ephemeral port).
@@ -406,6 +411,7 @@ async fn main() -> Result<()> {
 
     let mut app_state = AppState {
         config: Arc::new(config.clone()),
+        sandbox,
         state_store,
         engine: engine.clone(),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(
@@ -878,7 +884,7 @@ fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Op
         roots: &roots,
         parsers: &parsers,
         kinds: &engine.kinds,
-        trust_store: &engine.trust_store,
+        trust_store: &engine.node_trust_store,
     };
     let mut limit: Option<u32> = None;
     for root in &roots.ordered {
@@ -1144,8 +1150,14 @@ async fn run_service_standalone(
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
+            .context("load node sandbox policy")?,
+    );
+
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
+        sandbox,
         state_store,
         engine: engine.clone(),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(

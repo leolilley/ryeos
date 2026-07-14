@@ -16,11 +16,14 @@ install=ryeos.install
 # disable strip (and `lto` for the same reason).
 options=('!strip' '!lto')
 
-# SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
-depends=('bubblewrap' 'gcc-libs' 'glibc')
+# SQLite is bundled (libsqlite3-sys) and TLS uses rustls. Bubblewrap is needed
+# only when the operator changes the strict sandbox policy to `mode: enforce`.
+depends=('gcc-libs' 'glibc')
+optdepends=('bubblewrap>=0.11.0: enforce the node subprocess sandbox policy')
 
 # cc needed for bundled libsqlite3-sys C compilation
 makedepends=('rust' 'cargo' 'cc')
+checkdepends=('bubblewrap>=0.11.0')
 
 source=(
     "$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v${pkgver}.tar.gz"

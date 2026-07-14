@@ -2250,7 +2250,8 @@ pub struct SpawnItemParams<'a> {
     pub vault_bindings: std::collections::HashMap<String, String>,
     pub daemon_callback_env: std::collections::HashMap<String, String>,
     pub roots: DaemonRootEnv,
-    pub sandbox_enabled: bool,
+    pub sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    pub sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
@@ -2284,7 +2285,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         vault_bindings,
         daemon_callback_env,
         roots,
-        sandbox_enabled,
+        sandbox,
+        sandbox_project_authority,
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
@@ -2437,9 +2439,43 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         }
     }
 
+    let sandbox_project_root = match &resolved.plan_context.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
+        _ => None,
+    };
+    let sandbox_resolution_roots = engine.resolution_roots(sandbox_project_root);
+    let sandbox_bundle_roots = sandbox_resolution_roots
+        .ordered
+        .iter()
+        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+        .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
+        .collect();
+    let sandbox_operator_trusted_keys_dir = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/trusted");
+    let sandbox_verified_code = plan
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            ryeos_engine::contracts::PlanNode::DispatchSubprocess {
+                tool_path: Some(source_path),
+                ..
+            } => Some(ryeos_engine::sandbox::SandboxVerifiedCode {
+                source_path: source_path.clone(),
+                content_hash: resolved.resolved_item.content_hash.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
     let engine_ctx = EngineContext {
         app_root,
-        sandbox_enabled,
+        sandbox,
+        sandbox_project_authority,
+        sandbox_state_root: state_root.map(std::path::Path::to_path_buf),
+        sandbox_checkpoint_dir: allocated_checkpoint_dir.clone(),
+        sandbox_bundle_roots,
+        sandbox_operator_trusted_keys_dir: Some(sandbox_operator_trusted_keys_dir),
+        sandbox_verified_code,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),

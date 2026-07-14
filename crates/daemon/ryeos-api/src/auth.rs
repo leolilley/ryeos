@@ -675,7 +675,6 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -732,6 +731,7 @@ mod tests {
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
+            sandbox: Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
             state_store,
             engine: Arc::new(engine),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(

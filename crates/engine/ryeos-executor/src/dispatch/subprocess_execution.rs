@@ -345,11 +345,11 @@ async fn dispatch_streaming_subprocess(
         .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
-    let executor_path = crate::execution::launch::resolve_native_executor_path(
+    let executor = crate::execution::launch::materialize_native_executor(
         &bundle_roots,
         &executor_ref,
         &cache_root,
-        &ctx.engine.trust_store,
+        &ctx.engine.node_trust_store,
         ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
@@ -357,7 +357,11 @@ async fn dispatch_streaming_subprocess(
         detail: e.to_string(),
     })?;
 
-    let executor_path_str = executor_path.to_string_lossy().to_string();
+    let executor_path_str = executor.path.to_string_lossy().to_string();
+    let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+        source_path: executor.path,
+        content_hash: executor.content_hash,
+    }];
     let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
         &state.config.app_root,
@@ -376,18 +380,32 @@ async fn dispatch_streaming_subprocess(
         stdin_data: Some(stdin_data),
         timeout: 120.0,
         limits: None,
+        inherited_fds: Vec::new(),
     };
-    let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
-        subprocess_request,
-        &state.config.app_root,
-        request.project_path,
-        &item_ref_str,
-        "streaming-tool",
-    )
-    .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
-        .await
-        .map_err(|e| DispatchError::Internal(e.into()))?;
+    let subprocess_request = state
+        .sandbox
+        .apply(
+            subprocess_request,
+            ryeos_engine::sandbox::SandboxLaunchContext {
+                project_path: request.project_path,
+                project_authority: request.provenance.sandbox_project_authority(),
+                state_root: request.provenance.state_root_override(),
+                checkpoint_dir: None,
+                bundle_roots: &bundle_roots,
+                operator_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
+                verified_code: &sandbox_verified_code,
+                item_ref: &item_ref_str,
+                thread_id: "streaming-tool",
+            },
+        )
+        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+    let workspace_lifeline = request.provenance.workspace_lifeline();
+    let result = tokio::task::spawn_blocking(move || {
+        let _workspace_lifeline = workspace_lifeline;
+        lillux::run(subprocess_request)
+    })
+    .await
+    .map_err(|e| DispatchError::Internal(e.into()))?;
 
     if !result.success {
         return Err(DispatchError::SubprocessRunFailed {
@@ -479,7 +497,9 @@ async fn dispatch_tool_subprocess(
     if request.validate_only {
         let engine = ctx.engine.clone();
         let resolved_clone = resolved.clone();
+        let workspace_lifeline = request.provenance.workspace_lifeline();
         let validated = tokio::task::spawn_blocking(move || {
+            let _workspace_lifeline = workspace_lifeline;
             ryeos_app::thread_lifecycle::validate_item(&engine, &resolved_clone)
         })
         .await

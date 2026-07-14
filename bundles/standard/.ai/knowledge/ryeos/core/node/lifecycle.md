@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:7dd9bf2dc1d37f5fc9cbfa7038d499ddfd6c457bfddc78a00da73049609273cd:yZlsYuPDMbJCVZoJVzT1NIGkvUtwMVdFwgHyV3cQGMyVZhrhjPjnCHM59w+cmI2nXVvd5jK+dhk/yxiMvCXPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:fff683339800e1042034fa92809ab87830935b912dccd1161a3d3cd12493a5bb:P70w45Ng3IRZPPAl2QnNxJIedj9iW/yyhAmMWai1q2j9DIZ+MG0KDl0cujftzgyw6Qpw2UhhSGW/2c4p0l9rAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Local node lifecycle semantics owned by the ryeos-node crate: init,
   start, stop, status, liveness, daemon metadata, and CLI preflight.
@@ -18,11 +18,11 @@ is exactly four verbs:
 ryeos init
 ryeos start
 ryeos stop
-ryeos status
+ryeos node status
 ```
 
 There is no `restart`, no enable/disable command, no init-system
-integration, and no separate probe command. `ryeos status` is the only
+integration, and no separate probe command. `ryeos node status` is the only
 lifecycle read operation. Lifecycle operations are local-node operations
 and intentionally ignore `RYEOSD_URL`; that variable only steers normal
 daemon-backed dispatch.
@@ -52,7 +52,7 @@ registration. Missing system space, missing registration directory, or no
 signed registrations returns `NotInitialized` with `Run: ryeos init`
 guidance. Bundle names are not hardcoded.
 
-## `ryeos status`
+## `ryeos node status`
 
 `status` is strictly read-only: no directory creation, no metadata
 writes, no repair, no socket cleanup.
@@ -116,3 +116,7 @@ Normal daemon-backed CLI dispatch first checks local lifecycle status
 unless `RYEOSD_URL` is set. If not `Running`, it fails before signing with
 guidance to run `ryeos init` or `ryeos start`. `RYEOSD_URL` bypasses this
 preflight for normal dispatch only; lifecycle verbs still ignore it.
+
+Sandbox policy is not a live-reload surface. Validate edits with
+`ryeos node doctor`, then stop/start the node so startup resolves a new immutable
+snapshot. See [Execution Sandbox](execution-sandbox.md).

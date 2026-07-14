@@ -123,12 +123,21 @@ fn run_gc_and_log(
     runtime_state_dir: &std::path::Path,
     state_store: &ryeos_app::state_store::StateStore,
 ) -> Result<GcResult> {
+    let active_resume_roots = state_store
+        .active_resume_snapshot_roots()
+        .context("failed to collect active runtime snapshot roots")?;
     let mut runtime_cleanup = GcResult::default();
     gc::purge_runtime_state(runtime_state_dir, params, &mut runtime_cleanup)
         .context("runtime-state purge failed")?;
 
-    let mut result =
-        gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
+    let mut result = gc::run_gc_with_extra_roots(
+        cas_root,
+        refs_root,
+        Some(signer),
+        params,
+        &active_resume_roots,
+    )
+    .context("GC pipeline failed")?;
     result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
     result.deleted_fire_records = runtime_cleanup.deleted_fire_records;
     result.freed_bytes += runtime_cleanup.freed_bytes;

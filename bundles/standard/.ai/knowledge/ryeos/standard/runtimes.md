@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:65c468a5d25609fd66cbe5f71e80b9700e56acba6655505a3c646d421392e22b:eYz5GawnXvYEAZgBVsLR3FOUvtRQeLyzKCABTtoC2Igj0olMgkfDme6XCITcZm0j1gDWdeKlUJv69ZhoCE5EBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:b71de4d6264949a365b89c3433f7932a0ff4bfb9b22a5d9558f92e9cd44f8763:/AZNksSoB2snspOwUalYDrH1FOC9KxXgXB1dQHJRg59U0DKEiBwp5Fv96VQxwom/CG4bTIZE5zbCfv8BeV3fDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The three runtimes that ship with the standard bundle —
   directive-runtime, graph-runtime, and knowledge-runtime.
@@ -13,6 +13,10 @@ description: >
 The standard bundle declares three runtime binaries, each serving a
 different kind of workflow. They are native Linux x86_64 executables
 that communicate with the daemon via the `runtime_v1` protocol.
+
+Authorized runtime subprocesses are wrapped by the node's immutable sandbox
+snapshot when policy is enforced; runtime/item metadata cannot enable or
+weaken it. See [Execution Sandbox](../core/node/execution-sandbox.md).
 
 ## Directive Runtime (`runtime:directive-runtime`)
 
@@ -65,6 +69,14 @@ It performs graph traversal natively in Rust.
 5. Supports resume from persisted state after interruption
 
 See [Graphs](graphs/graphs.md) for the full graph YAML format.
+
+The graph node-result cache uses `RYEOS_CACHE_DIR/<graph-id>` when that variable
+is set; otherwise it uses `$TMPDIR/ryeos-graph-cache/<graph-id>`. Enforced mode
+normalizes `TMPDIR=/tmp` and gives each sandbox launch a private `/tmp` tmpfs,
+so the default cache is ephemeral and cannot be relied on across runtime
+processes. Native-resume durability comes from `RYEOS_CHECKPOINT_DIR` and the
+policy's daemon-validated `{checkpoint_dir}` mount instead. A custom
+`RYEOS_CACHE_DIR` persists only when node policy exposes that path writable.
 
 ## Knowledge Runtime (`runtime:knowledge-runtime`)
 

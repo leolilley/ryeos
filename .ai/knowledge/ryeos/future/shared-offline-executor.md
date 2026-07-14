@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-25T06:08:13Z:d548309ac2de35dea54c6882848591859e569ccc34a350652b0ce7de93a7f65f:qTMU3aXR7iAcX7S1taAo2xUnd70xw5A3fOZSEBF6a5JwiuFs0YR2Sb1egt+X4oRgrZCo/A3etlXXTX2b80foDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:dc3a9788296ffef7ba326e01b29191b09cadf08e2f34915ec24a5a3518e84779:uRPadTdM66oBECGAM2ACsdfSkZQ+nqQenpUqJs8oRJfdRUeLczleMUkoHBa2+3fB3Z63WtGG75ERl/vtOiXABg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Shared Engine-Backed Offline Executor
 
 ## Status
@@ -21,7 +21,10 @@ Create a shared executor only when there is real pressure from more than one cal
 - The daemon or another local worker needs identical `cli_exec` / subprocess launch semantics.
 - More executable item shapes appear beyond the current field patterns.
 - Protocol handling grows beyond simple env injection, argv forwarding, stdin/stdout mode, and trusted binary resolution.
-- Execution needs centralized tracing, policy, sandboxing, lifecycle control, or cancellation.
+- Execution needs centralized tracing, lifecycle control, or cancellation.
+- The existing shared immutable sandbox boundary proves insufficient for a new
+  offline executable shape; sandboxing alone is no longer a trigger because
+  current offline tool/service launches already use the RyeOS strict policy.
 - Engine startup cost per CLI invocation becomes a measurable problem and needs a cached local execution service.
 
 ## Target shape

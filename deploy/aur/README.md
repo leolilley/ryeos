@@ -17,6 +17,15 @@ does not regenerate CAS data, re-sign bundle content, or import packaged trust
 documents as authority. `ryeos init` verifies the installed artifact against
 the official publisher key compiled into the release binary.
 
+`bubblewrap>=0.11.0` is an optional dependency. Initialization writes the strict
+sandbox policy with `mode: disabled`, so the base node installs and runs without a
+sandbox backend. Operators who change `<app-root>/.ai/node/sandbox.yaml` to
+`mode: enforce` must install an unprivileged Bubblewrap first; enforced execution fails closed
+when the configured backend is missing or unusable. Validate the edit with
+`ryeos node doctor` and restart the node to load it. The
+[sandbox contract](../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-sandbox.md) documents the strict
+schema and operating contract.
+
 For a release, download both immutable inputs once and run:
 
 ```sh

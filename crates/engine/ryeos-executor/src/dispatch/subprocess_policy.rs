@@ -57,12 +57,12 @@ pub(super) fn service_params_with_project_path(
     mut params: Value,
     verified: &VerifiedItem,
     project_path: &Path,
-) -> Value {
-    if !service_declares_project_path(verified) {
-        return params;
+) -> Result<Value, DispatchError> {
+    if !service_declares_project_path(verified)? {
+        return Ok(params);
     }
     let Some(obj) = params.as_object_mut() else {
-        return params;
+        return Ok(params);
     };
     let fill_project_path = obj.get("project_path").is_none_or(|value| {
         value.is_null() || value.as_str().is_some_and(|path| path.trim().is_empty())
@@ -73,10 +73,10 @@ pub(super) fn service_params_with_project_path(
             Value::String(project_path.to_string_lossy().into_owned()),
         );
     }
-    params
+    Ok(params)
 }
 
-fn service_declares_project_path(verified: &VerifiedItem) -> bool {
+fn service_declares_project_path(verified: &VerifiedItem) -> Result<bool, DispatchError> {
     if verified
         .resolved
         .metadata
@@ -85,20 +85,44 @@ fn service_declares_project_path(verified: &VerifiedItem) -> bool {
         .and_then(Value::as_object)
         .is_some_and(|schema| schema.contains_key("project_path"))
     {
-        return true;
+        return Ok(true);
     }
 
-    let Ok(content) = std::fs::read_to_string(&verified.resolved.source_path) else {
-        return false;
-    };
+    let content = std::fs::read_to_string(&verified.resolved.source_path).map_err(|error| {
+        DispatchError::SchemaMisconfigured {
+            kind: verified.resolved.kind.clone(),
+            detail: format!(
+                "failed to reread verified service source '{}': {error}",
+                verified.resolved.source_path.display()
+            ),
+        }
+    })?;
+    let actual_hash = ryeos_engine::item_resolution::content_hash(&content);
+    if actual_hash != verified.resolved.content_hash {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: verified.resolved.kind.clone(),
+            detail: format!(
+                "service source '{}' changed after verification (expected content hash {}, got {})",
+                verified.resolved.source_path.display(),
+                verified.resolved.content_hash,
+                actual_hash
+            ),
+        });
+    }
     let body = lillux::signature::strip_signature_lines(&content);
-    let Ok(parsed) = serde_yaml::from_str::<Value>(&body) else {
-        return false;
-    };
-    parsed
+    let parsed = serde_yaml::from_str::<Value>(&body).map_err(|error| {
+        DispatchError::SchemaMisconfigured {
+            kind: verified.resolved.kind.clone(),
+            detail: format!(
+                "failed to parse verified service source '{}': {error}",
+                verified.resolved.source_path.display()
+            ),
+        }
+    })?;
+    Ok(parsed
         .get("schema")
         .and_then(Value::as_object)
-        .is_some_and(|schema| schema.contains_key("project_path"))
+        .is_some_and(|schema| schema.contains_key("project_path")))
 }
 
 /// Pure resolution output for a managed subprocess launch.

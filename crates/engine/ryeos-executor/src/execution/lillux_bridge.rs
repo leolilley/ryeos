@@ -20,5 +20,6 @@ pub fn to_lillux_request(spec: &SubprocessSpec) -> lillux::SubprocessRequest {
         stdin_data: Some(String::from_utf8_lossy(&spec.stdin).to_string()),
         timeout: spec.timeout.as_secs_f64(),
         limits: None,
+        inherited_fds: Vec::new(),
     }
 }

@@ -29,7 +29,6 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
-        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -108,7 +107,6 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
-        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -201,7 +199,8 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
         .expect("derive composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
-        .with_trust_store(trust_store)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
         .with_composers(composers)
 }
 
@@ -232,6 +231,7 @@ fn build_app_state(
 
     let state = AppState {
         config: Arc::new(config),
+        sandbox: Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         state_store,
         engine: Arc::new(engine),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(

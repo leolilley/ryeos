@@ -114,7 +114,8 @@ fn build_engine_against_bundle() -> Engine {
         ComposerRegistry::from_kinds(&kinds, &native_handlers).expect("composer registry");
 
     Engine::new(kinds, parser_dispatcher, vec![bundle_root])
-        .with_trust_store(trust_store)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
         .with_composers(composers)
 }
 
@@ -229,6 +230,7 @@ fn launch_metadata_from_spec_carries_cancellation_mode() {
 
     let spec = PlanSubprocessSpec {
         cmd: "/bin/true".into(),
+        verified_command: None,
         args: vec![],
         cwd: None,
         env: HashMap::new(),

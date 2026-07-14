@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:da5dc6df02ec2dc63c827deb64cd99d5fcae9ae15e0f2aadf7ee182bba4dd789:uOJ7nzRU44POL168Rn2VzMgVaW/gvYOqtvOYkttE+jqiFqtz98PE6mSWLkvK23J0LWyS/SA0+h8IKJexeV+yBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:17966d5c9ebe7423508f14befa4e92d39d8e1e475fd09ba8ce3f313319ee7418:vPhfbh4LByHGBlmc2QzMlyhvMRoezJZeaYy+viGswkj14g1akCNvzZtEtqOxQgGgoE1GRdNb7Nzaq2THZd8BBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.0.0"
+version: "3.1.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -13,7 +13,7 @@ description: >
 The `ryeos` CLI has two execution paths:
 
 1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
-   `status`, `trust pin`, `authorize-key`, `publish`, and local vault
+   `node status`, `trust pin`, `authorize-key`, `publish`, and local vault
    maintenance verbs.
 2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
    HTTP to a running daemon.
@@ -57,14 +57,25 @@ Default graceful timeout is 10 seconds. `--force` re-confirms live
 `status: "running"` and PID before signalling and verifies the PID is
 `ryeosd` on Unix.
 
-### `ryeos status`
+### `ryeos node status`
 
 ```bash
-ryeos status [--json] [--app-root <dir>]
+ryeos node status [--json] [--app-root <dir>]
 ```
 
 Read-only lifecycle status. Treats `daemon.json` as a hint and trusts
 only a `lifecycle.status` response reporting `status: "running"`.
+
+### `ryeos node doctor`
+
+```bash
+ryeos node doctor [--json] [--no-bundles] [--app-root <dir>]
+```
+
+Runs the offline node checklist. Its sandbox row uses the production strict loader:
+disabled is a healthy inactive opt-out, while enforced mode validates the
+backend and resource limit. Policy edits require a daemon restart; see
+[Execution Sandbox](execution-sandbox.md).
 
 ## Other local operator verbs
 

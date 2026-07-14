@@ -26,6 +26,7 @@ fn sh(args: &[&str]) -> SubprocessRequest {
         stdin_data: None,
         timeout: 30.0,
         limits: None,
+        inherited_fds: Vec::new(),
     }
 }
 

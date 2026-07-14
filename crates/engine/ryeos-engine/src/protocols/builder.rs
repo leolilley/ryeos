@@ -4,7 +4,7 @@
 //! "protocols-as-data" structurally true. It consumes a verified
 //! `ProtocolDescriptor` and dispatch-time inputs (`BuildRequest`),
 //! walks the descriptor's vocabulary fields, and emits a fully-formed
-//! `SubprocessSpec` ready for `sandbox_wrap` and `to_lillux_request`.
+//! `SubprocessSpec` ready for translation and `SandboxRuntime::apply`.
 //!
 //! ## Design invariants
 //!
@@ -251,7 +251,6 @@ pub fn build_subprocess_spec(
         item_ref: request.item_ref.clone(),
         thread_id: request.thread_id.to_string(),
         project_path: request.project_path.to_path_buf(),
-        sandbox: None,
     })
 }
 
@@ -423,6 +422,7 @@ mod tests {
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
                     raw_content: String::new(),
+                    source_content_digest: "0".repeat(64),
                     raw_content_digest: "0".repeat(64),
                 },
                 ancestors: vec![],

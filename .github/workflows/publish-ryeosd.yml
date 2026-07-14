@@ -82,7 +82,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends bubblewrap meson ninja-build libcap-dev pkg-config libssl-dev ca-certificates openssl
+          ./scripts/ci/install-bubblewrap.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -381,46 +382,204 @@ jobs:
             exit 1
           fi
 
-      - name: Smoke standard image lifecycle and sandbox
+      - name: Smoke standard image default-disabled profile
         env:
           IMG: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
         run: |
-          VOLUME="ryeos-release-${{ github.run_id }}"
-          CONTAINER="ryeos-release-${{ github.run_id }}"
+          VOLUME="ryeos-release-disabled-${{ github.run_id }}"
+          CONTAINER="ryeos-release-disabled-${{ github.run_id }}"
           cleanup() {
             docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
             docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+          }
+          reports_running() {
+            LIFECYCLE_STATUS_JSON="$1" python3 - <<'PY'
+          import json
+          import os
+
+          report = json.loads(os.environ["LIFECYCLE_STATUS_JSON"])
+          running = report.get("Running")
+          if not isinstance(running, dict) or not isinstance(running.get("metadata"), dict):
+              raise SystemExit(f"node is not Running: {report!r}")
+          PY
+          }
+          wait_ready() {
+            local report
+            for attempt in $(seq 1 60); do
+              if report="$(docker exec "$CONTAINER" ryeos node status --json 2>/dev/null)" && \
+                 reports_running "$report" && \
+                 docker exec "$CONTAINER" ryeos daemon status >/dev/null 2>&1; then
+                return 0
+              fi
+              if [ "$attempt" -eq 60 ]; then
+                docker logs "$CONTAINER"
+                return 1
+              fi
+              sleep 1
+            done
+          }
+          assert_sandbox_mode() {
+            local expected="$1"
+            local daemon_report doctor_report
+            daemon_report="$(docker exec "$CONTAINER" ryeos daemon status)"
+            DAEMON_STATUS_JSON="$daemon_report" EXPECTED_SANDBOX_MODE="$expected" python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          report = json.loads(os.environ["DAEMON_STATUS_JSON"])
+          sandbox = report.get("sandbox") or {}
+          expected = os.environ["EXPECTED_SANDBOX_MODE"]
+          if sandbox.get("version") != 1 or sandbox.get("mode") != expected:
+              raise SystemExit(
+                  f"running daemon sandbox mismatch: expected version=1 mode={expected!r}, sandbox={sandbox!r}"
+              )
+          if sandbox.get("source") != "/data/app/.ai/node/sandbox.yaml":
+              raise SystemExit(f"running daemon reported the wrong sandbox source: {sandbox!r}")
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox.get("policy_digest") or ""):
+              raise SystemExit(f"running daemon did not report a policy digest: {sandbox!r}")
+          PY
+            doctor_report="$(docker exec "$CONTAINER" ryeos node doctor --json --no-bundles)"
+            SANDBOX_DOCTOR_JSON="$doctor_report" EXPECTED_SANDBOX_MODE="$expected" python3 - <<'PY'
+          import json
+          import os
+
+          report = json.loads(os.environ["SANDBOX_DOCTOR_JSON"])
+          matches = [row for row in report.get("checks", []) if row.get("name") == "sandbox"]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one sandbox doctor row, got {matches!r}")
+          detail = matches[0].get("detail") or {}
+          expected = os.environ["EXPECTED_SANDBOX_MODE"]
+          if detail.get("version") != 1 or detail.get("mode") != expected:
+              raise SystemExit(
+                  f"sandbox doctor mismatch: expected version=1 mode={expected!r}, detail={detail!r}"
+              )
+          expected_backend = "captured_exact_executable_compatible" if expected == "enforce" else "not_checked"
+          if detail.get("backend_status") != expected_backend:
+              raise SystemExit(
+                  f"sandbox backend status mismatch: expected {expected_backend!r}, detail={detail!r}"
+              )
+          readable = (detail.get("filesystem") or {}).get("readable") or []
+          if "{node_public_identity}" not in readable:
+              raise SystemExit(f"node public identity binding missing: detail={detail!r}")
+          PY
+          }
+          trap cleanup EXIT
+          docker volume create "$VOLUME"
+          docker run -d --name "$CONTAINER" \
+            -v "$VOLUME:/data" \
+            "$IMG"
+          wait_ready
+          assert_sandbox_mode disabled
+          docker exec --workdir /tmp "$CONTAINER" \
+            ryeos execute tool:ryeos/core/identity/public_key
+          docker restart "$CONTAINER"
+          wait_ready
+          assert_sandbox_mode disabled
+
+      - name: Smoke standard image explicitly-enforced sandbox profile
+        env:
+          IMG: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
+        run: |
+          VOLUME="ryeos-release-enforced-${{ github.run_id }}"
+          CONTAINER="ryeos-release-enforced-${{ github.run_id }}"
+          cleanup() {
+            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+            docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+          }
+          reports_running() {
+            LIFECYCLE_STATUS_JSON="$1" python3 - <<'PY'
+          import json
+          import os
+
+          report = json.loads(os.environ["LIFECYCLE_STATUS_JSON"])
+          running = report.get("Running")
+          if not isinstance(running, dict) or not isinstance(running.get("metadata"), dict):
+              raise SystemExit(f"node is not Running: {report!r}")
+          PY
+          }
+          wait_ready() {
+            local report
+            for attempt in $(seq 1 60); do
+              if report="$(docker exec "$CONTAINER" ryeos node status --json 2>/dev/null)" && \
+                 reports_running "$report" && \
+                 docker exec "$CONTAINER" ryeos daemon status >/dev/null 2>&1; then
+                return 0
+              fi
+              if [ "$attempt" -eq 60 ]; then
+                docker logs "$CONTAINER"
+                return 1
+              fi
+              sleep 1
+            done
+          }
+          assert_sandbox_mode() {
+            local expected="$1"
+            local daemon_report doctor_report
+            daemon_report="$(docker exec "$CONTAINER" ryeos daemon status)"
+            DAEMON_STATUS_JSON="$daemon_report" EXPECTED_SANDBOX_MODE="$expected" python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          report = json.loads(os.environ["DAEMON_STATUS_JSON"])
+          sandbox = report.get("sandbox") or {}
+          expected = os.environ["EXPECTED_SANDBOX_MODE"]
+          if sandbox.get("version") != 1 or sandbox.get("mode") != expected:
+              raise SystemExit(
+                  f"running daemon sandbox mismatch: expected version=1 mode={expected!r}, sandbox={sandbox!r}"
+              )
+          if sandbox.get("source") != "/data/app/.ai/node/sandbox.yaml":
+              raise SystemExit(f"running daemon reported the wrong sandbox source: {sandbox!r}")
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", sandbox.get("policy_digest") or ""):
+              raise SystemExit(f"running daemon did not report a policy digest: {sandbox!r}")
+          PY
+            doctor_report="$(docker exec "$CONTAINER" ryeos node doctor --json --no-bundles)"
+            SANDBOX_DOCTOR_JSON="$doctor_report" EXPECTED_SANDBOX_MODE="$expected" python3 - <<'PY'
+          import json
+          import os
+
+          report = json.loads(os.environ["SANDBOX_DOCTOR_JSON"])
+          matches = [row for row in report.get("checks", []) if row.get("name") == "sandbox"]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one sandbox doctor row, got {matches!r}")
+          detail = matches[0].get("detail") or {}
+          expected = os.environ["EXPECTED_SANDBOX_MODE"]
+          if detail.get("version") != 1 or detail.get("mode") != expected:
+              raise SystemExit(
+                  f"sandbox doctor mismatch: expected version=1 mode={expected!r}, detail={detail!r}"
+              )
+          expected_backend = "captured_exact_executable_compatible" if expected == "enforce" else "not_checked"
+          if detail.get("backend_status") != expected_backend:
+              raise SystemExit(
+                  f"sandbox backend status mismatch: expected {expected_backend!r}, detail={detail!r}"
+              )
+          readable = (detail.get("filesystem") or {}).get("readable") or []
+          if "{node_public_identity}" not in readable:
+              raise SystemExit(f"node public identity binding missing: detail={detail!r}")
+          PY
           }
           trap cleanup EXIT
           docker volume create "$VOLUME"
           docker run -d --name "$CONTAINER" \
             --cap-add SYS_ADMIN \
             --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
             -v "$VOLUME:/data" \
             "$IMG"
-          for attempt in $(seq 1 60); do
-            if docker exec "$CONTAINER" ryeos node status >/dev/null 2>&1; then
-              break
-            fi
-            if [ "$attempt" -eq 60 ]; then
-              docker logs "$CONTAINER"
-              exit 1
-            fi
-            sleep 1
-          done
+          wait_ready
+          assert_sandbox_mode disabled
+          docker exec "$CONTAINER" sh -eu -c '
+            policy=/data/app/.ai/node/sandbox.yaml
+            grep -qx "mode: disabled" "$policy"
+            sed -i "s/^mode: disabled$/mode: enforce/" "$policy"
+            grep -qx "mode: enforce" "$policy"
+          '
+          docker restart "$CONTAINER"
+          wait_ready
+          assert_sandbox_mode enforce
           docker exec --workdir /tmp "$CONTAINER" \
             ryeos execute tool:ryeos/core/identity/public_key
-          docker restart "$CONTAINER"
-          for attempt in $(seq 1 60); do
-            if docker exec "$CONTAINER" ryeos node status >/dev/null 2>&1; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 60 ]; then
-              docker logs "$CONTAINER"
-              exit 1
-            fi
-            sleep 1
-          done
 
       - name: Scan standard image for known vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

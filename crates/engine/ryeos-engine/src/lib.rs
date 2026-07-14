@@ -25,6 +25,7 @@ pub mod resolution;
 pub mod roots;
 pub mod runtime;
 pub mod runtime_registry;
+pub mod sandbox;
 pub mod scope;
 pub mod subprocess_spec;
 pub mod trust;

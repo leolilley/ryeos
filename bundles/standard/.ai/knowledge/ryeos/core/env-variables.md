@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:13dfa10650c09cab1273e40d3cb865e85a4e7ccd7b228aeb0b1c4358de902a77:zdI/s28yC4gNrRbBhETsrvVs/VORjd9WQ1x+GgjFnpxeLD7qxvnM92j3fMahtKPUZT4ReWc4QyXETHUrULSyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:246061089c19421c9562493c078126b1d7cf446ab9e79f5a48e1a50e26c4069b:kIMAZjGYVw86d9YQbZC1W+k41yB5HGl5lAN70nUcEuvQRcjOjzSQjUYoiPxKmZyxPmHtlK+hPui+9rXfxhwSCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
-version: "2.0.0"
+version: "2.1.0"
 description: >
   Environment variables for local lifecycle, daemon dispatch, CLI
   signing, runtimes, tools, and provider auth.
@@ -23,7 +23,7 @@ description: >
 | `RYEOS_APP_ROOT` | `$XDG_DATA_DIR/ryeos` | App root — operator state, installed bundles, keys, and trust. Equivalent to `--app-root`. |
 | `XDG_RUNTIME_DIR` | `/tmp/ryeosd-<uid>` | Parent for default daemon UDS socket. |
 
-`ryeos init`, `start`, `stop`, and `status` ignore `RYEOSD_URL`.
+`ryeos init`, `start`, `stop`, and `node status` ignore `RYEOSD_URL`.
 
 ## CLI daemon-backed dispatch
 
@@ -56,3 +56,12 @@ The daemon propagates: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`,
 `TZ`, `TMPDIR`, `RUST_LOG`, `RUST_BACKTRACE`, `RYEOSD_TEST_STDERR_DIR`,
 and the proxy/CA vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
 `SSL_CERT_FILE`, `SSL_CERT_DIR`, and their lowercase forms).
+
+This is the construction allowlist. When node sandbox policy is enforced,
+`environment.allow` is a second node-owned filter over the completed target
+environment. Bubblewrap itself starts env-empty; accepted variables are set for
+the target inside the namespace. Enforced mode replaces any inherited
+`TMPDIR` value with `/tmp`, the sandbox-private tmpfs. The
+`RYEOSD_SOCKET_PATH` value is also checked against the daemon-pinned path before
+the exact socket is exposed. See [Execution
+Sandbox](node/execution-sandbox.md).

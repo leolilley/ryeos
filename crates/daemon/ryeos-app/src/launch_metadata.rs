@@ -278,6 +278,18 @@ impl ResumeContext {
             EffectivePrincipal::Delegated(d) => Some(d.caller_fingerprint.clone()),
         }
     }
+
+    /// Snapshot that can reconstruct this project as a fresh, non-lineage
+    /// workspace. A locally pinned snapshot wins; a pushed-root snapshot is an
+    /// equivalent immutable source when a borrowed child must not inherit the
+    /// parent's pushed-head ownership semantics.
+    pub fn durable_project_snapshot_hash(&self) -> Option<&str> {
+        self.original_snapshot_hash.as_deref().or_else(|| {
+            self.original_pushed_head_ref
+                .as_ref()
+                .map(|pinned| pinned.snapshot_hash.as_str())
+        })
+    }
 }
 
 impl RuntimeLaunchMetadata {
@@ -360,6 +372,7 @@ mod tests {
     fn empty_spec() -> PlanSubprocessSpec {
         PlanSubprocessSpec {
             cmd: "/bin/true".to_string(),
+            verified_command: None,
             args: Vec::new(),
             cwd: None,
             env: HashMap::new(),

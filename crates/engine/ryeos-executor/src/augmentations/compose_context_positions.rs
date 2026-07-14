@@ -241,24 +241,38 @@ pub async fn run(
             .app_root
             .join(ryeos_engine::AI_DIR)
             .join("state");
-        let executor_path = crate::execution::launch::resolve_native_executor_path(
+        let executor = crate::execution::launch::materialize_native_executor(
             &bundle_roots,
             &executor_ref,
             &cache_root,
-            &engine.trust_store,
+            &engine.node_trust_store,
             ryeos_engine::resolution::TrustClass::TrustedBundle,
         )
         .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
 
-        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let executor_path_str = executor.path.to_string_lossy().to_string();
+        let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+            source_path: executor.path,
+            content_hash: executor.content_hash,
+        }];
         let stdin_data = serde_json::to_string(&envelope)?;
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
         );
+        // The callback socket is carried in the method envelope, but it must
+        // also be declared in the target environment so the sandbox can make
+        // that exact daemon-pinned socket visible. The auth token remains the
+        // runtime's credential for callback requests.
         let envs = ryeos_app::process::build_subprocess_envs_with_roots(
             &std::collections::BTreeMap::new(),
-            &[("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
+            &[
+                (
+                    "RYEOSD_SOCKET_PATH".to_string(),
+                    state.config.uds_path.to_string_lossy().into_owned(),
+                ),
+                ("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned),
+            ],
             roots,
         )
         .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
@@ -270,19 +284,35 @@ pub async fn run(
             stdin_data: Some(stdin_data),
             timeout: 60.0,
             limits: None,
+            inherited_fds: Vec::new(),
         };
-        let subprocess_request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
-            subprocess_request,
-            state.config.sandbox_enabled,
-            &state.config.app_root,
-            project_path,
-            &format!("runtime:{target_kind}"),
-            &child_thread_id,
-        )
-        .map_err(|error| LaunchAugmentationError::Threads(format!("sandbox: {error}")))?;
-        let result = tokio::task::spawn_blocking(move || lillux::run(subprocess_request))
-            .await
-            .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
+        let item_ref = format!("runtime:{target_kind}");
+        let subprocess_request = state
+            .sandbox
+            .apply(
+                subprocess_request,
+                ryeos_engine::sandbox::SandboxLaunchContext {
+                    project_path,
+                    project_authority: provenance.sandbox_project_authority(),
+                    state_root: provenance.state_root_override(),
+                    checkpoint_dir: None,
+                    bundle_roots: &bundle_roots,
+                    operator_trusted_keys_dir: Some(
+                        &state.config.runtime_root().trusted_keys_dir(),
+                    ),
+                    verified_code: &sandbox_verified_code,
+                    item_ref: &item_ref,
+                    thread_id: &child_thread_id,
+                },
+            )
+            .map_err(|error| LaunchAugmentationError::Threads(format!("sandbox: {error}")))?;
+        let workspace_lifeline = provenance.workspace_lifeline();
+        let result = tokio::task::spawn_blocking(move || {
+            let _workspace_lifeline = workspace_lifeline;
+            lillux::run(subprocess_request)
+        })
+        .await
+        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
 
         if !result.success {
             return Err(LaunchAugmentationError::ChildBootstrap {

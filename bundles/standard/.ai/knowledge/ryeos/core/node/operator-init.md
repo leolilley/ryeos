@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:f25ef9f5046e1f56324b40ba3e7a2bf3be22aea77deb47ceb5b1c65987a461cb:NyV12kNRb0RL/su6+nb2cK5sf9MDX6RXDJb6LagV3g+kO+jLfELm7rzTNkjUWfHPRh9m3W0iIDz7JpEgdoVbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:d196e6ddbbb1db6ab05b3598cd356655eb14ab3639f131a9fb162822de76313c:TZ+2D3erOhtrJ6C1kdNjB7+Jfqt3Wkr95uilmBFdMSa5eBb6znNxQCkuLo4XA9LH3+PbrkuqzdbuRCs/yhHVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Operator initialization contract implemented by ryeos-node: keys,
   trust, bundle discovery, bundle planning, install, and post-init checks.
@@ -39,7 +39,8 @@ or `RYEOS_APP_ROOT`. Packaged installs initialize with plain `ryeos init`.
 11. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
     write signed registrations under `<system>/.ai/node/bundles/`.
 12. Create/load the vault X25519 keypair.
-13. Write default ingest-ignore config if missing.
+13. Write create-once node policy files if missing, including the disabled strict
+    subprocess sandbox policy and ingest-ignore config.
 14. Reload trust and verify official publisher, user key, and node key
     are trusted.
 
@@ -75,4 +76,6 @@ one-generation backup.
 `ryeos init` does not start the daemon and does not depend on it. Runtime
 startup may repair daemon-local public identity, daemon config, vault
 public key output, and local authorized-key entry, but only after
-init-state verification succeeds.
+init-state verification succeeds. Init also never overwrites an existing
+operator-edited `.ai/node/sandbox.yaml`. See
+[Execution Sandbox](execution-sandbox.md) for the complete accepted policy.

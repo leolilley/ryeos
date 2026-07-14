@@ -1,10 +1,11 @@
+<!-- ryeos:signed:2026-07-14T01:54:46Z:3f20334ad900a7ba157615b1a1f2a58091d4cb0b27be0e11fc743b2e184cfbd5:TBqvP71wsztsI562HhfRWvQutkHal0oSdMWHe4zsFNIEd0NDCK1rF53WhMoFjxe0ydK4b2LZsyKQq+a9RjsLBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.1.0"
-description: The local-trust assumptions that must harden before hosting other principals — sandboxing, MCP network auth, multi-principal resolution, remote-state GC — each requirement-shaped, none buildable ahead of a deployment decision.
+version: "0.2.0"
+description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around the implemented node-owned process sandbox.
 tags:
   - hosted-node
   - federation
@@ -16,23 +17,22 @@ tags:
 
 ## Status
 
-Deferred as a group, on purpose. The substrate currently assumes one local
-operator who owns the machine; these four boundaries only become real when
-a node hosts OTHER principals or federates. They are requirement-shaped,
-not backlog-shaped: designing them against imagined deployments produces
-the wrong designs. When a hosted/federation decision lands, each needs its
-own spec pass — this doc is the index of what that decision activates,
-not one work item.
+The node-owned RyeOS strict process sandbox is implemented as optional
+groundwork. The complete hosted-node boundary remains deployment-shaped:
+principal-specific isolation, authenticated network peers, multi-principal
+resolution, quotas, and distributed retention only become concrete when a node
+hosts other principals or federates. This document indexes those remaining
+decisions rather than treating them as one backlog item.
 
 ## The four boundaries
 
-1. **Process sandboxing.** `sandbox_wrap()` is an identity wrapper today:
-   spawned runtimes and tools run with the daemon user's full ambient
-   authority. Fine when the operator owns everything the process could
-   touch; not fine the moment a hosted principal's item executes on shared
-   hardware. Activation means choosing an isolation mechanism (namespaces,
-   seccomp, microVM) per threat model — which is exactly why it cannot be
-   designed ahead of one.
+1. **Hosted-principal process isolation.** The local node now has the optional,
+   node-wide RyeOS strict Bubblewrap boundary for tool/runtime launches. That is
+   useful node-level defense in depth, but it is not a multi-tenant contract: profiles are not
+   principal-specific and there are no CPU/memory/process cgroup quotas or
+   hostile-tenant kernel boundary. Hosting still requires a deployment-shaped
+   isolation decision (delegated cgroups, namespaces/seccomp, or microVMs),
+   attestation, and per-principal workspace authority.
 
 2. **MCP network authentication.** Local MCP integration trusts the local
    socket boundary. Networked MCP needs real peer authentication and an

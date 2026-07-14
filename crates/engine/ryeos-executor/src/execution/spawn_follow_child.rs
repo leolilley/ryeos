@@ -129,10 +129,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // native-resume parent can host that. Gate on that DECLARED capability (never
     // a kind identity): a parent that cannot be checkpoint-resumed could never be
     // woken to consume the child, so it must not be allowed to suspend for follow.
-    let parent_is_native_resume = state
-        .state_store
-        .get_launch_metadata(&parent_thread_id)?
-        .and_then(|m| m.native_resume)
+    let parent_launch_metadata = state.state_store.get_launch_metadata(&parent_thread_id)?;
+    let parent_is_native_resume = parent_launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.native_resume.as_ref())
         .is_some();
     if !parent_is_native_resume {
         bail!(
@@ -140,6 +140,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
              runtime.spawn_follow_child requires a checkpoint-resumable parent"
         );
     }
+    let inherited_snapshot_hash = if cap.provenance.workspace_lifeline().is_some() {
+        Some(
+            parent_launch_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.resume_context.as_ref())
+                .and_then(ResumeContext::durable_project_snapshot_hash)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: parent {parent_thread_id} owns an ephemeral workspace but has no durable project snapshot"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
 
     // ── Admission (authorize before resource resolution; before any mutation) ─
     let mut resolved_children = Vec::with_capacity(children.len());
@@ -352,7 +368,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             project_context: ProjectContext::LocalPath {
                 path: cap.provenance.effective_path().to_path_buf(),
             },
-            original_snapshot_hash: None,
+            original_snapshot_hash: inherited_snapshot_hash.clone(),
             // A follow child borrows the parent's workspace; it never
             // owns snapshot lineage, so no pushed-head identity is
             // seeded (rebuilding one would take over pin/foldback the

@@ -377,6 +377,9 @@ mod tests {
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
                     raw_content: String::new(),
+                    source_content_digest:
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
                     raw_content_digest:
                         "0000000000000000000000000000000000000000000000000000000000000000"
                             .to_string(),
@@ -469,6 +472,8 @@ mod tests {
                 alias_resolution: None,
                 added_by: crate::resolution::ResolutionStepName::PipelineInit,
                 raw_content: String::new(),
+                source_content_digest:
+                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
                 raw_content_digest:
                     "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             },

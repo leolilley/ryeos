@@ -4,16 +4,18 @@
 //! python-function tool runs a bounded subprocess that reproduces the runtime's
 //! exact `sys.path` and imports the tool module WITHOUT calling `execute`.
 //!
-//! It needs only an `Engine` — never daemon state, secrets, or callback tokens
-//! (an import probe doesn't use them) — so the daemon `tool/env-check` handler
-//! and the offline `ryeos doctor` share one implementation. Execution is via
-//! the synchronous, bounded `lillux::run`, so callers in either context (async
-//! handler or sync CLI) use it the same way.
+//! It needs an `Engine` plus the node's immutable sandbox snapshot — never
+//! daemon secrets or callback tokens (an import probe doesn't use them) — so
+//! the daemon `tool/env-check` handler and offline `ryeos doctor` share one
+//! implementation. Execution is via the synchronous, bounded `lillux::run`,
+//! after the request passes through the same sandbox launch boundary as a real
+//! tool process.
 
 use serde_json::{json, Value};
 
 use ryeos_engine::contracts::{ExecutionHints, PlanContext, PlanNode, VerifiedItem};
 use ryeos_engine::engine::Engine;
+use ryeos_engine::sandbox::{SandboxLaunchContext, SandboxRuntime};
 
 /// Wall-clock cap (seconds) on the import dry-run subprocess.
 const IMPORT_TIMEOUT_SECS: f64 = 20.0;
@@ -82,11 +84,15 @@ os.write(_saved,json.dumps(result).encode())
 /// `interpreter` / `venv_populated` / `import_ok` / `import_error` /
 /// `has_execute`. `required_secrets` are dropped from the probe env by name as
 /// belt-and-suspenders (the plan-build env carries no secret values anyway).
+/// Callers supply the same canonical, externally-authorized launch facts used
+/// for a real tool spawn, including the already-verified root item identity.
 pub fn import_dry_run(
     engine: &Engine,
     plan_ctx: &PlanContext,
     verified: &VerifiedItem,
     required_secrets: &[String],
+    sandbox: &SandboxRuntime,
+    sandbox_context: SandboxLaunchContext<'_>,
 ) -> Value {
     let plan = match engine.build_plan(plan_ctx, verified, &json!({}), &ExecutionHints::default()) {
         Ok(p) => p,
@@ -135,12 +141,24 @@ pub fn import_dry_run(
         .filter(|(k, _)| !required_secrets.iter().any(|s| s == *k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    let mut verified_code = sandbox_context.verified_code.to_vec();
+    if let Some(command) = &spec.verified_command {
+        if !verified_code.contains(command) {
+            verified_code.push(command.clone());
+        }
+    }
+    let sandbox_context = SandboxLaunchContext {
+        verified_code: &verified_code,
+        ..sandbox_context
+    };
 
     run_probe(
         &spec.cmd,
         args,
         spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
+        sandbox,
+        sandbox_context,
     )
 }
 
@@ -152,8 +170,10 @@ fn run_probe(
     args: Vec<String>,
     cwd: Option<String>,
     envs: Vec<(String, String)>,
+    sandbox: &SandboxRuntime,
+    sandbox_context: SandboxLaunchContext<'_>,
 ) -> Value {
-    let result = lillux::run(lillux::SubprocessRequest {
+    let request = lillux::SubprocessRequest {
         cmd: interpreter.to_string(),
         args,
         cwd,
@@ -161,7 +181,18 @@ fn run_probe(
         stdin_data: None,
         timeout: IMPORT_TIMEOUT_SECS,
         limits: None,
-    });
+        inherited_fds: Vec::new(),
+    };
+    let request = match sandbox.apply(request, sandbox_context) {
+        Ok(request) => request,
+        Err(error) => {
+            return json!({
+                "import_check": "unavailable",
+                "import_check_reason": format!("sandbox refused import probe: {error}"),
+            });
+        }
+    };
+    let result = lillux::run(request);
     shape_probe_result(interpreter, result)
 }
 
@@ -226,6 +257,7 @@ fn shape_probe_result(interpreter: &str, result: lillux::SubprocessResult) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::sandbox::{SandboxProjectAuthority, SandboxRuntime};
 
     fn python3() -> Option<String> {
         std::process::Command::new("python3")
@@ -261,6 +293,34 @@ mod tests {
         (tool, lib)
     }
 
+    fn run_probe_disabled(
+        interpreter: &str,
+        args: Vec<String>,
+        cwd: Option<String>,
+        envs: Vec<(String, String)>,
+        project: &std::path::Path,
+    ) -> Value {
+        let sandbox = SandboxRuntime::default();
+        run_probe(
+            interpreter,
+            args,
+            cwd,
+            envs,
+            &sandbox,
+            SandboxLaunchContext {
+                project_path: project,
+                project_authority: SandboxProjectAuthority::External,
+                state_root: None,
+                checkpoint_dir: None,
+                bundle_roots: &[],
+                operator_trusted_keys_dir: None,
+                verified_code: &[],
+                item_ref: "tool:test",
+                thread_id: "env-probe-test",
+            },
+        )
+    }
+
     #[test]
     fn probe_names_missing_module() {
         let Some(py) = python3() else { return };
@@ -269,7 +329,13 @@ mod tests {
             tmp.path(),
             "import definitely_not_a_real_module_xyz\ndef execute(p, pr):\n    return {}\n",
         );
-        let out = run_probe(&py, probe_args(&tool, &lib, tmp.path()), None, vec![]);
+        let out = run_probe_disabled(
+            &py,
+            probe_args(&tool, &lib, tmp.path()),
+            None,
+            vec![],
+            tmp.path(),
+        );
         assert_eq!(out["import_check"], "python_function");
         assert_eq!(out["import_ok"], false, "{out}");
         let err = out["import_error"].as_str().unwrap_or("");
@@ -285,7 +351,13 @@ mod tests {
             tmp.path(),
             "import os\ndef execute(p, pr):\n    return {}\n",
         );
-        let out = run_probe(&py, probe_args(&tool, &lib, tmp.path()), None, vec![]);
+        let out = run_probe_disabled(
+            &py,
+            probe_args(&tool, &lib, tmp.path()),
+            None,
+            vec![],
+            tmp.path(),
+        );
         assert_eq!(out["import_ok"], true, "{out}");
         assert_eq!(out["has_execute"], true, "{out}");
     }
@@ -298,7 +370,13 @@ mod tests {
             tmp.path(),
             "print('noise')\nimport sys; sys.stdout.write('more')\ndef execute(p, pr):\n    return {}\n",
         );
-        let out = run_probe(&py, probe_args(&tool, &lib, tmp.path()), None, vec![]);
+        let out = run_probe_disabled(
+            &py,
+            probe_args(&tool, &lib, tmp.path()),
+            None,
+            vec![],
+            tmp.path(),
+        );
         assert_eq!(out["import_ok"], true, "noise corrupted result: {out}");
     }
 
@@ -310,7 +388,13 @@ mod tests {
             tmp.path(),
             "def execute(p, pr):\n    raise RuntimeError('must not run')\n",
         );
-        let out = run_probe(&py, probe_args(&tool, &lib, tmp.path()), None, vec![]);
+        let out = run_probe_disabled(
+            &py,
+            probe_args(&tool, &lib, tmp.path()),
+            None,
+            vec![],
+            tmp.path(),
+        );
         assert_eq!(out["import_ok"], true, "{out}");
         assert!(out.get("import_error").is_none(), "{out}");
     }

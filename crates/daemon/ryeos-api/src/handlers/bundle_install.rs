@@ -14,7 +14,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use ryeos_bundle::preflight::preflight_verify_bundle_in_context;
+use ryeos_bundle::preflight::{
+    preflight_verify_bundle_in_context, preflight_verify_bundle_staging_in_context,
+};
 
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
@@ -100,9 +102,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Preflight verification: parse + validate + signature-check every
     // signable item in the bundle BEFORE any filesystem mutation.
     //
-    // Trust source: project + operator app root. Bundles whose signers aren't
-    // already trusted are rejected — operators must pin trust first.
-    let operator_config_root = state.config.runtime_root().config();
+    // Trust source: the node's pinned trust store. Bundles whose signers aren't
+    // already trusted are rejected — node administrators must pin trust first.
+    let node_config_root = state.config.runtime_root().config();
     let source_canonical = req
         .source_path
         .canonicalize()
@@ -117,7 +119,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     preflight_verify_bundle_in_context(
         &req.source_path,
         &installed_dependency_roots,
-        &operator_config_root,
+        &node_config_root,
     )
     .context("preflight verification refused install")?;
 
@@ -132,6 +134,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             req.preserve_runtime_artifacts,
             &transaction,
             registration.clone(),
+            |staging| {
+                preflight_verify_bundle_staging_in_context(
+                    staging,
+                    &req.name,
+                    &installed_dependency_roots,
+                    &node_config_root,
+                )
+                .context("preflight verification refused completed replacement staging tree")
+            },
         )
         .with_context(|| {
             format!(
@@ -146,6 +157,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &target,
             &transaction,
             registration.clone(),
+            |staging| {
+                preflight_verify_bundle_staging_in_context(
+                    staging,
+                    &req.name,
+                    &installed_dependency_roots,
+                    &node_config_root,
+                )
+                .context("preflight verification refused completed install staging tree")
+            },
         )
         .with_context(|| {
             format!(
@@ -191,6 +211,7 @@ fn install_dir_atomic(
     target: &Path,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
+    validate_staging: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
     let parent = target
         .parent()
@@ -218,6 +239,9 @@ fn install_dir_atomic(
                 staging.display()
             )
         })?;
+        // Re-read the completed copy rather than trusting the earlier source
+        // preflight; this catches source changes that raced the copy.
+        validate_staging(&staging)?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         transaction.begin_present(
@@ -242,6 +266,7 @@ fn replace_dir_atomic(
     preserve_runtime_artifacts: bool,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
+    validate_staging: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
     let source = src
         .canonicalize()
@@ -289,6 +314,9 @@ fn replace_dir_atomic(
         if preserve_runtime_artifacts {
             preserve_runtime_artifact_dirs(&canonical_target, &staging)?;
         }
+        // Validate the exact merged tree after sparse artifact preservation,
+        // before it can replace the registered bundle generation.
+        validate_staging(&staging)?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
         transaction.begin_present(
@@ -399,6 +427,7 @@ mod tests {
             preserve,
             &transaction,
             serde_json::json!({ "kind": "node", "path": target }),
+            |_| Ok(()),
         )
         .unwrap();
     }
@@ -504,6 +533,44 @@ mod tests {
             fs::read(target.join(".ai/refs/bundles/manifest")).unwrap(),
             b"ref"
         );
+    }
+
+    #[test]
+    fn replacement_validates_completed_staging_before_activation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let bundles = tmp.path().join(".ai/bundles");
+        let target = bundles.join("demo");
+        fs::create_dir_all(src.join(".ai/node/commands")).unwrap();
+        fs::create_dir_all(target.join(".ai/refs/bundles")).unwrap();
+        fs::write(src.join(".ai/node/commands/new.yaml"), b"new").unwrap();
+        fs::write(target.join(".ai/refs/bundles/manifest"), b"preserved").unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+        let transaction =
+            ryeos_app::bundle_transaction::BundleTransaction::acquire(tmp.path(), "demo").unwrap();
+        let validation_called = std::cell::Cell::new(false);
+
+        let error = replace_dir_atomic(
+            &src,
+            &target,
+            true,
+            &transaction,
+            serde_json::json!({ "kind": "node", "path": target }),
+            |staging| {
+                validation_called.set(true);
+                assert_eq!(
+                    fs::read(staging.join(".ai/refs/bundles/manifest")).unwrap(),
+                    b"preserved"
+                );
+                anyhow::bail!("completed staging rejected")
+            },
+        )
+        .expect_err("failed completed-staging preflight must prevent activation");
+
+        assert!(validation_called.get());
+        assert!(error.to_string().contains("completed staging rejected"));
+        assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
+        assert!(!target.join(".ai/node/commands/new.yaml").exists());
     }
 
     #[test]

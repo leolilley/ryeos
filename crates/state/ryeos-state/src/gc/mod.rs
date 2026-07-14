@@ -73,7 +73,10 @@ pub struct GcParams {
     /// project/deployed heads.
     #[serde(default)]
     pub deep: bool,
-    /// Purge executor/materialization caches under `.ai/state/cache`.
+    /// Purge rebuildable caches under `.ai/state/cache`. Request-owned
+    /// `cache/executions` workspaces and lock-owned `cache/verified-code`
+    /// generations are excluded because their in-memory lifelines are outside
+    /// CAS reachability and own cleanup.
     #[serde(default)]
     pub purge_cache: bool,
     /// Truncate `.ai/state/trace-events.ndjson`.
@@ -164,7 +167,11 @@ pub fn purge_runtime_state(
     }
 
     if params.deep || params.purge_cache {
-        remove_path_contents(&runtime_state_dir.join("cache"), params.dry_run, result)?;
+        remove_rebuildable_cache_contents(
+            &runtime_state_dir.join("cache"),
+            params.dry_run,
+            result,
+        )?;
         if !params.dry_run {
             fs::create_dir_all(runtime_state_dir.join("cache"))
                 .context("failed to recreate runtime cache directory")?;
@@ -214,6 +221,21 @@ pub fn run_gc(
     signer: Option<&dyn crate::Signer>,
     params: &GcParams,
 ) -> Result<GcResult> {
+    run_gc_with_extra_roots(cas_root, refs_root, signer, params, &[])
+}
+
+/// Run GC while retaining daemon-derived transient CAS roots.
+///
+/// This is kept separate from [`GcParams`] so callers cannot use the wire
+/// maintenance API to pin arbitrary objects. Online maintenance supplies only
+/// hashes read from active runtime launch metadata.
+pub fn run_gc_with_extra_roots(
+    cas_root: &Path,
+    refs_root: &Path,
+    signer: Option<&dyn crate::Signer>,
+    params: &GcParams,
+    extra_roots: &[String],
+) -> Result<GcResult> {
     let started = Instant::now();
     let mut result = GcResult::default();
 
@@ -250,9 +272,11 @@ pub fn run_gc(
     }
 
     // Phase 2: Sweep (always)
-    let reachable = reachability::collect_reachable(cas_root, refs_root)?;
+    let reachable =
+        reachability::collect_reachable_with_extra_roots(cas_root, refs_root, extra_roots)?;
 
-    result.roots_walked = reachable.chain_root_ids.len() + reachable.project_hashes.len();
+    result.roots_walked =
+        reachable.chain_root_ids.len() + reachable.project_hashes.len() + extra_roots.len();
     result.reachable_objects = reachable.object_hashes.len();
     result.reachable_blobs = reachable.blob_hashes.len();
 
@@ -411,6 +435,48 @@ fn remove_path_contents(path: &Path, dry_run: bool, result: &mut GcResult) -> Re
                         "failed to remove runtime directory {}",
                         entry_path.display()
                     )
+                })?;
+            }
+        } else if file_type.is_file() {
+            remove_runtime_file(&entry_path, dry_run, result)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove rebuildable cache entries without touching live execution roots.
+///
+/// `cache/executions` contains pushed-snapshot checkouts and isolated
+/// no-project workspaces whose `TempDirGuard`s own cleanup. The sandbox's
+/// `cache/verified-code` generations are likewise protected by process-held
+/// lifetime locks and remove themselves when their runtime generation drops.
+/// A deep maintenance pass cannot infer either in-memory liveness state here,
+/// so it must never recursively unlink those directories.
+fn remove_rebuildable_cache_contents(
+    cache_dir: &Path,
+    dry_run: bool,
+    result: &mut GcResult,
+) -> Result<()> {
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(cache_dir)
+        .with_context(|| format!("failed to read {}", cache_dir.display()))?
+    {
+        let entry = entry.context("failed to read cache entry")?;
+        if matches!(
+            entry.file_name().to_str(),
+            Some("executions" | "verified-code")
+        ) {
+            continue;
+        }
+        let entry_path = entry.path();
+        let file_type = entry.file_type().context("failed to stat cache entry")?;
+        if file_type.is_dir() {
+            remove_path_contents(&entry_path, dry_run, result)?;
+            if !dry_run {
+                fs::remove_dir(&entry_path).with_context(|| {
+                    format!("failed to remove cache directory {}", entry_path.display())
                 })?;
             }
         } else if file_type.is_file() {
@@ -775,6 +841,8 @@ mod tests {
         let bundle_event_ref =
             runtime_state_dir.join("refs/generic/bundle_events/email/event/head");
         let cache_file = runtime_state_dir.join("cache/executors/hash/runtime/bin");
+        let execution_file = runtime_state_dir.join("cache/executions/live/project.yaml");
+        let verified_code_file = runtime_state_dir.join("cache/verified-code/generation/digest");
         let trace_file = runtime_state_dir.join("trace-events.ndjson");
         let thread_meta = runtime_state_dir.join("threads/T-1/meta.json");
         let thread_checkpoint = runtime_state_dir.join("threads/T-1/checkpoints/ck.bin");
@@ -783,11 +851,15 @@ mod tests {
         fs::create_dir_all(project_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(bundle_event_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(execution_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(verified_code_file.parent().unwrap()).unwrap();
         fs::create_dir_all(thread_checkpoint.parent().unwrap()).unwrap();
         fs::write(&chain_ref, b"chain").unwrap();
         fs::write(&project_ref, b"project").unwrap();
         fs::write(&bundle_event_ref, b"bundle-event").unwrap();
         fs::write(&cache_file, b"cache").unwrap();
+        fs::write(&execution_file, b"active workspace").unwrap();
+        fs::write(&verified_code_file, b"verified bytes").unwrap();
         fs::write(&trace_file, b"trace line\n").unwrap();
         fs::write(&thread_meta, b"meta").unwrap();
         fs::write(&thread_checkpoint, b"ckpt").unwrap();
@@ -806,6 +878,14 @@ mod tests {
         assert!(
             !cache_file.exists(),
             "deep purge should drop executor cache files"
+        );
+        assert!(
+            execution_file.exists(),
+            "deep purge must not unlink request-owned execution workspaces"
+        );
+        assert!(
+            verified_code_file.exists(),
+            "deep purge must not unlink active verified-code generations"
         );
         assert_eq!(
             fs::metadata(&trace_file).unwrap().len(),

@@ -26,6 +26,10 @@ pub struct SubprocessRequest {
     pub timeout: f64,
     /// Optional limits installed in the child immediately before `exec`.
     pub limits: Option<SubprocessLimits>,
+    /// Open descriptors intentionally kept alive and inherited through exec.
+    /// Lillux retains the handles and clears `FD_CLOEXEC` only in the forked
+    /// child. The sandbox uses these only for Bubblewrap's fd-based mounts.
+    pub inherited_fds: Vec<std::sync::Arc<std::fs::File>>,
 }
 
 /// Resource limits applied to a spawned subprocess.
@@ -47,6 +51,62 @@ pub struct SubprocessResult {
     pub duration_ms: f64,
     pub pid: u32,
     pub timed_out: bool,
+}
+
+/// Validate retained descriptors and make them inheritable only inside this
+/// command's forked child. Callers must keep the Arc handles alive through
+/// `spawn`/`status`.
+pub fn configure_inherited_fds(
+    command: &mut process::Command,
+    inherited_fds: &[std::sync::Arc<std::fs::File>],
+) -> Result<(), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        if inherited_fds.is_empty() {
+            return Ok(());
+        }
+        return Err("inherited descriptors are unsupported on this platform".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let mut raw = Vec::with_capacity(inherited_fds.len());
+        for file in inherited_fds {
+            let fd = file.as_raw_fd();
+            if fd <= libc::STDERR_FILENO {
+                return Err(format!("inherited descriptor {fd} overlaps stdio"));
+            }
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 {
+                return Err(format!(
+                    "inherited descriptor {fd} cannot be inspected: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            if flags & libc::FD_CLOEXEC == 0 {
+                return Err(format!(
+                    "inherited descriptor {fd} is not protected by FD_CLOEXEC"
+                ));
+            }
+            raw.push(fd);
+        }
+        unsafe {
+            command.pre_exec(move || {
+                for fd in &raw {
+                    let flags = libc::fcntl(*fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Result of a detached spawn.
@@ -158,6 +218,49 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
     let start = Instant::now();
     let timeout = request.timeout;
 
+    #[cfg(unix)]
+    let inherited_fds = {
+        use std::os::fd::AsRawFd as _;
+
+        let mut raw = Vec::with_capacity(request.inherited_fds.len());
+        for file in &request.inherited_fds {
+            let fd = file.as_raw_fd();
+            if fd <= libc::STDERR_FILENO {
+                return Err(spawn_failure(
+                    start,
+                    format!("Failed to spawn: inherited descriptor {fd} overlaps stdio"),
+                ));
+            }
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 {
+                return Err(spawn_failure(
+                    start,
+                    format!(
+                        "Failed to spawn: inherited descriptor {fd} cannot be inspected: {}",
+                        std::io::Error::last_os_error()
+                    ),
+                ));
+            }
+            if flags & libc::FD_CLOEXEC == 0 {
+                return Err(spawn_failure(
+                    start,
+                    format!(
+                        "Failed to spawn: inherited descriptor {fd} is not protected by FD_CLOEXEC"
+                    ),
+                ));
+            }
+            raw.push(fd);
+        }
+        raw
+    };
+    #[cfg(not(unix))]
+    if !request.inherited_fds.is_empty() {
+        return Err(spawn_failure(
+            start,
+            "Failed to spawn: inherited descriptors are unsupported on this platform",
+        ));
+    }
+
     let envs_str: Vec<String> = request
         .envs
         .iter()
@@ -177,13 +280,25 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
         Stdio::null()
     });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Keep caller-pinned descriptors alive through `Command::spawn`. They stay
+    // CLOEXEC in the multithreaded parent and are made inheritable only in the
+    // forked child, preventing unrelated concurrent spawns from receiving them.
+    let _inherited_fds = &request.inherited_fds;
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
+            command.pre_exec(move || {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for fd in &inherited_fds {
+                    let flags = libc::fcntl(*fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
                 Ok(())
             });
         }
@@ -595,6 +710,7 @@ fn do_exec(
         stdin_data: stdin_data.map(|s| s.to_string()),
         timeout,
         limits: None,
+        inherited_fds: Vec::new(),
     });
     serde_json::json!({
         "success": r.success, "stdout": r.stdout, "stderr": r.stderr,
