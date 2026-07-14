@@ -1,6 +1,6 @@
 use crate::model::{ErrorMode, ErrorRecord, GraphConfig, GraphNode};
 
-use super::NextOnError;
+use super::outcome::NextOnError;
 
 /// Whether a node whose current dispatch just failed has retry attempts left.
 ///
