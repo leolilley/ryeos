@@ -22,22 +22,13 @@ use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
 
 mod checkpointing;
+mod events;
+mod outcome;
 mod transitions;
 
+use events::node_ref;
+use outcome::*;
 use transitions::{foreach_failure_summary, resolve_next_on_error, retry_attempts_remaining};
-
-fn add_runtime_cost(total: &mut Option<RuntimeCost>, cost: Option<RuntimeCost>) {
-    let Some(cost) = cost else { return };
-    let acc = total.get_or_insert(RuntimeCost {
-        input_tokens: 0,
-        output_tokens: 0,
-        total_usd: 0.0,
-        basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
-    });
-    acc.input_tokens += cost.input_tokens;
-    acc.output_tokens += cost.output_tokens;
-    acc.total_usd += cost.total_usd;
-}
 
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
 /// change to the written fields; the resume parser rejects an unknown version.
@@ -63,48 +54,6 @@ pub(crate) mod follow_keys {
 /// is exhausted. For logs only — the substrate keys off the thread lineage, not
 /// this string.
 const SEGMENT_CONTINUATION_REASON: &str = "graph segment step budget exhausted";
-
-/// Running cost accumulator for a single graph execution. Owned by the
-/// walker behind a `Mutex` (like `warnings`) so cost can be recorded with
-/// `&self` from `commit_step` — the single state-mutation point.
-///
-/// SEMANTICS: the aggregate is a **rollup** — a node that dispatches a
-/// cost-bearing directive/sub-graph child includes that child's cost here,
-/// and the child thread is ALSO finalized with its own cost. Downstream
-/// billing/reporting must therefore NOT sum `final_cost` across a thread
-/// tree, or nested executions are double-counted. Parent graph cost is a
-/// rollup/display figure.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct GraphAccounting {
-    /// Aggregate across every cost-bearing node. `None` until the first
-    /// node reports cost, so a pure-tool graph finalizes `cost: None`
-    /// rather than a misleading all-zeros record.
-    total: Option<RuntimeCost>,
-    /// One record per cost-bearing node, in execution order.
-    nodes: Vec<NodeCostRecord>,
-}
-
-impl GraphAccounting {
-    fn record(&mut self, node: &str, step: u32, item_id: &str, cost: RuntimeCost) {
-        let total = self.total.get_or_insert(RuntimeCost {
-            input_tokens: 0,
-            output_tokens: 0,
-            total_usd: 0.0,
-            // The aggregate is marked as a rollup on the wire so downstream
-            // consumers can render it as derived, never as own-spend.
-            basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
-        });
-        total.input_tokens += cost.input_tokens;
-        total.output_tokens += cost.output_tokens;
-        total.total_usd += cost.total_usd;
-        self.nodes.push(NodeCostRecord {
-            node: node.to_string(),
-            step,
-            item_id: item_id.to_string(),
-            cost,
-        });
-    }
-}
 
 // ── F3 advanced path: StepOutcome + commit_step ─────────────────
 //
@@ -3357,207 +3306,6 @@ impl Walker {
         ctx
     }
 
-    // ── Event/receipt emission helpers (all route through record_callback_warning) ──
-
-    async fn write_node_receipt_or_warn(&self, graph_run_id: &str, receipt: &NodeReceipt) {
-        let r = persistence::write_node_receipt(&self.client, graph_run_id, receipt).await;
-        self.record_callback_warning("write_node_receipt", r.map(|_| ()))
-    }
-
-    async fn emit_graph_step_started(&self, graph_run_id: &str, step: u32, current: &str) {
-        let r = self
-            .client
-            .append_runtime_event(
-                RuntimeEventType::GraphStepStarted,
-                json!({
-                    "graph_run_id": graph_run_id,
-                    "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
-                    "node": current,
-                    "node_ref": node_ref(&self.graph.definition_ref, current),
-                    "step": step,
-                }),
-            )
-            .await;
-        self.record_callback_warning("graph_step_started", r);
-    }
-
-    async fn emit_graph_follow_suspended(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        item_id: &str,
-        expected: Option<usize>,
-    ) {
-        let mut payload = json!({
-            "graph_run_id": graph_run_id,
-            "definition_ref": &self.graph.definition_ref,
-            "definition_hash": &self.graph.definition_hash,
-            "node": current,
-            "node_ref": node_ref(&self.graph.definition_ref, current),
-            "step": step,
-            "item_id": item_id,
-        });
-        if let Some(expected) = expected {
-            payload["expected"] = json!(expected);
-        }
-        let r = self
-            .client
-            .append_runtime_event(RuntimeEventType::GraphFollowSuspended, payload)
-            .await;
-        self.record_callback_warning("graph_follow_suspended", r);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn emit_graph_node_retry(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        item_id: &str,
-        failed_attempt: u32,
-        total_attempts: u32,
-        delay_ms: u64,
-        error: &str,
-    ) {
-        let r = self
-            .client
-            .append_runtime_event(
-                RuntimeEventType::GraphNodeRetry,
-                json!({
-                    "graph_run_id": graph_run_id,
-                    "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
-                    "node": current,
-                    "node_ref": node_ref(&self.graph.definition_ref, current),
-                    "step": step,
-                    "item_id": item_id,
-                    "attempt": failed_attempt,
-                    "attempts": total_attempts,
-                    "delay_ms": delay_ms,
-                    "error": error,
-                }),
-            )
-            .await;
-        self.record_callback_warning("graph_node_retry", r);
-    }
-
-    async fn emit_tool_call_start(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        item_id: &str,
-    ) {
-        // `tool` + `call_id` are the shared tool-event contract every
-        // producer satisfies (the timeline projection pairs on `call_id`);
-        // the graph coordinates stay as additive context. The call id is
-        // deterministic from the walk coordinates — one dispatch per
-        // (run, step, node).
-        let r = self
-            .client
-            .append_runtime_event(
-                RuntimeEventType::ToolCallStart,
-                json!({
-                    "tool": item_id,
-                    "call_id": graph_call_id(graph_run_id, step, current),
-                    "graph_run_id": graph_run_id,
-                    "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
-                    "node": current,
-                    "node_ref": node_ref(&self.graph.definition_ref, current),
-                    "step": step,
-                    "item_id": item_id,
-                }),
-            )
-            .await;
-        self.record_callback_warning("tool_call_start", r);
-    }
-
-    async fn emit_tool_call_result(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        item_id: &str,
-        status: &str,
-    ) {
-        let r = self
-            .client
-            .append_runtime_event(
-                RuntimeEventType::ToolCallResult,
-                json!({
-                    "tool": item_id,
-                    "call_id": graph_call_id(graph_run_id, step, current),
-                    "graph_run_id": graph_run_id,
-                    "definition_ref": &self.graph.definition_ref,
-                    "definition_hash": &self.graph.definition_hash,
-                    "node": current,
-                    "node_ref": node_ref(&self.graph.definition_ref, current),
-                    "step": step,
-                    "item_id": item_id,
-                    "status": status,
-                }),
-            )
-            .await;
-        self.record_callback_warning("tool_call_result", r);
-    }
-
-    async fn emit_graph_step_completed(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        status: &str,
-        error: Option<&str>,
-    ) {
-        let mut payload = json!({
-            "graph_run_id": graph_run_id,
-            "definition_ref": &self.graph.definition_ref,
-            "definition_hash": &self.graph.definition_hash,
-            "node": current,
-            "node_ref": node_ref(&self.graph.definition_ref, current),
-            "step": step,
-            "status": status,
-        });
-        if let Some(err) = error {
-            payload["error"] = json!(err);
-        }
-        let r = self
-            .client
-            .append_runtime_event(RuntimeEventType::GraphStepCompleted, payload)
-            .await;
-        self.record_callback_warning("graph_step_completed", r);
-    }
-
-    async fn emit_graph_branch_taken(
-        &self,
-        graph_run_id: &str,
-        step: u32,
-        current: &str,
-        target: Option<&str>,
-    ) {
-        if let Some(t) = target {
-            let r = self
-                .client
-                .append_runtime_event(
-                    RuntimeEventType::GraphBranchTaken,
-                    json!({
-                        "graph_run_id": graph_run_id,
-                        "definition_ref": &self.graph.definition_ref,
-                        "definition_hash": &self.graph.definition_hash,
-                        "node": current,
-                        "node_ref": node_ref(&self.graph.definition_ref, current),
-                        "step": step,
-                        "target": t,
-                        "target_node_ref": node_ref(&self.graph.definition_ref, t),
-                    }),
-                )
-                .await;
-            self.record_callback_warning("graph_branch_taken", r);
-        }
-    }
 }
 
 fn merge_into(target: &mut Value, source: &Value) {
@@ -3581,19 +3329,6 @@ fn strip_none_values(val: &Value) -> Value {
         Value::Array(arr) => Value::Array(arr.iter().map(strip_none_values).collect()),
         other => other.clone(),
     }
-}
-
-fn node_ref(definition_ref: &str, node: &str) -> String {
-    format!("{definition_ref}#node:{node}")
-}
-
-/// Deterministic call id for a node's action dispatch, satisfying the shared
-/// tool-event contract (`tool` + `call_id`) so start/result pair without
-/// producer-specific knowledge. One dispatch per (run, step, node) makes the
-/// coordinates a natural identity; a retried node re-dispatches under a new
-/// step, so attempts pair independently.
-fn graph_call_id(graph_run_id: &str, step: u32, node: &str) -> String {
-    format!("{graph_run_id}:{step}:{node}")
 }
 
 fn hash_json_value(value: &Value) -> String {
