@@ -4,4 +4,5 @@ name: ryeos-ui/item/inspect
 version: "1.0.0"
 description: Inspect one real canonical RyeOS item — resolve, classify trust, and return raw source and effective composition.
 endpoint: ui.ryeos.item.inspect
+record_thread: false
 availability: daemon_only

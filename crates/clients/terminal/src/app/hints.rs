@@ -64,6 +64,12 @@ async fn run_session_stream(
     tx: &tokio::sync::mpsc::UnboundedSender<SessionMessage>,
 ) {
     while let Some(frame) = stream.next_event().await {
+        if frame.event_type == "snapshot_required" {
+            if tx.send(SessionMessage::Resubscribed).is_err() {
+                break;
+            }
+            continue;
+        }
         if frame.event_type == "ui_intent.applied" {
             let payload = serde_json::from_str::<serde_json::Value>(&frame.data)
                 .unwrap_or(serde_json::Value::Null);

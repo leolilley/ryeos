@@ -3,6 +3,7 @@ category: "events"
 name: "replay"
 kind: service
 endpoint: events.replay
+record_thread: false
 required_caps: []
 schema:
   thread_id: string

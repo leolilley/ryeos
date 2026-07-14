@@ -477,11 +477,16 @@ async fn main() -> Result<()> {
                                 if ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
                                     &event.event_type,
                                 ) {
+                                    let status = ryeos_api::routes::invokers::stream_helpers::lifecycle_status(
+                                        &event.event_type,
+                                    );
                                     let payload = serde_json::json!({
                                         "kind": "thread",
-                                        "thread_id": event.thread_id,
-                                        "chain_root_id": event.chain_root_id,
-                                        "event_type": event.event_type,
+                                        "thread_id": &event.thread_id,
+                                        "chain_root_id": &event.chain_root_id,
+                                        "event_type": &event.event_type,
+                                        "status": status,
+                                        "updated_at": &event.ts,
                                     });
                                     for session_id in ui.browser_sessions.session_ids() {
                                         ui.session_bus.publish(
@@ -1223,7 +1228,8 @@ async fn run_service_standalone(
         endpoint = %result.endpoint,
         trust_class = ?result.trust_class,
         effective_caps = ?result.effective_caps,
-        audit_thread_id = %result.audit_thread_id,
+        invocation_id = %result.invocation_id,
+        recorded = result.recorded,
         "standalone service completed"
     );
 

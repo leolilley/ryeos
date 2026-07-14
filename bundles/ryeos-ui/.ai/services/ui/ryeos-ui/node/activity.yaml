@@ -7,4 +7,5 @@ description: >-
   continuation-deduped usage totals, and the latest durable events across
   every thread on the node.
 endpoint: ui.ryeos.node.activity
+record_thread: false
 availability: daemon_only

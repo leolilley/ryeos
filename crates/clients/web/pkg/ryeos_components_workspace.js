@@ -274,32 +274,36 @@ function timeline(viewVm) {
   const wrap = el("section", "ryeos-timeline");
   wrap.append(listHeader(viewVm.title || "timeline", ""));
   const entries = el("div", "ryeos-timeline-entries");
-  for (const entry of viewVm.entries || []) {
-    entries.append(timelineEntry(entry));
+  for (const [index, entry] of (viewVm.entries || []).entries()) {
+    entries.append(timelineEntry(entry, viewVm.entry_arrived_at_ms?.[index]));
   }
   if (!(viewVm.entries || []).length) entries.append(textEl("p", "No timeline events loaded."));
   wrap.append(entries);
   return wrap;
 }
 
-function timelineEntry(entry) {
+function timelineEntry(entry, arrivedAtMs) {
+  let node;
   switch (entry.type) {
     case "block":
-      return textEl("p", entry.text || "", `ryeos-timeline-block ${entry.tone || "neutral"}`);
+      node = textEl("p", entry.text || "", `ryeos-timeline-block ${entry.tone || "neutral"}`);
+      break;
     case "pair": {
-      const row = el("div", `ryeos-timeline-pair ${entry.tone || "neutral"}${entry.pending ? " pending" : ""}`);
-      row.append(textEl("span", entry.pending ? "▸" : entry.tone === "danger" ? "✗" : "✓"), textEl("strong", entry.summary || "tool"), textEl("small", entry.meta || ""));
-      return row;
+      node = el("div", `ryeos-timeline-pair ${entry.tone || "neutral"}${entry.pending ? " pending" : ""}`);
+      node.append(textEl("span", entry.pending ? "▸" : entry.tone === "danger" ? "✗" : "✓"), textEl("strong", entry.summary || "tool"), textEl("small", entry.meta || ""));
+      break;
     }
     case "separator":
       return textEl("div", entry.label || "turn", "ryeos-timeline-separator");
     case "line":
     default: {
-      const row = el("div", `ryeos-timeline-line ${entry.tone || "neutral"}`);
-      row.append(textEl("span", toneGlyph(entry.tone)), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
-      return row;
+      node = el("div", `ryeos-timeline-line ${entry.tone || "neutral"}`);
+      node.append(textEl("span", toneGlyph(entry.tone)), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
+      break;
     }
   }
+  applyTimedClass(node, "arrived", arrivedAtMs, 1_200);
+  return node;
 }
 
 // Tone → glyph, mirroring the terminal's theme::tone_glyph so a toned line
@@ -642,6 +646,7 @@ function rows(items, kind, dispatchUi) {
   const list = el("div", `ryeos-rows lf ${kind || "rows"}`);
   items.forEach((item, index) => {
     const row = el("button", `ryeos-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
+    applyMotion(row, item);
     row.type = "button";
     row.dataset.rowIndex = String(index);
     row.disabled = !item.intent;
@@ -665,6 +670,27 @@ function rowGlyph(item) {
     case "accent": return "›";
     default: return "•";
   }
+}
+
+function applyMotion(node, item) {
+  if (item.tone === "accent") node.classList.add("motion-breathe");
+  if (item.tone === "warn") node.classList.add("motion-swell");
+  if (applyTimedClass(node, "changed", item.changed_at_ms, 1_200)) {
+    node.classList.add(`changed-${item.changed_tone || "accent"}`);
+  }
+}
+
+function applyTimedClass(node, className, timestamp, durationMs) {
+  if (timestamp == null) return false;
+  const at = Number(timestamp);
+  if (!Number.isFinite(at)) return false;
+  const age = Math.max(0, Date.now() - at);
+  if (age >= durationMs) return false;
+  node.classList.add(className);
+  // Re-renders replace DOM nodes. Start the replacement at the marker's
+  // current age so unrelated commits cannot restart a one-shot animation.
+  node.style.animationDelay = `${-age}ms`;
+  return true;
 }
 
 // The table widget: aligned cells under column headers, a leading tone-glyph
@@ -701,6 +727,7 @@ function tableView(viewVm, dispatchUi) {
 
 function tableRow(item, ncols, index, dispatchUi) {
   const row = el("button", `ryeos-table-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
+  applyMotion(row, item);
   row.type = "button";
   row.dataset.rowIndex = String(index);
   row.disabled = !item.intent;

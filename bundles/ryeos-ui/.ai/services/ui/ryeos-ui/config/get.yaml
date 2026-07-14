@@ -4,4 +4,5 @@ name: ryeos-ui/config/get
 version: "1.0.0"
 description: Read durable local RyeOS UI user preferences.
 endpoint: ui.ryeos.config.get
+record_thread: false
 availability: daemon_only

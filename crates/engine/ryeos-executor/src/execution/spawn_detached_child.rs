@@ -140,6 +140,7 @@ pub async fn spawn_detached_child(
         origin_site_id: parent.origin_site_id.clone(),
         upstream_thread_id: None,
         requested_by: Some(thread_auth.acting_principal.clone()),
+        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
     })?;

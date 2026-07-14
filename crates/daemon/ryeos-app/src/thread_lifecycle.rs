@@ -1,5 +1,5 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -91,6 +91,8 @@ pub struct ThreadCreateParams {
     pub upstream_thread_id: Option<String>,
     #[serde(default)]
     pub requested_by: Option<String>,
+    #[serde(default)]
+    pub project_root: Option<PathBuf>,
     #[serde(default)]
     pub usage_subject: Option<UsageSubject>,
     #[serde(default)]
@@ -383,6 +385,13 @@ fn project_summary(path: &Path) -> ProjectSummary {
     }
 }
 
+fn local_project_root(context: &PlanContext) -> Option<PathBuf> {
+    let ProjectContext::LocalPath { path } = &context.project_context else {
+        return None;
+    };
+    Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+}
+
 fn list_item_from_detail(thread: ThreadDetail) -> ThreadListItem {
     ThreadListItem {
         thread_id: thread.thread_id,
@@ -396,6 +405,7 @@ fn list_item_from_detail(thread: ThreadDetail) -> ThreadListItem {
         upstream_thread_id: thread.upstream_thread_id,
         successor_thread_id: thread.successor_thread_id,
         requested_by: thread.requested_by,
+        project_root: thread.project_root,
         created_at: thread.created_at,
         updated_at: thread.updated_at,
     }
@@ -668,6 +678,7 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
+            project_root: local_project_root(&request.plan_context),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         };
@@ -727,6 +738,7 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: request.requested_by.clone(),
+            project_root: local_project_root(&request.plan_context),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         };
@@ -862,6 +874,7 @@ impl ThreadLifecycleService {
             origin_site_id: params.origin_site_id.clone(),
             upstream_thread_id: params.upstream_thread_id.clone(),
             requested_by: params.requested_by.clone(),
+            project_root: params.project_root.clone(),
             usage_subject: params.usage_subject.clone(),
             usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
         };
@@ -1503,7 +1516,7 @@ impl ThreadLifecycleService {
             &thread.status,
             thread.upstream_thread_id.as_deref(),
         )?;
-        let project = self.project_summary_for(&thread.thread_id);
+        let project = self.project_summary_for(thread.project_root.as_deref(), &thread.thread_id);
         let pending = self.pending_input(&thread.thread_id);
         Ok(ThreadView {
             thread,
@@ -1514,7 +1527,14 @@ impl ThreadLifecycleService {
         })
     }
 
-    fn project_summary_for(&self, thread_id: &str) -> Option<ProjectSummary> {
+    fn project_summary_for(
+        &self,
+        projected_root: Option<&str>,
+        thread_id: &str,
+    ) -> Option<ProjectSummary> {
+        if let Some(path) = projected_root {
+            return Some(project_summary(Path::new(path)));
+        }
         let metadata = self.state_store.get_launch_metadata(thread_id).ok()??;
         let ctx = metadata.resume_context.as_ref()?;
         let path = match &ctx.project_context {
@@ -1559,7 +1579,10 @@ impl ThreadLifecycleService {
                         .get(item.thread_id.as_str())
                         .map(|w| FollowFact::resume_successor_live(w))
                 });
-                let project = self.project_summary_for(&item.thread_id);
+                let project = self.project_summary_for(
+                    item.project_root.as_deref(),
+                    &item.thread_id,
+                );
                 let pending = self.pending_input(&item.thread_id);
                 // Cohort/fleet tags for client columns. Best-effort per row (fine
                 // at fleet scale); a facet-read hiccup just yields no tags, never
@@ -1633,6 +1656,22 @@ impl ThreadLifecycleService {
                 .requested_by
                 .as_deref()
                 .is_some_and(|value| value.contains(requested_by))
+            {
+                return false;
+            }
+        }
+        if filter
+            .exclude_item_prefixes
+            .iter()
+            .any(|prefix| item.item_ref.starts_with(prefix))
+        {
+            return false;
+        }
+        if let Some(project_root) = &filter.project_root {
+            if item
+                .project_root
+                .as_deref()
+                .is_some_and(|root| Path::new(root) != project_root)
             {
                 return false;
             }
@@ -1714,6 +1753,7 @@ impl ThreadLifecycleService {
             origin_site_id: source.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: source.requested_by.clone(),
+            project_root: source.project_root.as_ref().map(PathBuf::from),
             usage_subject: None,
             usage_subject_asserted_by: None,
         };
@@ -1856,17 +1896,36 @@ impl ThreadLifecycleService {
         sort: ryeos_state::queries::ThreadSort,
     ) -> Result<Vec<ThreadListView>> {
         let mut items = self.state_store.list_threads_query(limit, filter, sort)?;
-        if filter.active_only {
+        if filter.active_only || filter.project_root.is_some() {
             let mut seen = items
                 .iter()
                 .map(|item| item.thread_id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
+            let mut suspended = std::collections::BTreeSet::new();
             for item in self.active_follow_parent_items(filter)? {
+                // A matching continued parent may already be in the SQL page,
+                // but the live waiter still makes it effectively active for
+                // Watch ordering.
+                suspended.insert(item.thread_id.clone());
                 if seen.insert(item.thread_id.clone()) {
                     items.push(item);
                 }
             }
-            sort_thread_list_items(&mut items, sort);
+            if sort == ryeos_state::queries::ThreadSort::Watch {
+                items.sort_by(|a, b| {
+                    let a_terminal = ryeos_state::objects::ThreadStatus::from_str_lossy(&a.status)
+                        .is_some_and(|status| status.is_terminal())
+                        && !suspended.contains(&a.thread_id);
+                    let b_terminal = ryeos_state::objects::ThreadStatus::from_str_lossy(&b.status)
+                        .is_some_and(|status| status.is_terminal())
+                        && !suspended.contains(&b.thread_id);
+                    a_terminal
+                        .cmp(&b_terminal)
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                });
+            } else {
+                sort_thread_list_items(&mut items, sort);
+            }
             items.truncate(limit);
         }
         self.decorate_list_items(items)
@@ -2073,7 +2132,9 @@ pub fn resolve_root_execution(
         caller_scopes,
         validate_only,
     } = params;
-    let project_path = project_path.to_path_buf();
+    let project_path = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
 
     let canonical_ref =
         CanonicalRef::parse(item_ref).map_err(|e| anyhow!("invalid item ref: {e}"))?;
@@ -2669,6 +2730,7 @@ mod tests {
                 upstream_thread_id: None,
                 successor_thread_id: None,
                 requested_by: None,
+                project_root: None,
                 created_at: "t".to_string(),
                 updated_at: "t".to_string(),
             },

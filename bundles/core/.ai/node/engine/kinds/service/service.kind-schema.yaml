@@ -39,6 +39,7 @@ composed_value_contract:
       prim: sequence
       elements: { type: single, prim: string }
     description: { type: single, prim: string }
+    record_thread: { type: single, prim: boolean }
     schema: { type: single, prim: mapping }
 metadata:
   rules:
@@ -60,6 +61,9 @@ metadata:
     description:
       from: path
       key: description
+    record_thread:
+      from: path
+      key: record_thread
     schema:
       from: path
       key: schema

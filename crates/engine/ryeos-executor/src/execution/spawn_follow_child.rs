@@ -327,6 +327,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 origin_site_id: parent.origin_site_id.clone(),
                 upstream_thread_id: None,
                 requested_by: Some(thread_auth.acting_principal.clone()),
+                project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
                 usage_subject: None,
                 usage_subject_asserted_by: None,
             })?;
@@ -480,6 +481,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         origin_site_id: parent.origin_site_id.clone(),
                         upstream_thread_id: Some(parent_thread_id.clone()),
                         requested_by: parent.requested_by.clone(),
+                        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
                         usage_subject: None,
                         usage_subject_asserted_by: None,
                     },

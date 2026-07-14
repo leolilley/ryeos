@@ -32,6 +32,12 @@ pub struct RyeOsViewModel {
     pub generation: u64,
     #[serde(default)]
     pub now_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_chain_root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
@@ -310,6 +316,8 @@ pub enum RyeOsViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<RyeOsTimelineEntryVm>,
+        #[serde(default)]
+        entry_arrived_at_ms: Vec<Option<u64>>,
         /// Call-tree indent depth per entry (parallel to `entries`): a graph
         /// node's tool calls and its directive/sub-graph fork nest one level
         /// under the node. Empty or shorter than `entries` renders flat (depth
@@ -510,10 +518,18 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         health_label: health.clone(),
         health_tone: tone_for_health(&health),
     };
+    let route = core.seat.fold().input_route();
+    let tail_url = route
+        .chain_root
+        .as_ref()
+        .map(|root| format!("/ui/events/chain/{root}"));
     RyeOsViewModel {
         schema_version: "ryeos.ui.vm.v1".to_string(),
         generation: core.generation,
         now_ms: core.runtime.now_ms,
+        tail_thread_id: route.thread,
+        tail_chain_root_id: route.chain_root,
+        tail_url,
         presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
         chrome,
@@ -1328,6 +1344,27 @@ fn bound_view_vm_keyed(
             );
             let folded = windowed.folded;
             let selected = windowed.selected;
+            let arrival_by_key: std::collections::HashMap<&str, Option<u64>> = cached
+                .map(|cache| {
+                    cache
+                        .sources
+                        .iter()
+                        .zip(cache.arrivals.iter())
+                        .filter_map(|(source, arrived)| {
+                            Some((source.as_ref()?.key.as_str(), *arrived))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let entry_arrived_at_ms = folded
+                .sources
+                .iter()
+                .map(|source| {
+                    source
+                        .as_ref()
+                        .and_then(|source| arrival_by_key.get(source.key.as_str()).copied().flatten())
+                })
+                .collect();
             // The foldable section under the point — what a fold key toggles.
             let fold_section = selected.and_then(|i| {
                 let section = folded.sections.get(i).copied()?;
@@ -1373,6 +1410,7 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                entry_arrived_at_ms,
                 entry_indents: folded.indents,
                 selected,
                 fold_section,

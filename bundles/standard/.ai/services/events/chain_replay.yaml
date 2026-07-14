@@ -3,6 +3,7 @@ category: "events"
 name: "chain_replay"
 kind: service
 endpoint: events.chain_replay
+record_thread: false
 required_caps: []
 schema:
   chain_root_id: string

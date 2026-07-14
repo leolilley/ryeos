@@ -20,15 +20,19 @@ pub fn project_thread_snapshot(
         upstream = ?snapshot.upstream_thread_id,
         "project thread snapshot"
     );
+    let project_root = snapshot
+        .project_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
 
     db.connection()
         .execute(
             "INSERT OR REPLACE INTO threads (
             thread_id, chain_root_id, kind, status,
             item_ref, executor_ref, launch_mode,
-            current_site_id, origin_site_id, upstream_thread_id, requested_by,
+            current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
             created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 &snapshot.thread_id,
                 chain_root_id,
@@ -41,6 +45,7 @@ pub fn project_thread_snapshot(
                 &snapshot.origin_site_id,
                 &snapshot.upstream_thread_id,
                 &snapshot.requested_by,
+                project_root,
                 &snapshot.created_at,
                 &snapshot.updated_at,
                 &snapshot.started_at,

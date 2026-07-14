@@ -144,3 +144,13 @@ pub fn extract_required_caps(metadata_extra: &HashMap<String, Value>) -> Vec<Str
         })
         .unwrap_or_default()
 }
+
+/// Whether a verified service invocation should create a durable lifecycle
+/// thread. Auditability remains the compatibility and security default.
+pub fn extract_record_thread(metadata_extra: &HashMap<String, Value>) -> Result<bool> {
+    match metadata_extra.get("record_thread") {
+        None => Ok(true),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => anyhow::bail!("service YAML field 'record_thread' must be a boolean"),
+    }
+}

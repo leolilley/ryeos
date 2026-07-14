@@ -4,4 +4,5 @@ name: ryeos-ui/dimension/get
 version: "1.0.0"
 description: Returns the RyeOS UI Dimension v0 projection — node identity, health, spaces, bundles, remotes, threads, schedules, and GC state.
 endpoint: ui.ryeos.dimension.get
+record_thread: false
 availability: daemon_only

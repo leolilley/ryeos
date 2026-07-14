@@ -227,6 +227,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
     if let RyeOsViewVm::Timeline {
         entries,
         entry_indents,
+        entry_arrived_at_ms,
         selected,
         entry_expandable,
         entry_expanded,
@@ -240,11 +241,13 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: 
             entries,
             widgets::timeline::TimelineEntryMeta {
                 indents: entry_indents,
+                arrived_at_ms: entry_arrived_at_ms,
                 expandable: entry_expandable,
                 expanded: entry_expanded,
                 details: entry_details,
             },
             *selected,
+            now_ms,
         );
         return;
     }

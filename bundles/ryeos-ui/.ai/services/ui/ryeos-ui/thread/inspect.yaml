@@ -4,4 +4,5 @@ name: ryeos-ui/thread/inspect
 version: "1.0.0"
 description: Inspect one thread for RyeOS UI — returns detail, result, artifacts, children, facets, and recent events.
 endpoint: ui.ryeos.thread.inspect
+record_thread: false
 availability: daemon_only

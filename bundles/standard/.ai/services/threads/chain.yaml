@@ -3,6 +3,7 @@ category: "threads"
 name: "chain"
 kind: service
 endpoint: threads.chain
+record_thread: false
 required_caps: []
 schema:
   thread_id: string

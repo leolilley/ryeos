@@ -349,6 +349,7 @@ pub async fn handle(
         origin_site_id: previous.origin_site_id.clone(),
         upstream_thread_id: Some(previous.thread_id.clone()),
         requested_by: Some(ctx.fingerprint.clone()),
+        project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
     };

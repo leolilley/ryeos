@@ -1146,6 +1146,12 @@ pub(crate) async fn dispatch_method(
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(request.acting_principal.to_string()),
+            project_root: Some(
+                request
+                    .project_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| request.project_path.to_path_buf()),
+            ),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         })
@@ -1635,7 +1641,8 @@ pub async fn dispatch_service(
             .map_err(|e| e.downcast::<DispatchError>().unwrap_or_else(DispatchError::Internal))?;
             let envelope = serde_json::json!({
                 "thread": {
-                    "thread_id": result.audit_thread_id,
+                    "thread_id": result.invocation_id,
+                    "recorded": result.recorded,
                     "kind": thread_profile,
                     "item_ref": item_ref,
                     "status": "completed",

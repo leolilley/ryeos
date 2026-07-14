@@ -465,6 +465,21 @@ pub fn read_generic_head_ref(
     Ok(Some(signed_ref))
 }
 
+/// Remove a namespace-neutral head, making its CAS closure unreachable from
+/// this ref family. Missing refs are an idempotent success.
+pub fn remove_generic_head_ref(
+    refs_root: &Path,
+    namespace: &str,
+    name: &str,
+) -> anyhow::Result<bool> {
+    let path = generic_head_file_path(refs_root, namespace, name)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
 /// Advance a namespace-neutral signed head with compare-and-swap semantics.
 ///
 /// `expected_current_hash = None` means the head must not exist yet.

@@ -15,7 +15,6 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
-use ryeos_app::thread_lifecycle::ThreadListView;
 use ryeos_engine::contracts::ProjectContext;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -94,34 +93,15 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         // `active` narrows to live (non-terminal) threads. The filter accepts
         // bools for authored views and text for the TUI live-filter input.
         active_only: active_filter(&params),
-    };
-
-    let exclude_item_prefixes = string_list_filter(&params, "exclude_item_prefixes");
-    let project_filter = project_filter(&params, caller.project_root())?;
-    let needs_post_filter = !exclude_item_prefixes.is_empty() || project_filter.is_some();
-    let query_limit = if needs_post_filter {
-        MAX_THREAD_LIST_LIMIT
-    } else {
-        limit
+        exclude_item_prefixes: string_list_filter(&params, "exclude_item_prefixes"),
+        project_root: project_filter(&params, caller.project_root())?,
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
     // execution facts (`execution.supports_continuation`) the ryeos-ui gates on.
-    let mut threads = state
+    let threads = state
         .threads
-        .list_thread_views_query(query_limit, &filter, sort)?;
-    if needs_post_filter {
-        threads.retain(|row| {
-            let item_allowed = !exclude_item_prefixes
-                .iter()
-                .any(|prefix| row.item.item_ref.starts_with(prefix));
-            let project_allowed = project_filter
-                .as_ref()
-                .is_none_or(|project| row_matches_project(row, project));
-            item_allowed && project_allowed
-        });
-        threads.truncate(limit);
-    }
+        .list_thread_views_query(limit, &filter, sort)?;
 
     Ok(serde_json::json!({
         "threads": threads,
@@ -148,25 +128,6 @@ fn canonicalize_project_filter(path: &str) -> Result<PathBuf> {
 fn canonicalize_existing_dir(path: &str) -> Result<PathBuf> {
     let canonical = Path::new(path).canonicalize()?;
     Ok(canonical)
-}
-
-fn row_matches_project(row: &ThreadListView, project: &Path) -> bool {
-    if let Some(row_project) = &row.project {
-        return Path::new(&row_project.path)
-            .canonicalize()
-            .is_ok_and(|path| path == project);
-    }
-    is_effectively_active(row)
-}
-
-fn is_effectively_active(row: &ThreadListView) -> bool {
-    row.follow
-        .as_ref()
-        .is_some_and(|follow| follow.role == "suspended_parent")
-        || !matches!(
-            row.item.status.as_str(),
-            "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-        )
 }
 
 #[derive(serde::Deserialize)]

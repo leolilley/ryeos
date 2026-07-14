@@ -303,6 +303,18 @@ pub enum RyeOsEvent {
     DaemonEvent {
         payload: serde_json::Value,
     },
+    /// Immediate lossy presentation patch. It never emits a fetch.
+    HintReceived {
+        kind: String,
+        payload: serde_json::Value,
+    },
+    /// Coalesced reconciliation for one dirty hint kind.
+    HintFlush {
+        kind: String,
+    },
+    /// A lossy transport came back after a gap (or explicitly requested a
+    /// snapshot); rebuild all content-bound sources.
+    TransportReconnected,
     /// One frame from the head thread's live SSE tail. The reducer applies
     /// ryeos event semantics so both clients reach them through `dispatch`:
     /// cognition deltas accumulate into the live buffer; durable milestones

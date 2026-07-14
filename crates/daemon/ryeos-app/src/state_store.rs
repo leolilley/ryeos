@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use ryeos_state::chain::SnapshotUpdate;
+use ryeos_state::chain::{ChainLock, SnapshotUpdate};
 use ryeos_state::objects::thread_snapshot::ThreadStatus;
 use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
@@ -83,6 +83,7 @@ pub struct NewThreadRecord {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<PathBuf>,
     pub usage_subject: Option<UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
 }
@@ -132,6 +133,13 @@ pub struct ThreadEdgeRecord {
     pub metadata: Option<Value>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ServiceChainRetirement {
+    pub candidate_chains: usize,
+    pub retired_chains: usize,
+    pub deleted_rows: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ThreadListItem {
     pub thread_id: String,
@@ -151,6 +159,7 @@ pub struct ThreadListItem {
     /// threads only (mirrors `ThreadDetail`).
     pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -183,6 +192,7 @@ pub struct ThreadDetail {
     /// payloads. `None` for a thread that has not been continued.
     pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -240,6 +250,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         origin_site_id: thread.origin_site_id.clone(),
         upstream_thread_id: thread.upstream_thread_id.clone(),
         requested_by: thread.requested_by.clone(),
+        project_root: thread.project_root.clone(),
         base_project_snapshot_hash: None,
         result_project_snapshot_hash: None,
         created_at: now.clone(),
@@ -650,6 +661,7 @@ impl StateStore {
             origin_site_id: thread_row.origin_site_id.clone(),
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
+            project_root: thread_row.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: base_project_snapshot_hash.map(String::from),
             result_project_snapshot_hash: None,
             created_at: thread_row.created_at.clone(),
@@ -770,6 +782,7 @@ impl StateStore {
             origin_site_id: thread_row.origin_site_id.clone(),
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
+            project_root: thread_row.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
             created_at: thread_row.created_at.clone(),
@@ -926,6 +939,7 @@ impl StateStore {
                 origin_site_id: source_row.origin_site_id.clone(),
                 upstream_thread_id: source_row.upstream_thread_id.clone(),
                 requested_by: source_row.requested_by.clone(),
+                project_root: source_row.project_root.as_ref().map(PathBuf::from),
                 base_project_snapshot_hash: None,
                 result_project_snapshot_hash: None,
                 created_at: source_row.created_at.clone(),
@@ -1211,6 +1225,7 @@ impl StateStore {
             origin_site_id: source_row.origin_site_id.clone(),
             upstream_thread_id: source_row.upstream_thread_id.clone(),
             requested_by: source_row.requested_by.clone(),
+            project_root: source_row.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
             created_at: source_row.created_at.clone(),
@@ -1372,6 +1387,7 @@ impl StateStore {
                 origin_site_id: source_row.origin_site_id.clone(),
                 upstream_thread_id: source_row.upstream_thread_id.clone(),
                 requested_by: source_row.requested_by.clone(),
+                project_root: source_row.project_root.as_ref().map(PathBuf::from),
                 base_project_snapshot_hash: None,
                 result_project_snapshot_hash: None,
                 created_at: source_row.created_at.clone(),
@@ -1531,12 +1547,107 @@ impl StateStore {
             upstream_thread_id: thread_row.upstream_thread_id,
             successor_thread_id,
             requested_by: thread_row.requested_by,
+            project_root: thread_row.project_root,
             created_at: thread_row.created_at,
             updated_at: thread_row.updated_at,
             started_at: thread_row.started_at,
             finished_at: thread_row.finished_at,
             runtime,
         }))
+    }
+
+    pub fn touch_seat_lease(
+        &self,
+        thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("seat thread {thread_id} does not exist"))?;
+        if thread.kind != "seat_session"
+            || thread.status != "running"
+            || thread.requested_by.as_deref() != Some(owner)
+            || thread.item_ref != surface
+        {
+            bail!("seat thread {thread_id} is not a matching running owned seat");
+        }
+        if !g
+            .runtime_db
+            .touch_seat_lease(thread_id, owner, surface, client_ref)?
+        {
+            bail!("seat thread {thread_id} is being reaped");
+        }
+        Ok(())
+    }
+
+    pub fn touch_existing_seat_lease(&self, thread_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.touch_existing_seat_lease(thread_id)
+    }
+
+    pub fn remove_seat_lease(&self, thread_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.remove_seat_lease(thread_id)
+    }
+
+    pub fn expired_seat_leases(&self, cutoff_ms: i64) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.expired_seat_leases(cutoff_ms)
+    }
+
+    pub fn claim_expired_seat_lease(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.claim_expired_seat_lease(thread_id, cutoff_ms)
+    }
+
+    pub fn retire_service_chains_before(
+        &self,
+        cutoff: &str,
+        dry_run: bool,
+    ) -> Result<ServiceChainRetirement> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let candidates = g.state_db.terminal_service_chain_candidates(cutoff)?;
+        let mut result = ServiceChainRetirement {
+            candidate_chains: candidates.len(),
+            ..Default::default()
+        };
+        for chain_root_id in candidates {
+            if !g
+                .state_db
+                .terminal_service_chain_is_retirable(&chain_root_id, cutoff)?
+                || g.runtime_db.chain_has_live_state(&chain_root_id)?
+            {
+                continue;
+            }
+            if dry_run {
+                result.retired_chains += 1;
+                continue;
+            }
+            // Serialize head removal with every append/import writer, then
+            // repeat the terminal/age/runtime checks under that lock. A writer
+            // which published a new head before us makes the chain recent; a
+            // writer behind us cannot publish until the ref is gone.
+            let _chain_lock = ChainLock::acquire(g.state_db.refs_root(), &chain_root_id)?;
+            if !g
+                .state_db
+                .terminal_service_chain_is_retirable(&chain_root_id, cutoff)?
+                || g.runtime_db.chain_has_live_state(&chain_root_id)?
+            {
+                continue;
+            }
+            // Ref first: a crash after this point leaves no live CAS root. The
+            // remaining runtime/projection cleanup is idempotent.
+            g.state_db.remove_chain_head_ref(&chain_root_id)?;
+            result.deleted_rows += g.runtime_db.delete_chain_runtime(&chain_root_id)?;
+            result.deleted_rows += g.state_db.delete_chain_projection(&chain_root_id)?;
+            result.retired_chains += 1;
+        }
+        Ok(result)
     }
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
@@ -1757,6 +1868,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             });
@@ -1799,6 +1911,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -1837,6 +1950,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -1893,6 +2007,7 @@ impl StateStore {
                 upstream_thread_id: row.upstream_thread_id,
                 successor_thread_id,
                 requested_by: row.requested_by,
+                project_root: row.project_root,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -2643,6 +2758,7 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some("fp:test".to_string()),
+            project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
         }

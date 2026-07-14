@@ -3,6 +3,7 @@ category: "threads"
 name: "children"
 kind: service
 endpoint: threads.children
+record_thread: false
 required_caps: []
 schema:
   thread_id: string

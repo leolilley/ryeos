@@ -162,6 +162,65 @@ fn clamp_to_char_boundary(value: &str, cursor: usize) -> usize {
     cursor
 }
 
+fn patch_thread_record(
+    record: &mut serde_json::Value,
+    thread_id: &str,
+    status: &str,
+    updated_at: &str,
+) -> bool {
+    let serde_json::Value::Object(map) = record else {
+        return false;
+    };
+    if map.get("thread_id").and_then(serde_json::Value::as_str) != Some(thread_id) {
+        return false;
+    }
+    let current = map
+        .get("updated_at")
+        .and_then(serde_json::Value::as_str);
+    if current.is_some_and(|current| current > updated_at) {
+        return false;
+    }
+    let unchanged = map.get("status").and_then(serde_json::Value::as_str) == Some(status)
+        && current == Some(updated_at);
+    if unchanged {
+        return false;
+    }
+    map.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+    map.insert(
+        "updated_at".to_string(),
+        serde_json::Value::String(updated_at.to_string()),
+    );
+    true
+}
+
+fn patch_thread_collection(
+    response: &mut serde_json::Value,
+    collection_path: &str,
+    thread_id: &str,
+    status: &str,
+    updated_at: &str,
+) -> bool {
+    let mut collection = response;
+    for part in collection_path.split('.') {
+        let Some(next) = collection.get_mut(part) else {
+            return false;
+        };
+        collection = next;
+    }
+    let Some(records) = collection.as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for record in records {
+        changed |= patch_thread_record(record, thread_id, status, updated_at);
+    }
+    changed
+}
+
+fn is_thread_collection(path: Option<&str>) -> bool {
+    path.is_some_and(|path| path.rsplit('.').next() == Some("threads"))
+}
+
 /// Layout-neutral key for a transient input buffer. The buffer belongs to
 /// a view instance, not to a placement: the same `view:` rendered twice
 /// (two tiles, a tile and a slot) has independent buffer state. The
@@ -436,6 +495,7 @@ pub(crate) struct RyeOsTimelineSourceCache {
     pub entries: Vec<super::timeline::RyeOsTimelineEntryVm>,
     pub indents: Vec<u8>,
     pub sources: Vec<Option<super::timeline::TimelineEntrySource>>,
+    pub arrivals: Vec<Option<u64>>,
     /// Section (turn) index per entry, parallel to `entries`. Depends only on
     /// `entries`, so it is derived once here rather than rescanned by every
     /// windowed render frame (`timeline::fold_timeline_window`).
@@ -756,8 +816,8 @@ impl RyeOsCore {
     /// Hint arrival: semantic hook for transient "look" notices. Visual pulse
     /// state is layered on this entry point; refetches are content-bound via
     /// `refresh.on_hint`.
-    pub fn note_hint(&mut self, kind: &str, payload: &serde_json::Value) -> Vec<RyeOsEffect> {
-        if kind == "thread"
+    pub fn note_hint_received(&mut self, kind: &str, payload: &serde_json::Value) {
+        let attention_changed = kind == "thread"
             && payload
                 .get("event_type")
                 .and_then(serde_json::Value::as_str)
@@ -766,11 +826,86 @@ impl RyeOsCore {
                         event,
                         "thread_failed" | "thread_killed" | "thread_timed_out"
                     )
-                })
-        {
+                });
+        if attention_changed {
             self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
         }
-        self.effects_for_hint(kind)
+        let patched = kind == "thread" && self.patch_thread_hint(payload);
+        if attention_changed || patched {
+            self.bump_generation();
+        }
+    }
+
+    fn patch_thread_hint(&mut self, payload: &serde_json::Value) -> bool {
+        let Some(thread_id) = payload.get("thread_id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(status) = payload.get("status").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(updated_at) = payload.get("updated_at").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+
+        // Resolve only live view instances whose authored source selects a
+        // thread collection. Transcript/event sources also contain thread_id,
+        // but are not lifecycle rows and must remain byte-for-byte untouched.
+        let mut instances: Vec<(String, String)> = self
+            .workspace
+            .tile_ids()
+            .into_iter()
+            .filter_map(|tile_id| {
+                let tile = self.workspace.tiles.get(&tile_id)?;
+                Some((tile_id.0.to_string(), tile.view.view_ref.clone()))
+            })
+            .collect();
+        instances.extend(self.visible_dock_views());
+        let mut targets = Vec::new();
+        for (source_key, view_ref) in instances {
+            let Some(binding) = self.views.get(&view_ref) else {
+                continue;
+            };
+            if binding.widget == "sections" {
+                for (index, section) in binding.sections.iter().enumerate() {
+                    if is_thread_collection(section.source.collection.as_deref()) {
+                        targets.push((
+                            super::content::section_source_key(&source_key, index),
+                            section.source.collection.clone().unwrap_or_default(),
+                        ));
+                    }
+                }
+            } else if is_thread_collection(
+                binding.source.as_ref().and_then(|source| source.collection.as_deref()),
+            ) {
+                let collection = binding
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.collection.clone())
+                    .unwrap_or_default();
+                targets.push((source_key, collection));
+            }
+        }
+
+        let mut changed_sources = Vec::new();
+        for (source_key, collection) in targets {
+            let Some(source) = self.data.sources.get_mut(&source_key) else {
+                continue;
+            };
+            let old = source.clone();
+            if patch_thread_collection(source, &collection, thread_id, status, updated_at) {
+                changed_sources.push((source_key, old, source.clone()));
+            }
+        }
+        let mut changed = !changed_sources.is_empty();
+        if let Some(threads) = &mut self.data.threads {
+            for row in &mut threads.threads {
+                changed |= patch_thread_record(row, thread_id, status, updated_at);
+            }
+        }
+        for (source_key, old, new) in changed_sources {
+            self.note_source_row_changes(&source_key, Some(&old), &new);
+        }
+        changed
     }
 
     pub(crate) fn bump_activity_pulse(&mut self, amount: f32) {
@@ -1107,7 +1242,7 @@ impl RyeOsCore {
     }
 
     pub(crate) fn rebuild_timeline_source_cache(&mut self, source_key: &str) {
-        self.data.timeline_sources.remove(source_key);
+        let previous = self.data.timeline_sources.remove(source_key);
         let Some(tile_id) = parse_source_tile_key(source_key) else {
             return;
         };
@@ -1132,12 +1267,47 @@ impl RyeOsCore {
             sources.insert(0, None);
         }
         let (sections, collapsible) = super::timeline::timeline_section_index(&entries);
+        let previous_by_key: HashMap<String, (String, Option<u64>)> = previous
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .sources
+                    .iter()
+                    .zip(cache.entries.iter())
+                    .zip(cache.arrivals.iter())
+                    .filter_map(|((source, entry), arrived)| {
+                        Some((
+                            source.as_ref()?.key.clone(),
+                            (serde_json::to_string(entry).ok()?, *arrived),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let baseline = previous.is_none();
+        let arrivals = sources
+            .iter()
+            .zip(entries.iter())
+            .map(|(source, entry)| {
+                let source = source.as_ref()?;
+                if baseline {
+                    return None;
+                }
+                let signature = serde_json::to_string(entry).ok()?;
+                match previous_by_key.get(&source.key) {
+                    Some((old_signature, arrived)) if old_signature == &signature => arrived
+                        .filter(|at| self.runtime.now_ms.saturating_sub(*at) <= 2_000),
+                    _ => Some(self.runtime.now_ms),
+                }
+            })
+            .collect();
         self.data.timeline_sources.insert(
             source_key.to_string(),
             RyeOsTimelineSourceCache {
                 entries,
                 indents,
                 sources,
+                arrivals,
                 sections,
                 collapsible,
             },

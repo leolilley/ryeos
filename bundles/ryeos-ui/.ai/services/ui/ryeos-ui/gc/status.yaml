@@ -4,4 +4,5 @@ name: ryeos-ui/gc/status
 version: "1.0.0"
 description: Read-only GC state — running status, current phase, and recent GC event history from the JSONL log.
 endpoint: ui.ryeos.gc.status
+record_thread: false
 availability: daemon_only

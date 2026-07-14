@@ -4,4 +4,5 @@ name: ryeos-ui/files/list
 version: "1.0.0"
 description: Safe scoped file listing for RyeOS UI — constrained to session project root or project .ai directory. No arbitrary path access.
 endpoint: ui.ryeos.files.list
+record_thread: false
 availability: daemon_only

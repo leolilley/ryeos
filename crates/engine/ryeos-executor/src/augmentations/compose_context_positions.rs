@@ -163,6 +163,12 @@ pub async fn run(
             origin_site_id: plan_ctx.origin_site_id.clone(),
             upstream_thread_id: Some(parent_thread_id.to_string()),
             requested_by: Some(principal_fingerprint.to_string()),
+            project_root: match &plan_ctx.project_context {
+                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
+                    Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+                }
+                _ => None,
+            },
             usage_subject: None,
             usage_subject_asserted_by: None,
         })

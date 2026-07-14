@@ -907,6 +907,7 @@ mod tests {
             upstream_thread_id: upstream.map(Into::into),
             successor_thread_id: successor.map(Into::into),
             requested_by: None,
+            project_root: None,
             created_at: "t".into(),
             updated_at: "t".into(),
             started_at: None,

@@ -4,4 +4,5 @@ name: ryeos-ui/files/read
 version: "1.0.0"
 description: Safe scoped file reading for RyeOS UI — constrained to session project root or project .ai directory. Truncated at 256 KiB.
 endpoint: ui.ryeos.files.read
+record_thread: false
 availability: daemon_only

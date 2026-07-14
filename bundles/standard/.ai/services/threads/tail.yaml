@@ -3,6 +3,7 @@ category: "threads"
 name: "tail"
 kind: service
 endpoint: threads.tail
+record_thread: false
 availability: daemon_only
 required_caps: []
 schema:

@@ -4,4 +4,5 @@ name: ryeos-ui/projects/list
 version: "1.0.0"
 description: List the local per-principal RyeOS UI project registry.
 endpoint: ui.ryeos.projects.list
+record_thread: false
 availability: daemon_only

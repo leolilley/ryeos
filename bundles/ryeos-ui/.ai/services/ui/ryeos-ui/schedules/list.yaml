@@ -4,4 +4,5 @@ name: ryeos-ui/schedules/list
 version: "1.0.0"
 description: Schedule listing for RyeOS UI — returns schedules with last-fire and fire-count data.
 endpoint: ui.ryeos.schedules.list
+record_thread: false
 availability: daemon_only

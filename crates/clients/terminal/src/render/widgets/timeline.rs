@@ -10,7 +10,7 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, 
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
-use super::super::theme::{style_fg, style_muted, tone_glyph, tone_style, PANEL};
+use super::super::theme::{shimmer_style, style_fg, style_muted, tone_glyph, tone_style, PANEL};
 
 /// One rendered line plus the index of the entry it belongs to (None for
 /// structural blanks and the empty-state line — they never take the point).
@@ -55,6 +55,7 @@ impl FeedLine {
 #[derive(Clone, Copy)]
 pub struct TimelineEntryMeta<'a> {
     pub indents: &'a [u8],
+    pub arrived_at_ms: &'a [Option<u64>],
     pub expandable: &'a [bool],
     pub expanded: &'a [bool],
     pub details: &'a [Vec<RyeOsRowDetailVm>],
@@ -66,6 +67,7 @@ pub fn draw_timeline(
     entries: &[RyeOsTimelineEntryVm],
     meta: TimelineEntryMeta<'_>,
     selected: Option<usize>,
+    now_ms: u64,
 ) {
     let width = rect.w as usize;
     let height = rect.h as usize;
@@ -93,6 +95,7 @@ pub fn draw_timeline(
         meta,
         width,
         entry_start,
+        now_ms,
     );
 
     let visible = lines.len().min(height);
@@ -147,9 +150,11 @@ fn push_timeline_lines(
     meta: TimelineEntryMeta<'_>,
     width: usize,
     entry_offset: usize,
+    now_ms: u64,
 ) {
     let TimelineEntryMeta {
         indents: entry_indents,
+        arrived_at_ms,
         expandable: entry_expandable,
         expanded: entry_expanded,
         details: entry_details,
@@ -226,6 +231,21 @@ fn push_timeline_lines(
                     style_muted(),
                     Some(entry_index),
                 ));
+            }
+        }
+        let tone = match entry {
+            RyeOsTimelineEntryVm::Block { tone, .. }
+            | RyeOsTimelineEntryVm::Line { tone, .. }
+            | RyeOsTimelineEntryVm::Pair { tone, .. } => Some(*tone),
+            RyeOsTimelineEntryVm::Separator { .. } => None,
+        };
+        if let (Some(tone), Some(arrived_at_ms)) = (
+            tone,
+            arrived_at_ms.get(entry_index).copied().flatten(),
+        ) {
+            let flash = tone_style(tone).fg;
+            for line in &mut lines[first_line..] {
+                line.style = shimmer_style(line.style, Some(arrived_at_ms), flash, now_ms);
             }
         }
         // Tag every line this entry emitted with its call-tree depth (two
@@ -468,6 +488,7 @@ mod tests {
 
     const EMPTY_META: TimelineEntryMeta<'static> = TimelineEntryMeta {
         indents: &[],
+        arrived_at_ms: &[],
         expandable: &[],
         expanded: &[],
         details: &[],

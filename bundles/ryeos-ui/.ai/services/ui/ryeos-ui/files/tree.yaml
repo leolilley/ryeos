@@ -4,4 +4,5 @@ name: ryeos-ui/files/tree
 version: "1.0.0"
 description: Bounded file-space tree snapshot for RyeOS UI Atlas — constrained to session project roots with traversal caps and built-in heavy-directory skips.
 endpoint: ui.ryeos.files.tree
+record_thread: false
 availability: daemon_only

@@ -68,6 +68,12 @@ async fn reattach_seat_thread(
         .map(str::to_string)
         .collect();
     let thread_id = seats.first()?.clone();
+    // Discovery itself does not mutate presence. Renew/recreate the selected
+    // runtime lease before replay so a freshly reattached seat cannot be reaped
+    // during the first heartbeat interval.
+    if !touch_seat_thread(client, &thread_id).await {
+        return None;
+    }
 
     // Supersede the stragglers: parallel clients share the newest seat by
     // construction (this same freshest-first pick), so a SECOND running
@@ -165,6 +171,21 @@ pub async fn close_seat_thread(client: &DaemonClient, thread_id: &str) {
             }),
         )
         .await;
+}
+
+/// Refresh the runtime-only seat presence lease; best effort and deliberately
+/// independent of durable seat events.
+pub async fn touch_seat_thread(client: &DaemonClient, thread_id: &str) -> bool {
+    client
+        .signed_post(
+            "/execute",
+            &serde_json::json!({
+                "item_ref": "service:seat/touch",
+                "parameters": { "thread_id": thread_id },
+            }),
+        )
+        .await
+        .is_ok()
 }
 
 #[cfg(test)]

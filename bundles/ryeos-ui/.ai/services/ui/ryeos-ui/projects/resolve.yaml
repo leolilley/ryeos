@@ -4,4 +4,5 @@ name: ryeos-ui/projects/resolve
 version: "1.0.0"
 description: Resolve one local RyeOS UI project registry entry by opaque local id.
 endpoint: ui.ryeos.projects.resolve
+record_thread: false
 availability: daemon_only

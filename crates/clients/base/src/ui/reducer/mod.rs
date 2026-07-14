@@ -48,6 +48,12 @@ impl RyeOsCore {
             RyeOsEvent::Ui { event } => self.dispatch_ui(event),
             RyeOsEvent::EffectResult { result } => self.apply_effect_result(result),
             RyeOsEvent::DaemonEvent { payload } => self.apply_daemon_event(payload),
+            RyeOsEvent::HintReceived { kind, payload } => {
+                self.note_hint_received(&kind, &payload);
+                Vec::new()
+            }
+            RyeOsEvent::HintFlush { kind } => self.effects_for_hint(&kind),
+            RyeOsEvent::TransportReconnected => self.initial_effects(),
             RyeOsEvent::ThreadTail {
                 thread_id,
                 event_type,

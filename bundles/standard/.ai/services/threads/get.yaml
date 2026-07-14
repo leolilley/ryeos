@@ -3,6 +3,7 @@ category: "threads"
 name: "get"
 kind: service
 endpoint: threads.get
+record_thread: false
 required_caps: []
 schema:
   thread_id: string

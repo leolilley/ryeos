@@ -1,0 +1,9 @@
+kind: service
+name: seat-touch
+version: "1.0.0"
+description: Refresh the runtime presence lease for the browser session seat
+endpoint: ui.seat.touch
+record_thread: false
+availability: daemon_only
+schema:
+  thread_id: string

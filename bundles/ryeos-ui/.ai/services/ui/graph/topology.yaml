@@ -4,4 +4,5 @@ name: graph/topology
 version: "1.0.0"
 description: Returns the authenticated browser session's resolved RyeOS topology graph.
 endpoint: ui.graph.topology
+record_thread: false
 availability: daemon_only

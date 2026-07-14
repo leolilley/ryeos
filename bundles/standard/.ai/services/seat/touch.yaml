@@ -1,0 +1,10 @@
+kind: service
+name: seat/touch
+version: "1.0.0"
+description: Refresh the runtime presence lease for an owned running operator seat
+endpoint: seat.touch
+record_thread: false
+availability: daemon_only
+required_caps: ["ryeos.execute.service.seat/touch"]
+schema:
+  thread_id: string

@@ -33,11 +33,17 @@ pub fn register_extensions(
         ),
     );
 
-    // Register session_events stream source + web asset provider.
+    // Register browser-session stream sources + web asset provider.
     response_modes.register_event_stream_source(
         "session_events",
         std::sync::Arc::new(
             invokers::session_events_invocation::SessionEventsSourceFactory { ui: ui.clone() },
+        ),
+    );
+    response_modes.register_event_stream_source(
+        "browser_chain_tail",
+        std::sync::Arc::new(
+            invokers::browser_chain_tail_invocation::BrowserChainTailSourceFactory,
         ),
     );
     response_modes.set_static_asset_provider(

@@ -31,6 +31,21 @@ pub fn is_lifecycle_hint(event_type: &str) -> bool {
     event_type == "thread_created" || event_type == "thread_started" || is_terminal(event_type)
 }
 
+/// Authoritative durable status implied by a lifecycle event.
+pub fn lifecycle_status(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "thread_created" => Some("created"),
+        "thread_started" => Some("running"),
+        "thread_completed" => Some("completed"),
+        "thread_failed" => Some("failed"),
+        "thread_cancelled" => Some("cancelled"),
+        "thread_killed" => Some("killed"),
+        "thread_timed_out" => Some("timed_out"),
+        "thread_continued" => Some("continued"),
+        _ => None,
+    }
+}
+
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,

@@ -1,0 +1,15 @@
+id: ui/events/chain
+path: /ui/events/chain/{chain_root_id}
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 0
+  concurrent_max: 64
+response:
+  mode: event_stream
+  source: browser_chain_tail
+  source_config:
+    chain_root_id: "${path.chain_root_id}"
+    keep_alive_secs: 15

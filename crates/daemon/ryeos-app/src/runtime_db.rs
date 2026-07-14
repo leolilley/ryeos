@@ -247,6 +247,18 @@ CREATE TABLE IF NOT EXISTS launch_window (
 
 CREATE INDEX IF NOT EXISTS idx_launch_window_key
     ON launch_window(window_key);
+
+CREATE TABLE IF NOT EXISTS seat_lease (
+    seat_thread_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    surface TEXT NOT NULL,
+    client_ref TEXT NOT NULL,
+    last_seen_at_ms INTEGER NOT NULL,
+    reaping_at_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_seat_lease_last_seen
+    ON seat_lease(last_seen_at_ms);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -662,6 +674,17 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "seat_lease",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "seat_thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "owner", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "surface", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "client_ref", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "last_seen_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "reaping_at_ms", col_type: "INTEGER", pk: false, not_null: false },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -706,6 +729,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 columns: &["window_key"],
                 unique: false,
             },
+            sqlite_schema::IndexSpec {
+                name: "idx_seat_lease_last_seen",
+                table: "seat_lease",
+                columns: &["last_seen_at_ms"],
+                unique: false,
+            },
         ],
     }
 }
@@ -744,6 +773,14 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
     };
     if !launch_columns.iter().any(|c| c == "cancelled_at_ms") {
         tx.execute_batch("ALTER TABLE launch_window ADD COLUMN cancelled_at_ms INTEGER")?;
+    }
+    let seat_columns = {
+        let mut stmt = tx.prepare("PRAGMA table_info(seat_lease)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !seat_columns.iter().any(|c| c == "reaping_at_ms") {
+        tx.execute_batch("ALTER TABLE seat_lease ADD COLUMN reaping_at_ms INTEGER")?;
     }
     let legacy = {
         let mut stmt = tx.prepare(
@@ -861,6 +898,132 @@ impl RuntimeDb {
             params![thread_id, chain_root_id],
         )?;
         Ok(())
+    }
+
+    pub fn touch_seat_lease(
+        &self,
+        seat_thread_id: &str,
+        owner: &str,
+        surface: &str,
+        client_ref: &str,
+    ) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        Ok(self.conn.execute(
+            "INSERT INTO seat_lease
+                (seat_thread_id, owner, surface, client_ref, last_seen_at_ms, reaping_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+             ON CONFLICT(seat_thread_id) DO UPDATE SET
+                owner=excluded.owner, surface=excluded.surface,
+                client_ref=excluded.client_ref, last_seen_at_ms=excluded.last_seen_at_ms
+             WHERE seat_lease.reaping_at_ms IS NULL",
+            params![seat_thread_id, owner, surface, client_ref, now],
+        )? > 0)
+    }
+
+    pub fn touch_existing_seat_lease(&self, seat_thread_id: &str) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        Ok(self.conn.execute(
+            "UPDATE seat_lease SET last_seen_at_ms=?2
+             WHERE seat_thread_id=?1 AND reaping_at_ms IS NULL",
+            params![seat_thread_id, now],
+        )? > 0)
+    }
+
+    pub fn remove_seat_lease(&self, seat_thread_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM seat_lease WHERE seat_thread_id=?1",
+            params![seat_thread_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn expired_seat_leases(&self, cutoff_ms: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seat_thread_id FROM seat_lease WHERE last_seen_at_ms < ?1 ORDER BY last_seen_at_ms",
+        )?;
+        let rows = stmt.query_map(params![cutoff_ms], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn claim_expired_seat_lease(&self, seat_thread_id: &str, cutoff_ms: i64) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        Ok(self.conn.execute(
+            "UPDATE seat_lease SET reaping_at_ms=?3
+             WHERE seat_thread_id=?1 AND last_seen_at_ms < ?2",
+            params![seat_thread_id, cutoff_ms, now],
+        )? > 0)
+    }
+
+    pub fn chain_has_live_state(&self, chain_root_id: &str) -> Result<bool> {
+        let live: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM thread_runtime r
+                WHERE r.chain_root_id=?1 AND (r.pid IS NOT NULL OR r.pgid IS NOT NULL)
+             ) OR EXISTS(
+                SELECT 1 FROM thread_launch_claim c JOIN thread_runtime r USING(thread_id)
+                WHERE r.chain_root_id=?1
+             ) OR EXISTS(
+                SELECT 1 FROM follow_waiter WHERE parent_chain_root_id=?1 OR child_chain_root_id=?1
+             ) OR EXISTS(
+                SELECT 1 FROM follow_waiter_child WHERE child_chain_root_id=?1
+             ) OR EXISTS(
+                SELECT 1 FROM launch_window WHERE child_chain_root_id=?1
+             )",
+            params![chain_root_id],
+            |row| row.get(0),
+        )?;
+        Ok(live)
+    }
+
+    pub fn delete_chain_runtime(&self, chain_root_id: &str) -> Result<usize> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let ids = "SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1";
+            let mut deleted = 0usize;
+            deleted += self.conn.execute(
+                &format!("DELETE FROM thread_commands WHERE thread_id IN ({ids})"),
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                &format!("DELETE FROM thread_launch_claim WHERE thread_id IN ({ids})"),
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                &format!("DELETE FROM seat_lease WHERE seat_thread_id IN ({ids})"),
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                &format!("DELETE FROM thread_child_link WHERE child_thread_id IN ({ids}) OR parent_thread_id IN ({ids})"),
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                "DELETE FROM launch_window WHERE child_chain_root_id=?1",
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                "DELETE FROM follow_waiter_child WHERE child_chain_root_id=?1",
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                "DELETE FROM follow_waiter WHERE parent_chain_root_id=?1 OR child_chain_root_id=?1",
+                params![chain_root_id],
+            )?;
+            deleted += self.conn.execute(
+                "DELETE FROM thread_runtime WHERE chain_root_id=?1",
+                params![chain_root_id],
+            )?;
+            Ok::<_, rusqlite::Error>(deleted)
+        })();
+        match result {
+            Ok(deleted) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(deleted)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err.into())
+            }
+        }
     }
 
     #[tracing::instrument(

@@ -4,4 +4,5 @@ name: seat-replay
 version: "1.0.0"
 description: Replay the session's seat braid so seat state folds from history - live and replay are the same fold
 endpoint: ui.seat.replay
+record_thread: false
 availability: daemon_only

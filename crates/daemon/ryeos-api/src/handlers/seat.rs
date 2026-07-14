@@ -74,6 +74,10 @@ pub async fn handle_open(
     let caller = require_operator(&ctx)?;
     let req: OpenRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let surface_ref = req.surface_ref;
+    let client_ref = req
+        .client_ref
+        .unwrap_or_else(|| "client:ryeos/tui".to_string());
 
     let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     let site_id = state.threads.site_id().to_string();
@@ -81,19 +85,21 @@ pub async fn handle_open(
         thread_id: thread_id.clone(),
         chain_root_id: thread_id.clone(),
         kind: SEAT_KIND.to_string(),
-        item_ref: req.surface_ref,
-        executor_ref: req
-            .client_ref
-            .unwrap_or_else(|| "client:ryeos/tui".to_string()),
+        item_ref: surface_ref.clone(),
+        executor_ref: client_ref.clone(),
         launch_mode: "inline".to_string(),
         current_site_id: site_id.clone(),
         origin_site_id: site_id,
         upstream_thread_id: None,
-        requested_by: Some(caller),
+        requested_by: Some(caller.clone()),
+        project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
     })?;
     state.threads.mark_running(&thread_id)?;
+    state
+        .state_store
+        .touch_seat_lease(&thread_id, &caller, &surface_ref, &client_ref)?;
 
     Ok(json!({
         "thread_id": detail.thread_id,
@@ -146,6 +152,15 @@ pub async fn handle_append(
         ))
         .into());
     }
+    // Presence wins the expiry race before the durable append begins. If a
+    // reaper has already claimed the lease this fails instead of appending to
+    // a seat that is about to settle.
+    state.state_store.touch_seat_lease(
+        &detail.thread_id,
+        &caller,
+        &detail.item_ref,
+        &detail.executor_ref,
+    )?;
 
     let records: Vec<NewEventRecord> = req
         .events
@@ -163,7 +178,7 @@ pub async fn handle_append(
             HandlerError::BadRequest(
                 "seat session is no longer running; only running seats accept events".into(),
             )
-        })?;
+    })?;
     let last_seq = persisted.iter().map(|r| r.chain_seq).max().unwrap_or(0);
 
     Ok(json!({
@@ -190,6 +205,7 @@ pub async fn handle_close(
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
     let detail = require_owned_seat(&state, &req.thread_id, &caller)?;
     if detail.status != "running" {
+        state.state_store.remove_seat_lease(&detail.thread_id)?;
         return Ok(json!({ "thread_id": detail.thread_id, "status": detail.status }));
     }
     let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
@@ -203,7 +219,36 @@ pub async fn handle_close(
         final_cost: None,
         summary_json: None,
     })?;
+    state.state_store.remove_seat_lease(&finalized.thread_id)?;
     Ok(json!({ "thread_id": finalized.thread_id, "status": finalized.status }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TouchRequest {
+    thread_id: String,
+}
+
+pub async fn handle_touch(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = require_operator(&ctx)?;
+    let req: TouchRequest = serde_json::from_value(params)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let detail = require_owned_seat(&state, &req.thread_id, &caller)?;
+    if detail.status != "running" {
+        state.state_store.remove_seat_lease(&detail.thread_id)?;
+        return Err(HandlerError::BadRequest("seat session is not running".into()).into());
+    }
+    state.state_store.touch_seat_lease(
+        &detail.thread_id,
+        &caller,
+        &detail.item_ref,
+        &detail.executor_ref,
+    )?;
+    Ok(json!({ "thread_id": detail.thread_id, "touched": true }))
 }
 
 // ── seat/list ─────────────────────────────────────────────────────────────
@@ -291,4 +336,12 @@ pub static CLOSE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.seat/close"],
     handler: |params, ctx, state| Box::pin(handle_close(params, ctx, state)),
+};
+
+pub static TOUCH_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:seat/touch",
+    endpoint: "seat.touch",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.seat/touch"],
+    handler: |params, ctx, state| Box::pin(handle_touch(params, ctx, state)),
 };

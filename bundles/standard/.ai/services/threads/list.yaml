@@ -3,6 +3,7 @@ category: "threads"
 name: "list"
 kind: service
 endpoint: threads.list
+record_thread: false
 required_caps: []
 schema:
   limit: integer?

@@ -5,6 +5,7 @@
 
 use anyhow::Context;
 use rusqlite::OptionalExtension;
+use std::path::PathBuf;
 
 use crate::projection::ProjectionDb;
 
@@ -23,6 +24,7 @@ pub struct ThreadRow {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -43,6 +45,7 @@ impl ThreadRow {
             origin_site_id: row.get("origin_site_id")?,
             upstream_thread_id: row.get("upstream_thread_id")?,
             requested_by: row.get("requested_by")?,
+            project_root: row.get("project_root")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             started_at: row.get("started_at")?,
@@ -290,7 +293,7 @@ impl UsageSummaryRow {
 const THREAD_COLUMNS: &str = r#"
     thread_id, chain_root_id, kind, status,
     item_ref, executor_ref, launch_mode,
-    current_site_id, origin_site_id, upstream_thread_id, requested_by,
+    current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
     created_at, updated_at, started_at, finished_at
 "#;
 
@@ -401,6 +404,12 @@ pub struct ThreadListFilter {
     /// Keep only ACTIVE (non-terminal) threads — the agent's live cognition,
     /// what the one key is running now rather than the settled history.
     pub active_only: bool,
+    /// Exclude item refs beginning with any of these prefixes. Exclusions are
+    /// applied in SQL before ordering and limit.
+    pub exclude_item_prefixes: Vec<String>,
+    /// Local project scope. Legacy unattributed rows remain visible only while
+    /// their durable status is active.
+    pub project_root: Option<PathBuf>,
 }
 
 pub fn list_threads_sorted(
@@ -488,6 +497,29 @@ pub fn list_threads_query(
         // vocabulary (see TERMINAL_STATUSES), inlined as a fixed placeholder
         // list so this stays a borrowed &str condition.
         conditions.push("status NOT IN (?, ?, ?, ?, ?, ?)");
+        for status in TERMINAL_STATUSES.iter() {
+            params.push(status);
+        }
+    }
+    for prefix in &filter.exclude_item_prefixes {
+        if prefix.is_empty() {
+            continue;
+        }
+        // Keep the literal, case-sensitive semantics of Rust starts_with;
+        // LIKE would interpret '%' and '_' in an authored prefix as wildcards.
+        conditions.push("substr(item_ref, 1, length(?)) != ?");
+        params.push(prefix);
+        params.push(prefix);
+    }
+    let project_root = filter
+        .project_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    if let Some(project_root) = &project_root {
+        conditions.push(
+            "(project_root = ? OR (project_root IS NULL AND status NOT IN (?, ?, ?, ?, ?, ?)))",
+        );
+        params.push(project_root);
         for status in TERMINAL_STATUSES.iter() {
             params.push(status);
         }

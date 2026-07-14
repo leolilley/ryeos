@@ -58,6 +58,56 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         "maintenance GC: lock acquired"
     );
 
+    // Seat settlement is a normal braid write, so reap before quiescing the
+    // write barrier. Claiming marks (rather than deletes) the lease: failed
+    // settlement remains retryable and racing heartbeats cannot resurrect it.
+    let mut reaped_seats = 0usize;
+    let mut retired_service_chains = 0usize;
+    let mut deleted_service_chain_rows = 0usize;
+    if params.deep || params.prune_runtime_history {
+        let cutoff = gc::retention::iso8601_days_ago(7);
+        let retirement = state
+            .state_store
+            .retire_service_chains_before(&cutoff, params.dry_run)?;
+        retired_service_chains = retirement.retired_chains;
+        deleted_service_chain_rows = retirement.deleted_rows;
+    }
+    if params.deep && !params.dry_run {
+        const SEAT_LEASE_GRACE_MS: i64 = 10 * 60 * 1_000;
+        let cutoff = lillux::time::timestamp_millis() as i64 - SEAT_LEASE_GRACE_MS;
+        for thread_id in state.state_store.expired_seat_leases(cutoff)? {
+            if !state
+                .state_store
+                .claim_expired_seat_lease(&thread_id, cutoff)?
+            {
+                continue;
+            }
+            let Some(detail) = state.state_store.get_thread(&thread_id)? else {
+                state.state_store.remove_seat_lease(&thread_id)?;
+                continue;
+            };
+            if detail.kind != "seat_session" || detail.status != "running" {
+                state.state_store.remove_seat_lease(&thread_id)?;
+                continue;
+            }
+            state.threads.finalize_thread(
+                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                    thread_id,
+                    status: "completed".to_string(),
+                    outcome_code: Some("seat_lease_expired".to_string()),
+                    result: None,
+                    error: None,
+                    metadata: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    summary_json: None,
+                },
+            )?;
+            state.state_store.remove_seat_lease(&detail.thread_id)?;
+            reaped_seats += 1;
+        }
+    }
+
     // Step 2: Quiesce write barrier
     state
         .write_barrier
@@ -101,6 +151,9 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
             &params_clone,
             &runtime_state_dir_for_log,
             &state_store,
+            reaped_seats,
+            retired_service_chains,
+            deleted_service_chain_rows,
         )
     })
     .await;
@@ -109,7 +162,10 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     state.write_barrier.resume();
 
     // NOW propagate errors
-    let gc_result = gc_result.context("GC blocking task panicked")??;
+    let mut gc_result = gc_result.context("GC blocking task panicked")??;
+    gc_result.reaped_seats = reaped_seats;
+    gc_result.retired_service_chains = retired_service_chains;
+    gc_result.deleted_service_chain_rows = deleted_service_chain_rows;
 
     Ok(gc_result)
 }
@@ -122,6 +178,9 @@ fn run_gc_and_log(
     params: &GcParams,
     runtime_state_dir: &std::path::Path,
     state_store: &ryeos_app::state_store::StateStore,
+    reaped_seats: usize,
+    retired_service_chains: usize,
+    deleted_service_chain_rows: usize,
 ) -> Result<GcResult> {
     let mut runtime_cleanup = GcResult::default();
     gc::purge_runtime_state(runtime_state_dir, params, &mut runtime_cleanup)
@@ -132,6 +191,9 @@ fn run_gc_and_log(
     result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
     result.deleted_fire_records = runtime_cleanup.deleted_fire_records;
     result.freed_bytes += runtime_cleanup.freed_bytes;
+    result.reaped_seats = reaped_seats;
+    result.retired_service_chains = retired_service_chains;
+    result.deleted_service_chain_rows = deleted_service_chain_rows;
 
     // Retention: retire old terminal sync-job rows. Runs under the deep profile
     // only (see GcParams docs), never on a dry run. The write barrier is
@@ -173,6 +235,9 @@ fn run_gc_and_log(
             deleted_fire_records: result.deleted_fire_records,
             deleted_sync_jobs: result.deleted_sync_jobs,
             deleted_sync_job_attempts: result.deleted_sync_job_attempts,
+            reaped_seats: result.reaped_seats,
+            retired_service_chains: result.retired_service_chains,
+            deleted_service_chain_rows: result.deleted_service_chain_rows,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
