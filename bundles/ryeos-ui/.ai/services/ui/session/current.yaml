@@ -1,8 +1,9 @@
-# ryeos:signed:2026-06-11T22:51:46Z:77e265f84e169c3374ac9d0ec27ba7658490f3e250441512b2a81e7c4fe55d00:mdsOyu97QwS3VuDKeEKVVGmdLEIbRbhfNisRf4G0iJ/S1/dUC8iC8LejP0REm9p2M+YzjEegxbufSexVNhAoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:cc965aea23de89a93510d22618eddd0f89dcdc98878527c20bae9610e97f36db:cZu9JjnsrDeyEnB8oCX/Oe5uEHI5T/L0czeRelrWSEeKNL+Mo2/V5DqjiR63GTZkobIprzdcvHPE7Xr2Uw59Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: session-current
 version: "1.0.0"
 description: Returns the authenticated browser session's context fields.
 endpoint: ui.session.current
+ui_read_only: true
 record_thread: false
 availability: daemon_only

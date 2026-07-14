@@ -13,9 +13,11 @@ use serde_json::{json, Value};
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
+use ryeos_app::service_registry::{extract_required_caps, extract_ui_read_only};
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_runtime::authorizer::AuthorizationPolicy;
 
 use crate::browser_session::BrowserSession;
 use crate::state::get_ui_state;
@@ -61,48 +63,15 @@ fn invocation_context_for_session(
     }
 }
 
-fn is_session_local_invocation(item_ref: &str) -> bool {
-    item_ref.starts_with("service:ui/seat/")
+struct PreparedInvocation {
+    effective_path: std::path::PathBuf,
+    exec_ctx: ryeos_executor::executor::ExecutionContext,
 }
 
-fn is_declared_read_source_ref(item_ref: &str) -> bool {
-    matches!(
-        item_ref,
-        "service:bundle/list"
-            | "service:commands/list"
-            | "service:events/chain_replay"
-            | "service:items/effective"
-            | "service:node/status"
-            | "service:projects/list"
-            | "service:scheduler/list"
-            | "service:threads/list"
-            | "service:ui/ryeos-ui/files/list"
-            | "service:ui/ryeos-ui/gc/status"
-            | "service:ui/ryeos-ui/item/inspect"
-            | "service:ui/ryeos-ui/items/list"
-            | "service:ui/ryeos-ui/node/activity"
-            | "service:ui/ryeos-ui/remotes/list"
-            | "service:ui/ryeos-ui/schedules/list"
-            | "service:ui/ryeos-ui/thread/inspect"
-            | "service:ui/ryeos-ui/threads/list"
-    )
-}
-
-fn service_descriptor_for<'a>(
-    state: &'a AppState,
-    item_ref: &str,
-) -> Option<&'a ServiceDescriptor> {
-    state
-        .service_descriptors
-        .iter()
-        .find(|descriptor| descriptor.service_ref == item_ref)
-}
-
-fn read_only_invocation_allowed(state: &AppState, item_ref: &str) -> bool {
-    is_session_local_invocation(item_ref)
-        || (is_declared_read_source_ref(item_ref)
-            && service_descriptor_for(state, item_ref)
-                .is_some_and(|descriptor| descriptor.required_caps.is_empty()))
+#[derive(Debug, Clone)]
+struct UiInvocationPolicy {
+    read_only: bool,
+    required_caps: Vec<String>,
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -123,7 +92,48 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
-    if session.read_only && !read_only_invocation_allowed(&state, &item_ref) {
+    let root_canonical = CanonicalRef::parse(&item_ref)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
+    let project_path = session
+        .project_root
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.config.app_root.clone());
+    let invocation_ctx = invocation_context_for_session(&ctx, &session);
+    let prepared = prepare_item_ref(&invocation_ctx, &state, &project_path)?;
+    let verified = ryeos_executor::executor::resolve_and_verify(
+        &prepared.exec_ctx.engine,
+        &prepared.exec_ctx.plan_ctx,
+        &item_ref,
+        None,
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    let metadata = &verified.resolved.metadata.extra;
+    let policy = UiInvocationPolicy {
+        read_only: extract_ui_read_only(metadata)?,
+        required_caps: extract_required_caps(metadata),
+    };
+
+    let required_cap_refs = policy
+        .required_caps
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if state
+        .authorizer
+        .authorize(
+            &invocation_ctx.scopes,
+            &AuthorizationPolicy::require_all(&required_cap_refs),
+        )
+        .is_err()
+    {
+        return Err(HandlerError::Forbidden(
+            "browser session lacks a capability required by the invocation".into(),
+        )
+        .into());
+    }
+
+    if session.read_only && !policy.read_only {
         return Err(HandlerError::Forbidden(
             "read-only session cannot dispatch protected invocations".into(),
         )
@@ -132,64 +142,31 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
 
-    if is_session_local_invocation(&item_ref) {
-        let descriptor = service_descriptor_for(&state, &item_ref).ok_or(HandlerError::NotFound)?;
-        let result = (descriptor.handler)(req.params.clone(), ctx.clone(), state.clone()).await?;
+    let result = execute_prepared_item_ref(&req, &state, prepared, verified, ctx).await?;
 
-        ui.session_bus.publish(
-            &session_id,
-            "invocation.dispatched",
-            json!({
-                "target": { "kind": "ref", "ref": item_ref },
-                "invocation_id": invocation_id,
-                "status": "executed",
-            }),
-        );
-
-        return Ok(json!({
-            "status": "executed",
+    ui.session_bus.publish(
+        &session_id,
+        "invocation.dispatched",
+        json!({
             "target": { "kind": "ref", "ref": item_ref },
             "invocation_id": invocation_id,
-            "result": result,
-        }));
-    }
-
-    if CanonicalRef::parse(&item_ref).is_ok() {
-        let project_path = session
-            .project_root
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| state.config.app_root.clone());
-        let invocation_ctx = invocation_context_for_session(&ctx, &session);
-        let result = execute_item_ref(&req, &invocation_ctx, &state, &project_path).await?;
-
-        ui.session_bus.publish(
-            &session_id,
-            "invocation.dispatched",
-            json!({
-                "target": { "kind": "ref", "ref": item_ref },
-                "invocation_id": invocation_id,
-                "status": "executed",
-            }),
-        );
-
-        return Ok(json!({
             "status": "executed",
-            "target": { "kind": "ref", "ref": item_ref },
-            "invocation_id": invocation_id,
-            "result": result,
-        }));
-    }
+        }),
+    );
 
-    Err(HandlerError::BadRequest("UI invocation target must be a canonical ref".into()).into())
+    Ok(json!({
+        "status": "executed",
+        "target": { "kind": "ref", "ref": item_ref },
+        "invocation_id": invocation_id,
+        "result": result,
+    }))
 }
 
-async fn execute_item_ref(
-    req: &Request,
+fn prepare_item_ref(
     ctx: &HandlerContext,
     state: &AppState,
     project_path: &std::path::Path,
-) -> Result<Value> {
+) -> Result<PreparedInvocation> {
     let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
     let checkout_id = format!(
         "ui-{}-{:08x}",
@@ -204,10 +181,6 @@ async fn execute_item_ref(
         &checkout_id,
     )
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
-
-    let item_ref = req.item_ref();
-    let root_canonical = CanonicalRef::parse(item_ref)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
     let plan_ctx = ryeos_engine::contracts::PlanContext {
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -233,9 +206,26 @@ async fn execute_item_ref(
         requested_call: None,
     };
 
+    Ok(PreparedInvocation {
+        effective_path: project_ctx.effective_path,
+        exec_ctx,
+    })
+}
+
+async fn execute_prepared_item_ref(
+    req: &Request,
+    state: &AppState,
+    prepared: PreparedInvocation,
+    verified: ryeos_engine::contracts::VerifiedItem,
+    local_handler_context: HandlerContext,
+) -> Result<Value> {
+    let item_ref = req.item_ref();
+    let root_canonical = CanonicalRef::parse(item_ref)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
+
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-        project_ctx.effective_path.clone(),
-        project_ctx.request_engine.clone(),
+        prepared.effective_path.clone(),
+        prepared.exec_ctx.engine.clone(),
     );
 
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
@@ -243,8 +233,8 @@ async fn execute_item_ref(
         target_site_id: None,
         validate_only: false,
         params: req.params.clone(),
-        acting_principal: ctx.fingerprint.as_str(),
-        project_path: &project_ctx.effective_path,
+        acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
+        project_path: &prepared.effective_path,
         provenance,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
@@ -254,13 +244,20 @@ async fn execute_item_ref(
         parent_execution_context: None,
     };
 
-    ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, state)
-        .await
-        .map_err(|e| HandlerError::Structured {
-            code: "dispatch_error".into(),
-            body: ryeos_executor::structured_error::StructuredErrorPayload::from(&e).to_value(),
-        })
-        .map_err(Into::into)
+    ryeos_executor::dispatch::dispatch_verified_with_handler_context(
+        item_ref,
+        verified,
+        local_handler_context,
+        &dispatch_req,
+        &prepared.exec_ctx,
+        state,
+    )
+    .await
+    .map_err(|e| HandlerError::Structured {
+        code: "dispatch_error".into(),
+        body: ryeos_executor::structured_error::StructuredErrorPayload::from(&e).to_value(),
+    })
+    .map_err(Into::into)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -288,16 +285,6 @@ mod tests {
             read_only: false,
             user_principal_id,
         }
-    }
-
-    #[test]
-    fn read_only_allowlist_is_limited_to_declared_sources() {
-        assert!(is_declared_read_source_ref("service:node/status"));
-        assert!(is_declared_read_source_ref(
-            "service:ui/ryeos-ui/threads/list"
-        ));
-        assert!(!is_declared_read_source_ref("service:commands/submit"));
-        assert!(!is_declared_read_source_ref("tool:demo/run"));
     }
 
     #[test]

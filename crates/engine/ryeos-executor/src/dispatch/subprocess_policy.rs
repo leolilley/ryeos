@@ -53,54 +53,6 @@ pub(super) fn enforce_runtime_caps(
         })
 }
 
-pub(super) fn service_params_with_project_path(
-    mut params: Value,
-    verified: &VerifiedItem,
-    project_path: &Path,
-) -> Value {
-    if !service_declares_project_path(verified) {
-        return params;
-    }
-    let Some(obj) = params.as_object_mut() else {
-        return params;
-    };
-    let fill_project_path = obj.get("project_path").is_none_or(|value| {
-        value.is_null() || value.as_str().is_some_and(|path| path.trim().is_empty())
-    });
-    if fill_project_path {
-        obj.insert(
-            "project_path".to_string(),
-            Value::String(project_path.to_string_lossy().into_owned()),
-        );
-    }
-    params
-}
-
-fn service_declares_project_path(verified: &VerifiedItem) -> bool {
-    if verified
-        .resolved
-        .metadata
-        .extra
-        .get("schema")
-        .and_then(Value::as_object)
-        .is_some_and(|schema| schema.contains_key("project_path"))
-    {
-        return true;
-    }
-
-    let Ok(content) = std::fs::read_to_string(&verified.resolved.source_path) else {
-        return false;
-    };
-    let body = lillux::signature::strip_signature_lines(&content);
-    let Ok(parsed) = serde_yaml::from_str::<Value>(&body) else {
-        return false;
-    };
-    parsed
-        .get("schema")
-        .and_then(Value::as_object)
-        .is_some_and(|schema| schema.contains_key("project_path"))
-}
-
 /// Pure resolution output for a managed subprocess launch.
 pub struct PreparedManagedLaunch {
     pub resolved: ResolvedExecutionRequest,

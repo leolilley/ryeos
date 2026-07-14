@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-06T12:24:55Z:b80f4225a561bd3bbc9deb39f3b1ea9daa506b91be3a7aafa4e9479927d46dd3:lAKAm/EH3OjiR8sxhGf8PH68bvcSgTVskydnMlwRQefrYyQ6ZXMt7fVNlzNtuRvQF5xUwTDUQEDZcWPw0S8QAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:f57cdd3883000a0b715aef1f7d4dd8fa59e271eb60c008df027767d25a82614b:qbaMJWJI+oUYTpywICYmlh+9lvnex7hdeUyQC1xEFYEB7vfLZOU6c/zIMBEyTpyy9W6StRUFcsr9zKDUGPviBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/item/inspect
 version: "1.0.0"
 description: Inspect one real canonical RyeOS item — resolve, classify trust, and return raw source and effective composition.
 endpoint: ui.ryeos.item.inspect
+ui_read_only: true
 record_thread: false
 availability: daemon_only

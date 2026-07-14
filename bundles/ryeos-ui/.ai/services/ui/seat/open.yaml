@@ -1,7 +1,9 @@
-# ryeos:signed:2026-06-13T00:00:43Z:86be120588322f1268eef7413e008a3652caa62cb9bbeff6d86c3fbe2ae4721a:KZHpWbEXk6iKD/rQmUZYd5+58i7YCWgTtySj7m3kxKHZnqg8E3cq1dDQ7jcVZ/zV/J7JaBiC6Dq8zBuEx+x0DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:2747d12b16a56eb6940e3aba18e4a36d7a962cf3d8b9cc3cb28a77111017d0f8:DDeOmnLPSFIilzIXmsGJwmayQHo/LWolicilyWu56q9OpQqGRaqC04AbqUBcK7s3Kq4i6y7m82xwl1/ZSDd7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-open
 version: "1.0.0"
 description: Mint or attach the browser session's seat thread - the seat is itself a thread, braided and replayable
 endpoint: ui.seat.open
+ui_read_only: true
+ui_dispatch: session_local
 availability: daemon_only

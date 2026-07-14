@@ -1933,10 +1933,30 @@ impl RuntimeDb {
             "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter ORDER BY created_at_ms ASC"
         ))?;
         let rows = stmt.query_map([], read_follow_waiter_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .map(|w| self.with_follow_children(w))
-            .collect()
+        let mut waiters = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut child_stmt = self.conn.prepare(
+            "SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
+             terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms,
+             follow_key
+             FROM follow_waiter_child ORDER BY follow_key,item_index",
+        )?;
+        let child_rows = child_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(10)?, read_follow_child_row(row)?))
+        })?;
+        let mut children_by_waiter = std::collections::HashMap::new();
+        for row in child_rows {
+            let (follow_key, child) = row?;
+            children_by_waiter
+                .entry(follow_key)
+                .or_insert_with(Vec::new)
+                .push(child);
+        }
+        for waiter in &mut waiters {
+            waiter.children = children_by_waiter
+                .remove(&waiter.follow_key)
+                .unwrap_or_default();
+        }
+        Ok(waiters)
     }
 
     pub fn get_follow_child(

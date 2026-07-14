@@ -152,7 +152,7 @@ pub async fn run(
     // typing a filter never blocks on a per-keystroke daemon round-trip.
     let mut feed_dirty = false;
     let mut pending_hints: HashSet<String> = HashSet::new();
-    let mut last_hint_flush_ms = 0;
+    let mut hint_batch_started_ms: Option<u64> = None;
     let mut last_seat_touch_ms = now_ms();
 
     loop {
@@ -279,6 +279,9 @@ pub async fn run(
                             payload,
                         });
                         spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        if pending_hints.is_empty() {
+                            hint_batch_started_ms = Some(now_ms());
+                        }
                         pending_hints.insert(kind);
                         dirty = true;
                     }
@@ -293,6 +296,8 @@ pub async fn run(
                         // trusting whatever the screen froze on.
                         let effects = core.initial_effects();
                         spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        pending_hints.clear();
+                        hint_batch_started_ms = None;
                         dirty = true;
                     }
                 }
@@ -341,15 +346,14 @@ pub async fn run(
                         });
                     }
                 }
-                if !pending_hints.is_empty()
-                    && tick_now.saturating_sub(last_hint_flush_ms) >= HINT_FLUSH_MS
+                if hint_batch_started_ms
+                    .is_some_and(|started| tick_now.saturating_sub(started) >= HINT_FLUSH_MS)
                 {
-                    last_hint_flush_ms = tick_now;
                     let hints = std::mem::take(&mut pending_hints);
-                    let mut effects = Vec::new();
-                    for kind in hints {
-                        effects.extend(core.dispatch(RyeOsEvent::HintFlush { kind }));
-                    }
+                    hint_batch_started_ms = None;
+                    let effects = core.dispatch(RyeOsEvent::HintFlushBatch {
+                        kinds: hints.into_iter().collect(),
+                    });
                     spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                 }
                 // Flush a debounced live-filter refetch once typing has settled.

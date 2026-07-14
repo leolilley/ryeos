@@ -6,7 +6,9 @@
 //! auth means the ryeos-ui always sees all threads (admin context).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -23,6 +25,16 @@ fn default_limit() -> usize {
 }
 
 const MAX_THREAD_LIST_LIMIT: usize = 2_000;
+static THREAD_LIST_CALLS: AtomicU64 = AtomicU64::new(0);
+static THREAD_LIST_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+struct ThreadListInFlightGuard;
+
+impl Drop for ThreadListInFlightGuard {
+    fn drop(&mut self) {
+        THREAD_LIST_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Read an optional string filter param: absent, non-string, or empty/blank all
 /// mean "unfiltered" (`None`). The client sends `""` for an unset filter facet,
@@ -61,6 +73,10 @@ fn active_filter(params: &Value) -> bool {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let started = Instant::now();
+    let call = THREAD_LIST_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let in_flight = THREAD_LIST_IN_FLIGHT.fetch_add(1, Ordering::Relaxed) + 1;
+    let _in_flight_guard = ThreadListInFlightGuard;
     let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let limit = params
@@ -102,6 +118,27 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     let threads = state
         .threads
         .list_thread_views_query(limit, &filter, sort)?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if elapsed_ms >= 250 || in_flight >= 4 {
+        tracing::warn!(
+            call,
+            in_flight,
+            elapsed_ms,
+            rows = threads.len(),
+            limit,
+            "slow or overlapping ryeos-ui thread-list reconciliation"
+        );
+    } else {
+        tracing::debug!(
+            call,
+            in_flight,
+            elapsed_ms,
+            rows = threads.len(),
+            limit,
+            "ryeos-ui thread-list reconciliation"
+        );
+    }
 
     Ok(serde_json::json!({
         "threads": threads,

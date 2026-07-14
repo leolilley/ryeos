@@ -52,7 +52,7 @@ impl RyeOsCore {
                 self.note_hint_received(&kind, &payload);
                 Vec::new()
             }
-            RyeOsEvent::HintFlush { kind } => self.effects_for_hint(&kind),
+            RyeOsEvent::HintFlushBatch { kinds } => self.effects_for_hints(&kinds),
             RyeOsEvent::TransportReconnected => self.initial_effects(),
             RyeOsEvent::ThreadTail {
                 thread_id,

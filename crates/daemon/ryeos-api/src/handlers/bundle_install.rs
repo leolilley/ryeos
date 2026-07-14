@@ -97,29 +97,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    // Preflight verification: parse + validate + signature-check every
-    // signable item in the bundle BEFORE any filesystem mutation.
-    //
     // Trust source: project + operator app root. Bundles whose signers aren't
-    // already trusted are rejected — operators must pin trust first.
+    // already trusted are rejected — operators must pin trust first. Preflight
+    // runs against the completed staging tree below, not the mutable source.
     let operator_config_root = state.config.runtime_root().config();
-    let source_canonical = req
-        .source_path
-        .canonicalize()
-        .with_context(|| format!("canonicalize source path {}", req.source_path.display()))?;
     let installed_dependency_roots: Vec<PathBuf> =
         ryeos_bundle::installed::load_installed_bundle_records(&state.config.app_root)
             .context("preflight: load installed bundle registrations")?
             .into_iter()
-            .filter(|record| record.name != req.name && record.bundle_root != source_canonical)
+            .filter(|record| record.name != req.name)
             .map(|record| record.bundle_root)
             .collect();
-    preflight_verify_bundle_in_context(
-        &req.source_path,
-        &installed_dependency_roots,
-        &operator_config_root,
-    )
-    .context("preflight verification refused install")?;
 
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
@@ -132,6 +120,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             req.preserve_runtime_artifacts,
             &transaction,
             registration.clone(),
+            |staging| {
+                preflight_verify_bundle_in_context(
+                    staging,
+                    &installed_dependency_roots,
+                    &operator_config_root,
+                )
+                .context("preflight verification refused staged replacement")
+            },
         )
         .with_context(|| {
             format!(
@@ -146,6 +142,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &target,
             &transaction,
             registration.clone(),
+            |staging| {
+                preflight_verify_bundle_in_context(
+                    staging,
+                    &installed_dependency_roots,
+                    &operator_config_root,
+                )
+                .context("preflight verification refused staged install")
+            },
         )
         .with_context(|| {
             format!(
@@ -186,12 +190,16 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     Ok(report)
 }
 
-fn install_dir_atomic(
+fn install_dir_atomic<F>(
     src: &Path,
     target: &Path,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
-) -> Result<()> {
+    verify_staged: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let parent = target
         .parent()
         .context("installed bundle target has no parent")?;
@@ -220,6 +228,7 @@ fn install_dir_atomic(
         })?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        verify_staged(&staging)?;
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::Install,
             &staging,
@@ -236,13 +245,17 @@ fn install_dir_atomic(
     })()
 }
 
-fn replace_dir_atomic(
+fn replace_dir_atomic<F>(
     src: &Path,
     target: &Path,
     preserve_runtime_artifacts: bool,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
-) -> Result<()> {
+    verify_staged: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let source = src
         .canonicalize()
         .with_context(|| format!("canonicalize source path {}", src.display()))?;
@@ -291,6 +304,7 @@ fn replace_dir_atomic(
         }
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        verify_staged(&staging)?;
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::Replace,
             &staging,
@@ -399,6 +413,7 @@ mod tests {
             preserve,
             &transaction,
             serde_json::json!({ "kind": "node", "path": target }),
+            |_| Ok(()),
         )
         .unwrap();
     }

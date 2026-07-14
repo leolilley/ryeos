@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -162,6 +162,22 @@ pub struct ThreadListItem {
     pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Auxiliary facts for one thread-list page, loaded under one store lock and
+/// grouped in memory. Keeps the UI list path from reacquiring the global store
+/// mutex and rerunning projection queries for every row.
+#[derive(Debug, Default)]
+pub struct ThreadListEnrichment {
+    pub follow_waiters: Vec<runtime_db::FollowWaiter>,
+    pub facets: HashMap<String, Vec<(String, String)>>,
+    pub current_graph_nodes: HashMap<String, (String, u32)>,
+}
+
+#[derive(Debug, Default)]
+pub struct FollowParentListSnapshot {
+    pub waiters: Vec<runtime_db::FollowWaiter>,
+    pub parents: Vec<ThreadListItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -466,9 +482,30 @@ impl StateStore {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
-        self.inner
+        let started = std::time::Instant::now();
+        let guard = self
+            .inner
             .lock()
-            .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))
+            .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))?;
+        let waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(100) {
+            tracing::warn!(
+                wait_ms = waited.as_millis() as u64,
+                "StateStore lock acquisition was delayed"
+            );
+        }
+        Ok(guard)
+    }
+
+    fn warn_slow_lock_hold(operation: &'static str, started: std::time::Instant) {
+        let held = started.elapsed();
+        if held >= std::time::Duration::from_millis(100) {
+            tracing::warn!(
+                operation,
+                hold_ms = held.as_millis() as u64,
+                "StateStore lock was held by a slow operation"
+            );
+        }
     }
 
     /// Acquire a write permit from the write barrier.
@@ -1772,9 +1809,13 @@ impl StateStore {
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows = queries::list_threads(g.state_db.projection(), limit)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let rows = queries::list_threads(g.state_db.projection(), limit)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// List threads with optional principal filtering.
@@ -1787,10 +1828,14 @@ impl StateStore {
         limit: usize,
         filter_principal: Option<&str>,
     ) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows =
-            queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let rows =
+                queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// As [`Self::list_threads_filtered`] but with an explicit
@@ -1802,10 +1847,18 @@ impl StateStore {
         filter_principal: Option<&str>,
         sort: queries::ThreadSort,
     ) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows =
-            queries::list_threads_sorted(g.state_db.projection(), limit, filter_principal, sort)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let rows = queries::list_threads_sorted(
+                g.state_db.projection(),
+                limit,
+                filter_principal,
+                sort,
+            )?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
@@ -1838,24 +1891,51 @@ impl StateStore {
         filter: &queries::ThreadListFilter,
         sort: queries::ThreadSort,
     ) -> Result<Vec<ThreadListItem>> {
-        let g = self.lock()?;
-        let thread_rows =
-            queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
-        Self::rows_to_list_items(&g, thread_rows)
+        let (thread_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let rows = queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            Self::warn_slow_lock_hold("list_threads_query", hold_started);
+            (rows, payloads)
+        };
+        Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
     /// Project thread rows into `ThreadListItem`s, resolving each terminal
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list
     /// paths.
-    fn rows_to_list_items(g: &Inner, rows: Vec<queries::ThreadRow>) -> Result<Vec<ThreadListItem>> {
+    fn continuation_payloads_for_rows(
+        g: &Inner,
+        rows: &[queries::ThreadRow],
+    ) -> Result<HashMap<String, Vec<u8>>> {
+        let terminal_thread_ids = rows
+            .iter()
+            .filter(|row| is_terminal_status(&row.status))
+            .map(|row| row.thread_id.clone())
+            .collect::<Vec<_>>();
+        queries::continuation_successor_payloads(g.state_db.projection(), &terminal_thread_ids)
+    }
+
+    fn rows_to_list_items(
+        rows: Vec<queries::ThreadRow>,
+        successor_payloads: HashMap<String, Vec<u8>>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let mut successors = HashMap::new();
+        for (thread_id, payload) in successor_payloads {
+            let value: serde_json::Value = serde_json::from_slice(&payload)
+                .context("parse thread_continued payload for thread-list enrichment")?;
+            if let Some(successor) = value
+                .get("successor_thread_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                successors.insert(thread_id, successor.to_string());
+            }
+        }
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
-            let successor_thread_id = if is_terminal_status(&row.status) {
-                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
-            } else {
-                None
-            };
+            let successor_thread_id = successors.remove(&row.thread_id);
             items.push(ThreadListItem {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -1874,6 +1954,112 @@ impl StateStore {
             });
         }
         Ok(items)
+    }
+
+    /// Load the non-thread-row facts used to decorate one list page. Facets,
+    /// current graph nodes, and live follow waiters share one outer store lock
+    /// instead of relocking the store for every row.
+    pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
+        let (facet_rows, graph_node_payloads, follow_waiters) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let result = (
+                queries::get_facets_many(g.state_db.projection(), thread_ids)?,
+                queries::current_graph_node_payloads(g.state_db.projection(), thread_ids)?,
+                g.runtime_db.list_follow_waiters()?,
+            );
+            Self::warn_slow_lock_hold("thread_list_enrichment", hold_started);
+            result
+        };
+        Ok(Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+        ))
+    }
+
+    pub fn thread_list_enrichment_with_waiters(
+        &self,
+        thread_ids: &[String],
+        follow_waiters: Vec<runtime_db::FollowWaiter>,
+    ) -> Result<ThreadListEnrichment> {
+        let (facet_rows, graph_node_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let result = (
+                queries::get_facets_many(g.state_db.projection(), thread_ids)?,
+                queries::current_graph_node_payloads(g.state_db.projection(), thread_ids)?,
+            );
+            Self::warn_slow_lock_hold("thread_list_enrichment_with_waiters", hold_started);
+            result
+        };
+        Ok(Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+        ))
+    }
+
+    fn assemble_thread_list_enrichment(
+        facet_rows: Vec<queries::FacetRow>,
+        graph_node_payloads: HashMap<String, Vec<u8>>,
+        follow_waiters: Vec<runtime_db::FollowWaiter>,
+    ) -> ThreadListEnrichment {
+        let mut facets: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for row in facet_rows {
+            facets
+                .entry(row.thread_id)
+                .or_default()
+                .push((row.key, String::from_utf8_lossy(&row.value).to_string()));
+        }
+        let mut current_graph_nodes = HashMap::new();
+        for (thread_id, payload) in graph_node_payloads {
+            let payload: serde_json::Value = match serde_json::from_slice(&payload) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(
+                        %thread_id,
+                        %error,
+                        "ignoring malformed graph_step_started payload in thread-list enrichment"
+                    );
+                    continue;
+                }
+            };
+            let Some(node) = payload.get("node").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let step = payload
+                .get("step")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            current_graph_nodes.insert(thread_id, (node.to_string(), step));
+        }
+        ThreadListEnrichment {
+            follow_waiters,
+            facets,
+            current_graph_nodes,
+        }
+    }
+
+    /// One consistent runtime waiter snapshot plus its projected suspended
+    /// parents. Parent rows are fetched in bounded batches under the same store
+    /// lock, avoiding one lock/query cycle per waiter.
+    pub fn follow_parent_list_snapshot(&self) -> Result<FollowParentListSnapshot> {
+        let (waiters, rows, successor_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let waiters = g.runtime_db.list_follow_waiters()?;
+            let parent_ids = waiters
+                .iter()
+                .map(|waiter| waiter.parent_thread_id.clone())
+                .collect::<Vec<_>>();
+            let rows = queries::get_threads_many(g.state_db.projection(), &parent_ids)?;
+            let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
+            Self::warn_slow_lock_hold("follow_parent_list_snapshot", hold_started);
+            (waiters, rows, payloads)
+        };
+        let parents = Self::rows_to_list_items(rows, successor_payloads)?;
+        Ok(FollowParentListSnapshot { waiters, parents })
     }
 
     pub fn summarize_usage_by_subject(

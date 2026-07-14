@@ -308,9 +308,10 @@ pub enum RyeOsEvent {
         kind: String,
         payload: serde_json::Value,
     },
-    /// Coalesced reconciliation for one dirty hint kind.
-    HintFlush {
-        kind: String,
+    /// Coalesced reconciliation for every dirty hint kind in one client
+    /// window. Reconciliation remains single-flight per resolved source key.
+    HintFlushBatch {
+        kinds: Vec<String>,
     },
     /// A lossy transport came back after a gap (or explicitly requested a
     /// snapshot); rebuild all content-bound sources.

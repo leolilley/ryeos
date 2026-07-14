@@ -79,20 +79,21 @@ async fn run_session_stream(
             continue;
         }
 
-        if frame.event_type == "message" || frame.event_type.ends_with(".hint") {
-            let Some((kind, payload)) = serde_json::from_str::<serde_json::Value>(&frame.data)
-                .ok()
-                .and_then(|value| {
-                    let payload = value.get("payload").cloned().unwrap_or(value);
-                    let kind = payload.get("kind")?.as_str()?.to_string();
-                    Some((kind, payload))
-                })
-            else {
-                continue;
-            };
-            if tx.send(SessionMessage::Hint { kind, payload }).is_err() {
-                break;
-            }
+        if frame.event_type != "thread.hint" {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&frame.data) else {
+            continue;
+        };
+        let Some(kind) = payload
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if tx.send(SessionMessage::Hint { kind, payload }).is_err() {
+            break;
         }
     }
 }

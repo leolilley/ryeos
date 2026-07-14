@@ -83,7 +83,18 @@ pub fn bind_argv_with_command(
     argv: &[String],
     command: Option<&CommandDef>,
 ) -> Result<serde_json::Value, String> {
-    bind_argv_with_command_and_contract(argv, command, None)
+    bind_argv_with_command_and_contract_and_overlay(argv, command, None, None)
+}
+
+/// Command-aware binding with caller-supplied structured fields. The overlay
+/// is merged before form selection and required-slot validation, so data-driven
+/// UI arguments and positional argv are equivalent inputs to one binder.
+pub fn bind_argv_with_command_and_overlay(
+    argv: &[String],
+    command: Option<&CommandDef>,
+    overlay: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    bind_argv_with_command_and_contract_and_overlay(argv, command, None, Some(overlay))
 }
 
 /// Command-aware binding plus optional kind-agnostic invocation contract
@@ -94,11 +105,23 @@ pub fn bind_argv_with_command_and_contract(
     command: Option<&CommandDef>,
     contract: Option<&InvocationInputContract>,
 ) -> Result<serde_json::Value, String> {
+    bind_argv_with_command_and_contract_and_overlay(argv, command, contract, None)
+}
+
+fn bind_argv_with_command_and_contract_and_overlay(
+    argv: &[String],
+    command: Option<&CommandDef>,
+    contract: Option<&InvocationInputContract>,
+    overlay: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let Some(command) = command else {
-        return normalize_params_with_contract(bind_argv(argv), contract);
+        let mut value = bind_argv(argv);
+        merge_overlay(&mut value, overlay)?;
+        return normalize_params_with_contract(value, contract);
     };
 
     let mut value = bind_argv(argv);
+    merge_overlay(&mut value, overlay)?;
     decode_structured_command_fields(&mut value, command)?;
 
     let forms = command.forms.clone();
@@ -216,6 +239,26 @@ pub fn bind_argv_with_command_and_contract(
         "positional arguments {:?} do not match any positional form for alias {:?}",
         positionals, command.tokens
     ))
+}
+
+fn merge_overlay(
+    value: &mut serde_json::Value,
+    overlay: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let Some(overlay) = overlay else {
+        return Ok(());
+    };
+    if overlay.is_null() {
+        return Ok(());
+    }
+    let fields = overlay
+        .as_object()
+        .ok_or_else(|| "command argument overlay must be an object".to_string())?;
+    let target = value
+        .as_object_mut()
+        .ok_or_else(|| "command argument binder returned a non-object".to_string())?;
+    target.extend(fields.clone());
+    Ok(())
 }
 
 /// Normalize already-bound JSON parameters using a kind-agnostic input

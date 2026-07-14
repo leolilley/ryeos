@@ -392,25 +392,6 @@ fn local_project_root(context: &PlanContext) -> Option<PathBuf> {
     Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
 }
 
-fn list_item_from_detail(thread: ThreadDetail) -> ThreadListItem {
-    ThreadListItem {
-        thread_id: thread.thread_id,
-        chain_root_id: thread.chain_root_id,
-        kind: thread.kind,
-        status: thread.status,
-        item_ref: thread.item_ref,
-        launch_mode: thread.launch_mode,
-        current_site_id: thread.current_site_id,
-        origin_site_id: thread.origin_site_id,
-        upstream_thread_id: thread.upstream_thread_id,
-        successor_thread_id: thread.successor_thread_id,
-        requested_by: thread.requested_by,
-        project_root: thread.project_root,
-        created_at: thread.created_at,
-        updated_at: thread.updated_at,
-    }
-}
-
 fn sort_thread_list_items(items: &mut [ThreadListItem], sort: ryeos_state::queries::ThreadSort) {
     match sort {
         ryeos_state::queries::ThreadSort::Default => {
@@ -1516,7 +1497,11 @@ impl ThreadLifecycleService {
             &thread.status,
             thread.upstream_thread_id.as_deref(),
         )?;
-        let project = self.project_summary_for(thread.project_root.as_deref(), &thread.thread_id);
+        let project = thread
+            .project_root
+            .as_deref()
+            .map(Path::new)
+            .map(project_summary);
         let pending = self.pending_input(&thread.thread_id);
         Ok(ThreadView {
             thread,
@@ -1527,23 +1512,6 @@ impl ThreadLifecycleService {
         })
     }
 
-    fn project_summary_for(
-        &self,
-        projected_root: Option<&str>,
-        thread_id: &str,
-    ) -> Option<ProjectSummary> {
-        if let Some(path) = projected_root {
-            return Some(project_summary(Path::new(path)));
-        }
-        let metadata = self.state_store.get_launch_metadata(thread_id).ok()??;
-        let ctx = metadata.resume_context.as_ref()?;
-        let path = match &ctx.project_context {
-            ProjectContext::LocalPath { path } => path,
-            _ => return None,
-        };
-        Some(project_summary(path))
-    }
-
     /// Decorate a page of list rows. Batches the follow lineage: ONE
     /// `list_follow_waiters` read, joined in memory against the page, so the list
     /// path never issues a per-row runtime_db query. The durable
@@ -1552,7 +1520,24 @@ impl ThreadLifecycleService {
     /// once the waiter is gone the successor is an ordinary recoverable thread and
     /// its lineage shows in inspect, not the list.
     fn decorate_list_items(&self, items: Vec<ThreadListItem>) -> Result<Vec<ThreadListView>> {
-        let waiters = self.state_store.list_follow_waiters()?;
+        let thread_ids = items
+            .iter()
+            .map(|item| item.thread_id.clone())
+            .collect::<Vec<_>>();
+        let enrichment = self.state_store.thread_list_enrichment(&thread_ids)?;
+        Ok(self.decorate_list_items_with_enrichment(items, enrichment))
+    }
+
+    fn decorate_list_items_with_enrichment(
+        &self,
+        items: Vec<ThreadListItem>,
+        enrichment: crate::state_store::ThreadListEnrichment,
+    ) -> Vec<ThreadListView> {
+        let crate::state_store::ThreadListEnrichment {
+            follow_waiters: waiters,
+            mut facets,
+            mut current_graph_nodes,
+        } = enrichment;
         let mut by_parent: std::collections::HashMap<&str, &crate::runtime_db::FollowWaiter> =
             std::collections::HashMap::new();
         let mut by_successor: std::collections::HashMap<&str, &crate::runtime_db::FollowWaiter> =
@@ -1563,7 +1548,7 @@ impl ThreadLifecycleService {
                 by_successor.insert(succ.as_str(), w);
             }
         }
-        Ok(items
+        items
             .into_iter()
             .map(|item| {
                 let execution = self.execution_facts(&item.kind);
@@ -1579,24 +1564,19 @@ impl ThreadLifecycleService {
                         .get(item.thread_id.as_str())
                         .map(|w| FollowFact::resume_successor_live(w))
                 });
-                let project = self.project_summary_for(
-                    item.project_root.as_deref(),
-                    &item.thread_id,
-                );
+                let project = item
+                    .project_root
+                    .as_deref()
+                    .map(Path::new)
+                    .map(project_summary);
                 let pending = self.pending_input(&item.thread_id);
-                // Cohort/fleet tags for client columns. Best-effort per row (fine
-                // at fleet scale); a facet-read hiccup just yields no tags, never
-                // fails the list.
-                let facets = self
-                    .state_store
-                    .get_facets(&item.thread_id)
+                let facets = facets
+                    .remove(&item.thread_id)
                     .unwrap_or_default()
                     .into_iter()
                     .collect();
-                let current_node = self
-                    .state_store
-                    .current_graph_node(&item.thread_id)
-                    .unwrap_or_default()
+                let current_node = current_graph_nodes
+                    .remove(&item.thread_id)
                     .map(|(node, step)| CurrentNode { node, step });
                 ThreadListView {
                     item,
@@ -1608,33 +1588,13 @@ impl ThreadLifecycleService {
                     current_node,
                 }
             })
-            .collect())
-    }
-
-    fn active_follow_parent_items(
-        &self,
-        filter: &ryeos_state::queries::ThreadListFilter,
-    ) -> Result<Vec<ThreadListItem>> {
-        let mut items = Vec::new();
-        for waiter in self.state_store.list_follow_waiters()? {
-            let Some(thread) = self.state_store.get_thread(&waiter.parent_thread_id)? else {
-                continue;
-            };
-            if thread.status != "continued" {
-                continue;
-            }
-            let item = list_item_from_detail(thread);
-            if self.thread_list_item_matches_filter(&item, filter) {
-                items.push(item);
-            }
-        }
-        Ok(items)
+            .collect()
     }
 
     fn thread_list_item_matches_filter(
-        &self,
         item: &ThreadListItem,
         filter: &ryeos_state::queries::ThreadListFilter,
+        facets: &std::collections::HashMap<String, Vec<(String, String)>>,
     ) -> bool {
         if let Some(principal) = &filter.principal {
             if item.requested_by.as_deref() != Some(principal.as_str()) {
@@ -1668,21 +1628,14 @@ impl ThreadLifecycleService {
             return false;
         }
         if let Some(project_root) = &filter.project_root {
-            if item
-                .project_root
-                .as_deref()
-                .is_some_and(|root| Path::new(root) != project_root)
-            {
+            if item.project_root.as_deref().map(Path::new) != Some(project_root.as_path()) {
                 return false;
             }
         }
         if let Some((key, value)) = &filter.facet {
-            let has_facet = self
-                .state_store
-                .get_facets(&item.thread_id)
-                .unwrap_or_default()
-                .into_iter()
-                .any(|(k, v)| k == *key && v == *value);
+            let has_facet = facets
+                .get(&item.thread_id)
+                .is_some_and(|rows| rows.iter().any(|(k, v)| k == key && v == value));
             if !has_facet {
                 return false;
             }
@@ -1897,12 +1850,29 @@ impl ThreadLifecycleService {
     ) -> Result<Vec<ThreadListView>> {
         let mut items = self.state_store.list_threads_query(limit, filter, sort)?;
         if filter.active_only || filter.project_root.is_some() {
+            let crate::state_store::FollowParentListSnapshot { waiters, parents } =
+                self.state_store.follow_parent_list_snapshot()?;
+            let mut enrichment_ids = items
+                .iter()
+                .map(|item| item.thread_id.clone())
+                .collect::<Vec<_>>();
+            enrichment_ids.extend(parents.iter().map(|item| item.thread_id.clone()));
+            enrichment_ids.sort();
+            enrichment_ids.dedup();
+            let enrichment = self
+                .state_store
+                .thread_list_enrichment_with_waiters(&enrichment_ids, waiters)?;
             let mut seen = items
                 .iter()
                 .map(|item| item.thread_id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
             let mut suspended = std::collections::BTreeSet::new();
-            for item in self.active_follow_parent_items(filter)? {
+            for item in parents {
+                if item.status != "continued"
+                    || !Self::thread_list_item_matches_filter(&item, filter, &enrichment.facets)
+                {
+                    continue;
+                }
                 // A matching continued parent may already be in the SQL page,
                 // but the live waiter still makes it effectively active for
                 // Watch ordering.
@@ -1927,6 +1897,7 @@ impl ThreadLifecycleService {
                 sort_thread_list_items(&mut items, sort);
             }
             items.truncate(limit);
+            return Ok(self.decorate_list_items_with_enrichment(items, enrichment));
         }
         self.decorate_list_items(items)
     }

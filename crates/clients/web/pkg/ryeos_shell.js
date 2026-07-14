@@ -76,7 +76,9 @@ async function commit(envelope) {
       requestAnimationFrame(() => root?.querySelector("[data-ryeos-overlay-input]")?.focus());
     }
     for (const effect of envelope.effects || []) {
-      runEffect(effect)
+      runEffect(effect, {
+        project_path: envelope.view_model?.session?.project_path,
+      })
         .then((result) => {
           if (result?.kind === "dimension" && result?.data) latestDimension = result.data;
           ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
@@ -312,9 +314,7 @@ function attachSessionEvents(session) {
           const kinds = [...dirtyHintKinds];
           dirtyHintKinds.clear();
           hintFlushTimer = null;
-          kinds.forEach((dirtyKind) => {
-            void commit(ryeos_dispatch({ type: "hint_flush", kind: dirtyKind }));
-          });
+          void commit(ryeos_dispatch({ type: "hint_flush_batch", kinds }));
         }, 500);
       }
     } catch (error) {
@@ -349,21 +349,24 @@ function syncThreadTail(vm) {
   let opened = false;
   const forward = (event) => {
     try {
-      const payload = JSON.parse(event.data);
+      const frame = JSON.parse(event.data);
+      const eventType = frame?.event_type;
+      if (!eventType) return;
+      const payload = frame?.payload ?? null;
       ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
       void commit(ryeos_dispatch({
         type: "thread_tail",
         thread_id: payload?.thread_id || threadTailThreadId,
-        event_type: payload?.event_type || payload?._stream_event_type || event.type || "message",
+        event_type: eventType,
         payload,
       }));
     } catch (error) {
       console.warn("Failed to process RyeOS thread tail", error);
     }
   };
-  // The browser-authenticated tail adapter deliberately emits every envelope
-  // as an unnamed SSE message. EventSource has no wildcard listener for named
-  // events, so this keeps new event kinds forward-compatible.
+  // The browser-authenticated adapter carries one canonical
+  // `{event_type,payload}` frame inside unnamed SSE messages because
+  // EventSource has no wildcard listener for named events.
   source.addEventListener("message", forward);
   source.addEventListener("open", () => {
     if (opened) {

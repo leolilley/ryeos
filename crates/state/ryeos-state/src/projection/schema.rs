@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_hash ON events(event_hash);
 CREATE INDEX IF NOT EXISTS idx_events_chain_root ON events(chain_root_id);
 CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
+CREATE INDEX IF NOT EXISTS idx_events_thread_type_seq ON events(thread_id, event_type, thread_seq);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 
 -- Event replay index: track indexed position per thread
@@ -1222,6 +1223,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_events_thread_id",
                 table: "events",
                 columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_events_thread_type_seq",
+                table: "events",
+                columns: &["thread_id", "event_type", "thread_seq"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {

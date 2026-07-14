@@ -18,7 +18,7 @@ use ryeos_api::routes::response_modes::event_stream_mode::{
     validate_and_extract_path_capture, EventStreamStrategy, StreamSourceCompiler,
 };
 use ryeos_app::route_raw::RawRouteSpec;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio_stream::StreamExt;
 
 const SOURCE: &str = "browser_chain_tail";
@@ -114,22 +114,10 @@ impl CompiledRouteInvocation for CompiledBrowserChainTailInvocation {
         let keep_alive_secs = stream.keep_alive_secs;
         let events = stream.events.map(|item| {
             item.map(|mut envelope| {
-                let original_type = envelope.event_type.clone();
-                match &mut envelope.payload {
-                    Value::Object(map) => {
-                        map.entry("_stream_event_type".to_string())
-                            .or_insert_with(|| Value::String(original_type));
-                    }
-                    payload => {
-                        let mut wrapped = Map::new();
-                        wrapped.insert(
-                            "_stream_event_type".to_string(),
-                            Value::String(original_type),
-                        );
-                        wrapped.insert("payload".to_string(), std::mem::take(payload));
-                        *payload = Value::Object(wrapped);
-                    }
-                }
+                envelope.payload = serde_json::json!({
+                    "event_type": envelope.event_type,
+                    "payload": envelope.payload,
+                });
                 envelope.event_type = "message".to_string();
                 envelope
             })

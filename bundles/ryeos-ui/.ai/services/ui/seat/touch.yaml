@@ -1,8 +1,11 @@
+# ryeos:signed:2026-07-14T02:18:23Z:caf07aff3bba670a57a70bf9f55d1727e6a3ff22e1af26dc4dfa0d8022751a12:q5cPGIXzH0pPMV6Wj+jcTUTKwQFwe+2PbRBz1Xk/63QGM24bJ6jkFJ6H7zRTkCWa+fTDzkPCagTlAEkPkfYiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-touch
 version: "1.0.0"
 description: Refresh the runtime presence lease for the browser session seat
 endpoint: ui.seat.touch
+ui_read_only: true
+ui_dispatch: session_local
 record_thread: false
 availability: daemon_only
 schema:

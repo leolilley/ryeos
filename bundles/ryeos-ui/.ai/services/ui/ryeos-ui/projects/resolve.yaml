@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-06T12:24:56Z:baecc7dc022254c80c1097199244e369b11f414e32d721327b3bd09f0ca67ccd:qdgLRD0nUP6p6iUO/2zRejbY1LVjvn0DLAMmZWvrKqpzX12YDLG0nqk3zYq5agMDrNpccYM9kya9wY+/aW+rBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:19cc26fe32d7b47a286a38132584316fb3e9133f36373a7c0ad82edf6c71e14f:tPmNSJlsO35+bniMO8xJKSNa+BkPcjujiNPlLYHUn96i4BMeOklL8pqLoldmRzWTbkNuK2uChh6Hib0Y6B4uBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/projects/resolve
 version: "1.0.0"
 description: Resolve one local RyeOS UI project registry entry by opaque local id.
 endpoint: ui.ryeos.projects.resolve
+ui_read_only: true
 record_thread: false
 availability: daemon_only

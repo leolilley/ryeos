@@ -71,7 +71,6 @@ pub(crate) use subprocess_policy::strip_binary_ref_prefix;
 pub use subprocess_policy::PreparedManagedLaunch;
 use subprocess_policy::{
     enforce_runtime_caps, prepare_managed_launch, require_terminal_executor_id,
-    service_params_with_project_path,
 };
 
 /// Trusted parent execution context carried out-of-band through schema-driven
@@ -280,6 +279,14 @@ pub(crate) fn resolve_dispatch_hop(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
 ) -> Result<VerifiedHop, DispatchError> {
+    resolve_dispatch_hop_with_verified(current_ref, ctx, None)
+}
+
+fn resolve_dispatch_hop_with_verified(
+    current_ref: &CanonicalRef,
+    ctx: &ExecutionContext,
+    preverified: Option<VerifiedItem>,
+) -> Result<VerifiedHop, DispatchError> {
     // **B4 fast-path**: if the schema for the ref's kind already
     // declares "no execution block" (config, V5.3 knowledge, …),
     // short-circuit to NotRootExecutable BEFORE attempting engine
@@ -300,27 +307,40 @@ pub(crate) fn resolve_dispatch_hop(
     // for runtime refs — engine.resolve produces content_hash,
     // source_path, and audit data for ALL kinds including runtime.
     // Verification failure is a hard error at the hop boundary.
-    let verified: Option<VerifiedItem> = match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
-        Ok(resolved) => {
-            let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
-                DispatchError::InvalidRef(
-                    current_ref.to_string(),
-                    format!("verification failed: {e}"),
-                )
-            })?;
-            tracing::debug!(
-                item_ref = %current_ref,
-                trust_class = ?v.trust_class,
-                "hop verified"
-            );
-            Some(v)
+    let verified: Option<VerifiedItem> = if let Some(verified) = preverified {
+        if verified.resolved.canonical_ref != *current_ref {
+            return Err(DispatchError::InvalidRef(
+                current_ref.to_string(),
+                format!(
+                    "preverified item ref mismatch: verified '{}'",
+                    verified.resolved.canonical_ref
+                ),
+            ));
         }
-        Err(_) => {
-            // Resolution failed — the ref may not exist on disk. This
-            // is not necessarily fatal: the schema lookup below will
-            // produce a clearer error (SchemaMisconfigured enumerating
-            // available kinds) if the kind has no items at all.
-            None
+        Some(verified)
+    } else {
+        match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
+            Ok(resolved) => {
+                let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
+                    DispatchError::InvalidRef(
+                        current_ref.to_string(),
+                        format!("verification failed: {e}"),
+                    )
+                })?;
+                tracing::debug!(
+                    item_ref = %current_ref,
+                    trust_class = ?v.trust_class,
+                    "hop verified"
+                );
+                Some(v)
+            }
+            Err(_) => {
+                // Resolution failed — the ref may not exist on disk. This
+                // is not necessarily fatal: the schema lookup below will
+                // produce a clearer error (SchemaMisconfigured enumerating
+                // available kinds) if the kind has no items at all.
+                None
+            }
         }
     };
 
@@ -1520,6 +1540,8 @@ pub(crate) fn finalize_params(
 pub async fn dispatch_service(
     item_ref: &str,
     thread_profile: &str,
+    verified: Option<VerifiedItem>,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -1554,45 +1576,42 @@ pub async fn dispatch_service(
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
         } => {
-            let verified = service_executor::resolve_and_verify(
-                &ctx.engine,
-                &ctx.plan_ctx,
-                item_ref,
-                Some("service"),
-            )
-            .map_err(|e| {
-                match e.downcast_ref::<ryeos_engine::error::EngineError>() {
-                    // The service item YAML is absent from every search
-                    // space — the bundle shipping it is not installed.
-                    // Surface the installed-bundle list instead of an
-                    // opaque 500 so a remote operator can repair the
-                    // deployment without source-level debugging.
-                    Some(ryeos_engine::error::EngineError::ItemNotFound {
-                        searched_spaces,
-                        ..
-                    }) => {
-                        let mut installed_bundles: Vec<String> = state
-                            .node_config
-                            .bundles
-                            .iter()
-                            .map(|b| b.name.clone())
-                            .collect();
-                        installed_bundles.sort();
-                        DispatchError::ServiceNotInstalled {
-                            service_ref: item_ref.to_string(),
-                            installed_bundles,
-                            searched_spaces: searched_spaces.clone(),
+            let verified = match verified {
+                Some(verified) => verified,
+                None => service_executor::resolve_and_verify(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    item_ref,
+                    Some("service"),
+                )
+                .map_err(|e| {
+                    match e.downcast_ref::<ryeos_engine::error::EngineError>() {
+                        // The service item YAML is absent from every search
+                        // space — the bundle shipping it is not installed.
+                        // Surface the installed-bundle list instead of an
+                        // opaque 500 so a remote operator can repair the
+                        // deployment without source-level debugging.
+                        Some(ryeos_engine::error::EngineError::ItemNotFound {
+                            searched_spaces,
+                            ..
+                        }) => {
+                            let mut installed_bundles: Vec<String> = state
+                                .node_config
+                                .bundles
+                                .iter()
+                                .map(|b| b.name.clone())
+                                .collect();
+                            installed_bundles.sort();
+                            DispatchError::ServiceNotInstalled {
+                                service_ref: item_ref.to_string(),
+                                installed_bundles,
+                                searched_spaces: searched_spaces.clone(),
+                            }
                         }
+                        _ => DispatchError::Internal(e),
                     }
-                    _ => DispatchError::Internal(e),
-                }
-            })?;
-            let params = service_params_with_project_path(
-                request.params.clone(),
-                &verified,
-                request.project_path,
-            );
-
+                })?,
+            };
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
             // handler body must NEVER be reached because it will fail on
@@ -1626,11 +1645,12 @@ pub async fn dispatch_service(
             let result: ServiceExecutionResult = service_executor::execute_service_verified(
                 verified,
                 item_ref,
-                params,
+                request.params.clone(),
                 ExecutionMode::Live,
                 ctx,
                 state,
                 None,
+                local_handler_context,
             )
             .await
             // `execute_service_verified` maps a handler's typed `HandlerError`
@@ -2688,11 +2708,58 @@ pub async fn dispatch(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
+    dispatch_inner(item_ref, None, None, request, ctx, state).await
+}
+
+/// Dispatch an item whose root resolution and verification have already been
+/// completed by the caller. The verified root enters the same schema-driven
+/// hop loop as [`dispatch`]; only the first resolve/verify operation is reused.
+pub async fn dispatch_verified(
+    item_ref: &str,
+    verified: VerifiedItem,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
+    dispatch_inner(item_ref, Some(verified), None, request, ctx, state).await
+}
+
+/// Dispatch an already-verified root while carrying trusted local context for
+/// an in-process handler whose signed item policy requests it. Routing remains
+/// entirely schema-driven; subprocess and method terminators ignore it.
+pub async fn dispatch_verified_with_handler_context(
+    item_ref: &str,
+    verified: VerifiedItem,
+    local_handler_context: ryeos_app::handler_context::HandlerContext,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
+    dispatch_inner(
+        item_ref,
+        Some(verified),
+        Some(local_handler_context),
+        request,
+        ctx,
+        state,
+    )
+    .await
+}
+
+async fn dispatch_inner(
+    item_ref: &str,
+    verified_root: Option<VerifiedItem>,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<Value, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
     let mut hops: usize = 0;
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
+    let mut verified_root = verified_root;
 
     // Reject a method call (`call.method`/`call.args`) aimed at a kind that
     // does not declare method dispatch. The method selector is control
@@ -2777,7 +2844,7 @@ pub async fn dispatch(
             });
         }
 
-        let hop = resolve_dispatch_hop(&current_ref, ctx)?;
+        let hop = resolve_dispatch_hop_with_verified(&current_ref, ctx, verified_root.take())?;
 
         // Destructure up front so the match on `next` (which moves
         // the terminator out) can't conflict with later borrows. All
@@ -2820,6 +2887,7 @@ pub async fn dispatch(
                     ctx,
                     state,
                     &role,
+                    local_handler_context,
                 )
                 .await;
             }
@@ -3158,6 +3226,7 @@ async fn dispatch_by(
     ctx: &ExecutionContext,
     state: &AppState,
     role: &SubprocessRole,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<Value, DispatchError> {
     let DispatchByParams {
         terminator,
@@ -3193,7 +3262,16 @@ async fn dispatch_by(
                 kind: canonical_ref.kind.clone(),
                 detail: "service terminator has no thread_profile".into(),
             })?;
-            dispatch_service(&canonical_ref.to_string(), &tp, request, ctx, state).await
+            dispatch_service(
+                &canonical_ref.to_string(),
+                &tp,
+                verified,
+                local_handler_context,
+                request,
+                ctx,
+                state,
+            )
+            .await
         }
     }
 }
@@ -3346,130 +3424,6 @@ metadata:
             plan_ctx: test_plan_context(project_path),
             requested_call: None,
         }
-    }
-
-    fn verified_service_with_schema(
-        schema: Option<Value>,
-    ) -> ryeos_engine::contracts::VerifiedItem {
-        let source_path = tempdir().join("status.yaml");
-        fs::write(&source_path, "kind: service\nendpoint: project.status\n").unwrap();
-        let mut extra = std::collections::HashMap::new();
-        if let Some(schema) = schema {
-            extra.insert("schema".to_string(), schema);
-        }
-        let canonical_ref = CanonicalRef::parse("service:project/status").unwrap();
-        ryeos_engine::contracts::VerifiedItem {
-            resolved: ryeos_engine::contracts::ResolvedItem {
-                canonical_ref,
-                kind: "service".into(),
-                source_path,
-                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
-                resolved_from: "system".into(),
-                shadowed: Vec::new(),
-                materialized_project_root: None,
-                content_hash: lillux::cas::sha256_hex(b"test"),
-                signature_header: None,
-                source_format: ryeos_engine::contracts::ResolvedSourceFormat {
-                    extension: ".yaml".into(),
-                    parser: "parser:ryeos/core/yaml/yaml".into(),
-                    signature: ryeos_engine::contracts::SignatureEnvelope {
-                        prefix: "#".into(),
-                        suffix: None,
-                        after_shebang: false,
-                    },
-                },
-                metadata: ryeos_engine::contracts::ItemMetadata {
-                    extra,
-                    ..Default::default()
-                },
-            },
-            signer: None,
-            trust_class: ryeos_engine::contracts::TrustClass::Trusted,
-            pinned_version: None,
-        }
-    }
-
-    fn verified_service_with_body(body: &str) -> ryeos_engine::contracts::VerifiedItem {
-        let source_path = tempdir().join("status.yaml");
-        fs::write(&source_path, body).unwrap();
-        let mut verified = verified_service_with_schema(None);
-        verified.resolved.source_path = source_path;
-        verified
-    }
-
-    #[test]
-    fn service_project_path_is_injected_when_schema_declares_it() {
-        let verified = verified_service_with_schema(Some(json!({
-            "project_path": "string",
-            "provider": "string?"
-        })));
-        let params = service_params_with_project_path(
-            json!({"provider": "zen"}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/tmp/project");
-        assert_eq!(params["provider"], "zen");
-    }
-
-    #[test]
-    fn service_project_path_does_not_override_explicit_param() {
-        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
-        let params = service_params_with_project_path(
-            json!({"project_path": "/explicit"}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/explicit");
-    }
-
-    #[test]
-    fn service_project_path_overwrites_empty_opt_in_param() {
-        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
-        let params = service_params_with_project_path(
-            json!({"project_path": ""}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/tmp/project");
-    }
-
-    #[test]
-    fn service_project_path_overwrites_null_opt_in_param() {
-        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
-        let params = service_params_with_project_path(
-            json!({"project_path": null}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert_eq!(params["project_path"], "/tmp/project");
-    }
-
-    #[test]
-    fn service_project_path_is_not_injected_without_schema_field() {
-        let verified = verified_service_with_schema(Some(json!({"provider": "string?"})));
-        let params = service_params_with_project_path(
-            json!({"provider": "zen"}),
-            &verified,
-            Path::new("/tmp/project"),
-        );
-
-        assert!(params.get("project_path").is_none());
-    }
-
-    #[test]
-    fn service_project_path_is_injected_from_service_yaml_schema_mapping() {
-        let verified = verified_service_with_body(
-            "# ryeos:signed:test\nkind: service\nendpoint: project.status\nschema:\n  project_path: string\n",
-        );
-        let params =
-            service_params_with_project_path(json!({}), &verified, Path::new("/tmp/project"));
-
-        assert_eq!(params["project_path"], "/tmp/project");
     }
 
     fn write_signed_manifest(ai_dir: &std::path::Path, body: &str) {

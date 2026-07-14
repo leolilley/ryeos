@@ -582,8 +582,19 @@ pub struct RyeOsCore {
     pub active_workspace: usize,
     pub runtime: RyeOsRuntimeState,
     pub pending_effects: BTreeMap<u64, RyeOsEffectKind>,
+    /// Latest hint-driven reconciliation requested while the same source key
+    /// already had a fetch in flight. Transient client backpressure: at most
+    /// one request runs and one trailing request waits per source.
+    #[serde(default, skip)]
+    pub(crate) deferred_source_fetches: BTreeMap<String, DeferredSourceFetch>,
     pub generation: u64,
     pub next_effect_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeferredSourceFetch {
+    pub source_ref: String,
+    pub params: serde_json::Value,
 }
 
 impl RyeOsCore {
@@ -922,7 +933,15 @@ impl RyeOsCore {
     /// declares `refresh.on_hint: <kind>` or includes it in an array. Content
     /// decides its own liveness.
     pub fn effects_for_hint(&mut self, kind: &str) -> Vec<RyeOsEffect> {
-        let mut targets: Vec<(String, String)> = self
+        self.effects_for_hints(&[kind.to_string()])
+    }
+
+    /// Reconcile one client coalescing window. Targets are unioned across hint
+    /// kinds before any effects are emitted, then each source key goes through
+    /// the hint single-flight gate. This prevents `[thread, activity]` views
+    /// from issuing duplicate reads for one burst.
+    pub fn effects_for_hints(&mut self, kinds: &[String]) -> Vec<RyeOsEffect> {
+        let mut targets: std::collections::BTreeSet<(String, String)> = self
             .workspace
             .tile_ids()
             .into_iter()
@@ -930,7 +949,9 @@ impl RyeOsCore {
                 let tile = self.workspace.tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
-                refresh_matches_hint(binding.refresh.get("on_hint"), kind)
+                kinds
+                    .iter()
+                    .any(|kind| refresh_matches_hint(binding.refresh.get("on_hint"), kind))
                     .then(|| (tile_id.0.to_string(), view_ref.clone()))
             })
             .collect();
@@ -939,13 +960,17 @@ impl RyeOsCore {
                 .into_iter()
                 .filter(|(_, view_ref)| {
                     self.views.get(view_ref).is_some_and(|binding| {
-                        refresh_matches_hint(binding.refresh.get("on_hint"), kind)
+                        kinds
+                            .iter()
+                            .any(|kind| refresh_matches_hint(binding.refresh.get("on_hint"), kind))
                     })
                 }),
         );
         targets
             .into_iter()
-            .flat_map(|(source_key, view_ref)| self.emit_fetch_source_keyed(source_key, &view_ref))
+            .flat_map(|(source_key, view_ref)| {
+                self.emit_fetch_source_keyed_policy(source_key, &view_ref, true)
+            })
             .collect()
     }
 
@@ -972,6 +997,15 @@ impl RyeOsCore {
         &mut self,
         source_key: String,
         view_ref: &str,
+    ) -> Vec<RyeOsEffect> {
+        self.emit_fetch_source_keyed_policy(source_key, view_ref, false)
+    }
+
+    fn emit_fetch_source_keyed_policy(
+        &mut self,
+        source_key: String,
+        view_ref: &str,
+        hint_single_flight: bool,
     ) -> Vec<RyeOsEffect> {
         let Some(binding) = self.views.get(view_ref) else {
             return Vec::new();
@@ -1000,7 +1034,9 @@ impl RyeOsCore {
             // otherwise blank a sections view every coalesced activity tick.
             return resolved
                 .into_iter()
-                .filter_map(|(key, source, params)| self.build_fetch_source(key, &source, params))
+                .filter_map(|(key, source, params)| {
+                    self.build_fetch_source(key, &source, params, hint_single_flight)
+                })
                 .collect();
         }
         let Some(source) = binding.source.clone() else {
@@ -1030,7 +1066,7 @@ impl RyeOsCore {
                 params = serde_json::json!({ param: text });
             }
         }
-        self.build_fetch_source(source_key, &source, params)
+        self.build_fetch_source(source_key, &source, params, hint_single_flight)
             .into_iter()
             .collect()
     }
@@ -1058,15 +1094,63 @@ impl RyeOsCore {
         }
     }
 
+    /// Drop every cached and in-flight source instance owned by one bound
+    /// view host. Subject transitions call this before resolving the new
+    /// parameters, so an unresolved new subject stays empty and responses for
+    /// the prior subject are ignored rather than landing under the new route.
+    pub(crate) fn invalidate_view_sources(&mut self, source_key: &str, view_ref: &str) {
+        let Some(binding) = self.views.get(view_ref) else {
+            return;
+        };
+        let keys = if binding.widget == "sections" {
+            (0..binding.sections.len())
+                .map(|index| super::content::section_source_key(source_key, index))
+                .collect::<Vec<_>>()
+        } else {
+            vec![source_key.to_string()]
+        };
+        self.pending_effects.retain(|_, kind| {
+            !matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if keys.contains(tile_id))
+        });
+        for key in keys {
+            self.data.sources.remove(&key);
+            self.data.source_epoch.remove(&key);
+            self.data.source_stored_epoch.remove(&key);
+            self.data.source_floor.remove(&key);
+            self.data.timeline_sources.remove(&key);
+            self.deferred_source_fetches.remove(&key);
+        }
+    }
+
     fn build_fetch_source(
         &mut self,
         source_key: String,
         source: &super::content::SourceBinding,
         params: serde_json::Value,
+        hint_single_flight: bool,
     ) -> Option<RyeOsEffect> {
         if facet_param_unresolved(&source.params, &params) {
             return None;
         }
+        if hint_single_flight
+            && self.pending_effects.values().any(|kind| {
+                matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &source_key)
+            })
+        {
+            self.deferred_source_fetches.insert(
+                source_key,
+                DeferredSourceFetch {
+                    source_ref: source.item_ref.clone(),
+                    params,
+                },
+            );
+            return None;
+        }
+        // A fetch that can launch now supersedes any parked request for this
+        // key. This is especially important for explicit subject changes
+        // (lens/filter/project): an older deferred hint must never refetch the
+        // previous subject after the new request settles.
+        self.deferred_source_fetches.remove(&source_key);
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.clone(),
             source_ref: source.item_ref.clone(),
@@ -1076,6 +1160,52 @@ impl RyeOsCore {
         // for the same key that resolves later is then dropped on arrival.
         self.data.source_epoch.insert(source_key, effect.id);
         Some(effect)
+    }
+
+    /// Release one trailing hint reconciliation after the prior request for
+    /// the same source key settles. If another (non-hint) request is still in
+    /// flight, leave the trailing request parked until the final one settles.
+    pub(crate) fn release_deferred_source_fetch(
+        &mut self,
+        source_key: &str,
+    ) -> Option<RyeOsEffect> {
+        if self.pending_effects.values().any(|kind| {
+            matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == source_key)
+        }) {
+            return None;
+        }
+        if !self.source_key_is_live(source_key) {
+            self.deferred_source_fetches.remove(source_key);
+            return None;
+        }
+        let deferred = self.deferred_source_fetches.remove(source_key)?;
+        let effect = self.emit(RyeOsEffectKind::FetchSource {
+            tile_id: source_key.to_string(),
+            source_ref: deferred.source_ref,
+            params: deferred.params,
+        });
+        self.data
+            .source_epoch
+            .insert(source_key.to_string(), effect.id);
+        Some(effect)
+    }
+
+    fn source_key_is_live(&self, source_key: &str) -> bool {
+        let host_key = source_key
+            .split_once("#section")
+            .map(|(host, _)| host)
+            .unwrap_or(source_key);
+        if host_key.starts_with("dock:") {
+            return self
+                .visible_dock_views()
+                .iter()
+                .any(|(key, _)| key == host_key);
+        }
+        host_key
+            .parse::<u64>()
+            .ok()
+            .map(crate::ids::TileId::new)
+            .is_some_and(|tile_id| self.workspace.tiles.contains_key(&tile_id))
     }
 
     /// Visible content-bound slot views, keyed for source fetches.
@@ -1858,6 +1988,7 @@ impl Default for RyeOsCore {
             active_workspace: 0,
             runtime: RyeOsRuntimeState::default(),
             pending_effects: BTreeMap::new(),
+            deferred_source_fetches: BTreeMap::new(),
             generation: 0,
             next_effect_id: 0,
         }

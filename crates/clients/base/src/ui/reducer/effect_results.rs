@@ -14,13 +14,17 @@ impl RyeOsCore {
         let Some(expected) = self.pending_effects.remove(&result.id) else {
             return Vec::new();
         };
+        let completed_source_key = match &expected {
+            RyeOsEffectKind::FetchSource { tile_id, .. } => Some(tile_id.clone()),
+            _ => None,
+        };
 
         if !effect_result_kind_matches(&expected, &result.kind) {
             self.notice(
                 "RyeOS ignored a mismatched platform effect result.",
                 RyeOsTone::Warn,
             );
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
         if !result.ok {
@@ -28,7 +32,7 @@ impl RyeOsCore {
                 effect_failure_notice(&expected, result.error.as_deref()),
                 RyeOsTone::Danger,
             );
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
         if matches!(
@@ -42,15 +46,30 @@ impl RyeOsCore {
                 .as_ref()
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            return self.apply_invocation_result(&expected, result.kind, data);
+            let effects = self.apply_invocation_result(&expected, result.kind, data);
+            return self.finish_source_effect(completed_source_key.as_deref(), effects);
         }
 
         let Some(data) = result.data else {
             self.bump_generation();
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         };
 
-        self.apply_source_result(&expected, result.kind, result.id, data)
+        let effects = self.apply_source_result(&expected, result.kind, result.id, data);
+        self.finish_source_effect(completed_source_key.as_deref(), effects)
+    }
+
+    fn finish_source_effect(
+        &mut self,
+        completed_source_key: Option<&str>,
+        mut effects: Vec<RyeOsEffect>,
+    ) -> Vec<RyeOsEffect> {
+        if let Some(effect) = completed_source_key
+            .and_then(|source_key| self.release_deferred_source_fetch(source_key))
+        {
+            effects.push(effect);
+        }
+        effects
     }
 
     /// Effect batches resolve concurrently, so an older shared-dataset
@@ -458,6 +477,9 @@ impl RyeOsCore {
         self.data.tile_files.clear();
         self.data.sources.clear();
         self.data.source_epoch.clear();
+        self.data.source_stored_epoch.clear();
+        self.data.source_floor.clear();
+        self.deferred_source_fetches.clear();
         self.data.timeline_sources.clear();
         self.data.file_read = None;
         self.pending_effects
@@ -701,6 +723,7 @@ fn effect_depends_on_project_binding(kind: &RyeOsEffectKind) -> bool {
             | RyeOsEffectKind::ListFiles { .. }
             | RyeOsEffectKind::ReadFile { .. }
             | RyeOsEffectKind::DispatchInvocation { .. }
+            | RyeOsEffectKind::FetchSource { .. }
     )
 }
 

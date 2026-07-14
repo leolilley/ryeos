@@ -1,4 +1,4 @@
-use super::effect::RyeOsEffect;
+use super::effect::{RyeOsEffect, RyeOsEffectKind};
 use super::event::RyeOsStackMoveDirection;
 use super::model::RyeOsCore;
 use super::view_model::{RyeOsMotionEventVm, RyeOsSplitAxisVm};
@@ -209,7 +209,14 @@ impl RyeOsCore {
         self.data.tile_items.clear();
         self.data.tile_files.clear();
         self.data.tile_file_space.clear();
+        self.data.sources.clear();
+        self.data.source_epoch.clear();
+        self.data.source_stored_epoch.clear();
+        self.data.source_floor.clear();
         self.data.timeline_sources.clear();
+        self.deferred_source_fetches.clear();
+        self.pending_effects
+            .retain(|_, kind| !matches!(kind, RyeOsEffectKind::FetchSource { .. }));
         self.data.file_read = None;
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -290,6 +297,9 @@ impl RyeOsCore {
                 self.data.source_epoch.remove(&key);
                 self.data.source_stored_epoch.remove(&key);
                 self.data.timeline_sources.remove(&key);
+                let section_prefix = format!("{key}#section");
+                self.deferred_source_fetches
+                    .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
                 self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
                 self.bump_generation();
                 let effects = self.effects_for_view(&view);
@@ -345,20 +355,26 @@ impl RyeOsCore {
     }
 
     pub(crate) fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
+        let source_key = tile_id.0.to_string();
+        let section_prefix = format!("{source_key}#section");
         if self.workspace.tile_ids().len() <= 1 {
             if self.workspace.center_is_empty() || !self.workspace.tiles.contains_key(&tile_id) {
                 return false;
             }
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: tile_id.0.to_string(),
+                tile_id: source_key.clone(),
             });
             self.workspace.reset_to_empty();
+            self.deferred_source_fetches
+                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             return true;
         }
         if self.workspace.close_tile(tile_id) {
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: tile_id.0.to_string(),
+                tile_id: source_key.clone(),
             });
+            self.deferred_source_fetches
+                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
                 tile_id: self.workspace.focused_tile.0.to_string(),
             });

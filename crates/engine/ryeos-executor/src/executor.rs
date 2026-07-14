@@ -166,7 +166,7 @@ pub async fn execute_service(
     state: &AppState,
 ) -> Result<ServiceExecutionResult> {
     let verified = resolve_and_verify(&ctx.engine, &ctx.plan_ctx, service_ref, Some("service"))?;
-    execute_service_verified(verified, service_ref, params, mode, ctx, state, None).await
+    execute_service_verified(verified, service_ref, params, mode, ctx, state, None, None).await
 }
 
 /// Execute a service given an already-verified item.
@@ -181,6 +181,11 @@ pub async fn execute_service(
 /// source that minted the id before launch) receive every persisted event
 /// from the very first lifecycle event onward. When `None`, a fresh
 /// `svc-<ts>-<rand>` id is minted as before.
+///
+/// `local_handler_context` is trusted out-of-band context supplied by a local
+/// transport. It is selected only when the verified service item explicitly
+/// declares `ui_dispatch: session_local`; ordinary services always receive the
+/// verified execution principal derived from `ctx`.
 pub async fn execute_service_verified(
     verified: ryeos_engine::contracts::VerifiedItem,
     service_ref: &str,
@@ -189,6 +194,7 @@ pub async fn execute_service_verified(
     ctx: &ExecutionContext,
     state: &AppState,
     pre_minted_thread_id: Option<&str>,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<ServiceExecutionResult> {
     let trust_class = verified.trust_class;
 
@@ -284,11 +290,21 @@ pub async fn execute_service_verified(
     //    - live: cap enforcement already passed (step 5)
     //    - standalone: operator authority from filesystem
 
-    let hctx = ryeos_app::handler_context::HandlerContext::new(
-        ctx.principal_fingerprint.clone(),
-        ctx.caller_scopes.clone(),
-        true,
-    );
+    let verified_handler_context = || {
+        ryeos_app::handler_context::HandlerContext::new(
+            ctx.principal_fingerprint.clone(),
+            ctx.caller_scopes.clone(),
+            true,
+        )
+    };
+    let hctx = match ryeos_app::service_registry::extract_ui_dispatch(
+        &verified.resolved.metadata.extra,
+    )? {
+        ryeos_app::service_registry::UiDispatchMode::SessionLocal => {
+            local_handler_context.unwrap_or_else(verified_handler_context)
+        }
+        ryeos_app::service_registry::UiDispatchMode::Verified => verified_handler_context(),
+    };
 
     // 7. Dispatch to handler
     let handler = state
