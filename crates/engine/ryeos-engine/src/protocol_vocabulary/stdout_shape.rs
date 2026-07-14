@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 use crate::launch_envelope_types::RuntimeResult;
+use crate::method_wire::MethodCallResult;
 
 /// Maximum permitted size of a single streaming frame body.
 ///
@@ -23,6 +24,9 @@ pub enum StdoutShape {
     /// Daemon parses stdout as a single RuntimeResult JSON object at exit.
     /// Wire shape: `RuntimeResult` from `launch_envelope_types`.
     RuntimeResultV1,
+
+    /// Daemon parses stdout as one method-runtime result object at exit.
+    MethodCallResultV1,
 
     /// Daemon reads length-prefixed JSON frames during execution. Each
     /// frame is a StreamingChunk. The final frame's terminal: true bit
@@ -54,6 +58,7 @@ pub struct StreamingChunk {
 pub enum DecodedStdout {
     Opaque(Vec<u8>),
     RuntimeResult(RuntimeResult),
+    MethodCallResult(MethodCallResult),
     Streaming(Vec<StreamingChunk>),
 }
 
@@ -137,6 +142,17 @@ pub fn decode_stdout_terminal(
                 EngineError::Internal(format!("failed to parse RuntimeResult from stdout: {e}"))
             })?;
             Ok(DecodedStdout::RuntimeResult(parsed))
+        }
+        StdoutShape::MethodCallResultV1 => {
+            let parsed: MethodCallResult = serde_json::from_slice(raw_bytes).map_err(|e| {
+                EngineError::Internal(format!("failed to parse MethodCallResult from stdout: {e}"))
+            })?;
+            parsed.validate().map_err(|reason| {
+                EngineError::Internal(format!(
+                    "invalid MethodCallResult semantics from stdout: {reason}"
+                ))
+            })?;
+            Ok(DecodedStdout::MethodCallResult(parsed))
         }
         StdoutShape::StreamingChunksV1 => Err(EngineError::Internal(
             "StreamingChunksV1 cannot be decoded as terminal; use frame reader".into(),
@@ -296,6 +312,7 @@ mod tests {
         for shape in [
             StdoutShape::OpaqueBytes,
             StdoutShape::RuntimeResultV1,
+            StdoutShape::MethodCallResultV1,
             StdoutShape::StreamingChunksV1,
         ] {
             let yaml = serde_yaml::to_string(&shape).unwrap();
@@ -346,6 +363,42 @@ mod tests {
     fn runtime_result_decoder_rejects_non_json() {
         let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, b"not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn method_result_decoder_accepts_valid() {
+        let method_result = MethodCallResult {
+            success: true,
+            kind: "knowledge".to_string(),
+            method: "compose".to_string(),
+            output: Some(serde_json::json!({"rendered": "context"})),
+            error: None,
+            warnings: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&method_result).unwrap();
+        let decoded = decode_stdout_terminal(StdoutShape::MethodCallResultV1, &bytes).unwrap();
+        match decoded {
+            DecodedStdout::MethodCallResult(parsed) => {
+                assert!(parsed.success);
+                assert_eq!(parsed.kind, "knowledge");
+                assert_eq!(parsed.method, "compose");
+            }
+            _ => panic!("expected MethodCallResult"),
+        }
+    }
+
+    #[test]
+    fn method_result_decoder_rejects_incoherent_shape() {
+        let method_result = MethodCallResult {
+            success: true,
+            kind: "knowledge".to_string(),
+            method: "compose".to_string(),
+            output: None,
+            error: None,
+            warnings: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&method_result).unwrap();
+        assert!(decode_stdout_terminal(StdoutShape::MethodCallResultV1, &bytes).is_err());
     }
 
     fn write_frame(chunk: &StreamingChunk) -> Vec<u8> {

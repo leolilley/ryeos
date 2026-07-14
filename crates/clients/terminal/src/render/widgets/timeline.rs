@@ -239,10 +239,9 @@ fn push_timeline_lines(
             | RyeOsTimelineEntryVm::Pair { tone, .. } => Some(*tone),
             RyeOsTimelineEntryVm::Separator { .. } => None,
         };
-        if let (Some(tone), Some(arrived_at_ms)) = (
-            tone,
-            arrived_at_ms.get(entry_index).copied().flatten(),
-        ) {
+        if let (Some(tone), Some(arrived_at_ms)) =
+            (tone, arrived_at_ms.get(entry_index).copied().flatten())
+        {
             let flash = tone_style(tone).fg;
             for line in &mut lines[first_line..] {
                 line.style = shimmer_style(line.style, Some(arrived_at_ms), flash, now_ms);

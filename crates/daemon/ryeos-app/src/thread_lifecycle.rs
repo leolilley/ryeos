@@ -13,15 +13,16 @@ use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
-    FinalizeThreadRecord, NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord,
-    StateStore, ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadListItem,
-    ThreadResultRecord,
+    FinalizeCreatedUnattachedOutcome as StoreFinalizeCreatedUnattachedOutcome,
+    FinalizeIfNonterminalOutcome as StoreFinalizeIfNonterminalOutcome, FinalizeThreadRecord,
+    NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
+    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadListItem, ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
-    FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem, RuntimeEnvSource,
-    TrustClass,
+    ExecutionPlan, FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem,
+    RuntimeEnvSource, TrustClass,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_state::UsageSubject;
@@ -112,10 +113,14 @@ pub struct ThreadAttachProcessParams {
     pub pid: i64,
     /// Process-group id. The UDS `runtime.attach_process` wire reports `pid`
     /// only (the runtime knows its pid, not its group), so this defaults to 0
-    /// and is derived daemon-side via `process::pgid_of`. Direct in-process
-    /// callers (the detached spawn path) set it explicitly.
+    /// and is derived daemon-side while capturing the live process identity.
+    /// Direct in-process callers (the detached spawn path) set it explicitly.
     #[serde(default)]
     pub pgid: i64,
+    /// Daemon-captured, PID-reuse-safe identity. Wire callers omit this and the
+    /// UDS boundary derives it from the live process before attachment.
+    #[serde(default)]
+    pub process_identity: Option<crate::process::ExecutionProcessIdentity>,
     #[serde(default)]
     pub metadata: Option<Value>,
     /// Spawn-time metadata persisted alongside pid/pgid (cancellation
@@ -283,6 +288,48 @@ impl FollowFact {
         }
     }
 
+    /// The list-path equivalent of [`Self::suspended_parent`], sourced from a
+    /// bounded waiter summary that never loads child terminal envelopes.
+    fn suspended_parent_summary(w: &crate::runtime_db::FollowWaiterSummary) -> Self {
+        Self {
+            role: follow_role::SUSPENDED_PARENT,
+            display_state: follow_display_state::SUSPENDED,
+            phase: Some(w.phase.clone()),
+            follow_node: Some(w.follow_node.clone()),
+            child_thread_id: w.first_child_thread_id.clone(),
+            child_chain_root_id: w.first_child_chain_root_id.clone(),
+            child_terminal_status: w.first_child_terminal_status.clone(),
+            parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+            cohort: w.fanout.then(|| FollowCohortProgress {
+                done: w.terminal_child_count,
+                expected: w.expected_children,
+            }),
+        }
+    }
+
+    /// The list-path equivalent of [`Self::resume_successor_live`], sourced
+    /// from the same envelope-free bounded waiter summary.
+    fn resume_successor_live_summary(w: &crate::runtime_db::FollowWaiterSummary) -> Self {
+        Self {
+            role: follow_role::RESUME_SUCCESSOR,
+            display_state: if w.all_children_terminal() {
+                follow_display_state::RESUMED
+            } else {
+                follow_display_state::RESUME_QUEUED
+            },
+            phase: None,
+            follow_node: Some(w.follow_node.clone()),
+            child_thread_id: w.first_child_thread_id.clone(),
+            child_chain_root_id: w.first_child_chain_root_id.clone(),
+            child_terminal_status: w.first_child_terminal_status.clone(),
+            parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+            cohort: w.fanout.then(|| FollowCohortProgress {
+                done: w.terminal_child_count,
+                expected: w.expected_children,
+            }),
+        }
+    }
+
     /// A resume successor recognized after the waiter is cleared, from the
     /// predecessor's projected `graph_follow_resume` continuation edge. The child
     /// identities did not survive the waiter, so only the lineage role and this
@@ -434,6 +481,34 @@ pub struct ThreadFinalizeParams {
     pub final_cost: Option<FinalCost>,
     #[serde(default)]
     pub summary_json: Option<Value>,
+}
+
+/// Lifecycle-layer result of a conditional pre-launch cleanup. `Finalized` and
+/// `AlreadyTerminal` are settled outcomes; `NotCurrent` means another owner
+/// advanced or claimed the child, so the caller must not overwrite it.
+#[derive(Debug)]
+pub enum FinalizeCreatedUnattachedOutcome {
+    Finalized(ThreadDetail),
+    AlreadyTerminal(ThreadDetail),
+    NotCurrent {
+        thread: ThreadDetail,
+        process_attached: bool,
+        launch_claimed: bool,
+    },
+}
+
+impl FinalizeCreatedUnattachedOutcome {
+    pub fn is_settled(&self) -> bool {
+        matches!(Self::Finalized(_) | Self::AlreadyTerminal(_), self)
+    }
+}
+
+/// Lifecycle-layer result of an atomic finalize-if-live transition.
+#[derive(Debug)]
+pub enum FinalizeIfNonterminalOutcome {
+    Finalized(ThreadDetail),
+    AlreadyTerminal { status: String },
+    PreservedForShutdown,
 }
 
 /// Default auto-launch attempt budget for a machine continuation successor. The
@@ -891,10 +966,18 @@ impl ThreadLifecycleService {
         )
     )]
     pub fn attach_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
+        let process_identity = params.process_identity.as_ref().ok_or_else(|| {
+            anyhow!(
+                "refusing to attach process {}/{} without a durable process identity",
+                params.pid,
+                params.pgid
+            )
+        })?;
         self.state_store.attach_thread_process(
             &params.thread_id,
             params.pid,
             params.pgid,
+            process_identity,
             &params.launch_metadata,
         )?;
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
@@ -917,30 +1000,57 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        let terminal_status = completion.status.as_str();
-        let outcome_code = completion.outcome_code.clone().or_else(|| {
-            Some(if terminal_status == "completed" {
+        self.finalize_from_completion_inner(thread_id, completion, managed_envelope, false)
+    }
+
+    /// Finalization reported by the runtime callback boundary. The StateStore
+    /// atomically fences daemon shutdown and lets durable Cancel/Kill intent
+    /// dominate the runtime's self-reported terminal status.
+    pub fn finalize_from_runtime_completion(
+        &self,
+        thread_id: &str,
+        completion: &ExecutionCompletion,
+        managed_envelope: Option<Value>,
+    ) -> Result<ThreadDetail> {
+        self.finalize_from_completion_inner(thread_id, completion, managed_envelope, true)
+    }
+
+    fn finalize_from_completion_inner(
+        &self,
+        thread_id: &str,
+        completion: &ExecutionCompletion,
+        managed_envelope: Option<Value>,
+        runtime_callback: bool,
+    ) -> Result<ThreadDetail> {
+        let reported_status = completion.status.as_str();
+        let reported_outcome_code = completion.outcome_code.clone().or_else(|| {
+            Some(if reported_status == "completed" {
                 "success".to_string()
             } else {
-                terminal_status.to_string()
+                reported_status.to_string()
             })
         });
-
-        let persisted = self.state_store.finalize_thread(
-            thread_id,
-            &FinalizeThreadRecord {
-                status: terminal_status.to_string(),
-                outcome_code: outcome_code.clone(),
-                result_json: completion.result.clone(),
-                error_json: completion.error.clone(),
-                artifacts: completion
-                    .artifacts
-                    .iter()
-                    .map(artifact_to_record)
-                    .collect(),
-                final_cost: completion.final_cost.clone(),
-            },
-        )?;
+        let requested = FinalizeThreadRecord {
+            status: reported_status.to_string(),
+            outcome_code: reported_outcome_code,
+            result_json: completion.result.clone(),
+            error_json: completion.error.clone(),
+            artifacts: completion
+                .artifacts
+                .iter()
+                .map(artifact_to_record)
+                .collect(),
+            final_cost: completion.final_cost.clone(),
+        };
+        let (persisted, effective) = if runtime_callback {
+            self.state_store
+                .finalize_thread_from_runtime(thread_id, &requested)?
+        } else {
+            self.state_store
+                .finalize_thread_effective(thread_id, &requested)?
+        };
+        let terminal_status = effective.status.as_str();
+        let outcome_code = effective.outcome_code.as_deref();
         self.publish_records(&persisted);
         // Terminal: no queued operator input may survive, and a late enqueue
         // racing this finalize must be refused. Close after the terminal state
@@ -961,28 +1071,28 @@ impl ThreadLifecycleService {
         // tracing stream (deploy logs), so emit it there at ERROR level when
         // the run failed. Healthy runs stay silent — no stderr in `error`.
         if matches!(terminal_status, "failed" | "killed") {
-            if let Some(stderr_tail) = completion
-                .error
+            if let Some(stderr_tail) = effective
+                .error_json
                 .as_ref()
                 .and_then(|e| e.get("stderr"))
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                let exit_code = completion
-                    .error
+                let exit_code = effective
+                    .error_json
                     .as_ref()
                     .and_then(|e| e.get("exit_code"))
                     .and_then(Value::as_i64);
-                let soft_failure = completion
-                    .error
+                let soft_failure = effective
+                    .error_json
                     .as_ref()
                     .and_then(|e| e.get("soft_failure"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 tracing::error!(
                     thread_id,
-                    outcome_code = outcome_code.as_deref().unwrap_or(""),
+                    outcome_code = outcome_code.unwrap_or(""),
                     exit_code,
                     soft_failure,
                     stderr_tail = %stderr_tail,
@@ -994,8 +1104,8 @@ impl ThreadLifecycleService {
         self.update_scheduler_fire_on_thread_terminal(
             thread_id,
             terminal_status,
-            outcome_code.as_deref(),
-            completion.result.as_ref(),
+            outcome_code,
+            effective.result_json.as_ref(),
         );
 
         let finalized = self
@@ -1007,13 +1117,18 @@ impl ThreadLifecycleService {
         // a thread that completes — with or without a question — takes the
         // operator follow-up path. So finalize does NOT spawn a successor here.
 
+        // A stop-coerced callback must not retain a managed envelope that says
+        // `completed`; fall back to the effective terminal fields instead.
+        let managed_envelope = (effective.status == reported_status)
+            .then_some(managed_envelope)
+            .flatten();
         self.record_follow_child_terminal(
             &finalized.chain_root_id,
             thread_id,
             terminal_status,
-            completion.result.as_ref(),
-            completion.error.as_ref(),
-            completion.final_cost.as_ref(),
+            effective.result_json.as_ref(),
+            effective.error_json.as_ref(),
+            effective.final_cost.as_ref(),
             managed_envelope,
         );
 
@@ -1034,7 +1149,7 @@ impl ThreadLifecycleService {
         // failure). A follow child that finalizes here degrades to a visible
         // failure envelope; the normal follow terminal carries its envelope via
         // the callback or `finalize_thread_with_managed_envelope`.
-        self.finalize_thread_inner(params, None)
+        self.finalize_thread_inner(params, None, false)
     }
 
     /// Like [`finalize_thread`], but carries the runtime's canonical managed
@@ -1046,36 +1161,152 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
         managed_envelope: Value,
     ) -> Result<ThreadDetail> {
-        self.finalize_thread_inner(params, Some(managed_envelope))
+        self.finalize_thread_inner(params, Some(managed_envelope), false)
+    }
+
+    /// Settle a link-failure row only if it is atomically proven to remain a
+    /// never-launched child. This is the lifecycle wrapper around the StateStore
+    /// conditional transition, so successful cleanup still publishes the terminal
+    /// event and performs scheduler/command/follow bookkeeping.
+    pub fn finalize_created_unattached_if_current(
+        &self,
+        params: &ThreadFinalizeParams,
+    ) -> Result<FinalizeCreatedUnattachedOutcome> {
+        let reported_status = normalize_terminal_status(&params.status)?;
+        let requested = FinalizeThreadRecord {
+            status: reported_status.to_string(),
+            outcome_code: params.outcome_code.clone(),
+            result_json: params.result.clone(),
+            error_json: params.error.clone(),
+            artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
+            final_cost: params.final_cost.clone(),
+        };
+        match self
+            .state_store
+            .finalize_created_unattached_if_current(&params.thread_id, &requested)?
+        {
+            StoreFinalizeCreatedUnattachedOutcome::Finalized {
+                persisted,
+                effective,
+            } => self
+                .finish_generic_finalization(params, reported_status, persisted, effective, None)
+                .map(FinalizeCreatedUnattachedOutcome::Finalized),
+            StoreFinalizeCreatedUnattachedOutcome::AlreadyTerminal => self
+                .get_thread(&params.thread_id)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "terminal thread missing after conditional finalize: {}",
+                        params.thread_id
+                    )
+                })
+                .map(FinalizeCreatedUnattachedOutcome::AlreadyTerminal),
+            StoreFinalizeCreatedUnattachedOutcome::NotCurrent {
+                process_attached,
+                launch_claimed,
+                ..
+            } => self
+                .get_thread(&params.thread_id)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "thread missing after refused conditional finalize: {}",
+                        params.thread_id
+                    )
+                })
+                .map(|thread| FinalizeCreatedUnattachedOutcome::NotCurrent {
+                    thread,
+                    process_attached,
+                    launch_claimed,
+                }),
+        }
+    }
+
+    /// Atomically finalize only if the row remains nonterminal. This is the
+    /// fallback-finalizer entry point for runtimes that may concurrently win
+    /// through their callback: the StateStore performs the terminal check and
+    /// write under one lock, while this layer retains publication and all
+    /// terminal postcommit bookkeeping for the winning write.
+    pub fn finalize_if_nonterminal(
+        &self,
+        params: &ThreadFinalizeParams,
+    ) -> Result<FinalizeIfNonterminalOutcome> {
+        let reported_status = normalize_terminal_status(&params.status)?;
+        let requested = FinalizeThreadRecord {
+            status: reported_status.to_string(),
+            outcome_code: params.outcome_code.clone(),
+            result_json: params.result.clone(),
+            error_json: params.error.clone(),
+            artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
+            final_cost: params.final_cost.clone(),
+        };
+        match self
+            .state_store
+            .finalize_if_nonterminal(&params.thread_id, &requested)?
+        {
+            StoreFinalizeIfNonterminalOutcome::Finalized {
+                persisted,
+                effective,
+            } => self
+                .finish_generic_finalization(params, reported_status, persisted, effective, None)
+                .map(FinalizeIfNonterminalOutcome::Finalized),
+            StoreFinalizeIfNonterminalOutcome::AlreadyTerminal { status } => {
+                Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal { status })
+            }
+            StoreFinalizeIfNonterminalOutcome::PreservedForShutdown => {
+                Ok(FinalizeIfNonterminalOutcome::PreservedForShutdown)
+            }
+        }
     }
 
     fn finalize_thread_inner(
         &self,
         params: &ThreadFinalizeParams,
         managed_envelope: Option<Value>,
+        execution_result: bool,
     ) -> Result<ThreadDetail> {
-        let persisted = self.state_store.finalize_thread(
-            &params.thread_id,
-            &FinalizeThreadRecord {
-                status: normalize_terminal_status(&params.status)?.to_string(),
-                outcome_code: params.outcome_code.clone(),
-                result_json: params.result.clone(),
-                error_json: params.error.clone(),
-                artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
-                final_cost: params.final_cost.clone(),
-            },
-        )?;
+        let reported_status = normalize_terminal_status(&params.status)?;
+        let requested = FinalizeThreadRecord {
+            status: reported_status.to_string(),
+            outcome_code: params.outcome_code.clone(),
+            result_json: params.result.clone(),
+            error_json: params.error.clone(),
+            artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
+            final_cost: params.final_cost.clone(),
+        };
+        let (persisted, effective) = if execution_result {
+            self.state_store
+                .finalize_thread_from_runtime(&params.thread_id, &requested)?
+        } else {
+            self.state_store
+                .finalize_thread_effective(&params.thread_id, &requested)?
+        };
+        self.finish_generic_finalization(
+            params,
+            reported_status,
+            persisted,
+            effective,
+            managed_envelope,
+        )
+    }
+
+    fn finish_generic_finalization(
+        &self,
+        params: &ThreadFinalizeParams,
+        reported_status: &str,
+        persisted: Vec<PersistedEventRecord>,
+        effective: FinalizeThreadRecord,
+        managed_envelope: Option<Value>,
+    ) -> Result<ThreadDetail> {
         self.publish_records(&persisted);
         // Terminal: close the live-input entry after the terminal state write
         // (see `finalize_from_completion` for the race rationale).
         self.close_live_input(&params.thread_id);
 
-        let terminal_status = normalize_terminal_status(&params.status)?;
+        let terminal_status = effective.status.as_str();
         self.update_scheduler_fire_on_thread_terminal(
             &params.thread_id,
             terminal_status,
-            params.outcome_code.as_deref(),
-            params.result.as_ref(),
+            effective.outcome_code.as_deref(),
+            effective.result_json.as_ref(),
         );
 
         // Settle any commands still open for this now-terminal thread. It will
@@ -1093,10 +1324,12 @@ impl ThreadLifecycleService {
             &finalized.chain_root_id,
             &params.thread_id,
             terminal_status,
-            params.result.as_ref(),
-            params.error.as_ref(),
-            params.final_cost.as_ref(),
-            managed_envelope,
+            effective.result_json.as_ref(),
+            effective.error_json.as_ref(),
+            effective.final_cost.as_ref(),
+            (effective.status == reported_status)
+                .then_some(managed_envelope)
+                .flatten(),
         );
 
         Ok(finalized)
@@ -1512,9 +1745,9 @@ impl ThreadLifecycleService {
         })
     }
 
-    /// Decorate a page of list rows. Batches the follow lineage: ONE
-    /// `list_follow_waiters` read, joined in memory against the page, so the list
-    /// path never issues a per-row runtime_db query. The durable
+    /// Decorate a page of list rows. Batches the follow lineage into one
+    /// page-scoped, envelope-free waiter projection, so the list path never
+    /// issues a per-row runtime_db query. The durable
     /// (waiter-cleared) resume-successor derivation is deliberately NOT done here
     /// — it is a per-row projection query reserved for single-thread inspect;
     /// once the waiter is gone the successor is an ordinary recoverable thread and
@@ -1538,10 +1771,14 @@ impl ThreadLifecycleService {
             mut facets,
             mut current_graph_nodes,
         } = enrichment;
-        let mut by_parent: std::collections::HashMap<&str, &crate::runtime_db::FollowWaiter> =
-            std::collections::HashMap::new();
-        let mut by_successor: std::collections::HashMap<&str, &crate::runtime_db::FollowWaiter> =
-            std::collections::HashMap::new();
+        let mut by_parent: std::collections::HashMap<
+            &str,
+            &crate::runtime_db::FollowWaiterSummary,
+        > = std::collections::HashMap::new();
+        let mut by_successor: std::collections::HashMap<
+            &str,
+            &crate::runtime_db::FollowWaiterSummary,
+        > = std::collections::HashMap::new();
         for w in &waiters {
             by_parent.insert(w.parent_thread_id.as_str(), w);
             if let Some(succ) = &w.parent_successor_thread_id {
@@ -1555,14 +1792,14 @@ impl ThreadLifecycleService {
                 let follow = if item.status == "continued" {
                     by_parent
                         .get(item.thread_id.as_str())
-                        .map(|w| FollowFact::suspended_parent(w))
+                        .map(|w| FollowFact::suspended_parent_summary(w))
                 } else {
                     None
                 }
                 .or_else(|| {
                     by_successor
                         .get(item.thread_id.as_str())
-                        .map(|w| FollowFact::resume_successor_live(w))
+                        .map(|w| FollowFact::resume_successor_live_summary(w))
                 });
                 let project = item
                     .project_root
@@ -2248,6 +2485,7 @@ pub fn validate_item(
 pub struct SpawnedItem {
     pub pid: u32,
     pub pgid: i64,
+    pub process_identity: crate::process::ExecutionProcessIdentity,
     /// Spawn-time metadata derived from the engine `SubprocessSpec`
     /// (e.g. `native_async` cancellation policy). Persisted alongside
     /// pid/pgid so the daemon shutdown / cancel paths can route
@@ -2263,7 +2501,42 @@ impl SpawnedItem {
     }
 }
 
-/// Run the engine pipeline: verify → build_plan → spawn.
+/// A verified, fully built item plan retained from callback credential minting
+/// through spawn. Its timeout comes from the exact plan the engine executes, so
+/// credential lifetime cannot drift from a later plan rebuild.
+pub struct PreparedItemPlan {
+    plan: ExecutionPlan,
+    pub timeout_secs: u64,
+}
+
+pub fn prepare_item_plan(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+) -> Result<PreparedItemPlan> {
+    let verified = engine
+        .verify(&resolved.plan_context, resolved.resolved_item.clone())
+        .map_err(|e| anyhow!("verification failed: {e}"))?;
+    let plan = engine
+        .build_plan(
+            &resolved.plan_context,
+            &verified,
+            &resolved.parameters,
+            &resolved.plan_context.execution_hints,
+        )
+        .map_err(|e| anyhow!("plan build failed: {e}"))?;
+    let timeout_secs = match plan.nodes.first() {
+        Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
+            spec.timeout_secs
+        }
+        Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
+            bail!("item plan entrypoint is complete, not a subprocess")
+        }
+        None => bail!("item plan is empty"),
+    };
+    Ok(PreparedItemPlan { plan, timeout_secs })
+}
+
+/// Run the prepared engine plan's spawn phase.
 /// Returns a handle with pid/pgid that the daemon can persist before calling wait().
 ///
 /// If `thread_state_dir` is supplied AND the resolved spec declares
@@ -2277,12 +2550,20 @@ impl SpawnedItem {
 pub struct SpawnItemParams<'a> {
     pub engine: &'a Engine,
     pub resolved: &'a ResolvedExecutionRequest,
+    /// Exact verified plan used to derive callback credential lifetime.
+    pub prepared_plan: PreparedItemPlan,
     pub thread_id: &'a str,
     pub chain_root_id: &'a str,
     pub vault_bindings: std::collections::HashMap<String, String>,
-    pub daemon_callback_env: std::collections::HashMap<String, String>,
+    /// Exact signed-protocol environment, with each injection retaining its
+    /// typed vocabulary source through final composition.
+    pub protocol_env_bindings: Vec<EnvBinding>,
     pub roots: DaemonRootEnv,
-    pub sandbox_enabled: bool,
+    pub sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    pub sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
+    /// Exact daemon socket requested by the verified callback channel, or
+    /// `None` for a callback-free launch.
+    pub sandbox_daemon_socket_path: Option<&'a std::path::Path>,
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
@@ -2311,12 +2592,15 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     let SpawnItemParams {
         engine,
         resolved,
+        prepared_plan,
         thread_id,
         chain_root_id,
         vault_bindings,
-        daemon_callback_env,
+        protocol_env_bindings,
         roots,
-        sandbox_enabled,
+        sandbox,
+        sandbox_project_authority,
+        sandbox_daemon_socket_path,
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
@@ -2329,32 +2613,15 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .map(std::path::PathBuf::from)
         .context("spawn roots missing RYEOS_APP_ROOT")?;
     // vault_bindings: user-provided secret/capability env vars.
-    // daemon_callback_env: daemon infrastructure env (socket path, callback
-    // token, thread id, project path). Sourced from AppState by the caller
-    // (runner.rs), NOT from the daemon's own process env.
-    let verified = engine
-        .verify(&resolved.plan_context, resolved.resolved_item.clone())
-        .map_err(|e| anyhow!("verification failed: {e}"))?;
+    // protocol_env_bindings: the verified terminator protocol's exact signed
+    // env contract. Values are produced from daemon-owned launch facts by the
+    // runner, never inherited from the daemon's process environment.
+    let mut plan = prepared_plan.plan;
 
-    let mut plan = engine
-        .build_plan(
-            &resolved.plan_context,
-            &verified,
-            &resolved.parameters,
-            &resolved.plan_context.execution_hints,
-        )
-        .map_err(|e| anyhow!("plan build failed: {e}"))?;
-
-    // Inject the daemon's subprocess env contract into every subprocess
-    // node: allowlisted parent env (PATH/HOME/...) + daemon-resolved
-    // roots (RYEOS_APP_ROOT) + declared secrets, then
-    // layer the daemon callback infra (socket path, callback token,
-    // thread id, project path) on top. Mirrors `execution::launch::
-    // spawn_runtime`'s composition so engine-dispatched `bin:` items
-    // (e.g. `bin:ryeos-core-tools`) see the same env contract as runtime-
-    // binary spawns. Without this, `lillux::run`'s post-Part-B
-    // `env_clear()` would leave the subprocess with only a handful of
-    // RYEOSD_* vars without the operator app-root context.
+    // Compose every subprocess node from allowlisted parent env, daemon roots,
+    // declared secrets, engine-plan bindings, and the verified terminator
+    // protocol's exact typed injections. No callback key is manufactured here;
+    // callback-free protocols therefore stay callback-free through `env_clear`.
     let secret_map: std::collections::BTreeMap<String, String> = vault_bindings
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -2445,18 +2712,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
             });
             builder = builder.with_typed_bindings(runtime_bindings)?;
 
-            let daemon_callback_bindings = daemon_callback_env.iter().filter_map(|(key, value)| {
-                if key == "RYEOS_APP_ROOT" {
-                    None
-                } else {
-                    Some(EnvBinding::new(
-                        key.clone(),
-                        value.clone(),
-                        EnvSourceDetail::DaemonCallback,
-                    ))
-                }
-            });
-            builder = builder.with_typed_bindings(daemon_callback_bindings)?;
+            builder = builder.with_typed_bindings(protocol_env_bindings.iter().cloned())?;
 
             if spec.execution.native_resume.is_some() {
                 if let Some(resume_bindings) = resume_env_for_first_native_resume.take() {
@@ -2469,9 +2725,44 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         }
     }
 
+    let sandbox_project_root = match &resolved.plan_context.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
+        _ => None,
+    };
+    let sandbox_resolution_roots = engine.resolution_roots(sandbox_project_root);
+    let sandbox_bundle_roots = sandbox_resolution_roots
+        .ordered
+        .iter()
+        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+        .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
+        .collect();
+    let sandbox_node_trusted_keys_dir = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/trusted");
+    let sandbox_verified_code = plan
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            ryeos_engine::contracts::PlanNode::DispatchSubprocess {
+                tool_path: Some(source_path),
+                ..
+            } => Some(ryeos_engine::sandbox::SandboxVerifiedCode {
+                source_path: source_path.clone(),
+                content_hash: resolved.resolved_item.content_hash.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
     let engine_ctx = EngineContext {
         app_root,
-        sandbox_enabled,
+        sandbox,
+        sandbox_project_authority,
+        sandbox_state_root: state_root.map(std::path::Path::to_path_buf),
+        sandbox_checkpoint_dir: allocated_checkpoint_dir.clone(),
+        sandbox_daemon_socket_path: sandbox_daemon_socket_path.map(std::path::Path::to_path_buf),
+        sandbox_bundle_roots,
+        sandbox_node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
+        sandbox_verified_code,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),
@@ -2549,10 +2840,39 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     let spawned = engine
         .spawn_plan(&engine_ctx, &plan)
         .map_err(|e| anyhow!("spawn failed: {e}"))?;
+    let process_identity = match crate::process::capture_execution_process_identity(
+        spawned.pid as i64,
+        Some(spawned.pgid),
+    ) {
+        Ok(identity) => identity,
+        Err(
+            target_error @ crate::process::ExecutionProcessIdentityCaptureError::TargetAlreadyDeadOrStale,
+        ) => {
+            // Bubblewrap can report a very short command and reap it before the
+            // daemon captures its birth identity. Lillux still retains the
+            // wrapper/group leader and owns its wait/output path. Use that exact
+            // leader as the durable control target rather than turning a
+            // successful fast command into a spawn failure. The reported child
+            // PID remains internal accounting in SpawnedExecution.
+            crate::process::capture_execution_process_identity(
+                spawned.pgid,
+                Some(spawned.pgid),
+            )
+            .with_context(|| {
+                format!(
+                    "capture spawned target identity ({target_error}); capture retained wrapper identity"
+                )
+            })?
+        }
+        Err(error) => return Err(error).context("capture spawned target identity"),
+    };
+    let durable_pid = u32::try_from(process_identity.target_pid)
+        .context("durable spawned target PID exceeds u32")?;
 
     Ok(SpawnedItem {
-        pid: spawned.pid,
+        pid: durable_pid,
         pgid: spawned.pgid,
+        process_identity,
         launch_metadata,
         spawned,
     })

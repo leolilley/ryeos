@@ -109,6 +109,91 @@ pub fn sign_bundle_items_with_trust(
     signing_key: &lillux::crypto::SigningKey,
     base_trust_store: Option<&TrustStore>,
 ) -> Result<SignBundleReport> {
+    sign_bundle_generation(source, registry_roots, signing_key, base_trust_store, false)
+}
+
+/// Rebuild binary CAS metadata and sign every item as one atomic bundle
+/// generation. This is the public `bundle sign` workflow: neither the rebuilt
+/// refs nor a subset of new signatures becomes visible if any signing step
+/// fails.
+pub fn rebuild_and_sign_bundle_items_with_trust(
+    source: &Path,
+    registry_roots: &[PathBuf],
+    signing_key: &lillux::crypto::SigningKey,
+    base_trust_store: Option<&TrustStore>,
+) -> Result<SignBundleReport> {
+    sign_bundle_generation(source, registry_roots, signing_key, base_trust_store, true)
+}
+
+fn sign_bundle_generation(
+    source: &Path,
+    registry_roots: &[PathBuf],
+    signing_key: &lillux::crypto::SigningKey,
+    base_trust_store: Option<&TrustStore>,
+    rebuild_binary_manifest: bool,
+) -> Result<SignBundleReport> {
+    let live_root = source.to_path_buf();
+    super::publisher_transaction::with_staged_bundle_generation(source, |staging| {
+        let staged_registry_roots = super::publisher_transaction::roots_for_staged_generation(
+            &live_root,
+            staging,
+            registry_roots,
+        );
+        if rebuild_binary_manifest && staging.join(AI_DIR).join("bin").is_dir() {
+            super::build_bundle::rebuild_bundle_manifest_in_place(staging, signing_key)
+                .context("rebuild source bundle binary manifest")?;
+        }
+
+        let mut report = sign_bundle_items_with_trust_in_place(
+            staging,
+            &staged_registry_roots,
+            signing_key,
+            base_trust_store,
+        )?;
+        remap_report_errors(&mut report, staging, &live_root);
+        if !report.is_total_success() {
+            let failures = report
+                .failed
+                .iter()
+                .map(|outcome| match &outcome.error {
+                    Some(error) => format!("{}: {error}", outcome.item_ref),
+                    None => outcome.item_ref.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!(
+                "bundle sign failed for {} of {} item(s): {}",
+                report.failed.len(),
+                report.total(),
+                failures
+            );
+        }
+        Ok(report)
+    })
+}
+
+fn remap_report_errors(report: &mut SignBundleReport, staging: &Path, live_root: &Path) {
+    let staged = staging.to_string_lossy();
+    let live = live_root.to_string_lossy();
+    for outcome in report
+        .validated
+        .iter_mut()
+        .chain(report.signed.iter_mut())
+        .chain(report.failed.iter_mut())
+    {
+        if let Some(error) = &mut outcome.error {
+            *error = error.replace(staged.as_ref(), live.as_ref());
+        }
+    }
+}
+
+/// Sign items directly in a caller-owned private generation.
+pub(super) fn sign_bundle_items_with_trust_in_place(
+    source: &Path,
+    registry_roots: &[PathBuf],
+    signing_key: &lillux::crypto::SigningKey,
+    base_trust_store: Option<&TrustStore>,
+) -> Result<SignBundleReport> {
     let verifying_key = signing_key.verifying_key();
     let fingerprint = ryeos_engine::trust::compute_fingerprint(&verifying_key);
 
@@ -166,7 +251,7 @@ pub fn sign_bundle_items_with_trust(
             ryeos_engine::resolution::TrustClass::TrustedBundle,
         ));
     }
-    let handlers = HandlerRegistry::load_base(&handler_roots, &trust_store)
+    let handlers = HandlerRegistry::load_base_for_authoring(&handler_roots, &trust_store)
         .context("load handler descriptors")?;
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handlers));
 

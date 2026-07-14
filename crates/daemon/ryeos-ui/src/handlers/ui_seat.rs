@@ -132,18 +132,13 @@ pub async fn handle_open(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .into_iter()
         .filter(|thread| {
-            thread.kind == SEAT_KIND
-                && thread.status == "running"
-                && thread.item_ref == surface_ref
+            thread.kind == SEAT_KIND && thread.status == "running" && thread.item_ref == surface_ref
         })
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
     if let Some(thread) = existing {
-        state.state_store.touch_seat_lease(
-            &thread.thread_id,
-            &owner,
-            &surface_ref,
-            &client_ref,
-        )?;
+        state
+            .state_store
+            .touch_seat_lease(&thread.thread_id, &owner, &surface_ref, &client_ref)?;
         return Ok(json!({
             "thread_id": thread.thread_id,
             "chain_root_id": thread.chain_root_id,
@@ -234,7 +229,7 @@ pub async fn handle_append(
             HandlerError::BadRequest(
                 "seat session is no longer running; only running seats accept events".into(),
             )
-    })?;
+        })?;
     let last_seq = persisted.iter().map(|r| r.chain_seq).max().unwrap_or(0);
 
     Ok(json!({

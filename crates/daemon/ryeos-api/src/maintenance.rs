@@ -90,8 +90,9 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                 state.state_store.remove_seat_lease(&thread_id)?;
                 continue;
             }
-            state.threads.finalize_thread(
-                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            state
+                .threads
+                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
                     thread_id,
                     status: "completed".to_string(),
                     outcome_code: Some("seat_lease_expired".to_string()),
@@ -101,8 +102,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                     artifacts: Vec::new(),
                     final_cost: None,
                     summary_json: None,
-                },
-            )?;
+                })?;
             state.state_store.remove_seat_lease(&detail.thread_id)?;
             reaped_seats += 1;
         }
@@ -182,12 +182,21 @@ fn run_gc_and_log(
     retired_service_chains: usize,
     deleted_service_chain_rows: usize,
 ) -> Result<GcResult> {
+    let active_resume_roots = state_store
+        .active_resume_snapshot_roots()
+        .context("failed to collect active runtime snapshot roots")?;
     let mut runtime_cleanup = GcResult::default();
     gc::purge_runtime_state(runtime_state_dir, params, &mut runtime_cleanup)
         .context("runtime-state purge failed")?;
 
-    let mut result =
-        gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
+    let mut result = gc::run_gc_with_extra_roots(
+        cas_root,
+        refs_root,
+        Some(signer),
+        params,
+        &active_resume_roots,
+    )
+    .context("GC pipeline failed")?;
     result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
     result.deleted_fire_records = runtime_cleanup.deleted_fire_records;
     result.freed_bytes += runtime_cleanup.freed_bytes;

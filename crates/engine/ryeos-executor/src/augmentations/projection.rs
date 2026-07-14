@@ -148,6 +148,7 @@ mod tests {
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: content.to_string(),
+            source_content_digest: digest.clone(),
             raw_content_digest: digest,
         }
     }

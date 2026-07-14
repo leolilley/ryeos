@@ -6,6 +6,10 @@ use serde_json::Value;
 
 use crate::event_store_service::EventStoreService;
 use crate::kind_profiles::KindProfileRegistry;
+use crate::runtime_db::{
+    validate_command_type, MAX_COMMAND_CLAIM_ITEMS, MAX_COMMAND_CLAIM_RESPONSE_BYTES,
+    MAX_COMMAND_PARAMS_BYTES, MAX_COMMAND_REQUESTED_BY_BYTES, MAX_COMMAND_RESULT_BYTES,
+};
 use crate::state_store::{CommandRecord, NewCommandRecord, StateStore};
 
 #[derive(Debug, Clone)]
@@ -72,6 +76,18 @@ impl CommandService {
     )]
     pub fn submit(&self, params: &CommandSubmitParams) -> Result<CommandRecord> {
         validate_command_type(&params.command_type)?;
+        validate_optional_json_size(
+            "command params",
+            params.params.as_ref(),
+            MAX_COMMAND_PARAMS_BYTES,
+        )?;
+        if params
+            .requested_by
+            .as_ref()
+            .is_some_and(|requested_by| requested_by.len() > MAX_COMMAND_REQUESTED_BY_BYTES)
+        {
+            bail!("command requested_by exceeds the {MAX_COMMAND_REQUESTED_BY_BYTES}-byte maximum");
+        }
 
         let thread = self
             .state_store
@@ -113,7 +129,11 @@ impl CommandService {
     )]
     pub fn claim(&self, params: &CommandClaimParams) -> Result<CommandClaimResult> {
         let _timeout_ms = params.timeout_ms.unwrap_or(0);
-        let commands = self.state_store.claim_commands(&params.thread_id)?;
+        let commands = self.state_store.claim_commands(
+            &params.thread_id,
+            MAX_COMMAND_CLAIM_ITEMS,
+            MAX_COMMAND_CLAIM_RESPONSE_BYTES,
+        )?;
         Ok(CommandClaimResult { commands })
     }
 
@@ -131,6 +151,11 @@ impl CommandService {
             "completed" | "rejected" => {}
             other => bail!("invalid command completion status: {other}"),
         }
+        validate_optional_json_size(
+            "command result",
+            params.result.as_ref(),
+            MAX_COMMAND_RESULT_BYTES,
+        )?;
 
         let command = self.state_store.complete_command(
             params.command_id,
@@ -141,9 +166,13 @@ impl CommandService {
     }
 }
 
-fn validate_command_type(command_type: &str) -> Result<()> {
-    match command_type {
-        "cancel" | "kill" | "interrupt" | "continue" => Ok(()),
-        other => bail!("invalid command_type: {other}"),
+fn validate_optional_json_size(label: &str, value: Option<&Value>, maximum: usize) -> Result<()> {
+    let bytes = value
+        .map(serde_json::to_vec)
+        .transpose()?
+        .map_or(0, |v| v.len());
+    if bytes > maximum {
+        bail!("{label} is {bytes} bytes; maximum is {maximum}");
     }
+    Ok(())
 }

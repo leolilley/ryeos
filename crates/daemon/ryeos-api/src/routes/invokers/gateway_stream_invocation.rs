@@ -343,6 +343,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             previous_thread_id: None,
         };
 
+        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_path.as_path().to_path_buf(),
+            ctx.state.engine.clone(),
+        );
         let mut launch_handle = crate::routes::launch::spawn_dispatch_launch(
             &ctx.state,
             item_ref,
@@ -351,6 +355,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             principal_id,
             principal_scopes,
             thread_id.clone(),
+            launch_provenance,
             options,
         );
 

@@ -5,6 +5,11 @@ use serde_json::Value;
 
 use ryeos_runtime::envelope::RuntimeCost;
 
+/// One graph step publishes one durable node receipt. Keep the authored hard
+/// ceiling below the per-thread artifact collection ceiling, leaving room for
+/// terminal transcript/output artifacts as well.
+pub const MAX_GRAPH_STEPS: u32 = 500;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {

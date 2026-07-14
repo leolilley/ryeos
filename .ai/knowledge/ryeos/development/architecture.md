@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-06-15T04:48:22Z:9e78b3f12f12f83fa978d73996201863c0a5ee0a54f12023be7e3bdc60311ac6:PHsEfvb7RFaCYz7X084Py541RgYZ0tYJJqp7lP7ustaW3x3ymUfkVv7TYl7kDbeqrz3bBpsDVDiNWTifSrfIBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:2c44d7ff2c935a8a5895f790697f4400ad44080b9317aa087d408177d4741d50:cVEJBI/wg9iI3rpg52e5f+T7rxGnruT8miMin1EcgRJYbj0k3BWyxrNybeJTKN3xBGlsvTRT7f4mFEYYiOJNCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
 title: "Architecture Map"
 description: "Short orientation for crates, bundles, execution flow, and trust boundaries"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Architecture Map
@@ -18,7 +18,7 @@ full design document.
 | Area | Path | Owns |
 |---|---|---|
 | Crypto | `crates/kernel/lillux/` | Ed25519/X25519/SHA primitives and signatures |
-| Engine | `crates/engine/ryeos-engine/` | item resolution, trust verification, composition, plans |
+| Engine | `crates/engine/ryeos-engine/` | item resolution, trust verification, composition, plans, immutable node sandbox policy |
 | App | `crates/daemon/ryeos-app/` | daemon/app config, engine boot, node-config loading |
 | State | `crates/state/ryeos-state/` | SQLite state, CAS objects, thread state |
 | Runtime shared | `crates/engine/ryeos-runtime/` | callback client, runtime envelopes/types |
@@ -62,6 +62,7 @@ ryeos CLI
   -> engine resolves project -> user -> system
   -> engine verifies trust and composes effective item
   -> plan/handler/protocol selects runtime or tool binary
+  -> node sandbox snapshot optionally wraps the executable request
   -> subprocess runs and may call back to daemon
   -> daemon records state and returns result
 ```
@@ -78,6 +79,11 @@ generic composed dispatch fields. Avoid kind-specific CLI descriptor parsing.
   arbitrary ambient directories.
 - Bundle-owned binaries must be resolved from signed bundle bin trees. Do not
   install handler/runtime/tool binaries on PATH as a workaround.
+- Sandbox activation and OS controls come only from
+  `<app-root>/.ai/node/sandbox.yaml`; items cannot override the node snapshot.
+
+See `knowledge:ryeos/development/sandbox-runtime` for the pickup and launch
+coverage map.
 
 ## Project AI deployable surfaces
 

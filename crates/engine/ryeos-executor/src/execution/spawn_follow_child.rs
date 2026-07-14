@@ -129,10 +129,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // native-resume parent can host that. Gate on that DECLARED capability (never
     // a kind identity): a parent that cannot be checkpoint-resumed could never be
     // woken to consume the child, so it must not be allowed to suspend for follow.
-    let parent_is_native_resume = state
-        .state_store
-        .get_launch_metadata(&parent_thread_id)?
-        .and_then(|m| m.native_resume)
+    let parent_launch_metadata = state.state_store.get_launch_metadata(&parent_thread_id)?;
+    let parent_is_native_resume = parent_launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.native_resume.as_ref())
         .is_some();
     if !parent_is_native_resume {
         bail!(
@@ -140,6 +140,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
              runtime.spawn_follow_child requires a checkpoint-resumable parent"
         );
     }
+    let inherited_snapshot_hash = if cap.provenance.workspace_lifeline().is_some() {
+        Some(
+            parent_launch_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.resume_context.as_ref())
+                .and_then(ResumeContext::durable_project_snapshot_hash)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: parent {parent_thread_id} owns an ephemeral workspace but has no durable project snapshot"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
 
     // ── Admission (authorize before resource resolution; before any mutation) ─
     let mut resolved_children = Vec::with_capacity(children.len());
@@ -353,7 +369,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             project_context: ProjectContext::LocalPath {
                 path: cap.provenance.effective_path().to_path_buf(),
             },
-            original_snapshot_hash: None,
+            original_snapshot_hash: inherited_snapshot_hash.clone(),
             // A follow child borrows the parent's workspace; it never
             // owns snapshot lineage, so no pushed-head identity is
             // seeded (rebuilding one would take over pin/foldback the
@@ -380,6 +396,60 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             width,
         });
         let persisted_meta = state.state_store.get_launch_metadata(&child_thread_id)?;
+        let inherited_stop = match state.state_store.record_child_link(
+            &parent_thread_id,
+            &child_thread_id,
+            "dispatch",
+        ) {
+            Ok(inherited_stop) => inherited_stop,
+            Err(error) => {
+                // The conditional transition proves Created + unattached +
+                // unclaimed under the same store lock as finalization. A
+                // same-slot re-drive can therefore never finalize a child that
+                // advanced after the row read above.
+                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                    state,
+                    &child_thread_id,
+                    json!({
+                        "code": "child_link_failed",
+                        "reason": error.to_string(),
+                    }),
+                );
+                match cleanup {
+                    Ok(outcome) if outcome.is_settled() => {
+                        crate::execution::launch::kick_follow_resume_if_ready(
+                            state,
+                            &child_thread_id,
+                        );
+                        crate::execution::launch::kick_launch_window_for_terminal(
+                            state,
+                            &child_thread_id,
+                        );
+                    }
+                    Ok(outcome) => tracing::warn!(
+                        child_thread_id,
+                        ?outcome,
+                        "preserved concurrently advanced follow child after lineage failure"
+                    ),
+                    Err(cleanup_error) => {
+                        return Err(anyhow::anyhow!(
+                            "follow: record child lineage under parent {parent_thread_id}: \
+                             {error}; conditional child cleanup also failed: {cleanup_error}"
+                        ));
+                    }
+                }
+                return Err(error).context(format!(
+                    "follow: record child lineage under parent {parent_thread_id}"
+                ));
+            }
+        };
+        if inherited_stop.is_some() {
+            crate::execution::process_attachment::finalize_requested_stop_if_present(
+                state,
+                &child_thread_id,
+            )?;
+            bail!("follow: parent {parent_thread_id} was stop-requested during child admission");
+        }
         if let Some(persisted) = persisted_meta
             .as_ref()
             .filter(|m| m.resume_context.is_some())
@@ -391,9 +461,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 bail!("follow: launched child metadata conflicts at index {item_index}");
             }
         } else {
-            state
-                .state_store
-                .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
             if let Some(Value::Object(facets)) = child.facets.as_ref() {
                 let current: std::collections::HashMap<_, _> = state
                     .state_store

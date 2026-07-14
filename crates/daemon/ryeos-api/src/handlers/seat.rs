@@ -178,7 +178,7 @@ pub async fn handle_append(
             HandlerError::BadRequest(
                 "seat session is no longer running; only running seats accept events".into(),
             )
-    })?;
+        })?;
     let last_seq = persisted.iter().map(|r| r.chain_seq).max().unwrap_or(0);
 
     Ok(json!({

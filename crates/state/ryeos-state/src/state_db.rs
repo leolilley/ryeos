@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 
 use crate::bundle_events::{
-    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord,
+    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage,
+    BundleEventRecord, BundleEventScanCursor, BundleEventScanPage,
 };
 use crate::bundle_projection::BundleProjectionDb;
 use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
@@ -523,11 +524,8 @@ impl StateDb {
     }
 
     pub fn remove_chain_head_ref(&self, chain_root_id: &str) -> anyhow::Result<bool> {
-        let removed = crate::refs::remove_generic_head_ref(
-            &self.refs_root,
-            "chains",
-            chain_root_id,
-        )?;
+        let removed =
+            crate::refs::remove_generic_head_ref(&self.refs_root, "chains", chain_root_id)?;
         self.head_cache
             .lock()
             .expect("head_cache lock")
@@ -545,18 +543,40 @@ impl StateDb {
                 &format!("DELETE FROM event_replay_index WHERE thread_id IN ({thread_ids})"),
                 [chain_root_id],
             )?;
-            deleted += conn.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_edges WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_results WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_artifacts WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted +=
+                conn.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute(
+                "DELETE FROM thread_edges WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_results WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_artifacts WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
             deleted += conn.execute(
                 &format!("DELETE FROM thread_facets WHERE thread_id IN ({thread_ids})"),
                 [chain_root_id],
             )?;
-            deleted += conn.execute("DELETE FROM thread_usage_latest WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_usage_subjects WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM projection_meta WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM threads WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute(
+                "DELETE FROM thread_usage_latest WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_usage_subjects WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM projection_meta WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM threads WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
             Ok::<_, rusqlite::Error>(deleted)
         })();
         match result {
@@ -626,6 +646,46 @@ impl StateDb {
         event_kind: &str,
     ) -> anyhow::Result<Vec<BundleEventRecord>> {
         bundle_events::scan_bundle_events(&self.cas_root, &self.refs_root, bundle_id, event_kind)
+    }
+
+    pub fn read_bundle_event_chain_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> anyhow::Result<BundleEventChainPage> {
+        bundle_events::read_bundle_event_chain_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            chain_id,
+            cursor,
+            limit,
+            max_serialized_bytes,
+        )
+    }
+
+    pub fn scan_bundle_events_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        cursor: Option<&BundleEventScanCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> anyhow::Result<BundleEventScanPage> {
+        bundle_events::scan_bundle_events_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            cursor,
+            limit,
+            max_serialized_bytes,
+        )
     }
 
     pub fn open_bundle_projection(

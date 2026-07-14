@@ -283,16 +283,23 @@ pub fn materialize_manifest(
 
 pub fn load_verified_manifest_yaml(
     ai_dir: &Path,
-    expected_name: Option<&str>,
+    expected_name: &str,
     trust_store: &TrustStore,
-) -> Result<Option<BundleManifest>> {
+) -> Result<BundleManifest> {
     let manifest_path = ai_dir.join("manifest.yaml");
-    if !manifest_path.exists() {
-        return Ok(None);
-    }
-    let file_type = fs::symlink_metadata(&manifest_path)
-        .with_context(|| format!("failed to stat {}", manifest_path.display()))?
-        .file_type();
+    let file_type = match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "required signed bundle manifest is missing at {}",
+                manifest_path.display()
+            )
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to stat {}", manifest_path.display()))
+        }
+    };
     if file_type.is_symlink() || !file_type.is_file() {
         bail!(
             "bundle manifest at {} is not a regular file (symlinks rejected)",
@@ -329,16 +336,14 @@ pub fn load_verified_manifest_yaml(
             manifest_path.display()
         )
     })?;
-    if let Some(expected_name) =
-        expected_name.filter(|expected_name| manifest.name != *expected_name)
-    {
+    if manifest.name != expected_name {
         bail!(
             "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}'",
             manifest.name,
             expected_name
         );
     }
-    Ok(Some(manifest))
+    Ok(manifest)
 }
 
 fn yaml_signature_envelope() -> SignatureEnvelope {
@@ -349,63 +354,112 @@ fn yaml_signature_envelope() -> SignatureEnvelope {
     }
 }
 
-pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<BundleManifest>> {
+/// Parse the generated manifest for a published or runtime bundle.
+///
+/// This deliberately never consults unsigned `manifest.source.yaml`. Callers
+/// operating at the init/publisher development boundary must use the explicit
+/// source-materialization helper instead.
+pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManifest> {
     let ai_dir = source.join(".ai");
-
     let manifest_path = ai_dir.join("manifest.yaml");
-    if manifest_path.exists() {
-        let raw = fs::read_to_string(&manifest_path)
-            .with_context(|| format!("read manifest {}", manifest_path.display()))?;
-        let body = lillux::signature::strip_signature_lines(&raw);
-        let manifest = parse_current_manifest_body(&body, &manifest_path)?;
-        manifest.runtime_authority.validate().map_err(|e| {
-            anyhow::anyhow!(
-                "invalid `runtime_authority` declaration in {}: {e}",
+    let file_type = match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "required generated bundle manifest is missing at {}",
                 manifest_path.display()
             )
-        })?;
-        if manifest.name != expected_name {
-            bail!(
-                "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}' — \
-                 regenerate the manifest",
-                manifest.name,
-                expected_name
-            );
         }
-        return Ok(Some(manifest));
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect manifest {}", manifest_path.display()))
+        }
+    };
+    if file_type.is_symlink() || !file_type.is_file() {
+        bail!(
+            "bundle manifest at {} must be a regular non-symlink file",
+            manifest_path.display()
+        );
     }
 
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let manifest = parse_current_manifest_body(&body, &manifest_path)?;
+    manifest.runtime_authority.validate().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid `runtime_authority` declaration in {}: {e}",
+            manifest_path.display()
+        )
+    })?;
+    if manifest.name != expected_name {
+        bail!(
+            "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}' — \
+             regenerate the manifest",
+            manifest.name,
+            expected_name
+        );
+    }
+    Ok(manifest)
+}
+
+/// Materialize unsigned publisher input for init source-set planning.
+///
+/// This is intentionally crate-private so runtime/install callers cannot
+/// accidentally substitute source declarations for the mandatory generated
+/// manifest.
+pub(crate) fn materialize_manifest_source(
+    source: &Path,
+    expected_name: &str,
+) -> Result<BundleManifest> {
+    let ai_dir = source.join(".ai");
     let source_path = ai_dir.join("manifest.source.yaml");
-    if source_path.exists() {
-        let raw = fs::read_to_string(&source_path)
-            .with_context(|| format!("read manifest source {}", source_path.display()))?;
-        let src: BundleManifestSource = serde_yaml::from_str(&raw)
-            .with_context(|| format!("parse manifest source {}", source_path.display()))?;
-        let manifest = materialize_manifest(src, &ai_dir, expected_name)?;
-        return Ok(Some(manifest));
+    let file_type = match fs::symlink_metadata(&source_path) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "required bundle manifest source is missing at {}",
+                source_path.display()
+            )
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect manifest source {}", source_path.display()))
+        }
+    };
+    if file_type.is_symlink() || !file_type.is_file() {
+        bail!(
+            "bundle manifest source at {} must be a regular non-symlink file",
+            source_path.display()
+        );
     }
 
-    Ok(None)
+    let raw = fs::read_to_string(&source_path)
+        .with_context(|| format!("read manifest source {}", source_path.display()))?;
+    let src: BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+    materialize_manifest(src, &ai_dir, expected_name)
 }
 
 pub fn validate_manifest_dependencies(bundles: &[(String, PathBuf)]) -> Result<()> {
     let manifests = parse_all_manifests(bundles)?;
 
     let mut all_provides: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (_, mf) in &manifests {
-        if let Some(m) = mf {
-            for k in &m.provides_kinds {
-                all_provides.insert(k.clone());
-            }
+    for (_, manifest) in &manifests {
+        for kind in &manifest.provides_kinds {
+            all_provides.insert(kind.clone());
         }
     }
 
     let mut missing: Vec<(String, Vec<String>)> = Vec::new();
-    for (name, mf) in &manifests {
-        let Some(m) = mf else { continue };
+    for (name, manifest) in &manifests {
         let mut unsatisfied: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for req in m.requires_kinds.iter().chain(m.uses_kinds.iter()) {
-            if m.provides_kinds.contains(req) {
+        for req in manifest
+            .requires_kinds
+            .iter()
+            .chain(manifest.uses_kinds.iter())
+        {
+            if manifest.provides_kinds.contains(req) {
                 continue;
             }
             if !all_provides.contains(req) {
@@ -439,38 +493,33 @@ pub fn validate_manifest_dependencies(bundles: &[(String, PathBuf)]) -> Result<(
 /// Sort discovered bundles into installation order based on manifest dependencies.
 ///
 /// Bundles with no `requires_kinds` come first. Bundles whose requirements are
-/// fully satisfied by earlier bundles come next. Falls back to alphabetical
-/// order for bundles without manifests or when no dependency information exists.
+/// fully satisfied by earlier bundles come next. Every bundle must have a
+/// generated manifest.
 ///
 /// Returns a topologically-sorted copy of `bundles`.
 pub fn sort_bundles_by_dependency(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, PathBuf)>> {
+    let manifests = parse_all_manifests(bundles)?;
     if bundles.len() <= 1 {
         return Ok(bundles.to_vec());
     }
 
-    let manifests = parse_all_manifests(bundles)?;
-
     // Build (name, external_kinds, provides_kinds) for each bundle.
-    // Bundles without manifests get empty deps (treated as leaf nodes).
     let mut bundle_deps: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
-    for (name, mf) in &manifests {
-        match mf {
-            Some(m) => {
-                let external_kinds: Vec<String> = m
-                    .requires_kinds
-                    .iter()
-                    .chain(m.uses_kinds.iter())
-                    .filter(|k| !m.provides_kinds.contains(k))
-                    .cloned()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                bundle_deps.push((name.clone(), external_kinds, m.provides_kinds.clone()));
-            }
-            None => {
-                bundle_deps.push((name.clone(), Vec::new(), Vec::new()));
-            }
-        }
+    for (name, manifest) in &manifests {
+        let external_kinds: Vec<String> = manifest
+            .requires_kinds
+            .iter()
+            .chain(manifest.uses_kinds.iter())
+            .filter(|kind| !manifest.provides_kinds.contains(kind))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        bundle_deps.push((
+            name.clone(),
+            external_kinds,
+            manifest.provides_kinds.clone(),
+        ));
     }
 
     // Kahn's algorithm for topological sort.
@@ -548,10 +597,8 @@ pub fn sort_bundles_by_dependency(bundles: &[(String, PathBuf)]) -> Result<Vec<(
     Ok(result)
 }
 
-fn parse_all_manifests(
-    bundles: &[(String, PathBuf)],
-) -> Result<Vec<(String, Option<BundleManifest>)>> {
-    let mut manifests: Vec<(String, Option<BundleManifest>)> = Vec::new();
+fn parse_all_manifests(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, BundleManifest)>> {
+    let mut manifests: Vec<(String, BundleManifest)> = Vec::new();
     for (name, path) in bundles {
         let mf = parse_manifest(path, name)
             .with_context(|| format!("parse manifest for bundle {}", name))?;
@@ -572,56 +619,20 @@ mod tests {
             .to_path_buf()
     }
 
-    fn is_valid_bundle_name(name: &str) -> bool {
-        if name.is_empty() || name.len() > 64 {
-            return false;
-        }
-        name.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-    }
-
-    fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-        if !source_dir.is_dir() {
-            bail!("source directory does not exist: {}", source_dir.display());
-        }
-
-        let mut bundles = Vec::new();
-        let entries = fs::read_dir(source_dir)
-            .with_context(|| format!("read source directory {}", source_dir.display()))?;
-
-        for entry in entries {
-            let entry = entry.context("read source dir entry")?;
-            let file_type = entry.file_type().context("read source dir entry type")?;
-            if !file_type.is_dir() {
-                continue;
-            }
-
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-
-            if name_str.starts_with('.') {
-                continue;
-            }
-
-            if !is_valid_bundle_name(&name_str) {
-                continue;
-            }
-
-            let child_path = entry.path();
-            if child_path.join(ryeos_engine::AI_DIR).is_dir() {
-                bundles.push((name_str.into_owned(), child_path));
-            }
-        }
-
-        bundles.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(bundles)
+    fn materialize_test_manifest(bundle: &Path, name: &str) {
+        let manifest =
+            materialize_manifest_source(bundle, name).expect("materialize test manifest");
+        fs::write(
+            bundle.join(".ai/manifest.yaml"),
+            serde_yaml::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
     fn parse_manifest_reads_core() {
         let mf = parse_manifest(&workspace_root().join("bundles/core"), "core")
-            .expect("parse core manifest")
-            .expect("core has a manifest");
+            .expect("parse core manifest");
         assert_eq!(mf.name, "core");
         assert_eq!(mf.version, "0.5.0");
         assert!(!mf.provides_kinds.is_empty());
@@ -642,8 +653,7 @@ mod tests {
     #[test]
     fn parse_manifest_reads_standard() {
         let mf = parse_manifest(&workspace_root().join("bundles/standard"), "standard")
-            .expect("parse standard manifest")
-            .expect("standard has a manifest");
+            .expect("parse standard manifest");
         assert_eq!(mf.name, "standard");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
@@ -666,11 +676,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_manifest_reads_hosted_node_from_source() {
+    fn parse_manifest_reads_hosted_node_generated_manifest() {
         let root = workspace_root().join("bundles/hosted-node");
         let mf = parse_manifest(&workspace_root().join("bundles/hosted-node"), "hosted-node")
-            .expect("parse hosted-node manifest")
-            .expect("hosted-node has a manifest source");
+            .expect("parse hosted-node manifest");
         assert_eq!(mf.name, "hosted-node");
         assert_eq!(mf.version, "0.1.0");
         assert!(mf.provides_kinds.is_empty());
@@ -691,11 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_manifest_returns_none_when_missing() {
+    fn parse_manifest_fails_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("no-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        assert!(parse_manifest(&bundle, "no-manifest").unwrap().is_none());
+        let error = parse_manifest(&bundle, "no-manifest").unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
@@ -703,13 +713,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bad-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        fs::write(bundle.join(".ai/manifest.source.yaml"), "not: [valid\nyaml").unwrap();
+        fs::write(bundle.join(".ai/manifest.yaml"), "not: [valid\nyaml").unwrap();
         assert!(parse_manifest(&bundle, "bad-manifest").is_err());
     }
 
     #[test]
     fn validate_dependencies_core_and_standard_ok() {
-        let bundles = discover_bundles(&workspace_root().join("bundles")).unwrap();
+        let root = workspace_root();
+        let bundles = vec![
+            ("core".to_string(), root.join("bundles/core")),
+            ("standard".to_string(), root.join("bundles/standard")),
+        ];
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
             "core + standard should satisfy all dependencies"
@@ -741,6 +755,7 @@ mod tests {
             "name: needy\nversion: '1.0'\nrequires_kinds:\n  - magic\n",
         )
         .unwrap();
+        materialize_test_manifest(&needy, "needy");
 
         let bundles = vec![("needy".to_string(), needy)];
         let err = validate_manifest_dependencies(&bundles).unwrap_err();
@@ -756,16 +771,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_dependencies_skips_bundles_without_manifest() {
+    fn validate_dependencies_rejects_bundles_without_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let bare = tmp.path().join("bare");
         fs::create_dir_all(bare.join(".ai")).unwrap();
 
         let bundles = vec![("bare".to_string(), bare)];
-        assert!(
-            validate_manifest_dependencies(&bundles).is_ok(),
-            "bundles without manifests should pass"
-        );
+        let error = validate_manifest_dependencies(&bundles).unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
@@ -783,6 +796,7 @@ mod tests {
             "name: selfish\nversion: '1.0'\nrequires_kinds:\n  - foo\n",
         )
         .unwrap();
+        materialize_test_manifest(&selfish, "selfish");
 
         let bundles = vec![("selfish".to_string(), selfish)];
         assert!(
@@ -807,6 +821,7 @@ mod tests {
             "name: provider\nversion: '1.0'\nrequires_kinds: []\n",
         )
         .unwrap();
+        materialize_test_manifest(&provider, "provider");
 
         let consumer = tmp.path().join("consumer");
         fs::create_dir_all(consumer.join(".ai")).unwrap();
@@ -815,6 +830,7 @@ mod tests {
             "name: consumer\nversion: '1.0'\nrequires_kinds:\n  - alpha\n",
         )
         .unwrap();
+        materialize_test_manifest(&consumer, "consumer");
 
         let bundles = vec![
             ("consumer".to_string(), consumer),
@@ -832,8 +848,8 @@ mod tests {
         let bundle = tmp.path().join("real-name");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
         fs::write(
-            bundle.join(".ai/manifest.source.yaml"),
-            "name: wrong-name\nversion: '1.0'\nrequires_kinds: []\n",
+            bundle.join(".ai/manifest.yaml"),
+            "name: wrong-name\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\n",
         )
         .unwrap();
 
@@ -1007,7 +1023,7 @@ typo_field: oops
     }
 
     #[test]
-    fn parse_manifest_dev_mode_materializes_from_source() {
+    fn materialize_manifest_source_supports_init_planning() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("dev-bundle");
         let ai_dir = bundle.join(".ai");
@@ -1023,16 +1039,15 @@ typo_field: oops
         )
         .unwrap();
 
-        let mf = parse_manifest(&bundle, "dev-bundle")
-            .unwrap()
-            .expect("should find manifest via source fallback");
+        let mf = materialize_manifest_source(&bundle, "dev-bundle")
+            .expect("explicit source materialization should succeed");
         assert_eq!(mf.name, "dev-bundle");
         assert_eq!(mf.provides_kinds, vec!["custom"]);
         assert!(mf.requires_kinds.is_empty());
     }
 
     #[test]
-    fn parse_manifest_prefers_generated_over_source() {
+    fn parse_manifest_reads_generated_and_ignores_source() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("pub-bundle");
         let ai_dir = bundle.join(".ai");
@@ -1048,9 +1063,7 @@ typo_field: oops
         )
         .unwrap();
 
-        let mf = parse_manifest(&bundle, "pub-bundle")
-            .unwrap()
-            .expect("should find manifest");
+        let mf = parse_manifest(&bundle, "pub-bundle").expect("should find generated manifest");
         assert_eq!(mf.version, "2.0", "should read generated, not source");
         assert_eq!(mf.provides_kinds, vec!["published-kind"]);
     }

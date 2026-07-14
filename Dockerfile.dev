@@ -7,6 +7,8 @@
 #
 # Build:
 #   docker build -f Dockerfile.dev -t ryeosd-full:dev .
+# Run (explicitly trust the dev/custom publisher baked into this image):
+#   docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
 
 # debian:trixie ships glibc 2.41+, matching modern host toolchains. The
 # previous base (debian:bookworm-slim, glibc 2.36) refused to load

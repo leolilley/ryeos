@@ -9,9 +9,18 @@ use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use serde::{Deserialize, Serialize};
 
 use crate::callback_token::CallbackCapability;
-use crate::vault::{runtime_vault_ref, validate_runtime_vault_segment, NodeVault, VaultScope};
+use crate::vault::{
+    runtime_vault_ref, validate_runtime_vault_segment, validate_secret_value, NodeVault, VaultScope,
+};
 
 const VAULT_BUNDLE_REF_PREFIX: &str = "vault://bundle/";
+const DEFAULT_RUNTIME_VAULT_LIST_LIMIT: usize = 64;
+const MAX_RUNTIME_VAULT_LIST_LIMIT: usize = 128;
+const MAX_RUNTIME_VAULT_LIST_RESPONSE_BYTES: usize = 64 * 1024;
+
+fn default_runtime_vault_list_limit() -> usize {
+    DEFAULT_RUNTIME_VAULT_LIST_LIMIT
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +43,10 @@ pub struct RuntimeVaultRefParams {
 pub struct RuntimeVaultListParams {
     pub thread_id: String,
     pub namespace: String,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default = "default_runtime_vault_list_limit")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +70,7 @@ pub struct RuntimeVaultDeleteResponse {
 pub struct RuntimeVaultListResponse {
     pub namespace: String,
     pub keys: Vec<String>,
+    pub next_cursor: Option<String>,
 }
 
 pub struct RuntimeVaultService;
@@ -78,6 +92,7 @@ impl RuntimeVaultService {
             &bundle_id,
             &params.namespace,
         )?;
+        validate_secret_value(&params.value)?;
         let scope = VaultScope::runtime_bundle(&bundle_id, &params.namespace)?;
         vault.put_scoped_secret(&scope, &params.key, &params.value)?;
         Ok(RuntimeVaultPutResponse {
@@ -104,6 +119,7 @@ impl RuntimeVaultService {
         let value = vault
             .get_scoped_secret(&scope, &parsed.key)?
             .ok_or_else(|| anyhow::anyhow!("runtime vault secret not found"))?;
+        validate_secret_value(&value)?;
         Ok(RuntimeVaultGetResponse {
             r#ref: params.r#ref,
             value,
@@ -141,6 +157,14 @@ impl RuntimeVaultService {
     ) -> anyhow::Result<RuntimeVaultListResponse> {
         let bundle_id = effective_bundle_id(cap)?;
         validate_runtime_vault_segment("namespace", &params.namespace)?;
+        if let Some(cursor) = params.cursor.as_deref() {
+            validate_runtime_vault_segment("cursor", cursor)?;
+        }
+        if params.limit == 0 || params.limit > MAX_RUNTIME_VAULT_LIST_LIMIT {
+            anyhow::bail!(
+                "runtime vault list limit must be between 1 and {MAX_RUNTIME_VAULT_LIST_LIMIT}"
+            );
+        }
         authorize_runtime_vault(
             authorizer,
             &cap.effective_caps,
@@ -149,9 +173,35 @@ impl RuntimeVaultService {
             &params.namespace,
         )?;
         let scope = VaultScope::runtime_bundle(&bundle_id, &params.namespace)?;
+        let mut scoped_keys = vault.list_scoped_secret_keys(&scope)?;
+        for key in &scoped_keys {
+            validate_runtime_vault_segment("persisted key", key)?;
+        }
+        scoped_keys.sort();
+        scoped_keys.dedup();
+        let mut keys = scoped_keys
+            .into_iter()
+            .filter(|key| params.cursor.as_ref().is_none_or(|cursor| key > cursor))
+            .take(params.limit + 1)
+            .collect::<Vec<_>>();
+        let has_more = keys.len() > params.limit;
+        keys.truncate(params.limit);
+        let next_cursor = has_more.then(|| keys.last().cloned()).flatten();
+        let response_bytes = serde_json::to_vec(&RuntimeVaultListResponse {
+            namespace: params.namespace.clone(),
+            keys: keys.clone(),
+            next_cursor: next_cursor.clone(),
+        })?
+        .len();
+        if response_bytes > MAX_RUNTIME_VAULT_LIST_RESPONSE_BYTES {
+            anyhow::bail!(
+                "runtime vault list response is {response_bytes} bytes; maximum is {MAX_RUNTIME_VAULT_LIST_RESPONSE_BYTES}"
+            );
+        }
         Ok(RuntimeVaultListResponse {
             namespace: params.namespace,
-            keys: vault.list_scoped_secret_keys(&scope)?,
+            keys,
+            next_cursor,
         })
     }
 }
@@ -160,6 +210,32 @@ impl RuntimeVaultService {
 struct ParsedRuntimeVaultRef {
     namespace: String,
     key: String,
+}
+
+#[cfg(test)]
+mod parameter_tests {
+    use super::*;
+
+    #[test]
+    fn list_params_default_and_explicit_pagination_decode() {
+        let defaults: RuntimeVaultListParams = serde_json::from_value(serde_json::json!({
+            "thread_id": "thread-1",
+            "namespace": "weights"
+        }))
+        .unwrap();
+        assert_eq!(defaults.limit, DEFAULT_RUNTIME_VAULT_LIST_LIMIT);
+        assert_eq!(defaults.cursor, None);
+
+        let paged: RuntimeVaultListParams = serde_json::from_value(serde_json::json!({
+            "thread_id": "thread-1",
+            "namespace": "weights",
+            "cursor": "checkpoint_1",
+            "limit": MAX_RUNTIME_VAULT_LIST_LIMIT
+        }))
+        .unwrap();
+        assert_eq!(paged.cursor.as_deref(), Some("checkpoint_1"));
+        assert_eq!(paged.limit, MAX_RUNTIME_VAULT_LIST_LIMIT);
+    }
 }
 
 fn parse_ref_for_bundle(

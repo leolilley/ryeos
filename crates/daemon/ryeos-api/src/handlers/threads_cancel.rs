@@ -15,9 +15,9 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::cascade::{cancel_queued_descendants, cascade_descendants, CascadeMode};
-use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
+use ryeos_app::process::{kill_by_action, resolve_shutdown_action, ShutdownAction};
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::is_terminal_status;
+use ryeos_app::state_store::{is_terminal_status, StopIntent};
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_engine::contracts::ThreadTerminalStatus;
 use ryeos_executor::executor::ServiceAvailability;
@@ -59,18 +59,45 @@ pub async fn handle(
         )));
     }
 
-    // If the thread has a usable PGID, kill the process group. A non-positive
-    // pgid is unusable — `kill(-0, …)` would hit the daemon's own group — so it
-    // is treated as "no process to kill", not signalled.
-    let kill_info = if let Some(pgid) = thread.runtime.pgid.filter(|&p| p > 0) {
-        let action = resolve_shutdown_action(
-            thread
-                .runtime
-                .launch_metadata
-                .as_ref()
-                .and_then(|lm| lm.cancellation_mode),
-        );
-        let result = kill_by_action(pgid, action);
+    // Atomically close the attach window before deciding whether there is a
+    // process to signal. If attach won the StateStore lock first, its immutable
+    // identity is returned and killed below; if cancellation won, every later
+    // attach is rejected and its caller kills the just-spawned process.
+    let runtime = state
+        .state_store
+        .request_thread_stop(&req.thread_id, ryeos_app::state_store::StopIntent::Cancel)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let effective_intent = runtime.stop_intent.ok_or_else(|| {
+        HandlerError::Internal(format!(
+            "durable stop request for {} returned no effective intent",
+            req.thread_id
+        ))
+    })?;
+    let kill_info = if let Some(process_identity) = runtime.process_identity.as_ref() {
+        let pgid = runtime.pgid.ok_or_else(|| {
+            HandlerError::Internal(format!(
+                "verified process identity has no PGID for thread {}",
+                req.thread_id
+            ))
+        })?;
+        let action = match effective_intent {
+            StopIntent::Kill => ShutdownAction::Hard,
+            StopIntent::Cancel => resolve_shutdown_action(
+                runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|lm| lm.cancellation_mode),
+            ),
+        };
+        let process_identity = process_identity.clone();
+        let result = tokio::task::spawn_blocking(move || kill_by_action(&process_identity, action))
+            .await
+            .map_err(|error| {
+                HandlerError::Internal(format!(
+                    "process-group kill worker failed for thread {}: {error}",
+                    req.thread_id
+                ))
+            })?;
 
         // If the kill genuinely failed (not already_dead), don't
         // finalize — the process is still alive and marking it
@@ -102,13 +129,21 @@ pub async fn handle(
     // so `finalize_thread` would reject the same-status transition. Treat an
     // already-terminal target as success — the cancel took effect — rather than
     // surfacing the benign race as an Internal error.
+    let terminal_status = match effective_intent {
+        StopIntent::Cancel => ThreadTerminalStatus::Cancelled.as_str(),
+        StopIntent::Kill => ThreadTerminalStatus::Killed.as_str(),
+    };
     let finalized = match state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: req.thread_id.clone(),
-        status: ThreadTerminalStatus::Cancelled.as_str().to_string(),
-        outcome_code: Some(ThreadTerminalStatus::Cancelled.as_str().to_string()),
+        status: terminal_status.to_string(),
+        outcome_code: Some(terminal_status.to_string()),
         result: None,
         error: Some(json!({
-            "reason": "cancelled_by_request",
+            "reason": if effective_intent == StopIntent::Kill {
+                "killed_by_prior_request"
+            } else {
+                "cancelled_by_request"
+            },
         })),
         metadata: None,
         artifacts: Vec::new(),
@@ -122,7 +157,13 @@ pub async fn handle(
                 .get_thread(&req.thread_id)
                 .map_err(|read_err| HandlerError::Internal(read_err.to_string()))?;
             match current {
-                Some(thread) if is_terminal_status(&thread.status) => thread,
+                Some(thread) if thread.status == terminal_status => thread,
+                Some(thread) if is_terminal_status(&thread.status) => {
+                    return Err(HandlerError::Conflict(format!(
+                        "stop requested as {terminal_status}, but thread settled {}",
+                        thread.status
+                    )))
+                }
                 _ => return Err(HandlerError::Internal(e.to_string())),
             }
         }
@@ -136,23 +177,40 @@ pub async fn handle(
     // blocked on an inline child would leave that child running — and authoring —
     // past the parent's cancel. Graceful, honouring each child's declared mode. A
     // walk failure is logged, not raised: the primary is already settled.
-    let queued_cancelled = cancel_queued_descendants(&state, &req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let cascade_mode = match effective_intent {
+        StopIntent::Cancel => CascadeMode::Graceful,
+        StopIntent::Kill => CascadeMode::Hard,
+    };
+    let cascade_state = Arc::clone(&state);
+    let cascade_thread_id = req.thread_id.clone();
+    let (queued_cancelled, cascade_result) = tokio::task::spawn_blocking(move || {
+        let queued_cancelled = cancel_queued_descendants(&cascade_state, &cascade_thread_id)?;
+        let cascade =
+            cascade_descendants(&cascade_state.state_store, &cascade_thread_id, cascade_mode);
+        Ok::<_, anyhow::Error>((queued_cancelled, cascade))
+    })
+    .await
+    .map_err(|error| {
+        HandlerError::Internal(format!(
+            "descendant cascade worker failed for thread {}: {error}",
+            req.thread_id
+        ))
+    })?
+    .map_err(|error| HandlerError::Internal(error.to_string()))?;
     for root in &queued_cancelled {
         ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, root);
     }
-    let cascade =
-        match cascade_descendants(&state.state_store, &req.thread_id, CascadeMode::Graceful) {
-            Ok(report) => report,
-            Err(e) => {
-                tracing::warn!(
-                    thread_id = %req.thread_id,
-                    error = %e,
-                    "descendant cascade failed during cancel"
-                );
-                Vec::new()
-            }
-        };
+    let cascade = match cascade_result {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!(
+                thread_id = %req.thread_id,
+                error = %e,
+                "descendant cascade failed during cancel"
+            );
+            Vec::new()
+        }
+    };
 
     // If the cancelled thread was a followed child's chain terminal, its finalize
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —

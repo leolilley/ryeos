@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::NativeResumeSpec;
 use crate::error::EngineError;
-use crate::kind_registry::{KindRegistry, TerminatorDecl};
+use crate::kind_registry::KindRegistry;
 use crate::resolution::TrustClass;
 use crate::trust::TrustStore;
 
@@ -60,8 +60,6 @@ pub struct RuntimeYaml {
     pub required_envelope_fields: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
-    pub schema: Option<RuntimeSchema>,
     /// Replay-aware resume policy for this runtime. Presence ⇒ this runtime
     /// owns its own checkpoint/resume: the daemon allocates a per-thread
     /// checkpoint dir and injects `RYEOS_CHECKPOINT_DIR` for runtime-registry
@@ -90,13 +88,6 @@ where
     NativeResumeSpec::parse_declaration(&value)
         .map(Some)
         .map_err(serde::de::Error::custom)
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeSchema {
-    pub envelope: String,
-    pub result: String,
 }
 
 /// A runtime YAML that has been parsed AND trust-verified.
@@ -182,14 +173,9 @@ impl RuntimeRegistry {
             }
         }
 
-        // Typed-view validation: when a runtime's `serves` kind declares
-        // an explicit terminator (not a delegate), that terminator MUST be
-        // Subprocess with protocol `protocol:ryeos/core/runtime_v1`.
-        // Kinds that use `delegate: via: runtime_registry` (no terminator)
-        // are inherently compatible — they explicitly delegate to the
-        // runtime registry. Kinds with an incompatible terminator would
-        // produce confusing dispatch errors downstream.
-        const EXPECTED_PROTOCOL: &str = "protocol:ryeos/core/runtime_v1";
+        // A runtime may serve only an executable kind. The kind schema's
+        // verified terminator/protocol remains authoritative; the registry
+        // never binds a kind name to one built-in protocol ref.
         for (kind, list) in &by_kind {
             let schema = match kinds.get(kind) {
                 Some(s) => s,
@@ -200,34 +186,11 @@ impl RuntimeRegistry {
                     });
                 }
             };
-            let exec = match schema.execution() {
-                Some(e) => e,
-                None => {
-                    return Err(EngineError::RuntimeServesKindNoExecution {
-                        kind: kind.clone(),
-                        runtime: list[0].canonical_ref.to_string(),
-                    });
-                }
-            };
-            // If the kind delegates to the runtime registry (no terminator),
-            // it's inherently compatible with any runtime.
-            let terminator = match exec.terminator.as_ref() {
-                Some(t) => t,
-                None => continue, // delegate-based or alias-based — valid
-            };
-            let found_protocol = match terminator {
-                TerminatorDecl::Subprocess { protocol_ref } => protocol_ref.clone(),
-                TerminatorDecl::InProcess { .. } => String::new(),
-            };
-            if found_protocol != EXPECTED_PROTOCOL {
-                if let Some(_rt) = list.iter().next() {
-                    return Err(EngineError::RuntimeProtocolMismatch {
-                        runtime: list[0].canonical_ref.to_string(),
-                        kind: kind.clone(),
-                        expected: EXPECTED_PROTOCOL.to_string(),
-                        found: found_protocol.clone(),
-                    });
-                }
+            if schema.execution().is_none() {
+                return Err(EngineError::RuntimeServesKindNoExecution {
+                    kind: kind.clone(),
+                    runtime: list[0].canonical_ref.to_string(),
+                });
             }
         }
 
@@ -472,7 +435,6 @@ mod tests {
             required_caps: vec![],
             required_envelope_fields: vec![],
             description: None,
-            schema: None,
             native_resume: None,
         }
     }

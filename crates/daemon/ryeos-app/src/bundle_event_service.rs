@@ -6,7 +6,9 @@ use anyhow::Context;
 use ryeos_bundle::manifest::BundleEventOperation;
 use ryeos_bundle::runtime_authority::bundle_event_cap;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
-use ryeos_state::{BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord};
+use ryeos_state::{
+    BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord, BundleEventScanCursor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -40,6 +42,10 @@ pub struct BundleEventReadChainParams {
     pub thread_id: String,
     pub event_kind: String,
     pub chain_id: String,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default = "default_page_limit")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +53,10 @@ pub struct BundleEventReadChainParams {
 pub struct BundleEventScanParams {
     pub thread_id: String,
     pub event_kind: String,
+    #[serde(default)]
+    pub cursor: Option<BundleEventScanCursor>,
+    #[serde(default = "default_page_limit")]
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,9 +68,20 @@ pub struct BundleEventAppendResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct BundleEventRecordsResponse {
+pub struct BundleEventReadChainResponse {
     pub events: Vec<BundleEventRecord>,
+    pub next_cursor: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleEventScanResponse {
+    pub events: Vec<BundleEventRecord>,
+    pub next_cursor: Option<BundleEventScanCursor>,
+}
+
+const DEFAULT_PAGE_LIMIT: usize = 16;
+const MAX_PAGE_LIMIT: usize = 16;
+const MAX_PAGE_SERIALIZED_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct BundleEventService;
 
@@ -102,9 +123,10 @@ impl BundleEventService {
         authorizer: &Authorizer,
         cap: &CallbackCapability,
         params: BundleEventReadChainParams,
-    ) -> anyhow::Result<BundleEventRecordsResponse> {
+    ) -> anyhow::Result<BundleEventReadChainResponse> {
         let effective_bundle_id = effective_bundle_id(cap)?;
         validate_bundle_identifiers(&effective_bundle_id, &params.event_kind)?;
+        validate_page_limit(params.limit)?;
         authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
@@ -112,12 +134,17 @@ impl BundleEventService {
             &effective_bundle_id,
             &params.event_kind,
         )?;
-        Ok(BundleEventRecordsResponse {
-            events: state_store.read_bundle_event_chain(
-                &effective_bundle_id,
-                &params.event_kind,
-                &params.chain_id,
-            )?,
+        let page = state_store.read_bundle_event_chain_page(
+            &effective_bundle_id,
+            &params.event_kind,
+            &params.chain_id,
+            params.cursor.as_deref(),
+            params.limit,
+            MAX_PAGE_SERIALIZED_BYTES,
+        )?;
+        Ok(BundleEventReadChainResponse {
+            events: page.records,
+            next_cursor: page.next_cursor,
         })
     }
 
@@ -126,9 +153,10 @@ impl BundleEventService {
         authorizer: &Authorizer,
         cap: &CallbackCapability,
         params: BundleEventScanParams,
-    ) -> anyhow::Result<BundleEventRecordsResponse> {
+    ) -> anyhow::Result<BundleEventScanResponse> {
         let effective_bundle_id = effective_bundle_id(cap)?;
         validate_bundle_identifiers(&effective_bundle_id, &params.event_kind)?;
+        validate_page_limit(params.limit)?;
         authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
@@ -136,8 +164,16 @@ impl BundleEventService {
             &effective_bundle_id,
             &params.event_kind,
         )?;
-        Ok(BundleEventRecordsResponse {
-            events: state_store.scan_bundle_events(&effective_bundle_id, &params.event_kind)?,
+        let page = state_store.scan_bundle_events_page(
+            &effective_bundle_id,
+            &params.event_kind,
+            params.cursor.as_ref(),
+            params.limit,
+            MAX_PAGE_SERIALIZED_BYTES,
+        )?;
+        Ok(BundleEventScanResponse {
+            events: page.records,
+            next_cursor: page.next_cursor,
         })
     }
 }
@@ -155,6 +191,20 @@ impl From<BundleEventAppendResult> for BundleEventAppendResponse {
 
 fn default_schema_version() -> u32 {
     1
+}
+
+fn default_page_limit() -> usize {
+    DEFAULT_PAGE_LIMIT
+}
+
+fn validate_page_limit(limit: usize) -> anyhow::Result<()> {
+    if limit == 0 || limit > MAX_PAGE_LIMIT {
+        anyhow::bail!(
+            "bundle event page limit must be between 1 and {}",
+            MAX_PAGE_LIMIT
+        );
+    }
+    Ok(())
 }
 
 fn effective_bundle_id(cap: &CallbackCapability) -> anyhow::Result<String> {

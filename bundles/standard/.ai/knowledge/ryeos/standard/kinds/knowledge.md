@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:9ffcb5728f7abe0dba34fd257b563307ce2ab30d294bca03efbeb1c9489c8b8d:udMEilQB6vnrLpOifjyCy6Dfx4Z/2JuFiUw/5GXoL5sPgoi68h09JoNvoSOxz7fK0Vrt7GhGeycz6HBlSMq3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:83ece88929e572229703a85518c44e66bb3ed1e144e1ccc62902f39b56102e8b:fr4gfNb6uw5lMt4WkYNKRRtjTXfnazYjyWoczvnPi+pPu/JhLCfZ3gHf5QjjHZjW8IGDAbr6p1oC1a6ZfArAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/kinds
 tags: [kind, knowledge, context]
@@ -13,7 +13,14 @@ Invariant: knowledge items are context records with operation-based execution fo
 - Directory: `knowledge/`
 - Formats: markdown frontmatter or YAML
 - Composer: identity
-- Operations: `compose` and `compose_positions`
-- Runtime: runtime-registry delegate to `runtime:knowledge-runtime`
+- Generic methods: `compose`, `query`, `graph`, and `validate`
+- Private launch augmentation operation: `compose_positions`
+- Runtime implementation: runtime-registry selection of `runtime:knowledge-runtime`
+- Method wire: kind-schema selection of `protocol:ryeos/core/method_runtime_v1`
 
-Directives use `compose_positions` as a launch augmentation to render `system`, `before`, and `after` context blocks within per-position budgets.
+Directives use `compose_positions` through the daemon-owned
+`compose_context_positions` launch augmentation to render `system`, `before`,
+and `after` context blocks within per-position budgets. It is intentionally not
+available as a generic `call.method`.
+Direct runtime-item launch is rejected: knowledge-runtime consumes the method
+wire, not the ordinary `runtime_v1` launch envelope.

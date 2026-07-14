@@ -6,12 +6,50 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::launch_metadata::{RuntimeLaunchMetadata, LAUNCH_METADATA_SCHEMA_VERSION};
+use crate::process::{
+    validate_execution_process_identity_shape, ExecutionProcessIdentity,
+    PROCESS_IDENTITY_SCHEMA_VERSION,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopIntent {
+    Cancel,
+    Kill,
+}
+
+impl StopIntent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Kill => "kill",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "cancel" => Ok(Self::Cancel),
+            "kill" => Ok(Self::Kill),
+            other => bail!("invalid durable stop intent `{other}`"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeInfo {
     pub pid: Option<i64>,
     pub pgid: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Internal signal authority. Never expose boot IDs/start ticks through a
+    /// service response; callers only need the existing pid/pgid accounting.
+    #[serde(skip_serializing)]
+    pub process_identity: Option<ExecutionProcessIdentity>,
+    #[serde(skip_serializing)]
+    pub stop_requested_at_ms: Option<i64>,
+    #[serde(skip_serializing)]
+    pub stop_intent: Option<StopIntent>,
+    /// Internal recovery/resume authority. It can retain the original free-form
+    /// execution parameters, so it must never be echoed through ThreadDetail or
+    /// another service response. Internal owners use `get_launch_metadata`.
+    #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
 }
 
@@ -36,6 +74,42 @@ pub struct NewCommandRecord {
     pub requested_by: Option<String>,
     pub params: Option<Value>,
 }
+
+/// Maximum JSON size of one command's params at durable admission.
+pub const MAX_COMMAND_PARAMS_BYTES: usize = 256 * 1024;
+/// Maximum JSON size of one command's terminal result at durable admission.
+pub const MAX_COMMAND_RESULT_BYTES: usize = MAX_COMMAND_PARAMS_BYTES;
+/// Maximum UTF-8 size of the optional command requester identity.
+pub const MAX_COMMAND_REQUESTED_BY_BYTES: usize = 4 * 1024;
+/// Maximum number of pending commands transitioned by one runtime claim.
+pub const MAX_COMMAND_CLAIM_ITEMS: usize = 32;
+/// Exact serialized command-result budget, below the 10 MiB UDS frame limit.
+pub const MAX_COMMAND_CLAIM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// A live thread cannot accumulate unbounded terminalization work.
+pub const MAX_OPEN_COMMANDS_PER_THREAD: usize = 128;
+/// Aggregate variable content retained by a thread's open commands.
+pub const MAX_OPEN_COMMAND_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Validate the closed command vocabulary at the durable database boundary.
+///
+/// Service callers use this same policy for an early error, but every direct
+/// database caller is still required to cross this admission check.
+pub fn validate_command_type(command_type: &str) -> Result<()> {
+    match command_type {
+        "cancel" | "kill" | "interrupt" | "continue" => Ok(()),
+        other => bail!("invalid command_type: {other}"),
+    }
+}
+
+const BOUNDED_COMMAND_SELECT: &str = "SELECT command_id, thread_id, command_type, status, \
+            CASE WHEN requested_by IS NULL OR length(CAST(requested_by AS BLOB)) <= ?1 \
+                 THEN requested_by ELSE NULL END AS requested_by, \
+            CASE WHEN params IS NULL OR length(params) <= ?2 THEN params ELSE NULL END AS params, \
+            CASE WHEN result IS NULL OR length(result) <= ?3 THEN result ELSE NULL END AS result, \
+            created_at, claimed_at, completed_at, \
+            length(CAST(requested_by AS BLOB)) AS requested_by_len, \
+            length(params) AS params_len, length(result) AS result_len \
+     FROM thread_commands";
 
 /// Outcome of attempting to claim the right to launch a thread.
 ///
@@ -140,6 +214,36 @@ pub struct FollowWaiter {
     pub updated_at_ms: i64,
 }
 
+/// The bounded, response-facing projection of a live follow waiter.
+///
+/// Thread lists need lineage plus cohort progress, not the child terminal
+/// envelopes used by reconciliation. Keeping this separate prevents a list
+/// page from loading arbitrary result JSON out of `follow_waiter_child`.
+#[derive(Debug, Clone)]
+pub struct FollowWaiterSummary {
+    pub follow_key: String,
+    pub parent_thread_id: String,
+    pub parent_successor_thread_id: Option<String>,
+    pub follow_node: String,
+    pub phase: String,
+    pub fanout: bool,
+    pub expected_children: u32,
+    pub first_child_thread_id: Option<String>,
+    pub first_child_chain_root_id: Option<String>,
+    pub first_child_terminal_status: Option<String>,
+    pub child_count: u32,
+    pub terminal_child_count: u32,
+    pub created_at_ms: i64,
+}
+
+impl FollowWaiterSummary {
+    pub fn all_children_terminal(&self) -> bool {
+        self.expected_children > 0
+            && self.child_count == self.expected_children
+            && self.terminal_child_count == self.expected_children
+    }
+}
+
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -151,7 +255,10 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     pgid INTEGER,
     metadata BLOB,
     launch_metadata TEXT,
-    resume_attempts INTEGER NOT NULL DEFAULT 0
+    resume_attempts INTEGER NOT NULL DEFAULT 0,
+    process_identity TEXT,
+    stop_requested_at_ms INTEGER,
+    stop_intent TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
@@ -317,6 +424,24 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stop_requested_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "stop_intent",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -677,12 +802,42 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "seat_lease",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "seat_thread_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "owner", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "surface", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "client_ref", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "last_seen_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "reaping_at_ms", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec {
+                        name: "seat_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "surface",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "client_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_seen_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reaping_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],
@@ -781,6 +936,37 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
     };
     if !seat_columns.iter().any(|c| c == "reaping_at_ms") {
         tx.execute_batch("ALTER TABLE seat_lease ADD COLUMN reaping_at_ms INTEGER")?;
+    }
+    let runtime_columns = {
+        let mut stmt = tx.prepare("PRAGMA table_info(thread_runtime)")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !runtime_columns.iter().any(|c| c == "process_identity") {
+        tx.execute_batch("ALTER TABLE thread_runtime ADD COLUMN process_identity TEXT")?;
+    }
+    if !runtime_columns.iter().any(|c| c == "stop_requested_at_ms") {
+        tx.execute_batch("ALTER TABLE thread_runtime ADD COLUMN stop_requested_at_ms INTEGER")?;
+    }
+    if !runtime_columns.iter().any(|c| c == "stop_intent") {
+        tx.execute_batch("ALTER TABLE thread_runtime ADD COLUMN stop_intent TEXT")?;
+    }
+    // This generation intentionally has no raw-PID compatibility path. Old
+    // unsandboxed session leaders can survive their daemon, while their bare
+    // pid/pgid fields cannot prove which incarnation is still running. Refuse
+    // the database instead of clearing the row and duplicate-launching beside
+    // a possibly live process. The operator must explicitly quarantine/reset
+    // the foreign runtime DB before this generation will reconcile it.
+    let unauthenticated_process_rows: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM thread_runtime
+          WHERE process_identity IS NULL AND (pid IS NOT NULL OR pgid IS NOT NULL)",
+        [],
+        |row| row.get(0),
+    )?;
+    if unauthenticated_process_rows > 0 {
+        bail!(
+            "runtime.db contains {unauthenticated_process_rows} process row(s) without durable identity; refusing legacy pid/pgid state"
+        );
     }
     let legacy = {
         let mut stmt = tx.prepare(
@@ -958,7 +1144,7 @@ impl RuntimeDb {
         let live: bool = self.conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM thread_runtime r
-                WHERE r.chain_root_id=?1 AND (r.pid IS NOT NULL OR r.pgid IS NOT NULL)
+                WHERE r.chain_root_id=?1 AND r.process_identity IS NOT NULL
              ) OR EXISTS(
                 SELECT 1 FROM thread_launch_claim c JOIN thread_runtime r USING(thread_id)
                 WHERE r.chain_root_id=?1
@@ -1036,16 +1222,83 @@ impl RuntimeDb {
         thread_id: &str,
         pid: i64,
         pgid: i64,
+        process_identity: &ExecutionProcessIdentity,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
+        if process_identity.schema_version != PROCESS_IDENTITY_SCHEMA_VERSION
+            || process_identity.target_pid != pid
+            || process_identity.group_leader_pid != pgid
+        {
+            bail!("process identity does not match attached pid/pgid for thread {thread_id}");
+        }
+        validate_execution_process_identity_shape(process_identity)
+            .context("invalid process identity shape during attach")?;
+        let identity_json =
+            serde_json::to_string(process_identity).context("failed to encode process_identity")?;
+        let existing = self
+            .conn
+            .query_row(
+                "SELECT pid, pgid, process_identity, stop_requested_at_ms
+                   FROM thread_runtime WHERE thread_id = ?1",
+                params![thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                anyhow::anyhow!("thread_runtime row missing for thread_id: {thread_id}")
+            })?;
+        let (existing_pid, existing_pgid, existing_identity, stop_requested_at_ms) = existing;
+        if let Some(existing_identity) = existing_identity {
+            let existing_identity =
+                serde_json::from_str::<ExecutionProcessIdentity>(&existing_identity)
+                    .context("failed to decode existing process_identity during attach")?;
+            if existing_pid != Some(pid)
+                || existing_pgid != Some(pgid)
+                || existing_identity != *process_identity
+            {
+                bail!("refusing to replace immutable process identity for thread {thread_id}");
+            }
+            // Exact repeated self-attach is idempotent. A later trusted
+            // in-process attach may enrich metadata that the first UDS attach
+            // intentionally left empty, but it cannot change process identity.
+            // Once a stop is tombstoned, keep the exact repeat idempotent but do
+            // not mutate launch metadata during cancellation.
+            if stop_requested_at_ms.is_none() && !launch_metadata.is_empty() {
+                let lm_json = serde_json::to_string(launch_metadata)
+                    .context("failed to encode launch_metadata")?;
+                self.conn.execute(
+                    "UPDATE thread_runtime SET launch_metadata = ?2 WHERE thread_id = ?1",
+                    params![thread_id, lm_json],
+                )?;
+            }
+            return Ok(());
+        }
+        if stop_requested_at_ms.is_some() {
+            bail!("refusing to attach process to stop-requested thread {thread_id}");
+        }
+        if existing_pid.is_some() || existing_pgid.is_some() {
+            bail!("refusing to attach over unverified pid/pgid residue for thread {thread_id}");
+        }
+
         // Preserve seeded launch metadata. A self-attach over UDS sends only
         // thread/pid, so its `launch_metadata` is the serde default (empty); do
         // NOT let that clobber metadata already seeded on the row at spawn
         // (resume context / continuation spec). Update only pid/pgid in that case.
         if launch_metadata.is_empty() {
             let updated = self.conn.execute(
-                "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
-                params![thread_id, pid, pgid],
+                "UPDATE thread_runtime
+                    SET pid = ?2, pgid = ?3, process_identity = ?4
+                  WHERE thread_id = ?1
+                    AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
+                    AND stop_requested_at_ms IS NULL",
+                params![thread_id, pid, pgid, identity_json],
             )?;
             if updated == 0 {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -1056,14 +1309,66 @@ impl RuntimeDb {
             serde_json::to_string(launch_metadata).context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
-                SET pid = ?2, pgid = ?3, launch_metadata = ?4
-              WHERE thread_id = ?1",
-            params![thread_id, pid, pgid, lm_json],
+                SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5
+              WHERE thread_id = ?1
+                AND pid IS NULL AND pgid IS NULL AND process_identity IS NULL
+                AND stop_requested_at_ms IS NULL",
+            params![thread_id, pid, pgid, lm_json, identity_json],
         )?;
         if updated == 0 {
             bail!("thread_runtime row missing for thread_id: {thread_id}");
         }
         Ok(())
+    }
+
+    /// Atomically close the attach window for an explicit stop request and
+    /// return the process identity that was attached before the tombstone.
+    /// A concurrent attach is serialized by the StateStore lock: it either
+    /// lands first and is returned here, or observes the tombstone and fails.
+    pub fn request_thread_stop(&self, thread_id: &str, intent: StopIntent) -> Result<RuntimeInfo> {
+        let now_ms = lillux::time::timestamp_millis();
+        let updated = self.conn.execute(
+            "UPDATE thread_runtime
+                SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
+                    stop_intent = CASE
+                        WHEN stop_intent = 'kill' OR ?3 = 'kill' THEN 'kill'
+                        ELSE 'cancel'
+                    END
+              WHERE thread_id = ?1",
+            params![thread_id, now_ms, intent.as_str()],
+        )?;
+        if updated == 0 {
+            bail!("thread_runtime row missing for thread_id: {thread_id}");
+        }
+        self.get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("thread_runtime row disappeared for {thread_id}"))
+    }
+
+    /// Clear live process ownership only if it is still the exact incarnation
+    /// the caller finished waiting/reaping. This cannot erase a later attach.
+    pub fn clear_process_if_matches(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+    ) -> Result<bool> {
+        let identity_json = serde_json::to_string(process_identity)
+            .context("failed to encode process_identity for compare-and-clear")?;
+        Ok(self.conn.execute(
+            "UPDATE thread_runtime
+                SET pid = NULL, pgid = NULL, process_identity = NULL
+              WHERE thread_id = ?1 AND process_identity = ?2",
+            params![thread_id, identity_json],
+        )? > 0)
+    }
+
+    pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT thread_id FROM thread_runtime
+              WHERE process_identity IS NOT NULL
+              ORDER BY thread_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Seed/overwrite a thread's launch metadata WITHOUT touching pid/pgid. Used
@@ -1096,17 +1401,30 @@ impl RuntimeDb {
         let raw = self
             .conn
             .query_row(
-                "SELECT pid, pgid, launch_metadata FROM thread_runtime WHERE thread_id = ?1",
+                "SELECT pid, pgid, launch_metadata, process_identity,
+                        stop_requested_at_ms, stop_intent
+                   FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
                     let pid: Option<i64> = row.get(0)?;
                     let pgid: Option<i64> = row.get(1)?;
                     let lm_text: Option<String> = row.get(2)?;
-                    Ok((pid, pgid, lm_text))
+                    let identity_text: Option<String> = row.get(3)?;
+                    let stop_requested_at_ms: Option<i64> = row.get(4)?;
+                    let stop_intent: Option<String> = row.get(5)?;
+                    Ok((
+                        pid,
+                        pgid,
+                        lm_text,
+                        identity_text,
+                        stop_requested_at_ms,
+                        stop_intent,
+                    ))
                 },
             )
             .optional()?;
-        let Some((pid, pgid, lm_text)) = raw else {
+        let Some((pid, pgid, lm_text, identity_text, stop_requested_at_ms, stop_intent)) = raw
+        else {
             return Ok(None);
         };
         let launch_metadata = match lm_text.as_deref() {
@@ -1141,9 +1459,50 @@ impl RuntimeDb {
                 }
             },
         };
+        let process_identity = match identity_text.as_deref() {
+            None => None,
+            Some(value) => {
+                let identity = serde_json::from_str::<ExecutionProcessIdentity>(value)
+                    .with_context(|| {
+                        format!(
+                            "failed to decode process_identity for thread {thread_id} (payload_len={})",
+                            value.len()
+                        )
+                    })?;
+                if identity.schema_version != PROCESS_IDENTITY_SCHEMA_VERSION
+                    || Some(identity.target_pid) != pid
+                    || Some(identity.group_leader_pid) != pgid
+                {
+                    bail!(
+                        "process_identity mismatch for thread {thread_id}: persisted pid/pgid={pid:?}/{pgid:?}"
+                    );
+                }
+                validate_execution_process_identity_shape(&identity).with_context(|| {
+                    format!("invalid process_identity shape for thread {thread_id}")
+                })?;
+                Some(identity)
+            }
+        };
+        if !matches!(
+            (pid, pgid, process_identity.as_ref()),
+            (None, None, None) | (Some(_), Some(_), Some(_))
+        ) {
+            bail!(
+                "incomplete process attachment for thread {thread_id}: pid/pgid/identity must be all present or all absent"
+            );
+        }
+        let stop_intent = stop_intent.as_deref().map(StopIntent::parse).transpose()?;
+        if stop_requested_at_ms.is_some() != stop_intent.is_some() {
+            bail!(
+                "incomplete durable stop tombstone for thread {thread_id}: timestamp and intent must be present together"
+            );
+        }
         Ok(Some(RuntimeInfo {
             pid,
             pgid,
+            process_identity,
+            stop_requested_at_ms,
+            stop_intent,
             launch_metadata,
         }))
     }
@@ -1295,8 +1654,57 @@ impl RuntimeDb {
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
+        validate_command_type(&cmd.command_type)?;
         let now = now_rfc3339();
-        self.conn.execute(
+        if cmd
+            .requested_by
+            .as_ref()
+            .is_some_and(|requested_by| requested_by.len() > MAX_COMMAND_REQUESTED_BY_BYTES)
+        {
+            bail!("command requested_by exceeds the {MAX_COMMAND_REQUESTED_BY_BYTES}-byte maximum");
+        }
+        let params_blob = json_blob(&cmd.params)?;
+        let params_bytes = params_blob.as_ref().map_or(0, Vec::len);
+        if params_bytes > MAX_COMMAND_PARAMS_BYTES {
+            bail!("command params are {params_bytes} bytes; maximum is {MAX_COMMAND_PARAMS_BYTES}");
+        }
+        let requested_by_bytes = cmd.requested_by.as_ref().map_or(0, String::len);
+        let candidate_content_bytes = cmd
+            .command_type
+            .len()
+            .checked_add(requested_by_bytes)
+            .and_then(|bytes| bytes.checked_add(params_bytes))
+            .context("command content size overflow")?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let (open_items, open_content_bytes): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(length(CAST(command_type AS BLOB)) + \
+                                 COALESCE(length(CAST(requested_by AS BLOB)), 0) + \
+                                 COALESCE(length(params), 0) + COALESCE(length(result), 0)), 0) \
+             FROM thread_commands \
+             WHERE thread_id = ?1 AND status IN ('pending', 'claimed')",
+            params![&cmd.thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let open_items = usize::try_from(open_items).context("open command count is invalid")?;
+        let open_content_bytes =
+            usize::try_from(open_content_bytes).context("open command content total is invalid")?;
+        if open_items >= MAX_OPEN_COMMANDS_PER_THREAD {
+            bail!(
+                "thread {} already has {open_items} open commands; maximum is {MAX_OPEN_COMMANDS_PER_THREAD}",
+                cmd.thread_id
+            );
+        }
+        let final_content_bytes = open_content_bytes
+            .checked_add(candidate_content_bytes)
+            .context("open command content total overflow")?;
+        if final_content_bytes > MAX_OPEN_COMMAND_CONTENT_BYTES {
+            bail!(
+                "thread {} open command content would total {final_content_bytes} bytes; maximum is {MAX_OPEN_COMMAND_CONTENT_BYTES}",
+                cmd.thread_id
+            );
+        }
+        transaction.execute(
             "INSERT INTO thread_commands (
                 thread_id, command_type, status, requested_by, params, result,
                 created_at, claimed_at, completed_at
@@ -1305,40 +1713,87 @@ impl RuntimeDb {
                 &cmd.thread_id,
                 &cmd.command_type,
                 &cmd.requested_by,
-                json_blob(&cmd.params)?,
+                params_blob,
                 now,
             ],
         )?;
-
-        let command_id = self.conn.last_insert_rowid();
+        let command_id = transaction.last_insert_rowid();
+        transaction.commit()?;
         self.load_command(command_id)
     }
 
-    pub fn claim_commands(&self, thread_id: &str) -> Result<Vec<CommandRecord>> {
-        let now = now_rfc3339();
-
-        let mut stmt = self.conn.prepare(
-            "SELECT command_id, thread_id, command_type, status, requested_by, params,
-                    result, created_at, claimed_at, completed_at
-             FROM thread_commands
-             WHERE thread_id = ?1 AND status = 'pending'
-             ORDER BY command_id ASC",
-        )?;
-        let rows = stmt.query_map(params![thread_id], read_command_row)?;
-
-        let mut commands = Vec::new();
-        for row in rows {
-            let mut command = row?;
-            self.conn.execute(
-                "UPDATE thread_commands SET status = 'claimed', claimed_at = ?2 WHERE command_id = ?1",
-                params![command.command_id, now],
-            )?;
-            command.status = "claimed".to_string();
-            command.claimed_at = Some(now.clone());
-            commands.push(command);
+    pub fn claim_commands(
+        &self,
+        thread_id: &str,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<Vec<CommandRecord>> {
+        if limit == 0 || max_serialized_bytes < b"{\"commands\":[]}".len() {
+            bail!("command claim requires a positive item and response budget");
         }
-
-        drop(stmt);
+        let limit = limit.min(MAX_COMMAND_CLAIM_ITEMS);
+        let max_serialized_bytes = max_serialized_bytes.min(MAX_COMMAND_CLAIM_RESPONSE_BYTES);
+        let now = now_rfc3339();
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut commands = Vec::new();
+        let mut response_bytes = b"{\"commands\":[]}".len();
+        {
+            let sql = format!(
+                "{BOUNDED_COMMAND_SELECT} \
+                 WHERE thread_id = ?4 AND status = 'pending' \
+                 ORDER BY command_id ASC LIMIT ?5"
+            );
+            let mut stmt = transaction.prepare(&sql)?;
+            let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            let rows = stmt.query_map(
+                params![
+                    i64::try_from(MAX_COMMAND_REQUESTED_BY_BYTES).unwrap_or(i64::MAX),
+                    i64::try_from(MAX_COMMAND_PARAMS_BYTES).unwrap_or(i64::MAX),
+                    i64::try_from(MAX_COMMAND_RESULT_BYTES).unwrap_or(i64::MAX),
+                    thread_id,
+                    sql_limit,
+                ],
+                read_bounded_command_row,
+            )?;
+            for row in rows {
+                let mut command = row?;
+                command.status = "claimed".to_string();
+                command.claimed_at = Some(now.clone());
+                let encoded =
+                    serde_json::to_vec(&command).context("failed to size command claim record")?;
+                let candidate_bytes = response_bytes
+                    .checked_add(encoded.len())
+                    .and_then(|bytes| bytes.checked_add(usize::from(!commands.is_empty())))
+                    .context("command claim response size overflow")?;
+                if candidate_bytes > max_serialized_bytes {
+                    if commands.is_empty() {
+                        bail!(
+                            "pending command {} exceeds claim response budget {}",
+                            command.command_id,
+                            max_serialized_bytes
+                        );
+                    }
+                    break;
+                }
+                response_bytes = candidate_bytes;
+                commands.push(command);
+            }
+        }
+        for command in &commands {
+            let updated = transaction.execute(
+                "UPDATE thread_commands
+                 SET status = 'claimed', claimed_at = ?2
+                 WHERE command_id = ?1 AND status = 'pending'",
+                params![command.command_id, &now],
+            )?;
+            if updated != 1 {
+                bail!(
+                    "pending command {} changed during claim",
+                    command.command_id
+                );
+            }
+        }
+        transaction.commit()?;
         Ok(commands)
     }
 
@@ -1348,13 +1803,18 @@ impl RuntimeDb {
         status: &str,
         result: Option<&Value>,
     ) -> Result<CommandRecord> {
+        let result_blob = json_blob_ref(result)?;
+        let result_bytes = result_blob.as_ref().map_or(0, Vec::len);
+        if result_bytes > MAX_COMMAND_RESULT_BYTES {
+            bail!("command result is {result_bytes} bytes; maximum is {MAX_COMMAND_RESULT_BYTES}");
+        }
         let updated = self.conn.execute(
             "UPDATE thread_commands
              SET status = ?2,
                  result = ?3,
                  completed_at = ?4
              WHERE command_id = ?1 AND status IN ('pending', 'claimed')",
-            params![command_id, status, json_blob_ref(result)?, now_rfc3339()],
+            params![command_id, status, result_blob, now_rfc3339()],
         )?;
         if updated == 0 {
             bail!("command not claimable/completable: {command_id}");
@@ -1381,42 +1841,111 @@ impl RuntimeDb {
         thread_id: &str,
         terminal_status: &str,
     ) -> Result<Vec<CommandRecord>> {
-        let open: Vec<(i64, String)> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT command_id, command_type FROM thread_commands
-                 WHERE thread_id = ?1 AND status IN ('pending', 'claimed')
-                 ORDER BY command_id ASC",
-            )?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let (open_items, open_content_bytes): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(length(CAST(command_type AS BLOB)) + \
+                                 COALESCE(length(CAST(requested_by AS BLOB)), 0) + \
+                                 COALESCE(length(params), 0) + COALESCE(length(result), 0)), 0) \
+             FROM thread_commands \
+             WHERE thread_id = ?1 AND status IN ('pending', 'claimed')",
+            params![thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let open_items = usize::try_from(open_items).context("open command count is invalid")?;
+        let open_content_bytes =
+            usize::try_from(open_content_bytes).context("open command content total is invalid")?;
+        if open_items > MAX_OPEN_COMMANDS_PER_THREAD {
+            bail!(
+                "thread {thread_id} has {open_items} open commands; maximum is {MAX_OPEN_COMMANDS_PER_THREAD}"
+            );
+        }
+        if open_content_bytes > MAX_OPEN_COMMAND_CONTENT_BYTES {
+            bail!(
+                "thread {thread_id} open command content is {open_content_bytes} bytes; maximum is {MAX_OPEN_COMMAND_CONTENT_BYTES}"
+            );
+        }
+        let open: Vec<CommandRecord> = {
+            let sql = format!(
+                "{BOUNDED_COMMAND_SELECT} \
+                 WHERE thread_id = ?4 AND status IN ('pending', 'claimed') \
+                 ORDER BY command_id ASC LIMIT ?5"
+            );
+            let mut stmt = transaction.prepare(&sql)?;
             let rows = stmt
-                .query_map(params![thread_id], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                })?
+                .query_map(
+                    params![
+                        i64::try_from(MAX_COMMAND_REQUESTED_BY_BYTES).unwrap_or(i64::MAX),
+                        i64::try_from(MAX_COMMAND_PARAMS_BYTES).unwrap_or(i64::MAX),
+                        i64::try_from(MAX_COMMAND_RESULT_BYTES).unwrap_or(i64::MAX),
+                        thread_id,
+                        i64::try_from(MAX_OPEN_COMMANDS_PER_THREAD + 1).unwrap_or(i64::MAX)
+                    ],
+                    read_bounded_command_row,
+                )?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
-        let now = now_rfc3339();
-        let mut settled = Vec::with_capacity(open.len());
-        for (id, command_type) in open {
-            let fulfilled = command_fulfilled_by_terminal(&command_type, terminal_status);
+        if open.len() > MAX_OPEN_COMMANDS_PER_THREAD {
+            bail!(
+                "thread {thread_id} open command set changed beyond the {MAX_OPEN_COMMANDS_PER_THREAD}-item maximum"
+            );
+        }
+
+        // Materialize and bound every generated result before the first write.
+        // This makes an oversized terminal-status diagnostic fail closed without
+        // leaving an earlier command settled and a later one open.
+        let mut settlements = Vec::with_capacity(open.len());
+        for command in open {
+            validate_command_type(&command.command_type).with_context(|| {
+                format!(
+                    "command {} has an invalid durable command_type",
+                    command.command_id
+                )
+            })?;
+            let fulfilled = command_fulfilled_by_terminal(&command.command_type, terminal_status);
             let status = if fulfilled { "completed" } else { "rejected" };
             let result = serde_json::json!({
                 "reason": if fulfilled {
-                    format!("thread settled {terminal_status}, fulfilling the {command_type} command")
+                    format!(
+                        "thread settled {terminal_status}, fulfilling the {} command",
+                        command.command_type
+                    )
                 } else {
-                    format!("thread finalized ({terminal_status}) before the {command_type} command was handled")
+                    format!(
+                        "thread finalized ({terminal_status}) before the {} command was handled",
+                        command.command_type
+                    )
                 }
             });
-            let updated = self.conn.execute(
+            let result_blob = serde_json::to_vec(&result)
+                .context("failed to encode command settlement result")?;
+            if result_blob.len() > MAX_COMMAND_RESULT_BYTES {
+                bail!(
+                    "command {} settlement result is {} bytes; maximum is {MAX_COMMAND_RESULT_BYTES}",
+                    command.command_id,
+                    result_blob.len()
+                );
+            }
+            settlements.push((command, status, result, result_blob));
+        }
+
+        let now = now_rfc3339();
+        let mut settled = Vec::with_capacity(settlements.len());
+        for (mut command, status, result, result_blob) in settlements {
+            let updated = transaction.execute(
                 "UPDATE thread_commands SET status = ?2, result = ?3, completed_at = ?4
                  WHERE command_id = ?1 AND status IN ('pending', 'claimed')",
-                params![id, status, json_blob_ref(Some(&result))?, now],
+                params![command.command_id, status, result_blob, &now],
             )?;
             if updated > 0 {
-                if let Some(record) = self.get_command(id)? {
-                    settled.push(record);
-                }
+                command.status = status.to_string();
+                command.result = Some(result);
+                command.completed_at = Some(now.clone());
+                settled.push(command);
             }
         }
+        transaction.commit()?;
         Ok(settled)
     }
 
@@ -1439,15 +1968,18 @@ impl RuntimeDb {
     /// [`Self::load_command`] this is not an error on absence — `commands.get`
     /// and `commands.wait` distinguish "no such command" from a real row.
     pub fn get_command(&self, command_id: i64) -> Result<Option<CommandRecord>> {
+        let sql = format!("{BOUNDED_COMMAND_SELECT} WHERE command_id = ?4");
         Ok(self
             .conn
             .query_row(
-                "SELECT command_id, thread_id, command_type, status, requested_by, params,
-                        result, created_at, claimed_at, completed_at
-                 FROM thread_commands
-                 WHERE command_id = ?1",
-                params![command_id],
-                read_command_row,
+                &sql,
+                params![
+                    i64::try_from(MAX_COMMAND_REQUESTED_BY_BYTES).unwrap_or(i64::MAX),
+                    i64::try_from(MAX_COMMAND_PARAMS_BYTES).unwrap_or(i64::MAX),
+                    i64::try_from(MAX_COMMAND_RESULT_BYTES).unwrap_or(i64::MAX),
+                    command_id,
+                ],
+                read_bounded_command_row,
             )
             .optional()?)
     }
@@ -1926,6 +2458,101 @@ impl RuntimeDb {
             .transpose()
     }
 
+    /// Response-facing follow facts for a bounded set of thread ids. A thread
+    /// can match either side of the waiter (suspended parent or resume
+    /// successor). The query is chunked below SQLite's parameter ceiling and
+    /// deliberately projects no child terminal envelope.
+    pub fn follow_waiter_summaries_for_threads(
+        &self,
+        thread_ids: &[String],
+        max_items: usize,
+    ) -> Result<Vec<FollowWaiterSummary>> {
+        if max_items == 0 {
+            bail!("follow waiter summary maximum must be positive");
+        }
+        if thread_ids.len() > max_items {
+            bail!(
+                "follow waiter summary requested {} threads; maximum is {max_items}",
+                thread_ids.len()
+            );
+        }
+        if thread_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query_limit = max_items
+            .checked_add(1)
+            .context("follow waiter summary limit overflow")?;
+        let query_limit =
+            i64::try_from(query_limit).context("follow waiter summary limit exceeds SQLite i64")?;
+        let mut summaries = std::collections::BTreeMap::new();
+        for batch in thread_ids.chunks(FOLLOW_WAITER_SUMMARY_QUERY_BATCH) {
+            let requested_rows = std::iter::repeat("(?)")
+                .take(batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "WITH requested(thread_id) AS (VALUES {requested_rows}) \
+                 SELECT {FOLLOW_WAITER_SUMMARY_COLUMNS} FROM follow_waiter fw \
+                 WHERE fw.parent_thread_id IN (SELECT thread_id FROM requested) \
+                    OR fw.parent_successor_thread_id IN (SELECT thread_id FROM requested) \
+                 ORDER BY fw.created_at_ms, fw.follow_key LIMIT ?"
+            );
+            let mut params: Vec<&dyn rusqlite::types::ToSql> = batch
+                .iter()
+                .map(|thread_id| thread_id as &dyn rusqlite::types::ToSql)
+                .collect();
+            params.push(&query_limit);
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .context("prepare scoped follow waiter summaries")?;
+            let rows = stmt
+                .query_map(params.as_slice(), read_follow_waiter_summary_row)
+                .context("query scoped follow waiter summaries")?;
+            for row in rows {
+                let summary = row.context("read scoped follow waiter summary")?;
+                summaries.insert(summary.follow_key.clone(), summary);
+                if summaries.len() > max_items {
+                    bail!("thread list has more than {max_items} matching follow waiters");
+                }
+            }
+        }
+        let mut summaries = summaries.into_values().collect::<Vec<_>>();
+        summaries.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.follow_key.cmp(&b.follow_key))
+        });
+        Ok(summaries)
+    }
+
+    /// A complete but fail-closed snapshot for active/project list discovery.
+    /// Reading one extra row distinguishes a complete result from truncation;
+    /// callers never receive an incomplete set of suspended parents.
+    pub fn follow_waiter_summaries_bounded(
+        &self,
+        max_items: usize,
+    ) -> Result<Vec<FollowWaiterSummary>> {
+        if max_items == 0 {
+            bail!("follow waiter summary maximum must be positive");
+        }
+        let query_limit = max_items
+            .checked_add(1)
+            .context("follow waiter summary limit overflow")?;
+        let query_limit =
+            i64::try_from(query_limit).context("follow waiter summary limit exceeds SQLite i64")?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FOLLOW_WAITER_SUMMARY_COLUMNS} FROM follow_waiter fw \
+             ORDER BY fw.created_at_ms, fw.follow_key LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![query_limit], read_follow_waiter_summary_row)?;
+        let summaries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        if summaries.len() > max_items {
+            bail!("thread list has more than {max_items} live follow waiters");
+        }
+        Ok(summaries)
+    }
+
     /// All active follow waiters. The table holds only non-cleared rows, so
     /// every row here is recoverable by reconcile.
     pub fn list_follow_waiters(&self) -> Result<Vec<FollowWaiter>> {
@@ -2261,6 +2888,21 @@ const FOLLOW_WAITER_COLUMNS: &str = "follow_key, parent_thread_id, parent_chain_
      parent_successor_thread_id, follow_node, graph_run_id, step_count, frontier_id, \
      fanout, expected_children, phase, created_at_ms, updated_at_ms";
 
+const FOLLOW_WAITER_SUMMARY_QUERY_BATCH: usize = 500;
+const FOLLOW_WAITER_SUMMARY_COLUMNS: &str = "fw.follow_key, fw.parent_thread_id, \
+     fw.parent_successor_thread_id, fw.follow_node, fw.phase, fw.fanout, \
+     fw.expected_children, \
+     (SELECT c.child_thread_id FROM follow_waiter_child c \
+       WHERE c.follow_key = fw.follow_key ORDER BY c.item_index LIMIT 1), \
+     (SELECT c.child_chain_root_id FROM follow_waiter_child c \
+       WHERE c.follow_key = fw.follow_key ORDER BY c.item_index LIMIT 1), \
+     (SELECT c.terminal_status FROM follow_waiter_child c \
+       WHERE c.follow_key = fw.follow_key ORDER BY c.item_index LIMIT 1), \
+     (SELECT COUNT(*) FROM follow_waiter_child c WHERE c.follow_key = fw.follow_key), \
+     (SELECT COUNT(*) FROM follow_waiter_child c \
+       WHERE c.follow_key = fw.follow_key AND c.terminal_status IS NOT NULL), \
+     fw.created_at_ms";
+
 fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiter> {
     Ok(FollowWaiter {
         follow_key: row.get(0)?,
@@ -2277,6 +2919,26 @@ fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWai
         phase: row.get(10)?,
         created_at_ms: row.get(11)?,
         updated_at_ms: row.get(12)?,
+    })
+}
+
+fn read_follow_waiter_summary_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<FollowWaiterSummary> {
+    Ok(FollowWaiterSummary {
+        follow_key: row.get(0)?,
+        parent_thread_id: row.get(1)?,
+        parent_successor_thread_id: row.get(2)?,
+        follow_node: row.get(3)?,
+        phase: row.get(4)?,
+        fanout: row.get(5)?,
+        expected_children: row.get(6)?,
+        first_child_thread_id: row.get(7)?,
+        first_child_chain_root_id: row.get(8)?,
+        first_child_terminal_status: row.get(9)?,
+        child_count: row.get(10)?,
+        terminal_child_count: row.get(11)?,
+        created_at_ms: row.get(12)?,
     })
 }
 
@@ -2343,6 +3005,37 @@ fn read_command_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> 
     })
 }
 
+fn read_bounded_command_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
+    for (index, maximum, label) in [
+        (10, MAX_COMMAND_REQUESTED_BY_BYTES, "command requested_by"),
+        (11, MAX_COMMAND_PARAMS_BYTES, "command params"),
+        (12, MAX_COMMAND_RESULT_BYTES, "command result"),
+    ] {
+        let Some(length) = row.get::<_, Option<i64>>(index)? else {
+            continue;
+        };
+        let length = usize::try_from(length).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?;
+        if length > maximum {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Integer,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{label} is {length} bytes; maximum is {maximum}"),
+                )
+                .into(),
+            ));
+        }
+    }
+    read_command_row(row)
+}
+
 fn now_rfc3339() -> String {
     lillux::time::iso8601_now()
 }
@@ -2395,6 +3088,17 @@ mod tests {
         (tmp, db)
     }
 
+    fn fake_process_identity(pid: i64, pgid: i64) -> ExecutionProcessIdentity {
+        ExecutionProcessIdentity {
+            schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+            boot_id: "test-boot".to_string(),
+            target_pid: pid,
+            target_start_time_ticks: 10,
+            group_leader_pid: pgid,
+            group_leader_start_time_ticks: 20,
+        }
+    }
+
     #[test]
     fn attach_and_read_launch_metadata_roundtrip() {
         let (_tmp, db) = fresh_db();
@@ -2403,7 +3107,8 @@ mod tests {
             cancellation_mode: Some(CancellationMode::Graceful { grace_secs: 9 }),
             ..Default::default()
         };
-        db.attach_process("t1", 1234, 5678, &lm).unwrap();
+        db.attach_process("t1", 1234, 5678, &fake_process_identity(1234, 5678), &lm)
+            .unwrap();
 
         let info = db.get_runtime_info("t1").unwrap().unwrap();
         assert_eq!(info.pid, Some(1234));
@@ -2463,7 +3168,12 @@ mod tests {
         let kill = db.submit_command(&mk("t1", "kill")).unwrap();
         let other = db.submit_command(&mk("t2", "cancel")).unwrap();
         // Claim t1's commands so one open command is `claimed`, the other `pending`.
-        db.claim_commands("t1").unwrap();
+        db.claim_commands(
+            "t1",
+            MAX_COMMAND_CLAIM_ITEMS,
+            MAX_COMMAND_CLAIM_RESPONSE_BYTES,
+        )
+        .unwrap();
 
         // Thread finalized `cancelled`: the cancel command was fulfilled, the kill
         // was not.
@@ -2495,6 +3205,196 @@ mod tests {
     }
 
     #[test]
+    fn command_payload_limits_reject_before_durable_transition() {
+        let (_tmp, db) = fresh_db();
+        let oversized = Value::String("x".repeat(MAX_COMMAND_PARAMS_BYTES));
+        let oversized_submit = NewCommandRecord {
+            thread_id: "t1".to_string(),
+            command_type: "cancel".to_string(),
+            requested_by: None,
+            params: Some(oversized.clone()),
+        };
+        assert!(db.submit_command(&oversized_submit).is_err());
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM thread_commands", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "oversized params must not create a command");
+
+        let command = db
+            .submit_command(&NewCommandRecord {
+                thread_id: "t1".to_string(),
+                command_type: "cancel".to_string(),
+                requested_by: None,
+                params: None,
+            })
+            .unwrap();
+        assert!(db
+            .complete_command(command.command_id, "completed", Some(&oversized))
+            .is_err());
+        assert_eq!(
+            db.get_command(command.command_id).unwrap().unwrap().status,
+            "pending",
+            "oversized result must not settle the command"
+        );
+    }
+
+    #[test]
+    fn command_type_policy_is_enforced_at_the_durable_boundary() {
+        let (_tmp, db) = fresh_db();
+        for command_type in ["cancel", "kill", "interrupt", "continue"] {
+            db.submit_command(&NewCommandRecord {
+                thread_id: format!("valid-{command_type}"),
+                command_type: command_type.to_string(),
+                requested_by: None,
+                params: None,
+            })
+            .unwrap();
+        }
+
+        for command_type in ["", "pause", "Cancel", "continue "] {
+            assert!(db
+                .submit_command(&NewCommandRecord {
+                    thread_id: "invalid-command".to_string(),
+                    command_type: command_type.to_string(),
+                    requested_by: None,
+                    params: None,
+                })
+                .is_err());
+        }
+        let invalid_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM thread_commands WHERE thread_id = 'invalid-command'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(invalid_count, 0);
+    }
+
+    #[test]
+    fn settlement_result_limit_is_checked_before_any_command_is_updated() {
+        let (_tmp, db) = fresh_db();
+        let first = db
+            .submit_command(&NewCommandRecord {
+                thread_id: "settlement-bounds".to_string(),
+                command_type: "cancel".to_string(),
+                requested_by: None,
+                params: None,
+            })
+            .unwrap();
+        let second = db
+            .submit_command(&NewCommandRecord {
+                thread_id: "settlement-bounds".to_string(),
+                command_type: "kill".to_string(),
+                requested_by: None,
+                params: None,
+            })
+            .unwrap();
+
+        let oversized_terminal_status = "x".repeat(MAX_COMMAND_RESULT_BYTES);
+        assert!(db
+            .settle_open_commands("settlement-bounds", &oversized_terminal_status)
+            .is_err());
+        for command_id in [first.command_id, second.command_id] {
+            let command = db.get_command(command_id).unwrap().unwrap();
+            assert_eq!(command.status, "pending");
+            assert!(command.result.is_none());
+            assert!(command.completed_at.is_none());
+        }
+    }
+
+    #[test]
+    fn command_claim_limits_leave_unreturned_commands_pending() {
+        let (_tmp, db) = fresh_db();
+        let new_command = || NewCommandRecord {
+            thread_id: "t1".to_string(),
+            command_type: "cancel".to_string(),
+            requested_by: None,
+            params: None,
+        };
+        let first = db.submit_command(&new_command()).unwrap();
+        let second = db.submit_command(&new_command()).unwrap();
+        let third = db.submit_command(&new_command()).unwrap();
+
+        let claimed = db
+            .claim_commands("t1", 2, MAX_COMMAND_CLAIM_RESPONSE_BYTES)
+            .unwrap();
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|command| command.command_id)
+                .collect::<Vec<_>>(),
+            vec![first.command_id, second.command_id]
+        );
+        assert_eq!(
+            db.get_command(third.command_id).unwrap().unwrap().status,
+            "pending"
+        );
+        assert_eq!(
+            db.claim_commands("t1", 2, MAX_COMMAND_CLAIM_RESPONSE_BYTES)
+                .unwrap()[0]
+                .command_id,
+            third.command_id
+        );
+
+        let tiny_budget_command = db
+            .submit_command(&NewCommandRecord {
+                thread_id: "t2".to_string(),
+                ..new_command()
+            })
+            .unwrap();
+        assert!(db.claim_commands("t2", 1, 32).is_err());
+        assert_eq!(
+            db.get_command(tiny_budget_command.command_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "pending",
+            "a response-budget failure must not claim the command"
+        );
+    }
+
+    #[test]
+    fn open_command_quota_rejects_without_mutation_and_bounds_settlement() {
+        let (_tmp, db) = fresh_db();
+        for _ in 0..MAX_OPEN_COMMANDS_PER_THREAD {
+            db.submit_command(&NewCommandRecord {
+                thread_id: "bounded-thread".to_string(),
+                command_type: "cancel".to_string(),
+                requested_by: None,
+                params: None,
+            })
+            .unwrap();
+        }
+        assert!(db
+            .submit_command(&NewCommandRecord {
+                thread_id: "bounded-thread".to_string(),
+                command_type: "cancel".to_string(),
+                requested_by: None,
+                params: None,
+            })
+            .is_err());
+        let open_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM thread_commands \
+                 WHERE thread_id = 'bounded-thread' AND status IN ('pending', 'claimed')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(open_count as usize, MAX_OPEN_COMMANDS_PER_THREAD);
+        assert_eq!(
+            db.settle_open_commands("bounded-thread", "failed")
+                .unwrap()
+                .len(),
+            MAX_OPEN_COMMANDS_PER_THREAD
+        );
+    }
+
+    #[test]
     fn thread_has_kill_command_detects_the_kill_intent_marker() {
         let (_tmp, db) = fresh_db();
         let mk = |thread: &str, kind: &str| NewCommandRecord {
@@ -2521,15 +3421,28 @@ mod tests {
             cancellation_mode: Some(CancellationMode::Graceful { grace_secs: 9 }),
             ..Default::default()
         };
-        db.attach_process("t1", 1234, 5678, &seeded).unwrap();
+        db.attach_process(
+            "t1",
+            1234,
+            5678,
+            &fake_process_identity(1234, 5678),
+            &seeded,
+        )
+        .unwrap();
 
-        // Self-attach with default (empty) metadata, new pid/pgid.
-        db.attach_process("t1", 4321, 8765, &RuntimeLaunchMetadata::default())
-            .unwrap();
+        // Exact self-attach with default (empty) metadata is idempotent.
+        db.attach_process(
+            "t1",
+            1234,
+            5678,
+            &fake_process_identity(1234, 5678),
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
 
         let info = db.get_runtime_info("t1").unwrap().unwrap();
-        assert_eq!(info.pid, Some(4321), "pid still updated");
-        assert_eq!(info.pgid, Some(8765), "pgid still updated");
+        assert_eq!(info.pid, Some(1234));
+        assert_eq!(info.pgid, Some(5678));
         assert_eq!(
             info.launch_metadata
                 .expect("seeded metadata preserved")
@@ -2537,6 +3450,17 @@ mod tests {
             seeded.cancellation_mode,
             "empty attach must not clobber seeded metadata"
         );
+
+        let replacement = db
+            .attach_process(
+                "t1",
+                4321,
+                8765,
+                &fake_process_identity(4321, 8765),
+                &RuntimeLaunchMetadata::default(),
+            )
+            .unwrap_err();
+        assert!(format!("{replacement:#}").contains("immutable process identity"));
     }
 
     #[test]
@@ -2547,7 +3471,8 @@ mod tests {
             cancellation_mode: Some(CancellationMode::Hard),
             ..Default::default()
         };
-        db.attach_process("t1", 1, 2, &lm).unwrap();
+        db.attach_process("t1", 101, 102, &fake_process_identity(101, 102), &lm)
+            .unwrap();
         let info = db.get_runtime_info("t1").unwrap().unwrap();
         assert_eq!(
             info.launch_metadata.unwrap().cancellation_mode,
@@ -2832,15 +3757,17 @@ mod tests {
     fn null_launch_metadata_yields_none() {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
-        db.conn
-            .execute(
-                "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
-                params!["t1", 7i64, 8i64],
-            )
-            .unwrap();
+        db.attach_process(
+            "t1",
+            107,
+            108,
+            &fake_process_identity(107, 108),
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
         let info = db.get_runtime_info("t1").unwrap().unwrap();
-        assert_eq!(info.pid, Some(7));
-        assert_eq!(info.pgid, Some(8));
+        assert_eq!(info.pid, Some(107));
+        assert_eq!(info.pgid, Some(108));
         assert!(info.launch_metadata.is_none());
     }
 
@@ -2896,7 +3823,7 @@ mod tests {
         let (_tmp, db) = fresh_db();
         let lm = RuntimeLaunchMetadata::default();
         let err = db
-            .attach_process("missing", 1, 2, &lm)
+            .attach_process("missing", 101, 102, &fake_process_identity(101, 102), &lm)
             .expect_err("attach on missing row must error");
         assert!(err.to_string().contains("missing"));
     }
@@ -3197,6 +4124,42 @@ mod tests {
             .get_follow_waiter_by_successor("succ-1")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn list_waiter_summary_is_scoped_bounded_and_ignores_terminal_envelope() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        set_single_follow_child(&db, "fk1", "child-1", "chain-child").unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap();
+        db.mark_follow_waiting("fk1").unwrap();
+        // A corrupt or oversized terminal envelope is reconciliation data. The
+        // list projection must not fetch or decode it.
+        db.conn
+            .execute(
+                "UPDATE follow_waiter_child \
+                 SET terminal_status = 'completed', terminal_envelope = '{not-json' \
+                 WHERE follow_key = 'fk1'",
+                [],
+            )
+            .unwrap();
+
+        let requested = vec!["unrelated".to_string(), "succ-1".to_string()];
+        let summaries = db
+            .follow_waiter_summaries_for_threads(&requested, 2)
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.parent_thread_id, "parent-1");
+        assert_eq!(summary.first_child_thread_id.as_deref(), Some("child-1"));
+        assert_eq!(
+            summary.first_child_terminal_status.as_deref(),
+            Some("completed")
+        );
+        assert!(summary.all_children_terminal());
+
+        db.reserve_follow(&seed_follow("fk2")).unwrap();
+        assert!(db.follow_waiter_summaries_bounded(1).is_err());
     }
 
     #[test]

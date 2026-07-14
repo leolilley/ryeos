@@ -362,6 +362,14 @@ mod integration_tests {
                 "T-proc-1",
                 12345,
                 67890,
+                &ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 12345,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 67890,
+                    group_leader_start_time_ticks: 20,
+                },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
             .expect("attach_thread_process should succeed");
@@ -1664,6 +1672,14 @@ mod integration_tests {
                 "T-skip-attach",
                 99999,
                 99999,
+                &ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 99999,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 99999,
+                    group_leader_start_time_ticks: 10,
+                },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
             .expect_err("attach_process on a terminal thread must fail loudly");

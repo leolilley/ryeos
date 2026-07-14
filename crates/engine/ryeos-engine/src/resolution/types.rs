@@ -59,6 +59,10 @@ pub struct ResolvedAncestor {
     /// File content with the signature line stripped. Re-parsed by
     /// runtimes / composers using their own format-specific parser.
     pub raw_content: String,
+    /// SHA-256 of the exact whole source file as it was opened and verified,
+    /// including its signature envelope. This is the identity used to pin
+    /// executable source bytes at the sandbox boundary.
+    pub source_content_digest: String,
     /// SHA-256 of `raw_content` (signature-stripped, post-strip bytes).
     /// Named explicitly so it can never be confused with the original
     /// file digest — what the runtime parses is `raw_content`, so the
@@ -344,6 +348,7 @@ pub struct ResolutionProvenanceNode {
     pub trust_class: TrustClass,
     pub alias_resolution: Option<AliasHop>,
     pub added_by: ResolutionStepName,
+    pub source_content_digest: String,
     pub raw_content_digest: String,
 }
 
@@ -356,6 +361,7 @@ impl From<&ResolvedAncestor> for ResolutionProvenanceNode {
             trust_class: item.trust_class,
             alias_resolution: item.alias_resolution.clone(),
             added_by: item.added_by,
+            source_content_digest: item.source_content_digest.clone(),
             raw_content_digest: item.raw_content_digest.clone(),
         }
     }
@@ -574,6 +580,7 @@ mod tests {
             alias_resolution: None,
             added_by: ResolutionStepName::ResolveExtendsChain,
             raw_content: String::new(),
+            source_content_digest: String::new(),
             raw_content_digest: String::new(),
         }
     }

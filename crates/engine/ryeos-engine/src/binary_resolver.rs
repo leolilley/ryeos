@@ -25,9 +25,10 @@
 //! All three shapes go through the same manifest-hash + trust-store
 //! verification path below.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use lillux::crypto::VerifyingKey;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -42,6 +43,8 @@ use crate::trust::TrustStore;
 #[derive(Debug)]
 pub struct ResolvedBinary {
     pub absolute_path: PathBuf,
+    /// Raw SHA-256 of the exact verified executable bytes.
+    pub content_hash: String,
     pub manifest_hash: String,
     pub signer_fingerprint: String,
 }
@@ -254,13 +257,13 @@ pub fn resolve_bundle_binary_ref(
 
     // --- Regular file check: reject symlinks that escape, FIFOs, dirs, devices ---
 
-    let metadata = std::fs::metadata(&canonical_resolved).map_err(|e| {
+    let metadata = std::fs::symlink_metadata(&bin_path).map_err(|e| {
         EngineError::Internal(format!(
             "failed to stat resolved binary {}: {e}",
-            canonical_resolved.display()
+            bin_path.display()
         ))
     })?;
-    if !metadata.is_file() {
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return Err(EngineError::BinNotRegularFile {
             bin: bin_name.clone(),
         });
@@ -272,18 +275,37 @@ pub fn resolve_bundle_binary_ref(
         .join("bundles")
         .join("manifest");
 
-    if !manifest_ref_path.exists() {
-        return Err(EngineError::BinManifestMissing {
+    require_executor_manifest_ref(&manifest_ref_path, bundle_root, &bin_name)?;
+
+    let signed_manifest_ref = std::fs::read_to_string(&manifest_ref_path).map_err(|_| {
+        EngineError::BinManifestMissing {
             bundle_root: bundle_root.display().to_string(),
+        }
+    })?;
+    let verified_manifest_ref = crate::executor_resolution::verify_signed_executor_manifest_ref(
+        &signed_manifest_ref,
+        &trusted_verifying_key,
+        root_trust_class,
+    )
+    .map_err(|error| match error {
+        crate::executor_resolution::ExecutorResolutionError::ManifestSignerUntrusted {
+            fingerprint,
+        } => EngineError::BinUntrusted {
+            bin: bin_name.clone(),
+            fingerprint,
+        },
+        other => EngineError::BinManifestInvalid {
+            bin: bin_name.clone(),
+            reason: other.to_string(),
+        },
+    })?;
+    if !is_dispatchable_trust_class(verified_manifest_ref.trust_class) {
+        return Err(EngineError::BinUntrusted {
+            bin: bin_name.clone(),
+            fingerprint: verified_manifest_ref.signer_fingerprint.clone(),
         });
     }
-
-    let manifest_hash = std::fs::read_to_string(&manifest_ref_path)
-        .map_err(|_| EngineError::BinManifestMissing {
-            bundle_root: bundle_root.display().to_string(),
-        })?
-        .trim()
-        .to_string();
+    let manifest_hash = verified_manifest_ref.manifest_hash.clone();
 
     let objects_dir = bundle_root.join(crate::AI_DIR).join("objects");
     let cas = lillux::cas::CasStore::new(objects_dir);
@@ -297,15 +319,14 @@ pub fn resolve_bundle_binary_ref(
             bundle_root: bundle_root.display().to_string(),
         })?;
 
-    let item_source_hashes: HashMap<String, String> = manifest_value
-        .get("item_source_hashes")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let item_source_hashes = crate::executor_resolution::verify_executor_manifest_object(
+        &manifest_value,
+        &manifest_hash,
+    )
+    .map_err(|error| EngineError::BinManifestInvalid {
+        bin: bin_name.clone(),
+        reason: error.to_string(),
+    })?;
 
     let item_source_hash =
         item_source_hashes
@@ -336,11 +357,35 @@ pub fn resolve_bundle_binary_ref(
         &trusted_verifying_key,
     )?;
 
-    let content_blob_hash = item_source
-        .get("content_blob_hash")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let (content_blob_hash, signed_mode) = crate::executor_resolution::verify_executor_item_source(
+        &item_source,
+        item_source_hash,
+        &item_ref,
+    )
+    .map_err(|error| EngineError::BinManifestInvalid {
+        bin: bin_name.clone(),
+        reason: error.to_string(),
+    })?;
+    verify_installed_mode(&bin_name, &bin_path, signed_mode)?;
+
+    let blob_bytes = cas
+        .get_blob(&content_blob_hash)
+        .map_err(|error| EngineError::BinManifestInvalid {
+            bin: bin_name.clone(),
+            reason: format!("read content blob {content_blob_hash}: {error}"),
+        })?
+        .ok_or_else(|| EngineError::BinManifestInvalid {
+            bin: bin_name.clone(),
+            reason: format!("content blob {content_blob_hash} is missing from bundle CAS"),
+        })?;
+    let computed_blob_hash = lillux::sha256_hex(&blob_bytes);
+    if computed_blob_hash != content_blob_hash {
+        return Err(EngineError::BinHashMismatch {
+            bin: bin_name.clone(),
+            declared: content_blob_hash.clone(),
+            computed: computed_blob_hash,
+        });
+    }
 
     let bin_bytes = std::fs::read(&bin_path).map_err(|e| {
         EngineError::Internal(format!("failed to read binary {}: {e}", bin_path.display()))
@@ -356,34 +401,557 @@ pub fn resolve_bundle_binary_ref(
             computed: computed_hash,
         });
     }
-
-    let (trust_class, fingerprint) = crate::executor_resolution::verify_executor_trust(
-        &item_source,
-        |fp| trusted_verifying_key(fp).is_some(),
-        root_trust_class,
-    );
-
-    if !is_dispatchable_trust_class(trust_class) {
-        return Err(EngineError::BinUntrusted {
-            bin: bin_name,
-            fingerprint: fingerprint.unwrap_or_else(|| "<unknown>".to_string()),
+    if bin_bytes != blob_bytes {
+        return Err(EngineError::BinHashMismatch {
+            bin: bin_name.clone(),
+            declared: content_blob_hash,
+            computed: computed_hash,
         });
     }
-    let signer_fingerprint = fingerprint.unwrap_or_else(|| "<unknown>".to_string());
+
+    let signer_fingerprint = verified_manifest_ref.signer_fingerprint;
     if signer_fingerprint != signed_sidecar_fingerprint {
         return Err(EngineError::BinSidecarInvalid {
             bin: bin_name,
             reason: format!(
-                "sidecar signer `{signed_sidecar_fingerprint}` does not match item_source signature_info fingerprint `{signer_fingerprint}`"
+                "sidecar signer `{signed_sidecar_fingerprint}` does not match signed manifest-ref signer `{signer_fingerprint}`"
             ),
         });
     }
 
     Ok(ResolvedBinary {
         absolute_path: bin_path,
+        content_hash: computed_hash,
         manifest_hash,
         signer_fingerprint,
     })
+}
+
+/// Verify the complete node-installed executable set for a bundle.
+///
+/// If a bundle ships `.ai/bin`, the only accepted authorization chain is the
+/// current signed executor-manifest ref format. Every manifest entry must name
+/// one regular on-disk executable and its regular signed ItemSource sidecar;
+/// every executable and sidecar on disk must be named by that manifest. The
+/// manifest object, ItemSource objects, CAS blobs, sidecars, file bytes, Unix
+/// modes, and signer continuity are all checked before the bundle is admitted.
+pub fn verify_bundle_executor_manifest(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<(), EngineError> {
+    verify_bundle_executor_manifest_items(bundle_root, node_trust_store).map(|_| ())
+}
+
+/// Verify every admitted bundle's executable set and require one owner for
+/// each native-executor identity.
+///
+/// Native executor references are globally addressed as
+/// `native:<bare-name>` at launch time, with the target triple supplied by the
+/// node. Consequently, two bundles may not both publish the same
+/// `bin/<target-triple>/<bare-name>` identity. Checking every target triple at
+/// admission time keeps a bundle set portable: a collision cannot remain
+/// dormant merely because the current node has a different host triple.
+pub fn verify_bundle_executor_manifests(
+    bundle_roots: &[PathBuf],
+    node_trust_store: &TrustStore,
+) -> Result<(), EngineError> {
+    let mut owners: HashMap<String, &Path> = HashMap::new();
+
+    for bundle_root in bundle_roots {
+        let mut item_refs: Vec<String> =
+            verify_bundle_executor_manifest_items(bundle_root, node_trust_store)?
+                .into_iter()
+                .collect();
+        item_refs.sort_unstable();
+        for item_ref in item_refs {
+            if let Some(first_root) = owners.insert(item_ref.clone(), bundle_root.as_path()) {
+                return Err(EngineError::BinManifestInvalid {
+                    bin: item_ref.clone(),
+                    reason: format!(
+                        "native executor identity `{item_ref}` is published by both {} and {}; each target-triple/name identity must have exactly one admitted bundle owner",
+                        first_root.display(),
+                        bundle_root.display(),
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_bundle_executor_manifest_items(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<HashSet<String>, EngineError> {
+    let ai_dir = bundle_root.join(crate::AI_DIR);
+    require_regular_bundle_ai_tree(bundle_root, &ai_dir, true)?;
+    let bin_root = ai_dir.join("bin");
+    let manifest_ref_path = ai_dir.join("refs").join("bundles").join("manifest");
+
+    let bin_root_metadata = match std::fs::symlink_metadata(&bin_root) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                return Err(bundle_executor_error(
+                    bundle_root,
+                    format!("{} must be a regular directory", bin_root.display()),
+                ));
+            }
+            Some(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(bundle_executor_error(
+                bundle_root,
+                format!("stat {}: {error}", bin_root.display()),
+            ));
+        }
+    };
+    let manifest_ref_exists = match std::fs::symlink_metadata(&manifest_ref_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(bundle_executor_error(
+                    bundle_root,
+                    format!("{} must be a regular file", manifest_ref_path.display()),
+                ));
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(bundle_executor_error(
+                bundle_root,
+                format!("stat {}: {error}", manifest_ref_path.display()),
+            ));
+        }
+    };
+
+    if bin_root_metadata.is_none() && !manifest_ref_exists {
+        return Ok(HashSet::new());
+    }
+    if !manifest_ref_exists {
+        return Err(EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        });
+    }
+
+    let signed_manifest_ref = std::fs::read_to_string(&manifest_ref_path).map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!("read {}: {error}", manifest_ref_path.display()),
+        )
+    })?;
+    let verified_manifest_ref = crate::executor_resolution::verify_signed_executor_manifest_ref(
+        &signed_manifest_ref,
+        |fingerprint| {
+            node_trust_store
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
+        },
+        TrustClass::TrustedBundle,
+    )
+    .map_err(|error| match error {
+        crate::executor_resolution::ExecutorResolutionError::ManifestSignerUntrusted {
+            fingerprint,
+        } => EngineError::BinUntrusted {
+            bin: bundle_root.display().to_string(),
+            fingerprint,
+        },
+        other => bundle_executor_error(bundle_root, other.to_string()),
+    })?;
+    if !is_dispatchable_trust_class(verified_manifest_ref.trust_class) {
+        return Err(EngineError::BinUntrusted {
+            bin: bundle_root.display().to_string(),
+            fingerprint: verified_manifest_ref.signer_fingerprint,
+        });
+    }
+
+    let cas = lillux::cas::CasStore::new(ai_dir.join("objects"));
+    let manifest_value = cas
+        .get_object(&verified_manifest_ref.manifest_hash)
+        .map_err(|error| {
+            bundle_executor_error(
+                bundle_root,
+                format!(
+                    "read executor manifest object {}: {error}",
+                    verified_manifest_ref.manifest_hash
+                ),
+            )
+        })?
+        .ok_or_else(|| {
+            bundle_executor_error(
+                bundle_root,
+                format!(
+                    "executor manifest object {} is missing from bundle CAS",
+                    verified_manifest_ref.manifest_hash
+                ),
+            )
+        })?;
+    let item_source_hashes = crate::executor_resolution::verify_executor_manifest_object(
+        &manifest_value,
+        &verified_manifest_ref.manifest_hash,
+    )
+    .map_err(|error| bundle_executor_error(bundle_root, error.to_string()))?;
+
+    let expected_item_refs: HashSet<String> = item_source_hashes.keys().cloned().collect();
+    let mut ordered_item_refs: Vec<&String> = item_source_hashes.keys().collect();
+    ordered_item_refs.sort_unstable();
+    for item_ref in ordered_item_refs {
+        let (triple, bin_name) = parse_executor_item_ref(item_ref).map_err(|detail| {
+            bundle_executor_error(
+                bundle_root,
+                format!("invalid executor item ref `{item_ref}`: {detail}"),
+            )
+        })?;
+        let bin_path = bin_root.join(triple).join(bin_name);
+        require_regular_artifact(bundle_root, &bin_path, "installed executable")?;
+
+        let item_source_hash = &item_source_hashes[item_ref];
+        let item_source = cas
+            .get_object(item_source_hash)
+            .map_err(|error| {
+                bundle_executor_error(
+                    bundle_root,
+                    format!("read ItemSource {item_source_hash} for {item_ref}: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                bundle_executor_error(
+                    bundle_root,
+                    format!("ItemSource {item_source_hash} for {item_ref} is missing from CAS"),
+                )
+            })?;
+        let sidecar_signer = verify_item_source_sidecar(
+            bin_name,
+            &bin_path,
+            item_ref,
+            &item_source,
+            &|fingerprint| {
+                node_trust_store
+                    .get(fingerprint)
+                    .map(|signer| signer.verifying_key)
+            },
+        )?;
+        if sidecar_signer != verified_manifest_ref.signer_fingerprint {
+            return Err(EngineError::BinSidecarInvalid {
+                bin: bin_name.to_string(),
+                reason: format!(
+                    "sidecar signer `{sidecar_signer}` does not match signed manifest-ref signer `{}`",
+                    verified_manifest_ref.signer_fingerprint
+                ),
+            });
+        }
+
+        let (blob_hash, signed_mode) = crate::executor_resolution::verify_executor_item_source(
+            &item_source,
+            item_source_hash,
+            item_ref,
+        )
+        .map_err(|error| bundle_executor_error(bundle_root, error.to_string()))?;
+        verify_installed_mode(bin_name, &bin_path, signed_mode)?;
+
+        let blob_bytes = cas
+            .get_blob(&blob_hash)
+            .map_err(|error| {
+                bundle_executor_error(
+                    bundle_root,
+                    format!("read content blob {blob_hash} for {item_ref}: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                bundle_executor_error(
+                    bundle_root,
+                    format!("content blob {blob_hash} for {item_ref} is missing from CAS"),
+                )
+            })?;
+        let actual_blob_hash = lillux::sha256_hex(&blob_bytes);
+        if actual_blob_hash != blob_hash {
+            return Err(EngineError::BinHashMismatch {
+                bin: bin_name.to_string(),
+                declared: blob_hash,
+                computed: actual_blob_hash,
+            });
+        }
+
+        let installed_bytes = std::fs::read(&bin_path).map_err(|error| {
+            bundle_executor_error(
+                bundle_root,
+                format!("read installed executable {}: {error}", bin_path.display()),
+            )
+        })?;
+        let installed_hash = lillux::sha256_hex(&installed_bytes);
+        if installed_hash != blob_hash || installed_bytes != blob_bytes {
+            return Err(EngineError::BinHashMismatch {
+                bin: bin_name.to_string(),
+                declared: blob_hash,
+                computed: installed_hash,
+            });
+        }
+    }
+
+    let mut installed_item_refs = HashSet::new();
+    let mut installed_sidecar_refs = HashSet::new();
+    if bin_root_metadata.is_some() {
+        for triple_entry in sorted_dir_entries(&bin_root, bundle_root)? {
+            let triple_type = triple_entry.file_type().map_err(|error| {
+                bundle_executor_error(
+                    bundle_root,
+                    format!("inspect {}: {error}", triple_entry.path().display()),
+                )
+            })?;
+            let triple = triple_entry.file_name().into_string().map_err(|_| {
+                bundle_executor_error(bundle_root, "binary triple directory is not UTF-8")
+            })?;
+            if triple_type.is_symlink()
+                || !triple_type.is_dir()
+                || !is_safe_executor_path_segment(&triple)
+            {
+                return Err(bundle_executor_error(
+                    bundle_root,
+                    format!(
+                        "{} must be a regular, safely named target-triple directory",
+                        triple_entry.path().display()
+                    ),
+                ));
+            }
+
+            for artifact in sorted_dir_entries(&triple_entry.path(), bundle_root)? {
+                let artifact_type = artifact.file_type().map_err(|error| {
+                    bundle_executor_error(
+                        bundle_root,
+                        format!("inspect {}: {error}", artifact.path().display()),
+                    )
+                })?;
+                if artifact_type.is_symlink() || !artifact_type.is_file() {
+                    return Err(bundle_executor_error(
+                        bundle_root,
+                        format!("{} must be a regular file", artifact.path().display()),
+                    ));
+                }
+                let artifact_name = artifact.file_name().into_string().map_err(|_| {
+                    bundle_executor_error(bundle_root, "binary artifact name is not UTF-8")
+                })?;
+                let (bin_name, is_sidecar) = match artifact_name.strip_suffix(".item_source.json") {
+                    Some(bin_name) => (bin_name, true),
+                    None => (artifact_name.as_str(), false),
+                };
+                if !is_safe_executor_path_segment(bin_name) {
+                    return Err(bundle_executor_error(
+                        bundle_root,
+                        format!("unsafe binary artifact name `{artifact_name}`"),
+                    ));
+                }
+                let item_ref = format!("bin/{triple}/{bin_name}");
+                if !expected_item_refs.contains(&item_ref) {
+                    return Err(bundle_executor_error(
+                        bundle_root,
+                        format!(
+                            "on-disk executable artifact {} is not authorized by the signed executor manifest",
+                            artifact.path().display()
+                        ),
+                    ));
+                }
+                if is_sidecar {
+                    installed_sidecar_refs.insert(item_ref);
+                } else {
+                    installed_item_refs.insert(item_ref);
+                }
+            }
+        }
+    }
+
+    if installed_item_refs != expected_item_refs || installed_sidecar_refs != expected_item_refs {
+        return Err(bundle_executor_error(
+            bundle_root,
+            "signed executor manifest, installed executables, and ItemSource sidecars do not form a one-to-one set",
+        ));
+    }
+
+    Ok(expected_item_refs)
+}
+
+fn bundle_executor_error(bundle_root: &Path, reason: impl Into<String>) -> EngineError {
+    EngineError::BinManifestInvalid {
+        bin: bundle_root.display().to_string(),
+        reason: reason.into(),
+    }
+}
+
+/// Require the entire bundle `.ai` control tree to remain inside the admitted
+/// generation. In particular, CAS objects must not be reached through an
+/// ancestor symlink whose target can change independently after installation.
+fn require_regular_bundle_ai_tree(
+    bundle_root: &Path,
+    path: &Path,
+    tree_root: bool,
+) -> Result<(), EngineError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!("stat bundle control-tree path {}: {error}", path.display()),
+        )
+    })?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(bundle_executor_error(
+            bundle_root,
+            format!("bundle control tree contains symlink at {}", path.display()),
+        ));
+    }
+    if file_type.is_dir() {
+        for entry in sorted_dir_entries(path, bundle_root)? {
+            require_regular_bundle_ai_tree(bundle_root, &entry.path(), false)?;
+        }
+        return Ok(());
+    }
+    if !tree_root && file_type.is_file() {
+        return Ok(());
+    }
+
+    Err(bundle_executor_error(
+        bundle_root,
+        if tree_root {
+            format!(
+                "bundle control tree root must be a real directory at {}",
+                path.display()
+            )
+        } else {
+            format!(
+                "bundle control tree contains non-regular entry at {}",
+                path.display()
+            )
+        },
+    ))
+}
+
+fn require_executor_manifest_ref(
+    path: &Path,
+    bundle_root: &Path,
+    bin_name: &str,
+) -> Result<(), EngineError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.file_type().is_file() => {
+            Ok(())
+        }
+        Ok(_) => Err(EngineError::BinManifestInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("{} must be a regular file", path.display()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(EngineError::BinManifestMissing {
+                bundle_root: bundle_root.display().to_string(),
+            })
+        }
+        Err(error) => Err(EngineError::BinManifestInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("stat {}: {error}", path.display()),
+        }),
+    }
+}
+
+fn require_regular_artifact(
+    bundle_root: &Path,
+    path: &Path,
+    artifact_kind: &str,
+) -> Result<(), EngineError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        bundle_executor_error(
+            bundle_root,
+            format!("stat {artifact_kind} {}: {error}", path.display()),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(bundle_executor_error(
+            bundle_root,
+            format!("{artifact_kind} {} must be a regular file", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn sorted_dir_entries(
+    path: &Path,
+    bundle_root: &Path,
+) -> Result<Vec<std::fs::DirEntry>, EngineError> {
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|error| {
+            bundle_executor_error(bundle_root, format!("read {}: {error}", path.display()))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            bundle_executor_error(bundle_root, format!("read {}: {error}", path.display()))
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    Ok(entries)
+}
+
+fn parse_executor_item_ref(item_ref: &str) -> Result<(&str, &str), &'static str> {
+    let mut parts = item_ref.split('/');
+    if parts.next() != Some("bin") {
+        return Err("must start with `bin/`");
+    }
+    let triple = parts.next().ok_or("missing target triple")?;
+    let bin_name = parts.next().ok_or("missing binary name")?;
+    if parts.next().is_some()
+        || !is_safe_executor_path_segment(triple)
+        || !is_safe_executor_path_segment(bin_name)
+    {
+        return Err("must be exactly `bin/<safe-triple>/<safe-name>`");
+    }
+    Ok((triple, bin_name))
+}
+
+fn is_safe_executor_path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('.')
+        && !value.contains("..")
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.chars().any(char::is_whitespace)
+        && !value.chars().any(char::is_control)
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(unix)]
+fn verify_installed_mode(
+    bin_name: &str,
+    bin_path: &Path,
+    signed_mode: u32,
+) -> Result<(), EngineError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let actual_mode = std::fs::symlink_metadata(bin_path)
+        .map_err(|error| EngineError::BinManifestInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("stat {} for Unix mode: {error}", bin_path.display()),
+        })?
+        .permissions()
+        .mode()
+        & 0o7777;
+    if actual_mode != signed_mode {
+        return Err(EngineError::BinManifestInvalid {
+            bin: bin_name.to_string(),
+            reason: format!(
+                "installed Unix mode {actual_mode:#o} does not match signed mode {signed_mode:#o}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_installed_mode(
+    _bin_name: &str,
+    _bin_path: &Path,
+    _signed_mode: u32,
+) -> Result<(), EngineError> {
+    Ok(())
 }
 
 fn registered_bundle_root_for_source(
@@ -584,23 +1152,74 @@ fn verify_item_source_sidecar(
     trusted_verifying_key: &impl Fn(&str) -> Option<VerifyingKey>,
 ) -> Result<String, EngineError> {
     let sidecar_path = bin_path.with_file_name(format!("{bin_name}.item_source.json"));
+    let sidecar_metadata =
+        std::fs::symlink_metadata(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("stat {}: {e}", sidecar_path.display()),
+        })?;
+    if sidecar_metadata.file_type().is_symlink() || !sidecar_metadata.file_type().is_file() {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("{} must be a regular file", sidecar_path.display()),
+        });
+    }
     let signed =
         std::fs::read_to_string(&sidecar_path).map_err(|e| EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
             reason: format!("read {}: {e}", sidecar_path.display()),
         })?;
 
-    let header = signed
-        .lines()
-        .next()
-        .and_then(|line| lillux::signature::parse_signature_line(line, "#", None))
-        .ok_or_else(|| EngineError::BinSidecarInvalid {
+    let (signature_line, body) =
+        signed
+            .split_once('\n')
+            .ok_or_else(|| EngineError::BinSidecarInvalid {
+                bin: bin_name.to_string(),
+                reason: format!(
+                    "{} must contain one signature header and a canonical JSON body",
+                    sidecar_path.display()
+                ),
+            })?;
+    if !signature_line.starts_with("# ryeos:signed:") || signature_line.trim_end() != signature_line
+    {
+        return Err(EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
-            reason: format!(
-                "missing or malformed signature line in {}",
-                sidecar_path.display()
-            ),
+            reason: "signature header is not in canonical `# ryeos:signed:` form".to_string(),
+        });
+    }
+    let header =
+        lillux::signature::parse_signature_line(signature_line, "#", None).ok_or_else(|| {
+            EngineError::BinSidecarInvalid {
+                bin: bin_name.to_string(),
+                reason: format!(
+                    "missing or malformed signature line in {}",
+                    sidecar_path.display()
+                ),
+            }
         })?;
+    if !is_lower_sha256(&header.signer_fingerprint)
+        || !is_lower_sha256(&header.content_hash)
+        || !crate::executor_resolution::has_canonical_signature_timestamp_shape(&header.timestamp)
+    {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: "signature header fields are not canonical".to_string(),
+        });
+    }
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&header.signature_b64)
+        .map_err(|_| EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: "signature must use canonical standard base64".to_string(),
+        })?;
+    if signature_bytes.len() != 64
+        || base64::engine::general_purpose::STANDARD.encode(&signature_bytes)
+            != header.signature_b64
+    {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: "signature must be one canonical Ed25519 signature".to_string(),
+        });
+    }
 
     let Some(verifying_key) = trusted_verifying_key(&header.signer_fingerprint) else {
         return Err(EngineError::BinUntrusted {
@@ -608,15 +1227,21 @@ fn verify_item_source_sidecar(
             fingerprint: header.signer_fingerprint,
         });
     };
+    let actual_fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
+    if actual_fingerprint != header.signer_fingerprint {
+        return Err(EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: "trusted-key lookup returned a key with a different fingerprint".to_string(),
+        });
+    }
 
-    let body = lillux::signature::strip_signature_lines_with_envelope(&signed, "#", None);
     if !lillux::signature::is_valid_signature_for(
         &header.content_hash,
         &header.signature_b64,
         &header.signer_fingerprint,
-        &body,
+        body,
         &verifying_key,
-        &header.signer_fingerprint,
+        &actual_fingerprint,
     ) {
         return Err(EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
@@ -645,7 +1270,7 @@ fn verify_item_source_sidecar(
         });
     }
 
-    Ok(header.signer_fingerprint)
+    Ok(actual_fingerprint)
 }
 
 /// Validate a binary name for both `bin:<name>` and `bin/<triple>/<name>`.
@@ -697,15 +1322,12 @@ fn validate_bin_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Decide whether the trust class returned by
-/// [`verify_executor_trust`] is high enough to dispatch the binary.
+/// Decide whether the signature-verified manifest ref's effective trust class
+/// is high enough to dispatch the binary.
 ///
 /// Both `TrustedBundle` and `TrustedProject` are dispatchable. The
-/// effective tier is already the `min` of the raw binary signature
-/// trust (which `verify_executor_trust` produces only as
-/// `TrustedBundle` / `UntrustedProject` / `Unsigned`) and the
-/// descriptor's `root_trust_class` (widened to `TrustedBundle` or
-/// `TrustedProject` by `plan_builder::widen_root_trust_class`).
+/// effective tier is already the `min` of trusted bundle-publisher
+/// authorization and the descriptor's `root_trust_class`.
 /// A `TrustedProject` here therefore means a system-signed binary
 /// reached through a user/project-tier descriptor — safe to run.
 /// Anything weaker (`UntrustedProject`, `Unsigned`) must be refused.
@@ -716,109 +1338,55 @@ fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor_resolution::verify_executor_trust;
     use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
     use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use serde_json::json;
 
-    /// Descriptor=System, binary signed by a system-trusted key.
-    /// Effective tier = TrustedBundle; gate accepts.
     #[test]
-    fn descriptor_system_binary_system_dispatches_as_system() {
-        let item_source = json!({
-            "signature_info": { "fingerprint": "sys-fp" }
-        });
-        let (tc, fp) =
-            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedBundle);
-        assert_eq!(tc, TrustClass::TrustedBundle);
-        assert_eq!(fp.as_deref(), Some("sys-fp"));
-        assert!(is_dispatchable_trust_class(tc));
-    }
-
-    /// Descriptor=System, binary signed by a key absent from the trust
-    /// store (modeling an untrusted signer under a bundle root). The
-    /// effective tier collapses to UntrustedProject and the gate refuses.
-    ///
-    /// Note: `verify_executor_trust` does not currently model a raw
-    /// `TrustedProject` signer tier — its `raw_trust` is only TrustedBundle,
-    /// UntrustedProject, or Unsigned. So a "binary signed by a user-tier
-    /// signer" is equivalent to "binary signed by a key not in the trust
-    /// store" today; this test covers that.
-    #[test]
-    fn descriptor_system_unknown_signer_refused() {
-        let item_source = json!({
-            "signature_info": { "fingerprint": "user-fp" }
-        });
-        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedBundle);
-        assert_eq!(tc, TrustClass::UntrustedProject);
-        assert_eq!(fp.as_deref(), Some("user-fp"));
-        assert!(!is_dispatchable_trust_class(tc));
-    }
-
-    /// Descriptor=User, binary signed by a system-trusted key.
-    /// Effective tier = TrustedProject (capped by descriptor); gate accepts.
-    ///
-    /// This is the case the wave-5 oracle audit flagged: previously the
-    /// gate hardcoded acceptance to `TrustedBundle` only, so this case
-    /// — which is the *normal* dispatch path for any user-tier descriptor
-    /// invoking a system-shipped runtime/handler binary — was rejected.
-    #[test]
-    fn descriptor_user_binary_system_dispatches_as_user() {
-        let item_source = json!({
-            "signature_info": { "fingerprint": "sys-fp" }
-        });
-        let (tc, fp) =
-            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedProject);
-        assert_eq!(tc, TrustClass::TrustedProject);
-        assert_eq!(fp.as_deref(), Some("sys-fp"));
-        assert!(is_dispatchable_trust_class(tc));
-    }
-
-    /// Descriptor=User, binary signed by an unknown signer.
-    /// Effective tier = UntrustedProject; gate refuses.
-    #[test]
-    fn descriptor_user_unknown_signer_refused() {
-        let item_source = json!({
-            "signature_info": { "fingerprint": "stranger-fp" }
-        });
-        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedProject);
-        assert_eq!(tc, TrustClass::UntrustedProject);
-        assert_eq!(fp.as_deref(), Some("stranger-fp"));
-        assert!(!is_dispatchable_trust_class(tc));
-    }
-
-    /// Sanity floor: anything below TrustedProject must never dispatch.
-    #[test]
-    fn untrusted_and_unsigned_are_never_dispatchable() {
+    fn only_trusted_effective_classes_are_dispatchable() {
+        assert!(is_dispatchable_trust_class(TrustClass::TrustedBundle));
+        assert!(is_dispatchable_trust_class(TrustClass::TrustedProject));
         assert!(!is_dispatchable_trust_class(TrustClass::UntrustedProject));
         assert!(!is_dispatchable_trust_class(TrustClass::Unsigned));
     }
 
     /// Build a minimally valid bundle in `bundle_root` containing a
     /// single binary named `bin_name`, its CAS-stored item_source/manifest,
-    /// and the `refs/bundles/manifest` pointer. Returns the signer
-    /// fingerprint and signing key used for the signed item-source sidecar.
+    /// and the signed `refs/bundles/manifest` pointer. Returns the signer
+    /// fingerprint and signing key used for both trust anchors.
     fn write_resolver_fixture(bundle_root: &Path, bin_name: &str) -> (String, SigningKey) {
-        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        write_resolver_fixture_for_triple(bundle_root, bin_name, env!("RYEOS_ENGINE_HOST_TRIPLE"))
+    }
+
+    fn write_resolver_fixture_for_triple(
+        bundle_root: &Path,
+        bin_name: &str,
+        triple: &str,
+    ) -> (String, SigningKey) {
         let ai = bundle_root.join(crate::AI_DIR);
         let bin_dir = ai.join("bin").join(triple);
         std::fs::create_dir_all(&bin_dir).unwrap();
         let bin_path = bin_dir.join(bin_name);
         let bin_bytes = b"placeholder-binary\n";
         std::fs::write(&bin_path, bin_bytes).unwrap();
-        let content_blob_hash = lillux::sha256_hex(bin_bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let cas = lillux::cas::CasStore::new(ai.join("objects"));
+        let content_blob_hash = cas.store_blob(bin_bytes).unwrap();
         let signing_key = SigningKey::from_bytes(&[31u8; 32]);
         let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
         let item_ref = format!("bin/{triple}/{bin_name}");
         let item_source = serde_json::json!({
+            "kind": "item_source",
             "item_ref": item_ref,
             "content_blob_hash": content_blob_hash,
             "integrity": format!("sha256:{content_blob_hash}"),
-            "signature_info": { "fingerprint": fingerprint },
-            "mode": 0o644,
+            "mode": 0o755,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
         let sidecar_body = lillux::cas::canonical_json(&item_source);
@@ -830,6 +1398,7 @@ mod tests {
         )
         .unwrap();
         let manifest = serde_json::json!({
+            "kind": "source_manifest",
             "item_source_hashes": {
                 item_ref: item_source_hash
             }
@@ -838,7 +1407,16 @@ mod tests {
 
         let ref_path = ai.join("refs").join("bundles").join("manifest");
         std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
-        std::fs::write(ref_path, manifest_hash).unwrap();
+        let signed_ref = lillux::signature::sign_content(
+            &format!(
+                "{}\n{manifest_hash}\n",
+                crate::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+            ),
+            &signing_key,
+            "#",
+            None,
+        );
+        std::fs::write(ref_path, signed_ref).unwrap();
 
         (fingerprint, signing_key)
     }
@@ -856,6 +1434,166 @@ mod tests {
             verifying_key: key.verifying_key(),
             label: None,
         }])
+    }
+
+    #[test]
+    fn full_bundle_executor_manifest_verifies_one_to_one_installed_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+
+        verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
+            .expect("complete signed executor chain should verify");
+
+        let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
+        std::fs::write(
+            bundle
+                .join(crate::AI_DIR)
+                .join("bin")
+                .join(triple)
+                .join("extra"),
+            b"not authorized",
+        )
+        .unwrap();
+        let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
+            .expect_err("an extra on-disk executable must be refused");
+        assert!(error.to_string().contains("not authorized"));
+    }
+
+    #[test]
+    fn admitted_bundle_set_rejects_duplicate_native_executor_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let collision_triple = "future-vendor-platform-abi";
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple(&first, "shared-executor", collision_triple);
+        write_resolver_fixture_for_triple(&second, "shared-executor", collision_triple);
+
+        let error = verify_bundle_executor_manifests(
+            &[first.clone(), second.clone()],
+            &trust_store_for(&fingerprint, &key),
+        )
+        .expect_err("two owners of one target-triple/name identity must be refused");
+        let message = error.to_string();
+        assert!(message.contains(&format!("bin/{collision_triple}/shared-executor")));
+        assert!(message.contains(&first.display().to_string()));
+        assert!(message.contains(&second.display().to_string()));
+    }
+
+    #[test]
+    fn admitted_bundle_set_allows_same_bare_name_for_different_triples() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        let (fingerprint, key) =
+            write_resolver_fixture_for_triple(&first, "portable-executor", "target-one");
+        write_resolver_fixture_for_triple(&second, "portable-executor", "target-two");
+
+        verify_bundle_executor_manifests(&[first, second], &trust_store_for(&fingerprint, &key))
+            .expect("target triple is part of the native executor identity");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_bundle_executor_manifest_requires_exact_signed_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let bin_path = bundle
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(env!("RYEOS_ENGINE_HOST_TRIPLE"))
+            .join("demo");
+        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+        let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
+            .expect_err("installed mode drift must be refused");
+        assert!(error.to_string().contains("does not match signed mode"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_bundle_executor_manifest_rejects_ai_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real_bundle = tmp.path().join("real-bundle");
+        let (fingerprint, key) = write_resolver_fixture(&real_bundle, "demo");
+        let bundle = tmp.path().join("bundle");
+        std::fs::create_dir(&bundle).unwrap();
+        symlink(real_bundle.join(crate::AI_DIR), bundle.join(crate::AI_DIR)).unwrap();
+
+        let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
+            .expect_err("an ancestor .ai symlink must be refused");
+        assert!(error.to_string().contains("control tree contains symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_bundle_executor_manifest_rejects_cas_ancestor_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let objects = bundle.join(crate::AI_DIR).join("objects");
+        let external_objects = tmp.path().join("external-objects");
+        std::fs::rename(&objects, &external_objects).unwrap();
+        symlink(&external_objects, &objects).unwrap();
+
+        let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
+            .expect_err("a CAS ancestor symlink must be refused");
+        assert!(error.to_string().contains("control tree contains symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_bundle_executor_manifest_rejects_special_ai_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let socket_path = bundle.join(crate::AI_DIR).join("unexpected.sock");
+        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
+            .expect_err("special entries in .ai must be refused");
+        assert!(error.to_string().contains("non-regular entry"));
+    }
+
+    #[test]
+    fn resolver_rejects_noncanonical_sidecar_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let sidecar_path = bundle
+            .join(crate::AI_DIR)
+            .join("bin")
+            .join(env!("RYEOS_ENGINE_HOST_TRIPLE"))
+            .join("demo.item_source.json");
+        let signed = std::fs::read_to_string(&sidecar_path).unwrap();
+        let (signature_line, body) = signed.split_once('\n').unwrap();
+        let header = lillux::signature::parse_signature_line(signature_line, "#", None).unwrap();
+        let noncanonical = format!(
+            "# ryeos:signed:2026-07-14T12:34:56+00:00:{}:{}:{}\n{body}",
+            header.content_hash, header.signature_b64, header.signer_fingerprint
+        );
+        std::fs::write(sidecar_path, noncanonical).unwrap();
+
+        let error = resolve_bundle_binary_ref(
+            "bin:demo",
+            &bundle,
+            trusted_key_for(&fingerprint, &key),
+            TrustClass::TrustedBundle,
+        )
+        .expect_err("alternate timestamp encodings must be refused");
+        assert!(matches!(
+            error,
+            EngineError::BinSidecarInvalid { ref reason, .. }
+                if reason.contains("not canonical")
+        ));
     }
 
     fn write_signed_bundle_manifest(
@@ -1208,7 +1946,7 @@ mod tests {
     }
 
     #[test]
-    fn forged_manifest_with_trusted_fingerprint_rejected_without_matching_sidecar() {
+    fn unsigned_forged_manifest_with_claimed_trusted_fingerprint_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let (fp, key) = write_resolver_fixture(&bundle, "demo");
@@ -1220,15 +1958,17 @@ mod tests {
         std::fs::write(&bin_path, forged_bytes).unwrap();
         let forged_hash = lillux::sha256_hex(forged_bytes);
         let forged_item_source = serde_json::json!({
+            "kind": "item_source",
             "item_ref": format!("bin/{triple}/demo"),
             "content_blob_hash": forged_hash,
             "integrity": format!("sha256:{forged_hash}"),
             "signature_info": { "fingerprint": fp },
-            "mode": 0o644,
+            "mode": 0o755,
         });
         let cas = lillux::cas::CasStore::new(ai.join("objects"));
         let forged_item_source_hash = cas.store_object(&forged_item_source).unwrap();
         let forged_manifest = serde_json::json!({
+            "kind": "source_manifest",
             "item_source_hashes": {
                 format!("bin/{triple}/demo"): forged_item_source_hash
             }
@@ -1249,9 +1989,9 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            matches!(err, EngineError::BinSidecarInvalid { ref reason, .. }
-                if reason.contains("does not match CAS item_source")),
-            "expected sidecar/CAS mismatch rejection, got: {err:?}"
+            matches!(err, EngineError::BinManifestInvalid { ref reason, .. }
+                if reason.contains("signature")),
+            "expected signed-manifest-ref rejection, got: {err:?}"
         );
     }
 
@@ -1327,29 +2067,6 @@ mod tests {
             use std::os::unix::fs::symlink;
             symlink(&outside, bin_dir.join("escaped")).unwrap();
         }
-
-        // Build a manifest that includes the symlink target hash.
-        let bin_bytes = b"evil";
-        let content_blob_hash = lillux::sha256_hex(bin_bytes);
-        let cas = lillux::cas::CasStore::new(bundle.join(crate::AI_DIR).join("objects"));
-        let item_source = serde_json::json!({
-            "content_blob_hash": content_blob_hash,
-            "signature_info": { "fingerprint": "test-fp" }
-        });
-        let item_source_hash = cas.store_object(&item_source).unwrap();
-        let manifest = serde_json::json!({
-            "item_source_hashes": {
-                format!("bin/{triple}/escaped"): item_source_hash
-            }
-        });
-        let manifest_hash = cas.store_object(&manifest).unwrap();
-        let ref_path = bundle
-            .join(crate::AI_DIR)
-            .join("refs")
-            .join("bundles")
-            .join("manifest");
-        std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
-        std::fs::write(&ref_path, manifest_hash).unwrap();
 
         let err =
             resolve_bundle_binary_ref("bin:escaped", &bundle, |_| None, TrustClass::TrustedBundle)
