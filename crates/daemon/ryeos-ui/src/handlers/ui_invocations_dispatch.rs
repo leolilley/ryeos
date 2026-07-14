@@ -92,7 +92,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
-    let root_canonical = CanonicalRef::parse(&item_ref)
+    CanonicalRef::parse(&item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
     let project_path = session
         .project_root
