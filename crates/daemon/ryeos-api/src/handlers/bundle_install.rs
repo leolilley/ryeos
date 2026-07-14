@@ -73,11 +73,32 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let bundles_root = state.config.app_root.join(".ai").join("bundles");
     let target = bundles_root.join(&req.name);
-    let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
-        &state.config.app_root,
-        &req.name,
-    )?;
-    let recovered = transaction.reconcile(state.identity.signing_key())?;
+    // Keep the exact installed-set read, admission, and namespace mutation in
+    // one node-wide critical section. The registry lock always precedes the
+    // per-name transaction lock.
+    let registry_lock =
+        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
+    let transaction = registry_lock.acquire_bundle(&req.name)?;
+    let recovered = match transaction.reconcile(state.identity.signing_key()) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            // Reconciliation may finish the tree/registration mutation and
+            // then fail while durably removing its journal. Invalidate before
+            // returning so a namespace-visible repair never leaves old engines
+            // cached in this daemon process.
+            state.engine_cache.bump_system_install_generation();
+            return Err(error).context("reconcile interrupted bundle transaction");
+        }
+    };
+    if recovered.is_some() {
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        tracing::info!(
+            bundle = %req.name,
+            engine_cache_generation = new_gen,
+            operation = ?recovered,
+            "reconciled bundle transaction: bumped engine cache generation"
+        );
+    }
     if matches!(
         recovered,
         Some(
@@ -87,12 +108,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     ) && transaction.target().is_dir()
         && !req.replace
     {
-        let new_gen = state.engine_cache.bump_system_install_generation();
-        tracing::info!(
-            bundle = %req.name,
-            engine_cache_generation = new_gen,
-            "recovered bundle install: bumped engine cache generation"
-        );
         return Ok(serde_json::json!({
             "name": req.name,
             "path": transaction.target(),
@@ -109,31 +124,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    // Preflight verification: parse + validate + signature-check every
-    // signable item in the bundle BEFORE any filesystem mutation.
-    //
-    // Trust source: the node's pinned trust store. Bundles whose signers aren't
-    // already trusted are rejected — node administrators must pin trust first.
+    // Trust comes only from the node's persistent trust store. Admission runs
+    // against the completed staging tree below, never the mutable source tree.
     let node_config_root = state.config.runtime_root().config();
-    let source_canonical = req
-        .source_path
-        .canonicalize()
-        .with_context(|| format!("canonicalize source path {}", req.source_path.display()))?;
-    let source_plan = build_prospective_bundle_plan(
-        &state.config.app_root,
-        &req.name,
-        &source_canonical,
-        req.replace,
-    )
-    .context("build prospective source bundle graph")?;
-    verify_planned_candidate(&source_plan, &req.name, &node_config_root, false)
-        .context("preflight verification refused install")?;
+    let prospective_validator = state
+        .extensions
+        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
+        .context("prospective node-config validator is not installed at the composition root")?;
 
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
     let registration = serde_json::json!({ "kind": "node", "path": target });
-    if replaced {
+    let activation = if replaced {
         replace_dir_atomic(
             &req.source_path,
             &target,
@@ -148,6 +151,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     true,
                     &node_config_root,
                     &state.engine.node_trust_store,
+                    &prospective_validator,
+                    Arc::clone(&state.sandbox),
                 )
                 .context("admission refused completed replacement staging tree")
             },
@@ -158,7 +163,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 req.source_path.display(),
                 target.display()
             )
-        })?;
+        })
     } else {
         install_dir_atomic(
             &req.source_path,
@@ -173,6 +178,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     false,
                     &node_config_root,
                     &state.engine.node_trust_store,
+                    &prospective_validator,
+                    Arc::clone(&state.sandbox),
                 )
                 .context("admission refused completed install staging tree")
             },
@@ -183,8 +190,23 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 req.source_path.display(),
                 target.display()
             )
-        })?;
+        })
+    };
+
+    // Invalidate cached engines as soon as a generation may be visible. This
+    // deliberately happens before propagating a post-rename/exchange journal
+    // error: activation can succeed even when `mark_activated` or its durable
+    // journal write fails. A conservative bump for a failed replacement that
+    // left the old target unchanged is harmless.
+    if target.is_dir() {
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        tracing::info!(
+            bundle = %req.name,
+            engine_cache_generation = new_gen,
+            "bundle namespace observed after activation attempt: bumped engine cache generation"
+        );
     }
+    activation?;
 
     let canonical_target = target
         .canonicalize()
@@ -194,17 +216,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let config_item_path = transaction
         .commit_present(state.identity.signing_key())
         .context("commit bundle registration")?;
-
-    // Bump the engine cache generation so any cached per-request
-    // engines (built against the previous bundle set) are invalidated.
-    // The next pushed_head request will build a fresh engine that
-    // includes the newly installed bundle.
-    let new_gen = state.engine_cache.bump_system_install_generation();
-    tracing::info!(
-        bundle = %req.name,
-        engine_cache_generation = new_gen,
-        "bundle installed: bumped engine cache generation"
-    );
 
     let report = serde_json::json!({
         "name": req.name,
@@ -251,6 +262,7 @@ pub(crate) fn verify_planned_candidate(
     bundle_name: &str,
     node_config_root: &Path,
     completed_staging: bool,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
     let job = plan
         .verification_jobs
@@ -272,6 +284,7 @@ pub(crate) fn verify_planned_candidate(
             bundle_name,
             &job.dependency_roots,
             node_config_root,
+            sandbox,
         )
     } else {
         preflight_verify_named_bundle_in_context(
@@ -279,6 +292,7 @@ pub(crate) fn verify_planned_candidate(
             bundle_name,
             &job.dependency_roots,
             node_config_root,
+            sandbox,
         )
     }
 }
@@ -292,15 +306,23 @@ pub(crate) fn admit_completed_staging(
     replace: bool,
     node_config_root: &Path,
     node_trust_store: &TrustStore,
+    prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
-    verify_planned_candidate(&plan, bundle_name, node_config_root, true)?;
+    verify_planned_candidate(
+        &plan,
+        bundle_name,
+        node_config_root,
+        true,
+        Arc::clone(&sandbox),
+    )?;
     let prospective_roots: Vec<PathBuf> = plan
         .bundles
         .values()
         .map(|bundle| bundle.source.root_path().clone())
         .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(&prospective_roots, node_trust_store)
+    ryeos_app::engine_init::admit_node_bundle_roots(&prospective_roots, node_trust_store, sandbox)
         .context("prospective bundle set would fail node engine boot")?;
 
     // Exercise the second boot phase too: bundle-contributed node config is
@@ -344,22 +366,31 @@ pub(crate) fn admit_completed_staging(
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    loader
-        .load_full(
+    let snapshot = loader
+        .load_full_prospective(
             &ryeos_app::node_config::SectionTable::new(),
             &prospective_records,
         )
         .context("prospective bundle set would fail full node-config boot")?;
+    prospective_validator
+        .validate(&snapshot)
+        .context("prospective bundle set would fail composed node-config admission")?;
     Ok(())
 }
 
-fn install_dir_atomic(
+fn install_dir_atomic<F>(
     src: &Path,
     target: &Path,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
-    validate_staging: impl FnOnce(&Path) -> Result<()>,
-) -> Result<()> {
+    verify_staged: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    let source = src
+        .canonicalize()
+        .with_context(|| format!("canonicalize source path {}", src.display()))?;
     let parent = target
         .parent()
         .context("installed bundle target has no parent")?;
@@ -368,29 +399,75 @@ fn install_dir_atomic(
         .and_then(|name| name.to_str())
         .context("installed bundle target has no valid directory name")?;
     let staging = parent.join(format!(".{name}.staging"));
-    (|| {
-        if target.exists() {
-            bail!(
-                "bundle target appeared during install: {}",
-                target.display()
-            );
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("canonicalize bundle parent {}", parent.display()))?;
+    let canonical_target = canonical_parent.join(name);
+    let canonical_staging = canonical_parent.join(format!(".{name}.staging"));
+    if source == canonical_target
+        || source.starts_with(&canonical_target)
+        || canonical_target.starts_with(&source)
+    {
+        bail!(
+            "source_path {} must be outside installed bundle target {}",
+            source.display(),
+            canonical_target.display()
+        );
+    }
+    if source == canonical_staging
+        || source.starts_with(&canonical_staging)
+        || canonical_staging.starts_with(&source)
+    {
+        bail!(
+            "source_path {} must be separate from bundle install staging path {}",
+            source.display(),
+            canonical_staging.display()
+        );
+    }
+    let stale_staging = match fs::symlink_metadata(&staging) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!(
+                    "bundle install staging path is not a real directory: {}",
+                    staging.display()
+                );
+            }
+            true
         }
-        if staging.exists() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect bundle install staging {}", staging.display()))
+        }
+    };
+    (|| {
+        match fs::symlink_metadata(target) {
+            Ok(_) => {
+                bail!(
+                    "bundle target appeared during install: {}",
+                    target.display()
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect bundle target {}", target.display()))
+            }
+        }
+        if stale_staging {
             fs::remove_dir_all(&staging)
                 .with_context(|| format!("remove stale staging dir {}", staging.display()))?;
         }
-        copy_dir_recursive(src, &staging).with_context(|| {
+        copy_dir_recursive(&source, &staging).with_context(|| {
             format!(
                 "copy bundle from {} to staging {}",
-                src.display(),
+                source.display(),
                 staging.display()
             )
         })?;
-        // Re-read the completed copy rather than trusting the earlier source
-        // preflight; this catches source changes that raced the copy.
-        validate_staging(&staging)?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        verify_staged(&staging)?;
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::Install,
             &staging,
@@ -407,14 +484,17 @@ fn install_dir_atomic(
     })()
 }
 
-fn replace_dir_atomic(
+fn replace_dir_atomic<F>(
     src: &Path,
     target: &Path,
     preserve_runtime_artifacts: bool,
     transaction: &ryeos_app::bundle_transaction::BundleTransaction,
     registration: serde_json::Value,
-    validate_staging: impl FnOnce(&Path) -> Result<()>,
-) -> Result<()> {
+    verify_staged: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let source = src
         .canonicalize()
         .with_context(|| format!("canonicalize source path {}", src.display()))?;
@@ -429,6 +509,10 @@ fn replace_dir_atomic(
         .and_then(|name| name.to_str())
         .context("installed bundle target has no valid directory name")?;
     let staging = parent.join(format!(".{name}.staging"));
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("canonicalize bundle parent {}", parent.display()))?;
+    let canonical_staging = canonical_parent.join(format!(".{name}.staging"));
     if source == canonical_target
         || source.starts_with(&canonical_target)
         || canonical_target.starts_with(&source)
@@ -439,33 +523,52 @@ fn replace_dir_atomic(
             canonical_target.display()
         );
     }
-    if staging.starts_with(&source) {
+    if source == canonical_staging
+        || source.starts_with(&canonical_staging)
+        || canonical_staging.starts_with(&source)
+    {
         bail!(
-            "source_path {} must not contain the bundle install staging path",
-            source.display()
+            "source_path {} must be separate from bundle replacement staging path {}",
+            source.display(),
+            canonical_staging.display()
         );
     }
+    let stale_staging = match fs::symlink_metadata(&staging) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                bail!(
+                    "bundle replacement staging path is not a real directory: {}",
+                    staging.display()
+                );
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect bundle replacement staging {}", staging.display())
+            })
+        }
+    };
 
     (|| {
-        if staging.exists() {
+        if stale_staging {
             fs::remove_dir_all(&staging)
                 .with_context(|| format!("remove stale staging dir {}", staging.display()))?;
         }
-        copy_dir_recursive(src, &staging).with_context(|| {
+        copy_dir_recursive(&source, &staging).with_context(|| {
             format!(
                 "copy replacement bundle from {} to staging {}",
-                src.display(),
+                source.display(),
                 staging.display(),
             )
         })?;
         if preserve_runtime_artifacts {
             preserve_runtime_artifact_dirs(&canonical_target, &staging)?;
         }
-        // Validate the exact merged tree after sparse artifact preservation,
-        // before it can replace the registered bundle generation.
-        validate_staging(&staging)?;
         lillux::sync_tree_durable(&staging)
             .with_context(|| format!("flush staged bundle {}", staging.display()))?;
+        verify_staged(&staging)?;
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::Replace,
             &staging,
@@ -563,11 +666,11 @@ mod tests {
 
     fn replace_for_test(src: &Path, target: &Path, preserve: bool) {
         let app_root = target.ancestors().nth(3).unwrap();
-        let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
-            app_root,
-            target.file_name().unwrap().to_str().unwrap(),
-        )
-        .unwrap();
+        let registry_lock =
+            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(app_root).unwrap();
+        let transaction = registry_lock
+            .acquire_bundle(target.file_name().unwrap().to_str().unwrap())
+            .unwrap();
         replace_dir_atomic(
             src,
             target,
@@ -644,7 +747,6 @@ mod tests {
         assert_eq!(fs::read(target.join("new/file.txt")).unwrap(), b"new");
         assert!(!target.join("old/file.txt").exists());
         assert!(!bundles.join(".ryeos-ui.staging").exists());
-        assert!(!bundles.join(".ryeos-ui.staging").exists());
     }
 
     #[test]
@@ -693,8 +795,9 @@ mod tests {
         fs::write(src.join(".ai/node/commands/new.yaml"), b"new").unwrap();
         fs::write(target.join(".ai/refs/bundles/manifest"), b"preserved").unwrap();
         fs::write(target.join("old.txt"), b"old").unwrap();
-        let transaction =
-            ryeos_app::bundle_transaction::BundleTransaction::acquire(tmp.path(), "demo").unwrap();
+        let registry_lock =
+            ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(tmp.path()).unwrap();
+        let transaction = registry_lock.acquire_bundle("demo").unwrap();
         let validation_called = std::cell::Cell::new(false);
 
         let error = replace_dir_atomic(

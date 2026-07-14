@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T12:24:55Z:c31e54e478a03b892a12dbd791c4c5e2350506dc6d4bbfda27ecb55c8c7a9e45:mRCNW+TOF5OVeNOb2dESIDT0ApZIPKQpNJ3HLKwoqCVpdE262m9sXA/xud0EJMvvEVFW4F21E+uIVud8shjeBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:a939cee0ed44fdcc15158b0e6fc638726932c42f2f49a89794cf2772456729d1:TEdhU0h/cPUNdFeAJrZRHngRz4/hbPAtYzCeldWlJ6CiTWSxHRGTbtXrwromZWzahh2/zvY0SEgi65sAK2iMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/node/activity
 version: "1.0.0"
@@ -7,4 +7,6 @@ description: >-
   continuation-deduped usage totals, and the latest durable events across
   every thread on the node.
 endpoint: ui.ryeos.node.activity
+ui_read_only: true
+record_thread: false
 availability: daemon_only

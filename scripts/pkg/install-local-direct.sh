@@ -518,7 +518,7 @@ if [[ -f "$sandbox_policy" ]]; then
     configured_backend="${configured_backend%"${configured_backend##*[![:space:]]}"}"
     [[ -z "$configured_backend" ]] || sandbox_backend="$configured_backend"
     configured_mode="$(
-        sed -n 's/^[[:space:]]*mode:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$sandbox_policy" | head -n1
+        sed -n 's/^mode:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$sandbox_policy" | head -n1
     )"
     configured_mode="${configured_mode#\"}"
     configured_mode="${configured_mode%\"}"

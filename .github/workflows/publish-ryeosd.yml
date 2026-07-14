@@ -173,7 +173,7 @@ jobs:
           fi
           if [[ "$CHECKSUM_EXISTS" == true && "$ARCHIVE_EXISTS" != true ]]; then
             echo "::error::Unsafe checksum-only bundle release state for $TAG; refusing regeneration"
-            echo "::error::Follow docs/release-recovery.md; never guess which archive an orphan checksum described."
+            echo "::error::Follow .ai/knowledge/ryeos/development/release-process.md#interrupted-release-recovery; never guess which archive an orphan checksum described."
             exit 1
           fi
           if [[ "$ARCHIVE_EXISTS" == true ]]; then
@@ -753,7 +753,7 @@ jobs:
               # signature is verified. Never let a pre-positioned unsigned
               # digest ask this trusted workflow to bless its own provenance.
               echo "::error::Existing immutable image lacks the expected workflow signature: $image"
-              echo "::error::Treat this incomplete tag as quarantined; follow docs/release-recovery.md instead of signing or overwriting it."
+              echo "::error::Treat this incomplete tag as quarantined; follow .ai/knowledge/ryeos/development/release-process.md#interrupted-release-recovery instead of signing or overwriting it."
               exit 1
             else
               # This digest came directly from this run's successful push step;

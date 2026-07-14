@@ -39,6 +39,8 @@ pub struct EngineContext {
     pub sandbox_project_authority: crate::sandbox::SandboxProjectAuthority,
     pub sandbox_state_root: Option<PathBuf>,
     pub sandbox_checkpoint_dir: Option<PathBuf>,
+    /// Typed callback-socket fact paired with this plan's daemon callback env.
+    pub sandbox_daemon_socket_path: Option<PathBuf>,
     pub sandbox_bundle_roots: Vec<PathBuf>,
     pub sandbox_node_trusted_keys_dir: Option<PathBuf>,
     pub sandbox_verified_code: Vec<crate::sandbox::SandboxVerifiedCode>,
@@ -120,7 +122,7 @@ pub enum PlanNode {
     DispatchSubprocess {
         id: PlanNodeId,
         /// The fully resolved subprocess specification.
-        spec: PlanSubprocessSpec,
+        spec: Box<PlanSubprocessSpec>,
         /// Audit: the root item's source path.
         #[serde(default)]
         tool_path: Option<PathBuf>,

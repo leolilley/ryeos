@@ -24,6 +24,8 @@ use serde_json::{json, Value};
 
 use super::LaunchAugmentationError;
 
+const AUGMENTATION_RUNTIME_TIMEOUT_SECS: u64 = 60;
+
 /// Run the `ComposeContextPositions` augmentation.
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
@@ -127,6 +129,15 @@ pub async fn run(
     let verified_runtime = engine.runtimes.lookup_for(target_kind).map_err(|_| {
         LaunchAugmentationError::RuntimeRegistry(format!("no runtime serves kind '{target_kind}'"))
     })?;
+    let runtime_protocol = crate::dispatch::require_method_runtime_protocol(
+        engine,
+        target_kind,
+        verified_runtime,
+        "augmentation",
+    )
+    .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?;
+    let runtime_item_ref = verified_runtime.canonical_ref.clone();
+    let runtime_item_ref_string = runtime_item_ref.to_string();
 
     let executor_ref = format!(
         "native:{}",
@@ -134,7 +145,18 @@ pub async fn run(
             .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?
     );
 
-    // 6. Mint child thread record under parent.
+    // 6. Mint child thread record under parent. The parent may itself be a
+    // continuation/child, so carry its durable chain root rather than treating
+    // the immediate parent id as the chain root.
+    let parent_thread = state
+        .threads
+        .get_thread(parent_thread_id)
+        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?
+        .ok_or_else(|| {
+            LaunchAugmentationError::Threads(format!(
+                "augmentation parent thread not found: {parent_thread_id}"
+            ))
+        })?;
     let child_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     // Derive the child thread's kind from the target kind's schema-declared
     // thread_profile. This keeps thread kinds in sync with kind schemas
@@ -154,43 +176,127 @@ pub async fn run(
         .threads
         .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
             thread_id: child_thread_id.clone(),
-            chain_root_id: parent_thread_id.to_string(),
+            chain_root_id: parent_thread.chain_root_id,
             kind: child_thread_kind.to_string(),
-            item_ref: format!("{target_kind}://{target_method}"),
+            item_ref: runtime_item_ref_string.clone(),
             executor_ref: executor_ref.clone(),
             launch_mode: "inline".to_string(),
             current_site_id: plan_ctx.current_site_id.clone(),
             origin_site_id: plan_ctx.origin_site_id.clone(),
             upstream_thread_id: Some(parent_thread_id.to_string()),
             requested_by: Some(principal_fingerprint.to_string()),
+            project_root: match &plan_ctx.project_context {
+                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
+                    Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+                }
+                _ => None,
+            },
             usage_subject: None,
             usage_subject_asserted_by: None,
         })
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
+    let mut lifecycle_owner =
+        crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);
+
+    // Projection ancestry alone is not sufficient for live cancellation: the
+    // runtime DB's operational edge drives exact descendant stop traversal.
+    // Link before minting authority or spawning, and atomically inherit a stop
+    // that raced child creation.
+    let inherited_stop = match state.state_store.record_child_link(
+        parent_thread_id,
+        &child_thread_id,
+        "dispatch",
+    ) {
+        Ok(inherited_stop) => inherited_stop,
+        Err(link_error) => {
+            let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                state,
+                &child_thread_id,
+                json!({
+                    "code": "child_link_failed",
+                    "reason": link_error.to_string(),
+                }),
+            );
+            match cleanup {
+                Ok(outcome) => {
+                    lifecycle_owner.disarm();
+                    if !outcome.is_settled() {
+                        tracing::warn!(
+                            child_thread_id,
+                            parent_thread_id,
+                            "augmentation child advanced while failed lineage cleanup was attempted"
+                        );
+                    }
+                }
+                Err(cleanup_error) => {
+                    return Err(LaunchAugmentationError::Threads(format!(
+                        "record augmentation child lineage for {parent_thread_id} failed: {link_error}; conditional cleanup also failed: {cleanup_error:#}"
+                    )));
+                }
+            }
+            return Err(LaunchAugmentationError::Threads(format!(
+                "record augmentation child lineage for {parent_thread_id}: {link_error}"
+            )));
+        }
+    };
+    if inherited_stop.is_some() {
+        let settled = crate::execution::process_attachment::finalize_requested_stop_if_present(
+            state,
+            &child_thread_id,
+        )
+        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+        if !settled {
+            return Err(LaunchAugmentationError::Threads(format!(
+                "parent {parent_thread_id} propagated a stop to augmentation child {child_thread_id}, but the child had no durable stop"
+            )));
+        }
+        lifecycle_owner.disarm();
+        return Err(LaunchAugmentationError::Threads(format!(
+            "parent {parent_thread_id} was stop-requested before augmentation child launch"
+        )));
+    }
 
     // 7. Generate callback token.
-    let ttl = ryeos_app::callback_token::compute_ttl(None);
+    let ttl = ryeos_app::callback_token::launch_token_ttl(Some(AUGMENTATION_RUNTIME_TIMEOUT_SECS));
     let child_provenance = provenance.clone_for_borrowed_child();
+    let callback_project_path = provenance
+        .state_root_override()
+        .unwrap_or(project_path)
+        .to_path_buf();
     let cap = state.callback_tokens.generate_with_context(
         &child_thread_id,
-        project_path.to_path_buf(),
+        callback_project_path.clone(),
         ttl,
         Vec::new(), // augmentation children have no caps
         child_provenance,
         None,
-        Some(format!("{target_kind}://{target_method}")),
+        Some(runtime_item_ref_string.clone()),
         serde_json::Value::Null,
         0,
     );
+    lifecycle_owner.track_callback_token(cap.token.clone());
 
-    // 8. Mint thread auth token (runtime expects RYEOSD_THREAD_AUTH_TOKEN).
-    let thread_auth = state.thread_auth.mint(
-        &child_thread_id,
-        principal_fingerprint.to_string(),
-        vec!["execute".to_string()],
-        ttl,
-    );
-    let tat_owned = thread_auth.token.clone();
+    // 8. Mint thread-auth authority only when the verified protocol requests
+    //    that source. The protocol also owns the eventual environment name.
+    let needs_thread_auth = runtime_protocol
+        .descriptor
+        .env_injections
+        .iter()
+        .any(|injection| {
+            injection.source
+                == ryeos_engine::protocol_vocabulary::EnvInjectionSource::ThreadAuthToken
+        });
+    let thread_auth = needs_thread_auth.then(|| {
+        state.thread_auth.mint(
+            &child_thread_id,
+            principal_fingerprint.to_string(),
+            vec!["execute".to_string()],
+            ttl,
+        )
+    });
+    if let Some(thread_auth) = &thread_auth {
+        lifecycle_owner.track_thread_auth_token(thread_auth.token.clone());
+    }
 
     // 9-12. All post-mint subprocess work runs inside this guarded block.
     //        Any failure — envelope serialize, native executor resolution,
@@ -199,7 +305,7 @@ pub async fn run(
     //        regardless, so a pre-spawn failure can no longer leak tokens
     //        or leave the child thread non-terminal.
     let spawn_outcome: Result<
-        ryeos_runtime::method_wire::MethodCallResult,
+        ryeos_engine::method_wire::MethodCallResult,
         LaunchAugmentationError,
     > = async {
         let runtime_config = crate::dispatch::method_runtime_config_snapshot(
@@ -210,8 +316,8 @@ pub async fn run(
         )
         .map_err(|e| LaunchAugmentationError::RuntimeRegistry(format!("runtime config: {e}")))?;
 
-        let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
-            schema_version: 1,
+        let envelope = ryeos_engine::method_wire::MethodCallEnvelope {
+            schema_version: ryeos_engine::method_wire::METHOD_CALL_SCHEMA_VERSION,
             kind: target_kind.clone(),
             method: target_method.clone(),
             thread_id: child_thread_id.clone(),
@@ -219,6 +325,7 @@ pub async fn run(
                 socket_path: state.config.uds_path.clone(),
                 token: cap.token.clone(),
             },
+            callback_project_path: callback_project_path.clone(),
             project_root: project_path.to_path_buf(),
             runtime_config,
             payload,
@@ -250,44 +357,110 @@ pub async fn run(
         )
         .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
 
-        let executor_path_str = executor.path.to_string_lossy().to_string();
+        let executor_path = executor.path.clone();
+        let executor_path_str = executor_path.to_string_lossy().to_string();
         let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
             source_path: executor.path,
             content_hash: executor.content_hash,
         }];
-        let stdin_data = serde_json::to_string(&envelope)?;
+        let stdin_data = ryeos_engine::protocols::build_method_call_stdin(
+            &runtime_protocol.descriptor,
+            &envelope,
+        )
+        .map_err(|error| {
+            LaunchAugmentationError::RuntimeRegistry(format!(
+                "method protocol '{}' stdin: {error}",
+                runtime_protocol.canonical_ref
+            ))
+        })?;
+        let stdin_data = String::from_utf8(stdin_data)
+            .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?;
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
         );
-        // The callback socket is carried in the method envelope, but it must
-        // also be declared in the target environment so the sandbox can make
-        // that exact daemon-pinned socket visible. The auth token remains the
-        // runtime's credential for callback requests.
-        let envs = ryeos_app::process::build_subprocess_envs_with_roots(
-            &std::collections::BTreeMap::new(),
-            &[
+        let callback_socket_requested = runtime_protocol
+            .descriptor
+            .env_injections
+            .iter()
+            .any(|injection| {
+                injection.source
+                    == ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
+            });
+        let callback_ipc_requested = runtime_protocol.descriptor.callback_channel
+            != ryeos_engine::protocol_vocabulary::CallbackChannel::None
+            || callback_socket_requested;
+        let env_request = ryeos_engine::subprocess_spec::SubprocessBuildRequest {
+            cmd: executor_path,
+            args: Vec::new(),
+            cwd: project_path.to_path_buf(),
+            timeout: std::time::Duration::from_secs(AUGMENTATION_RUNTIME_TIMEOUT_SECS),
+            item_ref: runtime_item_ref.clone(),
+            thread_id: child_thread_id.clone(),
+            project_path: project_path.to_path_buf(),
+            acting_principal: principal_fingerprint.to_string(),
+            cas_root: state
+                .state_store
+                .cas_root()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+            callback_token: Some(cap.token.clone()),
+            callback_socket_path: callback_socket_requested
+                .then(|| state.config.uds_path.to_string_lossy().into_owned()),
+            callback_project_path: Some(callback_project_path.clone()),
+            thread_auth_token: thread_auth.as_ref().map(|auth| auth.token.clone()),
+            params: envelope.payload.clone(),
+            resolution_output: None,
+        };
+        let protocol_bindings = runtime_protocol
+            .descriptor
+            .env_injections
+            .iter()
+            .map(|injection| {
+                let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                    injection.source,
+                    &env_request,
+                )
+                .map_err(|error| {
+                    LaunchAugmentationError::RuntimeRegistry(format!(
+                        "protocol '{}' env injection '{}' is unavailable for augmentation runtime '{}': {error}",
+                        runtime_protocol.canonical_ref,
+                        injection.name,
+                        runtime_item_ref,
+                    ))
+                })?;
+                Ok(ryeos_app::env_contract::EnvBinding::new(
+                    injection.name.clone(),
+                    value,
+                    ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
+                        source: injection.source,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, LaunchAugmentationError>>()?;
+        let envs = ryeos_app::env_contract::EnvContractBuilder::new()
+            .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
-                    "RYEOSD_SOCKET_PATH".to_string(),
-                    state.config.uds_path.to_string_lossy().into_owned(),
-                ),
-                ("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned),
-            ],
-            roots,
-        )
-        .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            }))
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?
+            .with_daemon_roots(roots)
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?
+            .with_typed_bindings(protocol_bindings)
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?
+            .build();
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
             cwd: Some(project_path.to_string_lossy().into_owned()),
             envs,
             stdin_data: Some(stdin_data),
-            timeout: 60.0,
+            timeout: AUGMENTATION_RUNTIME_TIMEOUT_SECS as f64,
             limits: None,
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
-        let item_ref = format!("runtime:{target_kind}");
         let subprocess_request = state
             .sandbox
             .apply(
@@ -297,23 +470,30 @@ pub async fn run(
                     project_authority: provenance.sandbox_project_authority(),
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
+                    daemon_socket_path: callback_ipc_requested
+                        .then_some(state.config.uds_path.as_path()),
                     bundle_roots: &bundle_roots,
-                    node_trusted_keys_dir: Some(
-                        &state.config.runtime_root().trusted_keys_dir(),
-                    ),
+                    node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &sandbox_verified_code,
-                    item_ref: &item_ref,
+                    item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },
             )
             .map_err(|error| LaunchAugmentationError::Threads(format!("sandbox: {error}")))?;
         let workspace_lifeline = provenance.workspace_lifeline();
+        let process_state = state.clone();
+        let process_thread_id = child_thread_id.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let _workspace_lifeline = workspace_lifeline;
-            lillux::run(subprocess_request)
+            crate::execution::process_attachment::run_lillux_attached(
+                &process_state,
+                &process_thread_id,
+                subprocess_request,
+                workspace_lifeline,
+            )
         })
         .await
-        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
+        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?
+        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn/attach: {e:#}")))?;
 
         if !result.success {
             return Err(LaunchAugmentationError::ChildBootstrap {
@@ -324,8 +504,11 @@ pub async fn run(
             });
         }
 
-        let batch_result: ryeos_runtime::method_wire::MethodCallResult =
-            serde_json::from_str(&result.stdout)?;
+        let batch_result = crate::dispatch::decode_method_runtime_result(
+            runtime_protocol,
+            &result.stdout,
+        )
+        .map_err(LaunchAugmentationError::RuntimeRegistry)?;
 
         // The runtime must echo back the dispatched kind/method.
         if batch_result.kind != *target_kind || batch_result.method != *target_method {
@@ -354,18 +537,28 @@ pub async fn run(
     state
         .callback_tokens
         .invalidate_for_thread(&child_thread_id);
-    state.thread_auth.invalidate(&thread_auth.token);
+    if let Some(thread_auth) = &thread_auth {
+        state.thread_auth.invalidate(&thread_auth.token);
+    }
     state.thread_auth.invalidate_for_thread(&child_thread_id);
 
     let batch_result = match spawn_outcome {
         Ok(br) => br,
         Err(e) => {
-            crate::dispatch::finalize_method_thread_if_needed(
+            match crate::dispatch::finalize_method_thread_if_needed(
                 state,
                 &child_thread_id,
                 "failed",
                 None,
-            );
+            ) {
+                Ok(_) => lifecycle_owner.disarm(),
+                Err(cleanup_error) => tracing::error!(
+                    child_thread_id,
+                    execution_error = %e,
+                    cleanup_error = %cleanup_error,
+                    "augmentation child execution and cleanup both failed"
+                ),
+            }
             return Err(e);
         }
     };
@@ -394,18 +587,51 @@ pub async fn run(
         Ok(())
     })();
     if let Err(e) = write_result {
-        crate::dispatch::finalize_method_thread_if_needed(state, &child_thread_id, "failed", None);
+        match crate::dispatch::finalize_method_thread_if_needed(
+            state,
+            &child_thread_id,
+            "failed",
+            None,
+        ) {
+            Ok(_) => lifecycle_owner.disarm(),
+            Err(cleanup_error) => tracing::error!(
+                child_thread_id,
+                projection_error = %e,
+                cleanup_error = %cleanup_error,
+                "augmentation projection and child cleanup both failed"
+            ),
+        }
         return Err(e);
     }
 
-    // Success: the runtime self-finalized via its callback. Finalize as a
-    // fallback only if that callback did not land.
-    crate::dispatch::finalize_method_thread_if_needed(
+    // Success: the daemon publishes terminal child state only after the method
+    // result and its parent-view projection have both been validated.
+    let finalization = crate::dispatch::finalize_method_thread_if_needed(
         state,
         &child_thread_id,
         "completed",
         batch_result.output,
-    );
+    )
+    .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+    lifecycle_owner.disarm();
+    match finalization {
+        crate::dispatch::MethodFinalizeOutcome::Finalized => {}
+        crate::dispatch::MethodFinalizeOutcome::AlreadyTerminal => {
+            return Err(LaunchAugmentationError::Threads(format!(
+                "augmentation child {child_thread_id} became terminal before its validated projection was committed"
+            )))
+        }
+        crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => {
+            return Err(LaunchAugmentationError::Threads(format!(
+                "augmentation child {child_thread_id} completed after a durable stop won"
+            )))
+        }
+        crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown => {
+            return Err(LaunchAugmentationError::Threads(format!(
+                "augmentation child {child_thread_id} was preserved for daemon shutdown recovery"
+            )))
+        }
+    }
 
     tracing::info!(
         kind = %target_kind,

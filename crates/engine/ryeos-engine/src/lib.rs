@@ -17,6 +17,7 @@ pub mod kind_registry;
 pub mod launch_envelope_types;
 pub mod lifecycle;
 pub mod method_call;
+pub mod method_wire;
 pub mod parsers;
 pub mod plan_builder;
 pub mod protocol_vocabulary;

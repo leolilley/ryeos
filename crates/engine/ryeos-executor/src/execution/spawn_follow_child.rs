@@ -343,6 +343,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 origin_site_id: parent.origin_site_id.clone(),
                 upstream_thread_id: None,
                 requested_by: Some(thread_auth.acting_principal.clone()),
+                project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
                 usage_subject: None,
                 usage_subject_asserted_by: None,
             })?;
@@ -395,6 +396,60 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             width,
         });
         let persisted_meta = state.state_store.get_launch_metadata(&child_thread_id)?;
+        let inherited_stop = match state.state_store.record_child_link(
+            &parent_thread_id,
+            &child_thread_id,
+            "dispatch",
+        ) {
+            Ok(inherited_stop) => inherited_stop,
+            Err(error) => {
+                // The conditional transition proves Created + unattached +
+                // unclaimed under the same store lock as finalization. A
+                // same-slot re-drive can therefore never finalize a child that
+                // advanced after the row read above.
+                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                    state,
+                    &child_thread_id,
+                    json!({
+                        "code": "child_link_failed",
+                        "reason": error.to_string(),
+                    }),
+                );
+                match cleanup {
+                    Ok(outcome) if outcome.is_settled() => {
+                        crate::execution::launch::kick_follow_resume_if_ready(
+                            state,
+                            &child_thread_id,
+                        );
+                        crate::execution::launch::kick_launch_window_for_terminal(
+                            state,
+                            &child_thread_id,
+                        );
+                    }
+                    Ok(outcome) => tracing::warn!(
+                        child_thread_id,
+                        ?outcome,
+                        "preserved concurrently advanced follow child after lineage failure"
+                    ),
+                    Err(cleanup_error) => {
+                        return Err(anyhow::anyhow!(
+                            "follow: record child lineage under parent {parent_thread_id}: \
+                             {error}; conditional child cleanup also failed: {cleanup_error}"
+                        ));
+                    }
+                }
+                return Err(error).context(format!(
+                    "follow: record child lineage under parent {parent_thread_id}"
+                ));
+            }
+        };
+        if inherited_stop.is_some() {
+            crate::execution::process_attachment::finalize_requested_stop_if_present(
+                state,
+                &child_thread_id,
+            )?;
+            bail!("follow: parent {parent_thread_id} was stop-requested during child admission");
+        }
         if let Some(persisted) = persisted_meta
             .as_ref()
             .filter(|m| m.resume_context.is_some())
@@ -406,9 +461,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 bail!("follow: launched child metadata conflicts at index {item_index}");
             }
         } else {
-            state
-                .state_store
-                .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
             if let Some(Value::Object(facets)) = child.facets.as_ref() {
                 let current: std::collections::HashMap<_, _> = state
                     .state_store
@@ -496,6 +548,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         origin_site_id: parent.origin_site_id.clone(),
                         upstream_thread_id: Some(parent_thread_id.clone()),
                         requested_by: parent.requested_by.clone(),
+                        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
                         usage_subject: None,
                         usage_subject_asserted_by: None,
                     },

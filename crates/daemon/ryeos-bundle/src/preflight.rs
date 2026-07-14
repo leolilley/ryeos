@@ -129,18 +129,29 @@ pub fn preflight_verify_bundle(source_path: &Path, app_root: &Path) -> Result<()
             .map(|record| record.bundle_root)
             .collect();
     let node_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
-    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, &node_config_root)
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(app_root)
+            .context("preflight: load node sandbox policy")?,
+    );
+    preflight_verify_bundle_in_context(
+        source_path,
+        &installed_bundle_roots,
+        &node_config_root,
+        sandbox,
+    )
 }
 
 pub fn preflight_verify_bundle_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
     node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_report_in_context(
         source_path,
         dependency_bundle_roots,
         node_config_root,
+        sandbox,
     )?;
     Ok(())
 }
@@ -156,6 +167,7 @@ pub fn preflight_verify_named_bundle_in_context(
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
     node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_in_context_inner(
         source_path,
@@ -163,6 +175,7 @@ pub fn preflight_verify_named_bundle_in_context(
         node_config_root,
         Some(expected_bundle_name),
         true,
+        sandbox,
     )?;
     Ok(())
 }
@@ -177,6 +190,7 @@ pub fn preflight_verify_bundle_staging_in_context(
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
     node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_in_context_inner(
         staging_path,
@@ -184,6 +198,7 @@ pub fn preflight_verify_bundle_staging_in_context(
         node_config_root,
         Some(expected_bundle_name),
         false,
+        sandbox,
     )?;
     Ok(())
 }
@@ -197,6 +212,7 @@ pub fn preflight_verify_bundle_report_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
     node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<PreflightReport> {
     // The core logic below populates `failures` (blocking) and
     // `warnings` (non-blocking). We lift the loop into this function
@@ -207,6 +223,7 @@ pub fn preflight_verify_bundle_report_in_context(
         node_config_root,
         None,
         true,
+        sandbox,
     )
 }
 
@@ -217,6 +234,7 @@ fn preflight_verify_bundle_in_context_inner(
     node_config_root: &Path,
     expected_bundle_name: Option<&str>,
     check_source_mtime: bool,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     validate_regular_tree(&ai_dir).with_context(|| {
@@ -314,7 +332,7 @@ fn preflight_verify_bundle_in_context_inner(
         &kinds,
     )
     .context("preflight: load parser tools")?;
-    let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store)
+    let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store, sandbox)
         .context("preflight: load handler descriptors")?;
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
 
@@ -2207,6 +2225,9 @@ system_source_caps:
         layout.add_fixed_parser_descriptor();
         layout.add_fixed_parser_handler(parsed_value);
         layout.write_signed_item("items/demo.yaml", "name: demo\n");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - mykind\n  - parser\nrequires_kinds: []\nuses_kinds: []\n",
+        );
     }
 
     #[test]
@@ -2232,6 +2253,7 @@ optional: {}
             &layout.source,
             &[],
             &layout.node_config_root,
+            Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -2264,6 +2286,7 @@ optional: {}
             &layout.source,
             &[],
             &layout.node_config_root,
+            Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         )
         .expect("non-identity composer should skip pre-composition contract validation");
 
@@ -2291,6 +2314,7 @@ strict_fields: warn
             &layout.source,
             &[],
             &layout.node_config_root,
+            Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         )
         .expect("warnings should not fail preflight");
 

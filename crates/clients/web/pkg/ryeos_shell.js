@@ -21,10 +21,18 @@ let queuedEnvelope = null;
 let currentEnvelope = null;
 let latestDimension = null;
 let seatThreadId = null;
+let seatHeartbeat = null;
 let seatSynced = 0;
 let seatSyncing = false;
 let overlayOpenLastCommit = false;
 let overlayReturnFocus = null;
+let sessionEvents = null;
+let sessionOpened = false;
+let dirtyHintKinds = new Set();
+let hintFlushTimer = null;
+let threadTail = null;
+let threadTailUrl = null;
+let threadTailThreadId = null;
 
 export async function bootRyeOs(appRoot) {
   root = appRoot;
@@ -55,6 +63,7 @@ async function commit(envelope) {
     if (overlayOpen && !overlayOpenLastCommit) overlayReturnFocus = focus;
     const scroll = captureTileScroll(root);
     renderDom(root, envelope.view_model, envelope.scene_model, dispatchUi, shellController());
+    syncThreadTail(envelope.view_model);
     restoreTileScroll(root, scroll);
     revealSelectedRows(root);
     restoreFocus(root, focus);
@@ -67,9 +76,12 @@ async function commit(envelope) {
       requestAnimationFrame(() => root?.querySelector("[data-ryeos-overlay-input]")?.focus());
     }
     for (const effect of envelope.effects || []) {
-      runEffect(effect)
+      runEffect(effect, {
+        project_path: envelope.view_model?.session?.project_path,
+      })
         .then((result) => {
           if (result?.kind === "dimension" && result?.data) latestDimension = result.data;
+          ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
           return commit(ryeos_apply_effect_result(result));
         })
         .catch((error) => commit(ryeos_apply_effect_result(failedResultFor(effect, error))));
@@ -94,6 +106,12 @@ async function attachSeat(session, envelope) {
     });
     seatThreadId = opened?.thread_id || null;
     if (!seatThreadId) return envelope;
+    if (seatHeartbeat) clearInterval(seatHeartbeat);
+    seatHeartbeat = setInterval(() => {
+      if (seatThreadId) {
+        invokeSeatService("service:ui/seat/touch", { thread_id: seatThreadId }).catch(() => {});
+      }
+    }, 60_000);
 
     let replayedEnvelope = envelope;
     if (opened?.reattached) {
@@ -112,6 +130,8 @@ async function attachSeat(session, envelope) {
   } catch (error) {
     console.warn("RyeOS seat attach failed; continuing with local-only seat", error);
     seatThreadId = null;
+    if (seatHeartbeat) clearInterval(seatHeartbeat);
+    seatHeartbeat = null;
     seatSynced = 0;
     return envelope;
   }
@@ -257,10 +277,23 @@ function cssEscape(value) {
 function attachSessionEvents(session) {
   const eventsUrl = session?.events_url || session?.event_url;
   if (!eventsUrl) return;
+  if (sessionEvents) {
+    sessionEvents.close();
+    if (threadTail) threadTail.close();
+    threadTail = null;
+    threadTailUrl = null;
+    threadTailThreadId = null;
+  }
+  if (hintFlushTimer) clearTimeout(hintFlushTimer);
+  hintFlushTimer = null;
+  dirtyHintKinds.clear();
+  sessionOpened = false;
   const source = new EventSource(eventsUrl);
+  sessionEvents = source;
   const dispatchDaemonEvent = (event) => {
     try {
       const payload = JSON.parse(event.data);
+      ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
       void commit(ryeos_dispatch({ type: "daemon_event", payload }));
     } catch (error) {
       console.warn("Failed to process RyeOS event stream message", error);
@@ -268,6 +301,79 @@ function attachSessionEvents(session) {
   };
   source.addEventListener("message", dispatchDaemonEvent);
   source.addEventListener("ui_intent.applied", dispatchDaemonEvent);
+  source.addEventListener("thread.hint", (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      const kind = payload?.kind;
+      if (!kind) return;
+      ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
+      void commit(ryeos_dispatch({ type: "hint_received", kind, payload }));
+      dirtyHintKinds.add(kind);
+      if (!hintFlushTimer) {
+        hintFlushTimer = setTimeout(() => {
+          const kinds = [...dirtyHintKinds];
+          dirtyHintKinds.clear();
+          hintFlushTimer = null;
+          void commit(ryeos_dispatch({ type: "hint_flush_batch", kinds }));
+        }, 500);
+      }
+    } catch (error) {
+      console.warn("Failed to process RyeOS lifecycle hint", error);
+    }
+  });
+  const reconcile = () => {
+    ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
+    void commit(ryeos_dispatch({ type: "transport_reconnected" }));
+  };
+  source.addEventListener("snapshot_required", reconcile);
+  source.addEventListener("open", () => {
+    if (sessionOpened) reconcile();
+    sessionOpened = true;
+  });
+  syncThreadTail(currentEnvelope?.view_model);
+}
+
+function syncThreadTail(vm) {
+  const url = vm?.tail_url || null;
+  // The braid URL is stable while a continuation advances its head. Keep the
+  // current head separate from the EventSource closure so live deltas are
+  // never attributed to the predecessor captured when the stream opened.
+  threadTailThreadId = vm?.tail_thread_id || vm?.tail_chain_root_id || null;
+  if (url === threadTailUrl) return;
+  if (threadTail) threadTail.close();
+  threadTail = null;
+  threadTailUrl = url;
+  if (!url) return;
+  const source = new EventSource(url);
+  threadTail = source;
+  let opened = false;
+  const forward = (event) => {
+    try {
+      const frame = JSON.parse(event.data);
+      const eventType = frame?.event_type;
+      if (!eventType) return;
+      const payload = frame?.payload ?? null;
+      ryeos_dispatch({ type: "tick", now_ms: BigInt(Date.now()) });
+      void commit(ryeos_dispatch({
+        type: "thread_tail",
+        thread_id: payload?.thread_id || threadTailThreadId,
+        event_type: eventType,
+        payload,
+      }));
+    } catch (error) {
+      console.warn("Failed to process RyeOS thread tail", error);
+    }
+  };
+  // The browser-authenticated adapter carries one canonical
+  // `{event_type,payload}` frame inside unnamed SSE messages because
+  // EventSource has no wildcard listener for named events.
+  source.addEventListener("message", forward);
+  source.addEventListener("open", () => {
+    if (opened) {
+      void commit(ryeos_dispatch({ type: "transport_reconnected" }));
+    }
+    opened = true;
+  });
 }
 
 function attachBrowserEvents() {

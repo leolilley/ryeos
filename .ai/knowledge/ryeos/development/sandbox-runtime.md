@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-07-14T02:13:36Z:43d0f7d6322fce777a27bca0273ed35cc3c6edf5fa0f53cb6126645b376ef0ba:3nexAzSpp9LU+Bu4XG0hbmDubxr7CpNthLxm86d20744sy/XGxt8shxt0dkiiHvoZjHWKkQTpgAip3ODELqdDQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:fa017f0737da23456103015f654428a247657f053368f46ca74877f0fc434080:ONR/hlqMFsrseAPD7LxBIV9IWwaw592sMiOHwHgaj67T9cKBCTu4ZqJdqq9qTVTaPQxF+5uJqMV0NE/9kDoOAA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/development
 name: sandbox-runtime
 title: Node Sandbox Runtime Architecture
 entry_type: implementation_guide
-version: "1.1.0"
+version: "1.2.0"
 description: Deep implementation map for the immutable RyeOS strict sandbox, exact-byte execution boundary, launch coverage, path authority, and state durability.
 tags:
   - sandbox
@@ -34,8 +34,10 @@ to pin the configured callback UDS path into the same snapshot. Standalone and
 offline callers use `load`. Disabled snapshots still validate the full schema,
 absolute backend spelling, and mandatory output/artifact limits, but do not inspect
 backend availability or add OS-confinement wrapping. Node-owned output retention
-limits still apply to every request. Enforced snapshots resolve and read the backend
-once, require unprivileged executable regular-file metadata
+limits still apply to every request; a disabled snapshot preserves a caller-owned
+open-file limit but does not install the policy's `RLIMIT_NOFILE`. Enforced
+snapshots resolve and read the backend once, require unprivileged executable
+regular-file metadata
 (no setuid, setgid, or file capabilities), materialize its exact bytes in the
 runtime's private artifact generation, and validate the Lillux subprocess
 limits before startup succeeds. Later launches execute the captured inode through
@@ -97,9 +99,12 @@ and the aggregate artifact byte bound cannot be below the per-file bound.
 
 `SandboxLaunchContext` carries engine/daemon-derived facts only: canonical item
 reference, one-component thread identifier, project authority and path,
-optional state root and checkpoint directory, verified bundle roots, node
-trusted-key directory, and zero or more `SandboxVerifiedCode` exact-byte identities.
-None of these fields can activate or relax the policy.
+optional state root and checkpoint directory, an optional typed daemon callback
+socket, verified bundle roots, node trusted-key directory, and zero or more
+`SandboxVerifiedCode` exact-byte identities. Socket authority is never inferred
+from a child environment-variable name: an IPC-capable launch must carry the
+exact socket fact and enforced apply compares it with the path pinned at daemon
+startup. None of these fields can activate or relax the policy.
 
 The shared runtime is applied at:
 
@@ -108,6 +113,10 @@ The shared runtime is applied at:
 - compose-context child runtime bootstrap;
 - inline, background, detached-child, and follow-child execution;
 - HTTP handler executable dispatch;
+- callback-free streaming protocol executors, which now receive a real durable
+  thread row and exact attached process identity rather than running as an
+  untracked blocking subprocess;
+- external parser/composer handler dispatch and boot-time handler validation;
 - tool environment import probes; and
 - offline executable tool and service dispatch.
 
@@ -116,10 +125,20 @@ are local user-interface processes that require the invoking terminal/desktop
 authority, not workloads launched by the node. Hosted execution never selects
 that client path.
 
-Internal parser/composer helpers are part of the trusted engine implementation,
-not caller-selected executable items. Their output still feeds the same
-signature, plan, authorization, and sandboxed launch boundary before item code
-can run.
+Maintainer-only bundle signing is also an explicit authoring boundary. It uses
+`HandlerRegistry::load_base_for_authoring` with the compiled disabled runtime
+because it may run before any node policy exists; it receives the maintainer's
+local process authority and makes no OS-confinement claim. Node boot, preflight,
+admission, doctor, item signing, and runtime handler dispatch do not use that
+exception.
+
+External parser/composer handlers are node-trusted infrastructure rather than
+caller-selected executable items, but they still pass through the immutable
+runtime. The registry retains each signed executor-manifest content hash, the
+sandbox captures those exact bytes, presents installed bundle roots read-only,
+and suppresses every configured host writable mount through a no-project launch
+authority. Their output then feeds the same signature, plan, and authorization
+boundary before item code can run.
 
 ## Exact-byte execution invariant
 
@@ -233,12 +252,40 @@ to namespace-local `/tmp`. The complete option vector, including all target
 environment values and arguments, is NUL-separated in a sealed anonymous file.
 Bubblewrap's host-visible argv contains only `--args <fd>`.
 
-A private `--json-status-fd` pipe reports the target host PID. With
-`--new-session`, that PID is the initial target process-group leader. Lillux
-therefore supervises both the target and outer Bubblewrap groups and kills both
-on timeout, cancellation, output overflow, or wait failure. Deliberate
-descendant `setsid` escape remains outside this local guarantee; hosted workers
-add cgroup ownership and `cgroup.kill`.
+A private `--json-status-fd` pipe reports the target host PID for accounting.
+Before executing Bubblewrap, Lillux creates a new session whose leader is the
+retained Bubblewrap wrapper; the target inherits that wrapper-led process
+group. Lillux keeps the wrapper unreaped while it terminates the group, so the
+PGID cannot be recycled even when the initial target exits before one of its
+descendants. Timeout, cancellation, output overflow, and wait failure all use
+that stable group ownership. Deliberate descendant `setsid` escape remains
+outside this local guarantee; hosted workers add cgroup ownership and
+`cgroup.kill`.
+
+Before durable attachment, the daemon captures a version-1
+`ExecutionProcessIdentity`: boot ID, target PID/start ticks, and retained group
+leader PID/start ticks. In-process spawns require the captured target to remain
+in the wrapper-led group. UDS self-attachment requires the reported PID to
+equal kernel `SO_PEERCRED` and captures the exact task through
+`SO_PEERPIDFD`. Later target/group signals reopen pidfds, revalidate both birth
+tuples, and use `pidfd_send_signal`; no stored numeric PID or PGID becomes raw
+signal authority.
+
+The exclusive daemon state lock is also the recovery ownership proof. On
+startup, a live attachment whose exact target and group leader still match is a
+previous-daemon orphan: reconciliation hard-kills that exact group, clears the
+attachment with compare-and-clear semantics, then resumes or finalizes the
+thread. A same-boot identity with a dead or mismatched leader is quarantined so
+PID reuse cannot turn cleanup into an unrelated signal. Old-boot dead identities
+can be cleared because their numeric IDs cannot name the recorded incarnation.
+
+There is still a process-creation-to-durable-attachment crash window. If the
+daemon receives `SIGKILL` after spawn but before publication, the process group
+can survive without a state row that identifies it. Parent-death signalling is
+not used as a substitute because the actual spawning-thread/child relationship
+does not provide the required daemon-lifetime ownership proof. Hosted workers
+must close this window at an outer cgroup/worker boundary and use `cgroup.kill`
+or equivalent whole-worker teardown.
 
 Writable binds are installed before read-only binds. Verified-code mirrors,
 exact artifact overlays, and captured non-system commands are pinned after
@@ -247,20 +294,27 @@ request executes the exact startup-captured Bubblewrap artifact and uses the
 canonical cwd for host spawn; Bubblewrap changes to the preserved namespace
 destination.
 
-`limits.open_files`, `limits.stdout_bytes`, and `limits.stderr_bytes` are each
-merged with request limits using the lower value. The first is installed as
-`RLIMIT_NOFILE` before exec. Output drainers retain only the configured prefix,
-continue draining to avoid pipe deadlock, and terminate the supervised workload
-with an explicit truncation outcome on overflow. `RLIMIT_NPROC` is deliberately
-absent because it is scoped to the daemon's real UID, not one sandbox.
+In `mode: enforce`, `limits.open_files`, `limits.stdout_bytes`, and
+`limits.stderr_bytes` are each merged with request limits using the lower value,
+and the open-file cap is installed as `RLIMIT_NOFILE` before exec. In
+`mode: disabled`, sandbox policy does not introduce an open-file limit; an
+explicit caller-owned `RLIMIT_NOFILE` is preserved. Output byte caps remain
+active in both modes because they protect the daemon's pipe drainers, which
+retain only the configured prefix, continue draining to avoid deadlock, and
+terminate the supervised workload with an explicit truncation outcome on
+overflow. `RLIMIT_NPROC` is deliberately absent because it is scoped to the
+daemon's real UID, not one sandbox.
 
 ## Workspace and CAS durability
 
-No-project requests, handler invocations, and pushed-head checkouts use narrow
-request-owned workspaces. Execution roots and workspaces are mode `0700` on
-Unix, and `TempDirGuard` lifelines are retained through every blocking,
-background, detached-child, follow-child, validation, and compose execution
-path. A process therefore cannot outlive cleanup of its cwd.
+No-project requests and pushed-head checkouts use narrow request-owned
+workspaces. External handler invocations instead use their verified bundle root
+as a read-only cwd; `SandboxProjectAuthority::ReadOnly` suppresses all writable
+policy mounts, including `{project}` and `{cwd}`. Execution roots and writable
+workspaces are mode `0700` on Unix, and `TempDirGuard` lifelines are retained
+through every blocking, background, detached-child, follow-child, validation,
+and compose execution path. A process therefore cannot outlive cleanup of a
+request-owned cwd.
 
 Live-project and manifest snapshot publication returns a
 `PendingProjectSnapshot` that owns the state-store write permit. The caller
@@ -290,6 +344,12 @@ both execute through normal signature and authorization paths.
 - delegated cgroup v2 CPU, memory, and per-sandbox `pids.max` quotas;
 - more production isolation backends in a future schema version; and
 - signed native runtime distributions for additional host triples.
+
+The current implementation is not hostile multi-tenancy: CPU, memory, and
+process-count quotas remain deferred; host PIDs are visible to syscalls;
+same-UID signal isolation is not claimed; and transitive imports, libraries,
+and assets remain live read-only. Hostile hosted workloads require cgroups plus
+a VM, microVM, or dedicated outer worker.
 
 Do not add item-authored profiles, secondary activation sources, implicit path
 creation, or per-spawn policy reads. Those would break node ownership, path

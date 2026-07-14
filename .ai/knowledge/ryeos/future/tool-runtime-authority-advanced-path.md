@@ -1,30 +1,36 @@
-<!-- ryeos:signed:2026-07-14T02:11:07Z:211c48ea73abcb5dedffe7dabe87647acf2f15975b69f3d1ced16d561f87adf0:2CQqq+Uf1Cwrl46boxY/HJRtye9bZ8rPK0OvCTAilS3BXd/8lHqP4ssj4JXmGhfhcZLCak/crEBoKNyVn85FAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:3af1d2388d4d85b663d571f87883d86ebdffb9189fe7efb3a31c1e54f778e7f8:sW8cI6bR2FMFMrrIlAbwzc7gicpWnR+ePQIqi6QB1GJR38d3VbdjIVAGA2MtFd8UiANrFhun78qXAVLF+/hMAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
 
-Deferred. The domain-events branch intentionally implements only the narrow first slice: direct tool executions may receive exact self-bundle domain-event callback capabilities derived from signed generated bundle manifests.
+Deferred. The current implementation intentionally provides only the narrow
+first slice: direct tool executions may receive exact self-bundle callback
+capabilities derived from signed generated bundle manifests.
 
-This advanced path is for the broader question: what should a first-class tool runtime authority model look like once tools need more than self-bundle domain events?
+The signed `tool_callback_v1` descriptor makes callback transport explicit;
+authority remains separately derived and deny-by-default. This advanced path is
+for the broader question: what should a first-class tool runtime authority model
+look like once tools need more than current self-bundle authority?
 
 ## Why this is deferred
 
 The immediate problem was specific and bounded:
 
-- Python tools needed `ryeos_runtime.events.append/read/scan`.
-- The daemon already enforced runtime domain-event callbacks by callback-token capabilities.
+- Tools needed bundle-event, runtime-vault, and item-authoring callbacks.
+- The daemon already enforced those callbacks by callback-token capabilities.
 - Direct tool subprocesses had no callback caps.
 - Granting generic tool `permissions` or reusing `required_caps` would create a self-grant footgun.
 
-So the safe branch solution was narrow manifest-derived domain-event caps, not a complete tool authority system.
+So the safe solution was narrow manifest-derived caps, not a complete tool
+authority system.
 
 ## Trigger for revisiting
 
 Reopen this design when direct tools need one or more of:
 
-- callback access to daemon APIs beyond self-bundle domain events;
-- cross-bundle domain-event read/write delegation;
-- caller-delegated capabilities narrower than the caller but broader than self-domain-events;
+- callback access to daemon APIs beyond current self-bundle authority;
+- cross-bundle bundle-event or vault delegation;
+- caller-delegated capabilities narrower than the caller but broader than self-bundle authority;
 - user-visible approval grants for tool authority;
 - install-time namespace ownership and revocation;
 - per-tool sandbox profiles tied to authority;
@@ -81,12 +87,13 @@ The grant set should be explicit and auditable. It should never be accepted from
 
 ## Possible signed manifest shape
 
-Future manifests may grow from the current `domain_events` declaration into typed authority blocks:
+Future manifests may grow from the current typed `runtime_authority` blocks:
 
 ```yaml
-domain_events:
-  - event_kind: email_event
-    operations: [append, scan]
+runtime_authority:
+  bundle_events:
+    - event_kind: email_event
+      operations: [append, scan]
 
 tool_authority:
   callbacks:
@@ -140,8 +147,8 @@ The same authority derivation should feed both paths.
 
 ## Migration path
 
-1. Keep the current self-bundle domain-events slice as the baseline.
+1. Keep the current self-bundle manifest-authority slice as the baseline.
 2. Add structured manifest declarations only when a new callback API needs them.
-3. Add install-policy checks before any cross-bundle or non-domain-event authority.
+3. Add install-policy checks before any cross-bundle or new callback authority.
 4. Add caller/session delegation as an intersecting constraint, not a replacement for signed declarations.
 5. Only then introduce a managed tool runtime if execution behavior, not authority, needs centralization.

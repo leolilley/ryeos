@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:d196e6ddbbb1db6ab05b3598cd356655eb14ab3639f131a9fb162822de76313c:TZ+2D3erOhtrJ6C1kdNjB7+Jfqt3Wkr95uilmBFdMSa5eBb6znNxQCkuLo4XA9LH3+PbrkuqzdbuRCs/yhHVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:11da537b84d5f86892b7c3eb20265c67b002d505b38abf18af46c12c7a1ee8a5:x9s8P6AEjkQbYmlg8sA6jHYhML2utdOV2bLQT2p08X8BDx23HEUEQ1EqS0eVgchR0A27lIL1f7Ey1GjjR1yWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Operator initialization contract implemented by ryeos-node: keys,
   trust, bundle discovery, bundle planning, install, and post-init checks.
@@ -30,7 +30,7 @@ or `RYEOS_APP_ROOT`. Packaged installs initialize with plain `ryeos init`.
 2. Create the app-root layout (`<app_root>/.ai/{node,state,bundles,config}`).
 3. Load-or-create the operator Ed25519 signing key.
 4. Load-or-create the node Ed25519 signing key.
-5. Write self-trust docs for both keys into the operator trust store.
+5. Write self-trust docs for both keys into the node trust store.
 6. Pin the official publisher key from hardcoded public key bytes.
 7. Pin any additional `--trust-file` publisher docs.
 8. Discover bundles in the source directory.
@@ -61,6 +61,23 @@ c9d7301fba468b669d91a6000e9b6a4158c0e615dea4fe1f99906b8c9214bc28
 Rotation requires a coordinated `ryeos` binary release. Development
 bundles are signed with `.dev-keys/PUBLISHER_DEV.pem` and trusted with
 `--trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml`.
+
+A packaged `PUBLISHER_TRUST.toml` is only a trust pointer. Its location beside
+a bundle, package, or container never grants authority by itself. Additional
+publishers enter the node trust store only through an explicit trust
+choice:
+
+- `ryeos init --trust-file <PUBLISHER_TRUST.toml>` pins a named publisher;
+- development/custom containers may opt in to their baked publisher set with
+  `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
+- the local source installer may opt in with `--trust-source-publishers`.
+
+Release containers pass no packaged trust documents to `ryeos init`.
+Development opt-ins trust every publisher document in the selected source
+boundary, so use them only after independently verifying that source. The
+loader validates each document's decoded key and fingerprint before pinning it,
+and bundle preflight still fails closed when content is not signed by a pinned
+publisher.
 
 ## Bundle discovery and planning
 

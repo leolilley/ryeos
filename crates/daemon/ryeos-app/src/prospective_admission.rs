@@ -32,4 +32,3 @@ impl ProspectiveNodeConfigValidator {
         (self.validate)(snapshot)
     }
 }
-

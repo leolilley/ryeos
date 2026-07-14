@@ -8,7 +8,9 @@
 //! install is aborted and the partial directory is cleaned up.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -21,6 +23,10 @@ use ryeos_executor::executor::ServiceAvailability;
 const REMOTE_OBJECT_BATCH_DECLARED_BYTES: u64 = 8 * 1024 * 1024;
 const REMOTE_OBJECT_BATCH_MAX_HASHES: usize = 256;
 const REMOTE_OBJECT_RESPONSE_MAX_BYTES: usize = 48 * 1024 * 1024;
+const REMOTE_FETCH_STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const REMOTE_FETCH_SCAVENGE_SCAN_LIMIT: usize = 256;
+const REMOTE_FETCH_SCAVENGE_REMOVE_LIMIT: usize = 8;
+const REMOTE_FETCH_HEARTBEAT_FILE: &str = ".ryeos-remote-fetch-heartbeat";
 
 fn default_remote() -> String {
     "default".to_string()
@@ -61,44 +67,38 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Validate bundle name locally before hitting the network.
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
-    // Check bundle doesn't already exist locally.
     let bundles_root = state
         .config
         .app_root
         .join(ryeos_engine::AI_DIR)
         .join("bundles");
     let local_target = bundles_root.join(&req.bundle_name);
-    let transaction = ryeos_app::bundle_transaction::BundleTransaction::acquire(
-        &state.config.app_root,
-        &req.bundle_name,
-    )?;
-    let recovered = transaction.reconcile(state.identity.signing_key())?;
-    if matches!(
-        recovered,
-        Some(
-            ryeos_app::bundle_transaction::BundleOperation::Install
-                | ryeos_app::bundle_transaction::BundleOperation::RemoteInstall
-        )
-    ) && transaction.target().is_dir()
+    let node_config_root = state.config.runtime_root().config();
+    let prospective_validator = state
+        .extensions
+        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
+        .context("prospective node-config validator is not installed at the composition root")?;
+
+    // Reconcile/check under the same global -> per-name lock order used by the
+    // final mutation, then release both before opening a socket. This avoids a
+    // needless transfer for a known installed generation without allowing any
+    // remote wait to block unrelated bundle mutations.
     {
-        let new_gen = state.engine_cache.bump_system_install_generation();
-        tracing::info!(
-            bundle = %req.bundle_name,
-            engine_cache_generation = new_gen,
-            "recovered remote bundle install: bumped engine cache generation"
-        );
-        return Ok(serde_json::json!({
-            "bundle_name": req.bundle_name,
-            "path": transaction.target(),
-            "recovered": true,
-        }));
-    }
-    if local_target.exists() {
-        bail!(
-            "bundle '{}' already installed locally at {}",
-            req.bundle_name,
-            local_target.display()
-        );
+        let registry_lock = ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(
+            &state.config.app_root,
+        )?;
+        scavenge_stale_remote_fetches(&bundles_root)?;
+        let transaction = registry_lock.acquire_bundle(&req.bundle_name)?;
+        if let Some(report) = reconcile_remote_install(&req.bundle_name, &state, &transaction)? {
+            return Ok(report);
+        }
+        if local_target.exists() {
+            bail!(
+                "bundle '{}' already installed locally at {}",
+                req.bundle_name,
+                local_target.display()
+            );
+        }
     }
 
     let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
@@ -114,95 +114,167 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         bail!("remote bundle '{}' has no files", req.bundle_name);
     }
 
-    // 2. Materialize a hidden generation in bounded CAS batches. No response
-    // or decoded bundle-wide blob map is retained: at most one bounded batch
-    // is live, and any missing/malformed blob removes the hidden generation.
+    // 2. Materialize a request-unique hidden generation in bounded CAS batches
+    // while no bundle transaction lock is held. No response or decoded
+    // bundle-wide blob map is retained: at most one bounded batch is live.
     std::fs::create_dir_all(&bundles_root)
         .with_context(|| format!("create bundles root {}", bundles_root.display()))?;
-    let staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
-    let node_config_root = state.config.runtime_root().config();
+    let transfer_staging = bundles_root.join(format!(
+        ".{}.remote-fetch-{}",
+        req.bundle_name,
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir(&transfer_staging).with_context(|| {
+        format!(
+            "create unique remote transfer staging {}",
+            transfer_staging.display()
+        )
+    })?;
+    let mut staging_cleanup = RemoteStagingCleanup::new(transfer_staging.clone());
+    write_remote_fetch_heartbeat(&transfer_staging)
+        .context("initialize remote bundle transfer heartbeat")?;
+    let (files_installed, total_bytes) =
+        fetch_and_materialize_files(&client, &entries, &transfer_staging).await?;
+    lillux::sync_tree_durable(&transfer_staging).with_context(|| {
+        format!(
+            "flush remote transfer staging {}",
+            transfer_staging.display()
+        )
+    })?;
+    write_remote_fetch_heartbeat(&transfer_staging)
+        .context("refresh remote bundle transfer heartbeat after durable flush")?;
+
+    // 3. Acquire the node-wide registry lock only after all remote I/O has
+    // completed, then acquire the per-name lock. Reconcile, exact re-planning,
+    // admission, activation, and registration remain serialized as one final
+    // local mutation. The private transfer generation is intentionally outside
+    // both locks.
+    let registry_lock =
+        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
+    let transaction = registry_lock.acquire_bundle(&req.bundle_name)?;
+    if let Some(report) = reconcile_remote_install(&req.bundle_name, &state, &transaction)? {
+        return Ok(report);
+    }
     if local_target.exists() {
         bail!(
-            "bundle '{}' appeared during remote install at {}",
+            "bundle '{}' appeared during remote transfer at {}",
             req.bundle_name,
             local_target.display()
         );
     }
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)
-            .with_context(|| format!("remove stale staging {}", staging.display()))?;
-    }
-    std::fs::create_dir(&staging)
-        .with_context(|| format!("create staging dir {}", staging.display()))?;
 
-    let staged_result: Result<((usize, u64), std::path::PathBuf)> = async {
-        let counts = fetch_and_materialize_files(&client, &entries, &staging).await?;
-        if let Err(error) = crate::handlers::bundle_install::admit_completed_staging(
-            &state.config.app_root,
-            &req.bundle_name,
-            &staging,
-            false,
-            &node_config_root,
-            &state.engine.node_trust_store,
-        ) {
-            bail!(
-                "prospective admission failed for bundle '{}': {}",
-                req.bundle_name,
-                error
-            );
+    // The transfer is now protected by the node-wide mutation lock, so its
+    // out-of-band liveness marker can be removed before the generation is
+    // admitted as bundle content.
+    remove_remote_fetch_heartbeat(&transfer_staging)?;
+
+    let transaction_staging = bundles_root.join(format!(".{}.remote-staging", req.bundle_name));
+    remove_stale_transaction_staging(&transaction_staging)?;
+    match lillux::rename_path_durable(&transfer_staging, &transaction_staging) {
+        Ok(()) => staging_cleanup.retarget(transaction_staging.clone()),
+        Err(error) => {
+            if error.namespace_committed() {
+                staging_cleanup.retarget(transaction_staging.clone());
+                staging_cleanup.cleanup_now();
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "move remote transfer generation {} to transaction staging {}",
+                    transfer_staging.display(),
+                    transaction_staging.display()
+                )
+            });
         }
-        lillux::sync_tree_durable(&staging)
-            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-        if local_target.exists() {
-            bail!(
-                "bundle '{}' appeared before remote activation at {}",
-                req.bundle_name,
-                local_target.display()
-            );
-        }
+    }
+
+    let admission = crate::handlers::bundle_install::admit_completed_staging(
+        &state.config.app_root,
+        &req.bundle_name,
+        &transaction_staging,
+        false,
+        &node_config_root,
+        &state.engine.node_trust_store,
+        &prospective_validator,
+        Arc::clone(&state.sandbox),
+    );
+    if let Err(error) = admission {
+        // The canonical staging name is shared by transaction recovery. Remove
+        // this request's rejected generation before releasing its lock.
+        staging_cleanup.cleanup_now();
+        return Err(error).with_context(|| {
+            format!(
+                "prospective admission failed for bundle '{}'",
+                req.bundle_name
+            )
+        });
+    }
+
+    let mut cache_invalidated = false;
+    let activation: Result<PathBuf> = (|| {
         let registration = serde_json::json!({ "kind": "node", "path": local_target });
         transaction.begin_present(
             ryeos_app::bundle_transaction::BundleOperation::RemoteInstall,
-            &staging,
+            &transaction_staging,
             registration,
         )?;
-        lillux::rename_path_durable(&staging, &local_target)?;
+        match lillux::rename_path_durable(&transaction_staging, &local_target) {
+            Ok(()) => staging_cleanup.disarm(),
+            Err(error) => {
+                if error.namespace_committed() {
+                    staging_cleanup.disarm();
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "activate remote bundle staging {} at {}",
+                        transaction_staging.display(),
+                        local_target.display()
+                    )
+                });
+            }
+        }
+
+        // The target namespace is now visible. Invalidate immediately, before
+        // any fallible journal/registration step can return an error.
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        cache_invalidated = true;
+        tracing::info!(
+            bundle = %req.bundle_name,
+            engine_cache_generation = new_gen,
+            "remote bundle namespace activated: bumped engine cache generation"
+        );
+
         transaction.mark_activated()?;
         let canonical = local_target
             .canonicalize()
             .context("canonicalize installed bundle path")?;
-        Ok((counts, canonical))
-    }
-    .await;
-    let ((files_installed, total_bytes), canonical_target) = match staged_result {
-        Ok(result) => result,
+        transaction
+            .commit_present(state.identity.signing_key())
+            .context("commit remote bundle registration")?;
+        Ok(canonical)
+    })();
+
+    let canonical_target = match activation {
+        Ok(path) => path,
         Err(error) => {
-            if staging.exists() {
-                if let Err(cleanup_error) = std::fs::remove_dir_all(&staging) {
-                    tracing::warn!(
-                        path = %staging.display(),
-                        error = %cleanup_error,
-                        "failed to remove rejected remote bundle staging tree"
-                    );
-                }
+            // A durable-rename error can report failure after committing the
+            // namespace, and mark/registration writes can fail after a normal
+            // rename. Never return with a visible generation and stale engines.
+            if !cache_invalidated && local_target.is_dir() {
+                let new_gen = state.engine_cache.bump_system_install_generation();
+                tracing::warn!(
+                    bundle = %req.bundle_name,
+                    engine_cache_generation = new_gen,
+                    error = %error,
+                    "remote bundle activation failed after target became visible: bumped engine cache generation"
+                );
             }
+            // If activation failed before the namespace rename, the canonical
+            // staging path still exists. Clean it while this transaction lock
+            // is held; the journal remains sufficient for fail-closed recovery.
+            staging_cleanup.cleanup_now();
             return Err(error);
         }
     };
-
-    // 3. Write signed node-config bundle registration.
-
-    transaction
-        .commit_present(state.identity.signing_key())
-        .context("commit remote bundle registration")?;
-
-    // Bump the engine cache generation — same as local bundle_install.
-    let new_gen = state.engine_cache.bump_system_install_generation();
-    tracing::info!(
-        bundle = %req.bundle_name,
-        engine_cache_generation = new_gen,
-        "remote bundle installed: bumped engine cache generation"
-    );
 
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,
@@ -210,6 +282,314 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "total_bytes": total_bytes,
         "path": canonical_target.display().to_string(),
     }))
+}
+
+/// Reconcile one bundle transaction while the caller holds its lock. Visible
+/// repairs invalidate cached engines even if this remote-install request will
+/// subsequently return an already-installed result.
+fn reconcile_remote_install(
+    bundle_name: &str,
+    state: &AppState,
+    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
+) -> Result<Option<Value>> {
+    let recovered = match transaction.reconcile(state.identity.signing_key()) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            state.engine_cache.bump_system_install_generation();
+            return Err(error).context("reconcile interrupted bundle transaction");
+        }
+    };
+    if recovered.is_some() {
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        tracing::info!(
+            bundle = %bundle_name,
+            operation = ?recovered,
+            engine_cache_generation = new_gen,
+            "reconciled bundle transaction: bumped engine cache generation"
+        );
+    }
+    if matches!(
+        recovered,
+        Some(
+            ryeos_app::bundle_transaction::BundleOperation::Install
+                | ryeos_app::bundle_transaction::BundleOperation::RemoteInstall
+        )
+    ) && transaction.target().is_dir()
+    {
+        return Ok(Some(serde_json::json!({
+            "bundle_name": bundle_name,
+            "path": transaction.target(),
+            "recovered": true,
+        })));
+    }
+    Ok(None)
+}
+
+fn inspect_remote_fetch_heartbeat(transfer_root: &Path) -> Result<Option<std::fs::Metadata>> {
+    let root_metadata = std::fs::symlink_metadata(transfer_root)
+        .with_context(|| format!("inspect remote transfer root {}", transfer_root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        bail!(
+            "remote transfer root {} is not a real directory",
+            transfer_root.display()
+        );
+    }
+
+    let heartbeat = transfer_root.join(REMOTE_FETCH_HEARTBEAT_FILE);
+    let metadata = match std::fs::symlink_metadata(&heartbeat) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect remote transfer heartbeat {}", heartbeat.display())
+            })
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!(
+            "remote transfer heartbeat {} is not a real regular file",
+            heartbeat.display()
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if metadata.uid() != root_metadata.uid() {
+            bail!(
+                "remote transfer heartbeat {} is not owned like its transfer root",
+                heartbeat.display()
+            );
+        }
+    }
+    Ok(Some(metadata))
+}
+
+fn write_remote_fetch_heartbeat(transfer_root: &Path) -> Result<()> {
+    // Validate any existing marker before atomically replacing it so a linked
+    // or non-regular entry can never be treated as liveness authority.
+    inspect_remote_fetch_heartbeat(transfer_root)?;
+    let elapsed = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?;
+    let heartbeat = transfer_root.join(REMOTE_FETCH_HEARTBEAT_FILE);
+    let body = format!("{}\n", elapsed.as_nanos());
+    lillux::atomic_write_private(&heartbeat, body.as_bytes()).with_context(|| {
+        format!(
+            "durably update remote transfer heartbeat {}",
+            heartbeat.display()
+        )
+    })?;
+    inspect_remote_fetch_heartbeat(transfer_root)?
+        .context("remote transfer heartbeat disappeared after durable update")?;
+    Ok(())
+}
+
+fn remove_remote_fetch_heartbeat(transfer_root: &Path) -> Result<()> {
+    inspect_remote_fetch_heartbeat(transfer_root)?
+        .context("remote transfer heartbeat is missing before final admission")?;
+    let heartbeat = transfer_root.join(REMOTE_FETCH_HEARTBEAT_FILE);
+    lillux::remove_file_durable(&heartbeat).with_context(|| {
+        format!(
+            "durably remove remote transfer heartbeat {}",
+            heartbeat.display()
+        )
+    })
+}
+
+/// Remove a bounded number of request-unique transfer generations abandoned
+/// by process death.
+///
+/// Transfers intentionally run without the registry lock, so lock ownership
+/// alone cannot identify a live generation. Active transfers durably refresh a
+/// verified regular-file heartbeat after every bounded object batch. Only
+/// canonical UUID names that are real directories, owned like the bundles
+/// root, and whose heartbeat is stale for a full day are eligible. Debris from
+/// before heartbeat creation falls back to the root directory timestamp. Scan
+/// and removal caps bound work under the node-wide registry lock.
+fn scavenge_stale_remote_fetches(bundles_root: &Path) -> Result<()> {
+    let root_metadata = match std::fs::symlink_metadata(bundles_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect bundles root {}", bundles_root.display()))
+        }
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        bail!(
+            "bundles root {} is not a real directory",
+            bundles_root.display()
+        );
+    }
+
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    #[cfg(unix)]
+    let root_owner = root_metadata.uid();
+
+    let mut entries = std::fs::read_dir(bundles_root)
+        .with_context(|| format!("scan bundles root {}", bundles_root.display()))?
+        .take(REMOTE_FETCH_SCAVENGE_SCAN_LIMIT)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries {
+        if removed >= REMOTE_FETCH_SCAVENGE_REMOVE_LIMIT {
+            break;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_remote_fetch_generation_name(&file_name) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to inspect stale remote bundle transfer candidate"
+                );
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            continue;
+        }
+        #[cfg(unix)]
+        if metadata.uid() != root_owner {
+            continue;
+        }
+        let modified = match inspect_remote_fetch_heartbeat(&path) {
+            Ok(Some(heartbeat)) => match heartbeat.modified() {
+                Ok(modified) => modified,
+                Err(_) => continue,
+            },
+            Ok(None) => match metadata.modified() {
+                Ok(modified) => modified,
+                Err(_) => continue,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "refusing to scavenge remote transfer with invalid heartbeat"
+                );
+                continue;
+            }
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age < REMOTE_FETCH_STALE_AGE {
+            continue;
+        }
+
+        match lillux::remove_dir_all_durable(&path) {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!(
+                    path = %path.display(),
+                    age_seconds = age.as_secs(),
+                    "removed abandoned remote bundle transfer generation"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to remove abandoned remote bundle transfer generation"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_remote_fetch_generation_name(file_name: &str) -> bool {
+    let Some(rest) = file_name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((bundle_name, generation)) = rest.rsplit_once(".remote-fetch-") else {
+        return false;
+    };
+    if crate::handlers::bundle_install::validate_name(bundle_name).is_err() {
+        return false;
+    }
+    let Ok(generation_id) = uuid::Uuid::parse_str(generation) else {
+        return false;
+    };
+    generation_id.hyphenated().to_string() == generation
+}
+
+fn remove_stale_transaction_staging(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect transaction staging {}", path.display()))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        bail!(
+            "remote transaction staging {} is not a real directory",
+            path.display()
+        );
+    }
+    lillux::remove_dir_all_durable(path)
+        .with_context(|| format!("remove stale transaction staging {}", path.display()))
+}
+
+/// Best-effort cancellation/error cleanup for a request-owned hidden staging
+/// generation. Once a transaction rename commits, the guard is retargeted to
+/// the canonical staging path and finally disarmed when that path becomes live.
+struct RemoteStagingCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl RemoteStagingCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn retarget(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn cleanup_now(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+                if std::fs::remove_dir_all(&self.path).is_ok() {
+                    self.armed = false;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.armed = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for RemoteStagingCleanup {
+    fn drop(&mut self) {
+        self.cleanup_now();
+    }
 }
 
 /// Fetch and materialize all unique blobs in bounded batches. Reused hashes
@@ -225,7 +605,7 @@ async fn fetch_and_materialize_files(
 
     for hashes in batches {
         let response = client
-            .objects_get_with_response_limit(&hashes, REMOTE_OBJECT_RESPONSE_MAX_BYTES)
+            .objects_get_bundle_batch_with_response_limit(&hashes, REMOTE_OBJECT_RESPONSE_MAX_BYTES)
             .await
             .context("fetch bounded remote bundle blob batch")?;
         let mut blob_data = HashMap::with_capacity(response.entries.len());
@@ -281,6 +661,13 @@ async fn fetch_and_materialize_files(
                 files_installed += 1;
             }
         }
+
+        // Each remote object request has a bounded total timeout. Refreshing a
+        // durable marker after its fully materialized batch keeps an active
+        // transfer's observed age below that bound even when the transfer root
+        // itself stopped gaining top-level directory entries long ago.
+        write_remote_fetch_heartbeat(local_target)
+            .context("refresh remote bundle transfer heartbeat after object batch")?;
     }
 
     Ok((files_installed, total_bytes))
@@ -388,6 +775,12 @@ fn validate_export_response(
                 entry.path
             );
         }
+        if entry.path.split('/').next() == Some(REMOTE_FETCH_HEARTBEAT_FILE) {
+            bail!(
+                "remote bundle export entry '{}' uses the reserved transfer heartbeat path",
+                entry.path
+            );
+        }
         ryeos_state::project_sync::validate_safe_relative_path(&entry.path)
             .with_context(|| format!("invalid exported bundle path '{}'", entry.path))?;
         if entry.path.split('/').any(str::is_empty) {
@@ -418,7 +811,8 @@ fn validate_export_response(
                 );
             }
             if directories.insert(directory.clone())
-                && directories.len() + paths.len() >= super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
+                && directories.len() + paths.len()
+                    >= super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
             {
                 bail!(
                     "remote bundle export exceeds maximum of {} materialized files/directories",
@@ -438,7 +832,8 @@ fn validate_export_response(
                 entry.path
             );
         }
-        if directories.len() + paths.len() > super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES {
+        if directories.len() + paths.len() > super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
+        {
             bail!(
                 "remote bundle export exceeds maximum of {} materialized files/directories",
                 super::bundle_export::MAX_EXPORTED_BUNDLE_TREE_ENTRIES
@@ -583,10 +978,8 @@ mod tests {
 
     #[test]
     fn export_validation_rejects_excessive_tree_depth() {
-        let mut components = vec![
-            "directory";
-            super::super::bundle_export::MAX_EXPORTED_BUNDLE_DEPTH + 1
-        ];
+        let mut components =
+            vec!["directory"; super::super::bundle_export::MAX_EXPORTED_BUNDLE_DEPTH + 1];
         components.push("file");
         let path = components.join("/");
         let response = response(vec![entry(&path, 1, 1)]);

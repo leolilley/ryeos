@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
@@ -297,12 +298,29 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         "installation order determined"
     );
 
+    // A re-init inherits the existing immutable node policy. On first init the
+    // policy is materialized later in this transaction and its defined default
+    // is disabled, so authoring preflight uses the matching compiled snapshot.
+    let sandbox_policy = opts
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join(ryeos_engine::sandbox::SANDBOX_POLICY_RELATIVE_PATH);
+    let sandbox = if sandbox_policy.exists() {
+        Arc::new(
+            ryeos_engine::sandbox::SandboxRuntime::load(&opts.app_root)
+                .context("load existing node sandbox policy for init preflight")?,
+        )
+    } else {
+        Arc::new(ryeos_engine::sandbox::SandboxRuntime::default())
+    };
+
     if !opts.skip_preflight {
         for job in &plan.verification_jobs {
             ryeos_bundle::preflight::preflight_verify_bundle_in_context(
                 &job.subject_root,
                 &job.dependency_roots,
                 &operator_config_root,
+                Arc::clone(&sandbox),
             )
             .with_context(|| {
                 format!("verify {} source against pinned publisher key", job.subject)
@@ -311,6 +329,11 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 7. Install each bundle (atomic stage → swap) ──
+    // Serialize the entire installed-set mutation. Each per-name transaction
+    // below is acquired through this guard, preserving global -> per-name lock
+    // order while dependency generations are activated in plan order.
+    let bundle_registry_lock =
+        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&opts.app_root)?;
     let mut bundles_installed = Vec::new();
     for name in &plan.install_order {
         let planned = plan
@@ -325,8 +348,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
-        let transaction =
-            ryeos_app::bundle_transaction::BundleTransaction::acquire(&opts.app_root, name)?;
+        let transaction = bundle_registry_lock.acquire_bundle(name)?;
         transaction.reconcile(&node_key)?;
         let grants = command_registration_grants
             .get(name)
@@ -372,6 +394,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                         name,
                         &installed_dependency_roots,
                         &operator_config_root,
+                        Arc::clone(&sandbox),
                     )
                     .with_context(|| {
                         format!(
@@ -405,6 +428,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                         name,
                         &installed_dependency_roots,
                         &operator_config_root,
+                        Arc::clone(&sandbox),
                     )
                     .with_context(|| {
                         format!(
@@ -419,6 +443,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
         bundles_installed.push(name.clone());
     }
+    drop(bundle_registry_lock);
 
     // ── 8. Vault X25519 keypair ──
     let vault_dir = opts
@@ -784,7 +809,7 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-// ── Bundle manifest (v2: generated + signed) ───────────────────────
+// ── Bundle manifest (generated + signed) ───────────────────────────
 pub use ryeos_bundle::manifest::{
     derive_provides_kinds, materialize_manifest, parse_manifest, sort_bundles_by_dependency,
     validate_manifest_dependencies, BundleManifest, BundleManifestSource,
@@ -1309,11 +1334,23 @@ mod tests {
 
     // ── Manifest tests ──────────────────────────────────────────────
 
+    fn materialize_test_manifest(bundle: &Path, name: &str) {
+        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        let source: BundleManifestSource =
+            serde_yaml::from_str(&fs::read_to_string(ai_dir.join("manifest.source.yaml")).unwrap())
+                .unwrap();
+        let manifest = materialize_manifest(source, &ai_dir, name).unwrap();
+        fs::write(
+            ai_dir.join("manifest.yaml"),
+            serde_yaml::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn parse_manifest_reads_core() {
         let mf = parse_manifest(&workspace_root().join("bundles/core"), "core")
-            .expect("parse core manifest")
-            .expect("core has a manifest");
+            .expect("parse core manifest");
         assert_eq!(mf.name, "core");
         assert_eq!(mf.version, "0.5.0");
         assert!(!mf.provides_kinds.is_empty());
@@ -1334,8 +1371,7 @@ mod tests {
     #[test]
     fn parse_manifest_reads_standard() {
         let mf = parse_manifest(&workspace_root().join("bundles/standard"), "standard")
-            .expect("parse standard manifest")
-            .expect("standard has a manifest");
+            .expect("parse standard manifest");
         assert_eq!(mf.name, "standard");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
@@ -1358,11 +1394,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_manifest_returns_none_when_missing() {
+    fn parse_manifest_fails_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("no-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        assert!(parse_manifest(&bundle, "no-manifest").unwrap().is_none());
+        let error = parse_manifest(&bundle, "no-manifest").unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
@@ -1370,13 +1407,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bad-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        fs::write(bundle.join(".ai/manifest.source.yaml"), "not: [valid\nyaml").unwrap();
+        fs::write(bundle.join(".ai/manifest.yaml"), "not: [valid\nyaml").unwrap();
         assert!(parse_manifest(&bundle, "bad-manifest").is_err());
     }
 
     #[test]
     fn validate_dependencies_core_and_standard_ok() {
-        let bundles = discover_bundles(&workspace_root().join("bundles")).unwrap();
+        let root = workspace_root();
+        let bundles = vec![
+            ("core".to_string(), root.join("bundles/core")),
+            ("standard".to_string(), root.join("bundles/standard")),
+        ];
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
             "all bundle dependencies should be satisfied"
@@ -1395,6 +1436,7 @@ mod tests {
             "name: needy\nversion: '1.0'\nrequires_kinds:\n  - magic\n",
         )
         .unwrap();
+        materialize_test_manifest(&needy, "needy");
 
         let bundles = vec![("needy".to_string(), needy)];
         let err = validate_manifest_dependencies(&bundles).unwrap_err();
@@ -1410,17 +1452,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_dependencies_skips_bundles_without_manifest() {
+    fn validate_dependencies_rejects_bundles_without_manifest() {
         let tmp = tempfile::tempdir().unwrap();
-        // No manifest.yaml — should be fine
+        // No generated manifest: dependency validation must fail closed.
         let bare = tmp.path().join("bare");
         fs::create_dir_all(bare.join(".ai")).unwrap();
 
         let bundles = vec![("bare".to_string(), bare)];
-        assert!(
-            validate_manifest_dependencies(&bundles).is_ok(),
-            "bundles without manifests should pass"
-        );
+        let error = validate_manifest_dependencies(&bundles).unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
@@ -1439,6 +1479,7 @@ mod tests {
             "name: selfish\nversion: '1.0'\nrequires_kinds:\n  - foo\n",
         )
         .unwrap();
+        materialize_test_manifest(&selfish, "selfish");
 
         let bundles = vec![("selfish".to_string(), selfish)];
         assert!(
@@ -1464,6 +1505,7 @@ mod tests {
             "name: provider\nversion: '1.0'\nrequires_kinds: []\n",
         )
         .unwrap();
+        materialize_test_manifest(&provider, "provider");
 
         // Consumer bundle
         let consumer = tmp.path().join("consumer");
@@ -1473,6 +1515,7 @@ mod tests {
             "name: consumer\nversion: '1.0'\nrequires_kinds:\n  - alpha\n",
         )
         .unwrap();
+        materialize_test_manifest(&consumer, "consumer");
 
         let bundles = vec![
             ("consumer".to_string(), consumer),
@@ -1492,8 +1535,8 @@ mod tests {
         let bundle = tmp.path().join("real-name");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
         fs::write(
-            bundle.join(".ai/manifest.source.yaml"),
-            "name: wrong-name\nversion: '1.0'\nrequires_kinds: []\n",
+            bundle.join(".ai/manifest.yaml"),
+            "name: wrong-name\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\n",
         )
         .unwrap();
 
@@ -1605,7 +1648,7 @@ typo_field: oops
         }
     }
 
-    // ── v2 tests: derive, materialize, source split ────────────────
+    // ── Generated-manifest tests: derive, materialize, source split ──
 
     #[test]
     fn derive_provides_kinds_scans_core_schemas() {
@@ -1687,7 +1730,7 @@ typo_field: oops
     }
 
     #[test]
-    fn parse_manifest_dev_mode_materializes_from_source() {
+    fn parse_manifest_rejects_source_only_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("dev-bundle");
         let ai_dir = bundle.join(".ai");
@@ -1704,16 +1747,12 @@ typo_field: oops
         )
         .unwrap();
 
-        let mf = parse_manifest(&bundle, "dev-bundle")
-            .unwrap()
-            .expect("should find manifest via source fallback");
-        assert_eq!(mf.name, "dev-bundle");
-        assert_eq!(mf.provides_kinds, vec!["custom"]);
-        assert!(mf.requires_kinds.is_empty());
+        let error = parse_manifest(&bundle, "dev-bundle").unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
-    fn parse_manifest_prefers_generated_over_source() {
+    fn parse_manifest_reads_generated_and_ignores_source() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("pub-bundle");
         let ai_dir = bundle.join(".ai");
@@ -1731,9 +1770,7 @@ typo_field: oops
         )
         .unwrap();
 
-        let mf = parse_manifest(&bundle, "pub-bundle")
-            .unwrap()
-            .expect("should find manifest");
+        let mf = parse_manifest(&bundle, "pub-bundle").expect("should find generated manifest");
         assert_eq!(mf.version, "2.0", "should read generated, not source");
         assert_eq!(mf.provides_kinds, vec!["published-kind"]);
     }

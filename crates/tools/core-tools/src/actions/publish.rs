@@ -44,7 +44,7 @@ pub struct PublishOptions {
     pub registry_roots: Vec<PathBuf>,
     /// Author signing key used for every signing operation in this run.
     pub signing_key: SigningKey,
-    /// Operator trust store used to verify dependency bundle schemas,
+    /// Node trust store used to verify dependency bundle schemas,
     /// parsers, and handlers during the sign-items phase.
     pub base_trust_store: Option<TrustStore>,
     /// Owner label written into PUBLISHER_TRUST.toml (e.g. "ryeos-official",
@@ -105,22 +105,28 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     // generation is exchanged into the public bundle path, so a late failure
     // cannot expose a half-cleaned CAS or a mixture of old and new signatures.
     let live_root = opts.bundle_source.clone();
+    let canonical_live_root = fs::canonicalize(&live_root).with_context(|| {
+        format!(
+            "canonicalize bundle source before publication {}",
+            live_root.display()
+        )
+    })?;
     let effective_bundle_name = match opts.name.as_deref() {
         Some(name) => name.to_string(),
-        None => live_root
+        None => canonical_live_root
             .file_name()
             .and_then(|name| name.to_str())
             .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("bundle_source path has no UTF-8 directory name"))?,
     };
     super::publisher_transaction::with_staged_bundle_generation(&live_root, |staging| {
-        let registry_roots = registry_roots_for_staging(&live_root, staging, &opts.registry_roots);
-        let mut report = run_publish_in_place(
-            opts,
+        let registry_roots = super::publisher_transaction::roots_for_staged_generation(
+            &live_root,
             staging,
-            &registry_roots,
-            &effective_bundle_name,
-        )?;
+            &opts.registry_roots,
+        );
+        let mut report =
+            run_publish_in_place(opts, staging, &registry_roots, &effective_bundle_name)?;
         remap_publish_report_paths(&mut report, staging, &live_root);
         Ok(report)
     })
@@ -182,7 +188,7 @@ fn run_publish_in_place(
     };
 
     // ── Phase 3: sign every other signable item ──
-    let mut sign_report = sign_bundle::sign_bundle_items_with_trust(
+    let mut sign_report = sign_bundle::sign_bundle_items_with_trust_in_place(
         bundle_source,
         registry_roots,
         &opts.signing_key,
@@ -276,10 +282,9 @@ fn run_publish_in_place(
     }
 
     // ── Phase 4: generate + sign bundle manifest (idempotent) ──
-    let (manifest_generated, manifest_changed) = generate_and_sign_manifest(
-        &ai_dir,
+    let (manifest_generated, manifest_changed) = generate_and_sign_manifest_in_place(
         bundle_source,
-        Some(effective_bundle_name),
+        effective_bundle_name,
         &opts.signing_key,
     )
     .context("manifest generation phase failed")?;
@@ -318,32 +323,6 @@ fn run_publish_in_place(
         partial,
         skipped_unsignable,
     })
-}
-
-/// Redirect registry roots that live inside the bundle being published to the
-/// staged generation. In particular, core publishes with itself as its kind
-/// and parser registry; reading the live root here would mix generations.
-fn registry_roots_for_staging(
-    live_root: &Path,
-    staging: &Path,
-    registry_roots: &[PathBuf],
-) -> Vec<PathBuf> {
-    let canonical_live = fs::canonicalize(live_root).ok();
-    registry_roots
-        .iter()
-        .map(|root| {
-            let relative = canonical_live.as_ref().and_then(|live| {
-                fs::canonicalize(root)
-                    .ok()
-                    .and_then(|canonical| canonical.strip_prefix(live).ok().map(Path::to_path_buf))
-            });
-            match relative {
-                Some(relative) => staging.join(relative),
-                None if root == live_root => staging.to_path_buf(),
-                None => root.clone(),
-            }
-        })
-        .collect()
 }
 
 fn remap_publish_report_paths(report: &mut PublishReport, staging: &Path, live_root: &Path) {
@@ -605,8 +584,8 @@ fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
 /// Idempotent: if the existing `.ai/manifest.yaml` already carries a valid
 /// signature for the newly materialized body, no write occurs.
 ///
-/// Returns `(Some((path, changed)))` where `changed` reflects whether
-/// the file was actually written. A publishable bundle must carry a regular
+/// Returns `(path, changed)` where `changed` reflects whether the file was
+/// actually written. A publishable bundle must carry a regular
 /// `.ai/manifest.source.yaml`; missing or linked sources fail without deleting
 /// any previously generated manifest.
 /// Inputs the namespace lint needs from the manifest source: the effective
@@ -802,17 +781,16 @@ fn lint_item_namespaces(
 
 /// Generate and sign `.ai/manifest.yaml` from `.ai/manifest.source.yaml`.
 ///
-/// `name_override` is the **effective bundle id** the manifest must carry —
+/// `effective_bundle_name` is the **effective bundle id** the manifest must carry —
 /// the first bare-id segment of the bundle's item refs, which runtime
-/// authority requires to equal `manifest.name`. When `None`, the bundle
-/// source directory's basename is used (the historical default, correct when
-/// the directory name already matches the effective bundle id).
-pub fn generate_and_sign_manifest(
-    ai_dir: &Path,
+/// authority requires to equal `manifest.name`. Callers resolve it from the
+/// live bundle identity before entering a staged generation.
+pub(super) fn generate_and_sign_manifest_in_place(
     bundle_source: &Path,
-    name_override: Option<&str>,
+    effective_bundle_name: &str,
     signing_key: &SigningKey,
 ) -> Result<(PathBuf, bool)> {
+    let ai_dir = bundle_source.join(ryeos_engine::AI_DIR);
     let source_path = ai_dir.join("manifest.source.yaml");
     let source_metadata = fs::symlink_metadata(&source_path)
         .with_context(|| format!("inspect required manifest source {}", source_path.display()))?;
@@ -823,21 +801,13 @@ pub fn generate_and_sign_manifest(
         );
     }
 
-    let bundle_name = match name_override {
-        Some(name) => name,
-        None => bundle_source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("bundle_source path has no directory name"))?,
-    };
-
     let raw = fs::read_to_string(&source_path)
         .with_context(|| format!("read manifest source {}", source_path.display()))?;
     let src: BundleManifestSource = serde_yaml::from_str(&raw)
         .with_context(|| format!("parse manifest source {}", source_path.display()))?;
 
-    let manifest =
-        materialize_manifest(src, ai_dir, bundle_name).context("materialize bundle manifest")?;
+    let manifest = materialize_manifest(src, &ai_dir, effective_bundle_name)
+        .context("materialize bundle manifest")?;
 
     let body = serde_yaml::to_string(&manifest).context("serialize bundle manifest")?;
     let target = ai_dir.join("manifest.yaml");

@@ -2,6 +2,7 @@
 name = "ryeos-client-web"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "Web renderer for Rye OS"
 
 [lib]

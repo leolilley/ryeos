@@ -251,8 +251,12 @@ fn output_overflow_terminates_a_continuously_writing_group() {
 fn bubblewrap_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
     let status = bubblewrap_status_pipe().expect("status pipe");
     let status_fd = status.writer_fd();
+    // Like the real sandbox launch, the mock target inherits the retained
+    // wrapper's Lillux-owned session/process group. The status PID identifies
+    // the target for accounting, while the wrapper keeps the shared PGID owned.
     let wrapper_script = format!(
-        "setsid /bin/sh -c '{script}' & target=$!; \
+        "/bin/sh -c 'exec /bin/sh -c \"$1\"' \
+         ryeos-target '{script}' & target=$!; \
          printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
     );
     let mut request = sh(&["-c", &wrapper_script]);
@@ -269,7 +273,11 @@ fn reported_target_group_is_exposed_and_killed_on_timeout() {
     let running = spawn(bubblewrap_protocol_shell("sleep 30", 0.25)).expect("spawn");
     let target_pid = running.pid;
 
-    assert_eq!(running.pgid, target_pid as i64);
+    assert_ne!(running.pgid, target_pid as i64);
+    assert_eq!(
+        unsafe { libc::getpgid(target_pid as libc::pid_t) } as i64,
+        running.pgid
+    );
     let result = running.wait();
 
     assert!(result.timed_out, "stderr: {}", result.stderr);
@@ -283,6 +291,31 @@ fn reported_target_group_is_exposed_and_killed_on_timeout() {
     assert!(
         !is_alive(target_pid),
         "reported target survived timeout cleanup"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn reported_target_exit_still_cleans_up_same_group_descendants() {
+    let running = spawn(bubblewrap_protocol_shell("sleep 30 & printf %s $!", 2.0)).expect("spawn");
+    let target_pid = running.pid;
+    let retained_pgid = running.pgid;
+
+    let result = running.wait();
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.pid, target_pid);
+    let background_pid: u32 = result.stdout.parse().expect("background pid");
+    assert_ne!(retained_pgid, target_pid as i64);
+    for _ in 0..50 {
+        if !is_alive(background_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(background_pid),
+        "same-group descendant survived after the reported target exited"
     );
 }
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:3a10e0a5811e73b72d933009e52a88d520ea93c0b9364f1cc3c191550bfd67f5:vuPIJfuKtBmALVqkXfPrkpK6nuiX6kxeG5RGkZufpyYAHBxUjeLmeHwZLMfN+HW4pQpv6XUUbSOXSghZTsRTBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:32aa040113a899e23106a7f3ab811958ba13ffb3ca4241aa8124c34f52bd416d:he4O+CfC+gtzmD6nX1Z/zgrmpSWadZH8utJtrJVk/jnEUGy6xHzCZKFTaA8BSAH8Ynuv2PzcU8F8sI00nwLXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -242,14 +242,14 @@ keys must enumerate their capabilities explicitly.
 When a node's signing key is compromised or needs rotation, treat it as a
 break-glass operation. The daemon no longer has an `--init-only` path and
 will not auto-regenerate the node key, because doing so would invalidate
-the node trust doc pinned in the operator trust store.
+the node trust doc pinned in the node trust store.
 
 Safe rotation requires explicit operator action:
 
 1. Stop the daemon.
 2. Replace/regenerate the node signing key under
    `<system>/.ai/node/identity/private_key.pem`.
-3. Recreate and pin the matching node trust doc in the operator trust store.
+3. Recreate and pin the matching node trust doc in the node trust store.
 4. Re-sign or recreate node-signed local config items as needed.
 5. Reissue every remotely granted authorized key.
 
@@ -320,9 +320,17 @@ ryeos remote bundle-install --remote production --bundle-name standard
 - The export is limited to 10,000 files, 20,000 total tree entries, 64 levels,
   4 KiB paths, 32 MiB per file, and 256 MiB of declared file content.
 - Object responses are streamed into bounded buffers and fetched in bounded
-  batches; the installer never retains a whole-bundle blob map.
+  batches; the installer never retains a whole-bundle blob map. The export and
+  each object batch have a five-minute total request bound covering both the
+  response and bounded body read.
 - Missing, duplicate, malformed, wrong-sized, or hash-mismatched blobs abort
   the operation and remove the hidden staging generation.
+- Network transfer uses a request-unique hidden generation while no bundle
+  mutation lock is held. The installer reacquires that lock only to reconcile,
+  run prospective admission, journal, and durably activate the completed tree;
+  it rechecks for a concurrent install before activation. A bounded scavenger
+  removes only same-owner, real-directory UUID transfer generations that have
+  remained stale for at least 24 hours; current transfers are not age-eligible.
 - The completed staging tree must pass signed-manifest preflight and the same
   prospective engine/node-config admission used at node boot. A bundle that
   would introduce a registry, protocol, runtime, command, or native-executor

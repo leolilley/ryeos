@@ -594,13 +594,18 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 if !args.no_bundles {
                     let operator_config_root =
                         ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
+                    let sandbox = ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
+                        .map(std::sync::Arc::new)
+                        .map_err(|error| error.to_string());
                     for record in &snapshot.bundles {
-                        // Static checks only (no offline engine): the doctor
-                        // must stay fast and dependency-free; import dry-runs
-                        // belong to the bundle-level `ryeos doctor <source>`.
+                        // Skip import dry-runs, but parser-backed verification
+                        // still uses the node's immutable sandbox snapshot.
                         let report = ryeos_core_tools::actions::doctor::run_doctor(
                             Err("node doctor runs static checks only"),
-                            Err("node doctor runs static checks only"),
+                            sandbox
+                                .as_ref()
+                                .map(std::sync::Arc::clone)
+                                .map_err(String::as_str),
                             &record.path,
                             &roots,
                             &operator_config_root,

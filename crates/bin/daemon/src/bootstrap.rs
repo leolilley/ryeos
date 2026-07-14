@@ -591,6 +591,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// Returns `(engine, node_config_snapshot)`.
 pub fn load_node_config_two_phase(
     config: &Config,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<(Arc<Engine>, Arc<NodeConfigSnapshot>)> {
     let app_root = &config.app_root;
 
@@ -629,6 +630,7 @@ pub fn load_node_config_two_phase(
     let engine = Arc::new(crate::engine_init::build_engine(
         config,
         &effective_bundle_roots,
+        sandbox,
     )?);
 
     // ── Phase 2: full node-config scan ──

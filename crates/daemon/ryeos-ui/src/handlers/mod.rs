@@ -37,6 +37,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_seat::OPEN_DESCRIPTOR,
     ui_seat::APPEND_DESCRIPTOR,
     ui_seat::REPLAY_DESCRIPTOR,
+    ui_seat::TOUCH_DESCRIPTOR,
     ui_seat::CLOSE_DESCRIPTOR,
     ui_files::FILES_LIST_DESCRIPTOR,
     ui_files::FILES_READ_DESCRIPTOR,

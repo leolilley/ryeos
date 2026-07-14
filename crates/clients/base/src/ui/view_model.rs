@@ -32,6 +32,12 @@ pub struct RyeOsViewModel {
     pub generation: u64,
     #[serde(default)]
     pub now_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_chain_root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
@@ -310,6 +316,8 @@ pub enum RyeOsViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<RyeOsTimelineEntryVm>,
+        #[serde(default)]
+        entry_arrived_at_ms: Vec<Option<u64>>,
         /// Call-tree indent depth per entry (parallel to `entries`): a graph
         /// node's tool calls and its directive/sub-graph fork nest one level
         /// under the node. Empty or shorter than `entries` renders flat (depth
@@ -421,6 +429,10 @@ pub struct RyeOsTableRowVm {
     pub detail: Vec<RyeOsRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// The change's tone when it crossed a tone boundary (or the row just
+    /// arrived) — renderers flash in this color instead of generic accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_tone: Option<RyeOsTone>,
     /// The row's raw record — base-only (not serialized to clients). Overlays
     /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
     /// management is reachable. Skipped to avoid duplicating every record into
@@ -472,6 +484,10 @@ pub struct RyeOsRowVm {
     pub detail: Vec<RyeOsRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// The change's tone when it crossed a tone boundary (or the row just
+    /// arrived) — renderers flash in this color instead of generic accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_tone: Option<RyeOsTone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -502,10 +518,18 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         health_label: health.clone(),
         health_tone: tone_for_health(&health),
     };
+    let route = core.seat.fold().input_route();
+    let tail_url = route
+        .chain_root
+        .as_ref()
+        .map(|root| format!("/ui/events/chain/{root}"));
     RyeOsViewModel {
         schema_version: "ryeos.ui.vm.v1".to_string(),
         generation: core.generation,
         now_ms: core.runtime.now_ms,
+        tail_thread_id: route.thread,
+        tail_chain_root_id: route.chain_root,
+        tail_url,
         presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
         chrome,
@@ -970,7 +994,7 @@ struct RowLocalState<'a> {
     cursor: Option<usize>,
     collapsed: Option<&'a std::collections::BTreeSet<usize>>,
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
-    changed_rows: Option<&'a std::collections::BTreeMap<String, u64>>,
+    changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 }
 
 fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalState<'a> {
@@ -1149,6 +1173,7 @@ fn bound_view_vm_keyed(
                             expanded: false,
                             detail: Vec::new(),
                             changed_at_ms: None,
+                    changed_tone: None,
                         });
                     }
                 }
@@ -1250,7 +1275,13 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
-                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        changed_at_ms: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .map(|flash| flash.at_ms),
+                        changed_tone: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .and_then(|flash| flash.tone.as_deref())
+                            .map(|tone| tone_from_name(Some(tone))),
                     }
                 })
                 .collect();
@@ -1313,6 +1344,27 @@ fn bound_view_vm_keyed(
             );
             let folded = windowed.folded;
             let selected = windowed.selected;
+            let arrival_by_key: std::collections::HashMap<&str, Option<u64>> = cached
+                .map(|cache| {
+                    cache
+                        .sources
+                        .iter()
+                        .zip(cache.arrivals.iter())
+                        .filter_map(|(source, arrived)| {
+                            Some((source.as_ref()?.key.as_str(), *arrived))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let entry_arrived_at_ms = folded
+                .sources
+                .iter()
+                .map(|source| {
+                    source
+                        .as_ref()
+                        .and_then(|source| arrival_by_key.get(source.key.as_str()).copied().flatten())
+                })
+                .collect();
             // The foldable section under the point — what a fold key toggles.
             let fold_section = selected.and_then(|i| {
                 let section = folded.sections.get(i).copied()?;
@@ -1358,6 +1410,7 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                entry_arrived_at_ms,
                 entry_indents: folded.indents,
                 selected,
                 fold_section,
@@ -1416,7 +1469,13 @@ fn bound_view_vm_keyed(
                         expandable: !expand_fields.is_empty(),
                         expanded,
                         detail,
-                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        changed_at_ms: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .map(|flash| flash.at_ms),
+                        changed_tone: changed_rows
+                            .and_then(|rows| rows.get(&key))
+                            .and_then(|flash| flash.tone.as_deref())
+                            .map(|tone| tone_from_name(Some(tone))),
                         raw: record.raw,
                     }
                 })
@@ -1447,6 +1506,7 @@ fn bound_view_vm_keyed(
                     expanded: false,
                     detail: Vec::new(),
                     changed_at_ms: None,
+                    changed_tone: None,
                 })
                 .collect();
             let notice_start = rows.len();
@@ -1521,6 +1581,7 @@ fn status_notice_rows(
             expanded: false,
             detail: Vec::new(),
             changed_at_ms: None,
+                    changed_tone: None,
         })
         .collect()
 }
@@ -2687,7 +2748,7 @@ fn selected_row_state(
     tile_id: TileId,
 ) -> (
     Option<&std::collections::BTreeSet<String>>,
-    Option<&std::collections::BTreeMap<String, u64>>,
+    Option<&std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 ) {
     match core.workspace.tiles.get(&tile_id).map(|tile| &tile.local) {
         Some(ViewLocalState::GenericList {
@@ -3181,7 +3242,7 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "project", "status", "source", "follow", "created"]
+            ["thread", "kind", "item", "id", "project", "status", "source", "follow", "created"]
         );
         let rows = project_table(
             &binding,
@@ -3197,6 +3258,7 @@ mod tests {
             [
                 "T-ab",
                 "directive",
+                "base \u{2039} directive:ops",
                 "directive:ops/base",
                 "",
                 "running",

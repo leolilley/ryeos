@@ -3,35 +3,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-const DEFAULT_SANDBOX_POLICY: &str = r#"version: 1
-mode: disabled
-backend:
-  kind: bubblewrap
-  executable: /usr/bin/bwrap
-filesystem:
-  readable:
-    - "{node_public_identity}"
-    - "{daemon_socket}"
-    - "{bundle_roots}"
-    - "{node_trusted_keys}"
-    - "{verified_code}"
-  writable:
-    - "{project}"
-    - "{checkpoint_dir}"
-network:
-  mode: host
-environment:
-  allow:
-    - "*"
-limits:
-  open_files: 1024
-  stdout_bytes: 8388608
-  stderr_bytes: 8388608
-  verified_artifact_file_bytes: 67108864
-  verified_artifact_total_bytes: 268435456
-  verified_artifact_files: 4096
-"#;
-
 struct NodeDefaultPaths {
     sandbox_policy: PathBuf,
     ingest_dir: PathBuf,
@@ -46,7 +17,9 @@ impl NodeDefaultPaths {
         let ingest_dir = node.join("ingest");
         let sync_dir = node.join("sync");
         Self {
-            sandbox_policy: node.join("sandbox.yaml"),
+            sandbox_policy: app_root
+                .join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::sandbox::SANDBOX_POLICY_RELATIVE_PATH),
             ignore_config: ingest_dir.join("ignore.yaml"),
             ingest_dir,
             sync_policy: sync_dir.join("policy.yaml"),
@@ -62,13 +35,17 @@ pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
     let paths = NodeDefaultPaths::under(app_root);
 
     if !paths.sandbox_policy.exists() {
-        lillux::atomic_write_private(&paths.sandbox_policy, DEFAULT_SANDBOX_POLICY.as_bytes())
-            .with_context(|| {
+        let policy =
+            serde_yaml::to_string(&ryeos_engine::sandbox::SandboxPolicy::default_disabled())
+                .context("serialize default sandbox policy")?;
+        lillux::atomic_write_private(&paths.sandbox_policy, policy.as_bytes()).with_context(
+            || {
                 format!(
                     "write default sandbox policy {}",
                     paths.sandbox_policy.display()
                 )
-            })?;
+            },
+        )?;
     }
 
     if !paths.ignore_config.exists() {
@@ -118,8 +95,7 @@ mod tests {
 
     #[test]
     fn sandbox_default_preserves_execution_policy() {
-        let policy: ryeos_engine::sandbox::SandboxPolicy =
-            serde_yaml::from_str(DEFAULT_SANDBOX_POLICY).unwrap();
+        let policy = ryeos_engine::sandbox::SandboxPolicy::default_disabled();
 
         assert_eq!(policy.version, 1);
         assert_eq!(policy.mode, ryeos_engine::sandbox::SandboxMode::Disabled);

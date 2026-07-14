@@ -2,6 +2,7 @@
 name = "ryeos-directive-runtime"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [[bin]]
 name = "ryeos-directive-runtime"
@@ -12,7 +13,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
 lillux = { workspace = true }
-quick-xml = "0.36"
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 futures-util = { workspace = true }

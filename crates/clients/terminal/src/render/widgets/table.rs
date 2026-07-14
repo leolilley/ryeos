@@ -11,7 +11,7 @@ use super::super::primitives::fill_line;
 use super::super::text::{letterspace, truncate};
 use super::super::theme::{
     active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
-    tone_style,
+    tone_style, ACCENT,
 };
 use super::rows::draw_detail;
 
@@ -167,7 +167,14 @@ fn draw_row(
         style_fg()
     };
     style = active_pulse_style(style, row.tone, now_ms);
-    style = shimmer_style(style, row.changed_at_ms, now_ms);
+    style = shimmer_style(
+        style,
+        row.changed_at_ms,
+        row.changed_tone
+            .map(|tone| tone_style(tone).fg)
+            .unwrap_or(ACCENT),
+        now_ms,
+    );
     fill_line(surface, left, y, width, style);
 
     let glyph_style = if row.selected {
@@ -235,6 +242,7 @@ mod tests {
             expanded: false,
             detail: Vec::new(),
             changed_at_ms: None,
+            changed_tone: None,
             raw: serde_json::Value::Null,
         }
     }

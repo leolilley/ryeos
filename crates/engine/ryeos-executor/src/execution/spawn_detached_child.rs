@@ -165,6 +165,7 @@ pub async fn spawn_detached_child(
         origin_site_id: parent.origin_site_id.clone(),
         upstream_thread_id: None,
         requested_by: Some(thread_auth.acting_principal.clone()),
+        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
     })?;
@@ -205,6 +206,58 @@ pub async fn spawn_detached_child(
     state
         .state_store
         .seed_launch_metadata(&child_thread_id, &meta)?;
+    let inherited_stop =
+        match state
+            .state_store
+            .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
+        {
+            Ok(inherited_stop) => inherited_stop,
+            Err(error) => {
+                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                    state,
+                    &child_thread_id,
+                    json!({
+                        "code": "child_link_failed",
+                        "reason": error.to_string(),
+                    }),
+                );
+                match cleanup {
+                    Ok(outcome) if outcome.is_settled() => {
+                        crate::execution::launch::kick_follow_resume_if_ready(
+                            state,
+                            &child_thread_id,
+                        );
+                        crate::execution::launch::kick_launch_window_for_terminal(
+                            state,
+                            &child_thread_id,
+                        );
+                    }
+                    Ok(outcome) => tracing::warn!(
+                        child_thread_id,
+                        ?outcome,
+                        "preserved concurrently advanced detached child after lineage failure"
+                    ),
+                    Err(cleanup_error) => {
+                        return Err(anyhow::anyhow!(
+                            "detach: record child lineage under parent {parent_thread_id}: \
+                             {error}; conditional child cleanup also failed: {cleanup_error}"
+                        ));
+                    }
+                }
+                return Err(error).context(format!(
+                    "detach: record child lineage under parent {parent_thread_id}"
+                ));
+            }
+        };
+    if inherited_stop.is_some() {
+        crate::execution::process_attachment::finalize_requested_stop_if_present(
+            state,
+            &child_thread_id,
+        )?;
+        anyhow::bail!(
+            "detach: parent {parent_thread_id} was stop-requested during child admission"
+        );
+    }
 
     // ── Cohort facets ───────────────────────────────────────────────────────
     // Stamp `(key, value)` tags BEFORE launch so a `threads.list --facet` query

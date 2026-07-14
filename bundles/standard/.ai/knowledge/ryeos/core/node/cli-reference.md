@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:17966d5c9ebe7423508f14befa4e92d39d8e1e475fd09ba8ce3f313319ee7418:vPhfbh4LByHGBlmc2QzMlyhvMRoezJZeaYy+viGswkj14g1akCNvzZtEtqOxQgGgoE1GRdNb7Nzaq2THZd8BBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:0a2b25d415332b323a812871fc3e13b162c7df8cba1e7d38a9351bf8d36cceeb:MzM0zcjjIn7abg2yBu0xFVXyAtISC4DPme9lmBJy5rW2wPdve09JGHQOyB5Fyi6zNnwek/aQ6ORXWzqAMnLtBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.1.0"
+version: "3.2.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -52,10 +52,12 @@ timeout is 15 seconds.
 ryeos stop [--force] [--app-root <dir>]
 ```
 
-Gracefully stops the local daemon via the UDS that just proved live.
-Default graceful timeout is 10 seconds. `--force` re-confirms live
-`status: "running"` and PID before signalling and verifies the PID is
-`ryeosd` on Unix.
+Connects to a configured live UDS, captures the kernel-authenticated peer with
+`SO_PEERCRED` and `SO_PEERPIDFD`, verifies the peer names `ryeosd`, and sends
+`SIGTERM` through that pidfd. The default graceful wait is 10 seconds.
+`--force` takes a fresh socket peer pidfd before escalating to `SIGKILL` and
+waiting two more seconds. Neither mode signals a PID from `daemon.json` or an
+RPC response.
 
 ### `ryeos node status`
 

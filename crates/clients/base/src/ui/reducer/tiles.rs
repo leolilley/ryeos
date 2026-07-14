@@ -1,4 +1,4 @@
-use super::effect::RyeOsEffect;
+use super::effect::{RyeOsEffect, RyeOsEffectKind};
 use super::event::RyeOsStackMoveDirection;
 use super::model::RyeOsCore;
 use super::view_model::{RyeOsMotionEventVm, RyeOsSplitAxisVm};
@@ -54,9 +54,8 @@ impl RyeOsCore {
     /// chat line) is input-only.
     fn lensable(&self, view_ref: &str) -> bool {
         self.views.get(view_ref).is_some_and(|binding| {
-            let input_only = binding.input.is_some()
-                && binding.source.is_none()
-                && binding.sections.is_empty();
+            let input_only =
+                binding.input.is_some() && binding.source.is_none() && binding.sections.is_empty();
             binding.widget != "scene" && !input_only
         })
     }
@@ -79,14 +78,12 @@ impl RyeOsCore {
             return Vec::new();
         };
         let mut groups: Vec<LibraryGroup> = Vec::new();
-        let add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| {
-            match groups
-                .iter_mut()
-                .find(|group| group.title.eq_ignore_ascii_case(&title))
-            {
-                Some(existing) => existing.refs.extend(refs),
-                None => groups.push(LibraryGroup { title, refs }),
-            }
+        let add = |groups: &mut Vec<LibraryGroup>, title: String, refs: Vec<String>| match groups
+            .iter_mut()
+            .find(|group| group.title.eq_ignore_ascii_case(&title))
+        {
+            Some(existing) => existing.refs.extend(refs),
+            None => groups.push(LibraryGroup { title, refs }),
         };
         for entry in entries {
             if let Some(view_ref) = entry.as_str() {
@@ -212,7 +209,14 @@ impl RyeOsCore {
         self.data.tile_items.clear();
         self.data.tile_files.clear();
         self.data.tile_file_space.clear();
+        self.data.sources.clear();
+        self.data.source_epoch.clear();
+        self.data.source_stored_epoch.clear();
+        self.data.source_floor.clear();
         self.data.timeline_sources.clear();
+        self.deferred_source_fetches.clear();
+        self.pending_effects
+            .retain(|_, kind| !matches!(kind, RyeOsEffectKind::FetchSource { .. }));
         self.data.file_read = None;
         self.push_motion(RyeOsMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -291,10 +295,19 @@ impl RyeOsCore {
                 let key = tile_id.0.to_string();
                 self.data.sources.remove(&key);
                 self.data.source_epoch.remove(&key);
+                self.data.source_stored_epoch.remove(&key);
                 self.data.timeline_sources.remove(&key);
+                let section_prefix = format!("{key}#section");
+                self.deferred_source_fetches
+                    .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
                 self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
                 self.bump_generation();
-                return self.effects_for_view(&view);
+                let effects = self.effects_for_view(&view);
+                // The lens swapped subjects: eviction alone would let an
+                // in-flight response for the OLD lens land into the empty
+                // store — the floor refuses it outright.
+                self.floor_source_fetches(&effects, true);
+                return effects;
             }
         }
 
@@ -335,24 +348,33 @@ impl RyeOsCore {
         for key in restored_facets {
             effects.extend(self.effects_for_facet(&key));
         }
+        // Returning up the drill stack swaps the subject back: a straggler
+        // from the drilled-into lens must not land under the restored one.
+        self.floor_source_fetches(&effects, true);
         effects
     }
 
     pub(crate) fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
+        let source_key = tile_id.0.to_string();
+        let section_prefix = format!("{source_key}#section");
         if self.workspace.tile_ids().len() <= 1 {
             if self.workspace.center_is_empty() || !self.workspace.tiles.contains_key(&tile_id) {
                 return false;
             }
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: tile_id.0.to_string(),
+                tile_id: source_key.clone(),
             });
             self.workspace.reset_to_empty();
+            self.deferred_source_fetches
+                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             return true;
         }
         if self.workspace.close_tile(tile_id) {
             self.push_motion(RyeOsMotionEventVm::TileExit {
-                tile_id: tile_id.0.to_string(),
+                tile_id: source_key.clone(),
             });
+            self.deferred_source_fetches
+                .retain(|key, _| key != &source_key && !key.starts_with(&section_prefix));
             self.push_motion(RyeOsMotionEventVm::FocusChanged {
                 tile_id: self.workspace.focused_tile.0.to_string(),
             });

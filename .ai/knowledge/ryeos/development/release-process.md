@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-13T07:43:47Z:5e0ada05163877634ccf78c498ff63d2f670f6a67892021584767829e8c7c5d6:wL2JRvXdbAtfWe+20+WHv05qs+RuEc4/kh3Ex3+SK0GEkSjbx+9G1rYpapPeCt3TW5FShHVsujunLLUZC2x+Bw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T03:42:05Z:6376652de30c17f12c4f2d64dac07dcc8a510517567fded1479b9ad4d102d3ed:LXh8IhHYmD5+dBxQKwnOmBtTB3Q3m4X7GBbyoaRj1SFKQS6optuFrUkybwSNP1PaHPyD9J/n0P9R9W0uQO81AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # RyeOS Release Process
@@ -310,6 +310,30 @@ After pushing:
 git ls-remote --heads origin next main
 git ls-remote --tags origin "v$new"
 ```
+
+## Interrupted release recovery
+
+The release workflow never overwrites immutable image tags or GitHub release
+assets. It may resume only when the existing artifact identity is independently
+verified: an image must have the expected keyless workflow signature, source
+provenance, and SBOM; an existing bundle archive and checksum are downloaded
+and verified again; and an archive-only upload may remain canonical after its
+officially signed bundle contents pass structural and cryptographic preflight.
+Mutable `latest` tags move only after every immutable output passes again.
+
+Two ambiguous states require operator intervention:
+
+- If an immutable image tag exists without the expected workflow signature,
+  quarantine it. Confirm the exact digest and absence of the signature, then
+  normally burn the incomplete version and cut a new release. Delete that
+  registry version only when repository policy explicitly permits reuse and
+  you have confirmed it is the incomplete unsigned digest. Never replace a
+  signed immutable version.
+- If a GitHub release has a checksum but no archive, remove only the confirmed
+  orphan checksum through release asset controls and rerun. The checksum cannot
+  establish which missing bytes should be restored. This differs from an
+  archive-only state, where the archive itself can be verified and its missing
+  checksum derived.
 
 ## 8. GHCR release channel
 

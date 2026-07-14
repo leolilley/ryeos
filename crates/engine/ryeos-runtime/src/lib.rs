@@ -22,7 +22,6 @@ pub mod provider_snapshot;
 pub mod resolver;
 pub mod scalar_or_vec;
 pub mod template;
-pub mod transcript;
 pub mod verified_loader;
 
 pub use arg_binder::bind_argv;
@@ -46,19 +45,13 @@ pub use command::{
     InvocationInputContract, InvocationInputField, InvocationInputType, MatchedCommand,
 };
 pub use condition::{apply_operator, matches, resolve_path};
-pub use daemon_rpc::{
-    resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
-};
+pub use daemon_rpc::{resolve_daemon_socket_path, DaemonRpcClient, RpcError};
 pub use events::{RuntimeEventType, StorageClass};
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{merge_hooks, run_hooks, HookDispatcher};
 pub use hooks_loader::{HookDefinition, HooksLoader};
 pub use interpolation::{interpolate, interpolate_action, referenced_input_keys};
-pub use lillux::crypto::SigningKey;
-pub use paths::{
-    safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,
-};
+pub use paths::AI_DIR;
 pub use progress::{ProgressEvent, StatusEvent};
 pub use provider_snapshot::ResolvedProviderSnapshot;
 pub use resolver::{resolve_command, ResolveError, ResolvedCommand};
-pub use transcript::{KnowledgeRenderOptions, Transcript};

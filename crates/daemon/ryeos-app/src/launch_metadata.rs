@@ -39,10 +39,9 @@ pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 /// working dir is an ephemeral CAS checkout and fold-back skips
 /// `state/` and dotfile paths.
 ///
-/// `ryeos_runtime::thread_state_dir` is the project-relative path
-/// used by tool subprocesses for transcripts/knowledge (which DO
-/// fold back into CAS). This helper is the daemon-side counterpart
-/// for state that must NOT fold back.
+/// Runtime-specific transcript writers own any project-relative output that
+/// should fold back into CAS. This helper is only for daemon state that must
+/// remain outside that fold-back boundary.
 ///
 /// `RuntimeLaunchMetadata` and the resume-attempts counter both live
 /// in `runtime_db.thread_runtime` — the daemon's runtime ledger,

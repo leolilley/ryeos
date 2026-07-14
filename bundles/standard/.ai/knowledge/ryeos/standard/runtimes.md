@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:b71de4d6264949a365b89c3433f7932a0ff4bfb9b22a5d9558f92e9cd44f8763:/AZNksSoB2snspOwUalYDrH1FOC9KxXgXB1dQHJRg59U0DKEiBwp5Fv96VQxwom/CG4bTIZE5zbCfv8BeV3fDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:94f706955fb5d8dddb461640ce4db33925b72d5254944646b90251849f7f9c7d:XkbCoLEUDALKItZPKE3v5bgJpw/ZZmYUB9h7Mpnybwgt57WdrMrWTyL4rsk4Ip2hrLnhgr20+o0GjbjKj0zjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -10,9 +10,10 @@ description: >
 
 # Standard Bundle Runtimes
 
-The standard bundle declares three runtime binaries, each serving a
-different kind of workflow. They are native Linux x86_64 executables
-that communicate with the daemon via the `runtime_v1` protocol.
+The standard bundle declares three runtime binaries, each serving a different
+kind of workflow. They are native Linux x86_64 executables. Directive and graph
+use the ordinary `runtime_v1` workflow wire; knowledge uses the signed
+`method_runtime_v1` wire selected by its kind schema.
 
 Authorized runtime subprocesses are wrapped by the node's immutable sandbox
 snapshot when policy is enforced; runtime/item metadata cannot enable or
@@ -83,16 +84,25 @@ policy's daemon-validated `{checkpoint_dir}` mount instead. A custom
 **Serves:** `knowledge` (default)
 **Binary:** `bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime`
 **Required caps:** `runtime.execute`
-**Status:** V5.3 stub — full functionality in V5.4
+**Protocol:** schema-selected `method_runtime_v1`
 
-The knowledge runtime handles knowledge composition operations.
-Currently a placeholder that will be fully implemented in V5.4.
+The knowledge runtime handles bounded knowledge composition operations. The
+runtime registry selects this implementation binary, while the signed
+`knowledge` kind schema selects the `MethodCallEnvelope`/`MethodCallResult`
+wire used for both declared methods and composition launch augmentation. It is
+not directly launchable through the unrelated `runtime_v1` protocol.
 
-### Planned Operations
+### Operations
 - `compose` — assemble knowledge entries into a prompt context block
   within a token budget
-- `compose_positions` — compose knowledge at specific prompt positions
-  with per-position budgets
+- `query` — search the verified knowledge corpus
+- `graph` — inspect verified knowledge relationships
+- `validate` — validate the verified corpus and requested roots
+
+The daemon also invokes `compose_positions` through the private
+`compose_context_positions` launch augmentation to render specific prompt
+positions with per-position budgets. It is intentionally not a generically
+dispatchable method in the kind schema.
 
 ## Runtime Selection
 
@@ -102,11 +112,18 @@ When the daemon dispatches a directive or graph execution:
 3. The runtime registry finds a runtime that `serves` the kind
 4. The daemon spawns the runtime subprocess via `runtime_v1` protocol
 
+Method-bearing kinds use a parallel schema-driven path: the registry selects
+the runtime binary, and `execution.method_dispatch.protocol` selects the signed
+method wire. The daemon does not infer that protocol from the runtime name or
+kind name.
+
 Each kind has exactly one default runtime. Additional runtimes for
 the same kind can be registered but are not yet selected automatically.
 
 ## ABI Version
 
-All runtimes use ABI version `v1`. The `LaunchEnvelope` and
-`RuntimeResult` structures are versioned — breaking changes require
-a new ABI version.
+All runtime declarations use binary ABI version `v1`. The signed protocol
+selected for an invocation independently versions its wire:
+`runtime_v1` carries `LaunchEnvelope`/`RuntimeResult`, while
+`method_runtime_v1` carries `MethodCallEnvelope`/`MethodCallResult`. A breaking
+change requires a new applicable ABI/protocol version.

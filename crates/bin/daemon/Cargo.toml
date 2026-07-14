@@ -3,7 +3,7 @@ name = "ryeosd"
 version = "0.5.33"
 edition = "2021"
 description = "ryeosd daemon - Rust control plane for Rye OS"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/leolilley/ryeos"
 
 [lib]

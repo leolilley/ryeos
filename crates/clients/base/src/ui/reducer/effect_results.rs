@@ -14,13 +14,17 @@ impl RyeOsCore {
         let Some(expected) = self.pending_effects.remove(&result.id) else {
             return Vec::new();
         };
+        let completed_source_key = match &expected {
+            RyeOsEffectKind::FetchSource { tile_id, .. } => Some(tile_id.clone()),
+            _ => None,
+        };
 
         if !effect_result_kind_matches(&expected, &result.kind) {
             self.notice(
                 "RyeOS ignored a mismatched platform effect result.",
                 RyeOsTone::Warn,
             );
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
         if !result.ok {
@@ -28,7 +32,7 @@ impl RyeOsCore {
                 effect_failure_notice(&expected, result.error.as_deref()),
                 RyeOsTone::Danger,
             );
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         }
 
         if matches!(
@@ -42,15 +46,30 @@ impl RyeOsCore {
                 .as_ref()
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            return self.apply_invocation_result(&expected, result.kind, data);
+            let effects = self.apply_invocation_result(&expected, result.kind, data);
+            return self.finish_source_effect(completed_source_key.as_deref(), effects);
         }
 
         let Some(data) = result.data else {
             self.bump_generation();
-            return Vec::new();
+            return self.finish_source_effect(completed_source_key.as_deref(), Vec::new());
         };
 
-        self.apply_source_result(&expected, result.kind, result.id, data)
+        let effects = self.apply_source_result(&expected, result.kind, result.id, data);
+        self.finish_source_effect(completed_source_key.as_deref(), effects)
+    }
+
+    fn finish_source_effect(
+        &mut self,
+        completed_source_key: Option<&str>,
+        mut effects: Vec<RyeOsEffect>,
+    ) -> Vec<RyeOsEffect> {
+        if let Some(effect) = completed_source_key
+            .and_then(|source_key| self.release_deferred_source_fetch(source_key))
+        {
+            effects.push(effect);
+        }
+        effects
     }
 
     /// Effect batches resolve concurrently, so an older shared-dataset
@@ -274,19 +293,30 @@ impl RyeOsCore {
             }
             RyeOsEffectResultKind::SourceData => {
                 if let RyeOsEffectKind::FetchSource { tile_id, .. } = expected {
-                    // Freshness guard: only the newest request for this key may
-                    // land. An older fetch (e.g. the previously selected thread's
-                    // section) resolving late is dropped, so a reused single-lens
-                    // tile never shows mixed data from two selections.
-                    let is_latest = self
+                    // Freshness guard, two clauses:
+                    // - the floor refuses stragglers from before the key's
+                    //   subject changed (lens swap, drill return, selection
+                    //   facet write) — mixed-subject data can never land;
+                    // - within one subject, responses land MONOTONICALLY
+                    //   against what is stored. Requiring the NEWEST request
+                    //   here instead would starve any view whose query
+                    //   latency exceeds the hint-refetch cadence into a
+                    //   permanent "loading" — every response would arrive
+                    //   already superseded.
+                    let floor = self
                         .data
-                        .source_epoch
+                        .source_floor
                         .get(tile_id)
-                        .is_none_or(|&latest| result_id >= latest);
-                    if is_latest {
+                        .copied()
+                        .unwrap_or(0);
+                    let stored = self.data.source_stored_epoch.get(tile_id).copied();
+                    if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
+                        self.data
+                            .source_stored_epoch
+                            .insert(tile_id.clone(), result_id);
                         self.rebuild_timeline_source_cache(tile_id);
                     }
                     self.bump_generation();
@@ -447,6 +477,9 @@ impl RyeOsCore {
         self.data.tile_files.clear();
         self.data.sources.clear();
         self.data.source_epoch.clear();
+        self.data.source_stored_epoch.clear();
+        self.data.source_floor.clear();
+        self.deferred_source_fetches.clear();
         self.data.timeline_sources.clear();
         self.data.file_read = None;
         self.pending_effects
@@ -690,6 +723,7 @@ fn effect_depends_on_project_binding(kind: &RyeOsEffectKind) -> bool {
             | RyeOsEffectKind::ListFiles { .. }
             | RyeOsEffectKind::ReadFile { .. }
             | RyeOsEffectKind::DispatchInvocation { .. }
+            | RyeOsEffectKind::FetchSource { .. }
     )
 }
 
@@ -968,6 +1002,82 @@ mod tests {
         );
     }
 
+    /// Deliver a `SourceData` result carrying `{ "tag": <tag> }`.
+    fn deliver(core: &mut RyeOsCore, id: u64, tag: &str) {
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id,
+                ok: true,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: Some(serde_json::json!({ "tag": tag })),
+                error: None,
+            },
+        });
+    }
+
+    #[test]
+    fn superseded_first_response_still_lands_when_nothing_is_stored() {
+        // A refetch cadence faster than the query latency must not starve
+        // the view: the FIRST response to arrive renders even though a
+        // newer request is already in flight; the newer response then
+        // replaces it monotonically.
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/slow");
+        let older = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("fetch emitted");
+        let newer = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("fetch emitted");
+        assert!(newer.id > older.id);
+
+        deliver(&mut core, older.id, "first");
+        assert_eq!(
+            core.data.sources["K"]["tag"], "first",
+            "superseded-but-first response must render, not starve"
+        );
+        deliver(&mut core, newer.id, "second");
+        assert_eq!(core.data.sources["K"]["tag"], "second");
+    }
+
+    #[test]
+    fn facet_write_floor_refuses_pre_write_stragglers() {
+        // Even with the store empty after eviction, a response from a fetch
+        // issued BEFORE the facet write (the old subject) must not land.
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "rows",
+                "refresh": { "on_facet": "selection" },
+                "source": { "ref": "service:test/detail", "params": {}, "collection": "rows" }
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec {
+            view_ref: "view:test/detail".to_string(),
+        });
+        let key = tile_id.0.to_string();
+        let pre_write = core
+            .emit_fetch_source_keyed(key.clone(), "view:test/detail")
+            .pop()
+            .expect("fetch emitted");
+
+        let refetch = core.effects_for_facet("selection");
+        assert!(!refetch.is_empty(), "facet write refetches the subscriber");
+
+        deliver(&mut core, pre_write.id, "old-subject");
+        assert!(
+            core.data.sources.get(&key).is_none(),
+            "pre-write straggler must be refused by the floor"
+        );
+        let fresh = refetch.last().expect("refetch effect");
+        deliver(&mut core, fresh.id, "new-subject");
+        assert_eq!(core.data.sources[&key]["tag"], "new-subject");
+    }
+
     #[test]
     fn refetching_a_sections_view_keeps_prior_data_while_pending() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
@@ -1037,10 +1147,10 @@ mod tests {
         let effects = core.effects_for_facet("selection");
 
         assert!(
-            core.data.sources.get(&k0).is_none(),
+            !core.data.sources.contains_key(&k0),
             "old subject's section payload must not survive a facet write"
         );
-        assert!(core.data.sources.get(&k1).is_none());
+        assert!(!core.data.sources.contains_key(&k1));
         assert_eq!(effects.len(), 2, "one fresh fetch per section");
     }
 

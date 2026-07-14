@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-07-14T02:22:19Z:5d56177b2c560387c48a7219ac0c0b64d5746e7e54689f94e7bb3fd2d41d7ae0:D3Xx4Sw9o5LNU8wY7q7PKYnk9xf62wKaYlguQ8Aj7hsvtOb59vYrIXqRUftLukbrbEZ4El7Z3wEuNbf3sOT3Cg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:96742b8f0baed892c696bdef9a0ffc1cbcdf8170cf49e030dc549f4954b5fee7:xkLF6YFhpVXc1J3r4px7zxsDntBh899NbW0de+cJ+uoG1TpAv23G6uJTN5CA79ijq3FtOKEXZiRo/i24M3l2Aw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.4.0"
+version: "0.5.0"
 description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around the implemented node-owned process sandbox.
 tags:
   - hosted-node
@@ -32,6 +32,12 @@ deferred; host PIDs remain visible to syscalls; same-UID signal isolation is not
 claimed; and transitive imports, libraries, and assets remain live read-only
 views rather than content-pinned artifacts. A deployment that runs hostile
 workloads must still add cgroups plus a VM, microVM, or dedicated outer worker.
+
+Durable process attachment closes PID-reuse races after publication, but not
+the crash window between kernel process creation and that publication. A daemon
+`SIGKILL` in the window can leave an untracked local group. The future outer
+worker/cgroup must own launch placement and whole-workload teardown so recovery
+does not depend on a row the daemon may never have committed.
 
 The complete hosted-node boundary remains deployment-shaped:
 principal-specific identity and isolation, authenticated network peers,
@@ -120,7 +126,8 @@ Do not describe a deployment as hostile multi-tenant until it has, at minimum:
 - a decision on whether transitive code/assets must be closure-pinned or are
   acceptable as an admitted immutable image/snapshot; and
 - failure semantics that tear down the cgroup/worker and reconcile durable job
-  state without reusing leaked authority.
+  state without reusing leaked authority, including daemon death before durable
+  process attachment.
 
 ## Trigger
 

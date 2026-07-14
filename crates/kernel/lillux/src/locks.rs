@@ -16,7 +16,7 @@ pub fn with_exclusive_file_lock<T>(
         let lock = ExclusiveFileLock::acquire(target)?;
         let result = operation();
         drop(lock);
-        return result;
+        result
     }
 
     #[cfg(not(unix))]

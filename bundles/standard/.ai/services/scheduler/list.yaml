@@ -1,7 +1,8 @@
-# ryeos:signed:2026-06-11T21:03:06Z:5d7cd1526ba98a51b7d439556e1f0447b7bf7db30333674fe557ccdde5732773:CRSW87iv19GO86+FXNPzP/nMkmupJ45QZ8kfsl/VS/l3dLg8iJWx5qht2WkHt/jHB6Zt7f9W5D6X2B5WSEGMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:7163219370c860d6bb5d27dcc28ac6ca69285d14e7bba89abd58ff954521264b:5XORxTLNs5knRwbQYiYJeAPIJcmmOm2Zv6v4L1Ng8zYZUA4ltKylx+byjtaMpWkq9KGEOs/zBYo2yV5W+/aeDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "list"
 kind: service
 endpoint: scheduler.list
+ui_read_only: true
 required_caps: []
 description: "List all registered schedules"

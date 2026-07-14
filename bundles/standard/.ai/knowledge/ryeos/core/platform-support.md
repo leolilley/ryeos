@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:650e5cb45baef13524ab899322372592ac949969715a2f7d05db2b1f9615a141:+yemIL8+GRJ9WwJNHtFv29u1MqNWr1NGegJ+vteAU5/J7TD+Ufdrg/Nv8gnglZ0CWyqKalUb9Oc/NO4QeLQICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:e4d1b43bbf2ff391a9b3c6662b75acd8383352bb30f63cab5afbf3c0fcf72fe4:OeK94lm85laGVUuvXLRZ6cIHwvAjhDqeFTcOv2cLc7X1sH1nCggPStsVE5/OOWItUqzKvXepxQaJcSFkLQnzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Supported RyeOS host, architecture, packaging, container, sandbox, and
   filesystem boundaries.
@@ -19,14 +19,17 @@ not mean every distribution currently runs on every operating system or CPU.
 
 | Platform | Package/image support | Node execution support | Notes |
 |---|---|---|---|
-| Linux x86-64, glibc | Supported | Supported | Current bundle binaries target `x86_64-unknown-linux-gnu`. Bubblewrap is optional unless sandbox policy uses `mode: enforce`. |
-| Linux x86-64 container (`linux/amd64`) | Supported | Supported | Default-disabled sandboxing needs no extra capability; enforced mode needs the documented namespace, seccomp, and AppArmor profile. Published images are single-platform. |
+| Linux 6.9+, x86-64, glibc | Supported | Supported | Current bundle binaries target `x86_64-unknown-linux-gnu`. Bubblewrap is optional unless sandbox policy uses `mode: enforce`. |
+| Linux 6.9+ x86-64 container (`linux/amd64`) | Supported | Supported | The host kernel supplies the node's pidfd contract. Default-disabled sandboxing needs no extra capability; enforced mode needs the documented namespace, seccomp, and AppArmor profile. Published images are single-platform. |
 | Linux AArch64 | Not yet distributed | Not yet supported as a complete node distribution | Host-triple vocabulary exists, but official bundles do not ship AArch64 binaries. |
 | Linux musl | Not yet distributed | Not yet supported as a complete node distribution | Official bundle binaries currently target glibc. |
 | macOS and other Unix systems | Not distributed | Not supported | Some libraries have Unix fallbacks, but the complete distribution depends on Linux-target payloads and Linux-only activation/durability guarantees. Enforced Bubblewrap mode is Linux-only. |
 | Windows | Not distributed | Not supported | Process isolation and several filesystem guarantees do not have a production backend. |
 
-The supported Linux node requires atomic bundle replacement through
+The supported Linux node requires kernel 6.9 or newer, including
+`PIDFD_SIGNAL_PROCESS_GROUP` and `SO_PEERPIDFD`. Daemon startup probes both and
+fails before launching work when either is unavailable; there is no reusable
+numeric-PID signal fallback. It also requires atomic bundle replacement through
 `renameat2(RENAME_EXCHANGE)`. When sandbox policy is `mode: enforce`,
 an unprivileged Bubblewrap 0.11.0-or-newer installation must also be present
 and permitted to create its configured user and other namespaces. Setuid, setgid, and

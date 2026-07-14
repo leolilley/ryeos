@@ -1,15 +1,19 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::policy::validate_decrypted_keys;
+use crate::policy::{validate_decrypted_keys, MAX_VAULT_ENVELOPE_BYTES, MAX_VAULT_PLAINTEXT_BYTES};
+pub use lillux::vault::MAX_VAULT_KEY_FILE_BYTES;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct RewrapJournal {
     version: u32,
     store_present: bool,
 }
+
+const MAX_REWRAP_JOURNAL_BYTES: u64 = 4 * 1024;
 
 fn rewrap_journal_path(store_path: &Path) -> std::path::PathBuf {
     store_path.with_extension("rewrap-journal.toml")
@@ -72,8 +76,12 @@ pub fn recover_rewrap(key_path: &Path, public_key_path: &Path, store_path: &Path
     if !journal_path.exists() {
         return cleanup_staged_rewrap_files(key_path, public_key_path, store_path);
     }
-    let journal_raw = std::fs::read_to_string(&journal_path)
-        .with_context(|| format!("read rewrap journal {}", journal_path.display()))?;
+    let journal_raw = String::from_utf8(read_bounded_file(
+        &journal_path,
+        MAX_REWRAP_JOURNAL_BYTES,
+        "rewrap journal",
+    )?)
+    .with_context(|| format!("rewrap journal {} is not UTF-8", journal_path.display()))?;
     let journal: RewrapJournal = toml::from_str(&journal_raw)
         .with_context(|| format!("parse rewrap journal {}", journal_path.display()))?;
     if journal.version != 1 {
@@ -107,13 +115,19 @@ pub fn recover_rewrap(key_path: &Path, public_key_path: &Path, store_path: &Path
     if journal.store_present {
         read_sealed_secrets(&store_backup, &old_key)
             .context("rewrap backup generation is not readable")?;
-        let store_bytes = std::fs::read(&store_backup)
-            .with_context(|| format!("read {}", store_backup.display()))?;
+        let store_bytes = read_bounded_file(
+            &store_backup,
+            MAX_VAULT_ENVELOPE_BYTES,
+            "sealed envelope backup",
+        )?;
         lillux::atomic_write_private(store_path, &store_bytes)
             .context("restore sealed store after interrupted rewrap")?;
     }
-    let key_bytes =
-        std::fs::read(&key_backup).with_context(|| format!("read {}", key_backup.display()))?;
+    let key_bytes = read_bounded_file(
+        &key_backup,
+        MAX_VAULT_KEY_FILE_BYTES,
+        "vault secret-key backup",
+    )?;
     lillux::atomic_write_private(key_path, &key_bytes)
         .context("restore secret key after interrupted rewrap")?;
     lillux::vault::write_public_key(public_key_path, &old_key.public_key())
@@ -127,13 +141,26 @@ pub fn prepare_rewrap(key_path: &Path, public_key_path: &Path, store_path: &Path
     let public_backup = rewrap_backup_path(public_key_path);
     let store_backup = rewrap_backup_path(store_path);
 
-    lillux::atomic_write_private(&key_backup, &std::fs::read(key_path)?)?;
+    lillux::atomic_write_private(
+        &key_backup,
+        &read_bounded_file(key_path, MAX_VAULT_KEY_FILE_BYTES, "vault secret key")?,
+    )?;
     if public_key_path.exists() {
-        lillux::atomic_write(&public_backup, &std::fs::read(public_key_path)?)?;
+        lillux::atomic_write(
+            &public_backup,
+            &read_bounded_file(
+                public_key_path,
+                MAX_VAULT_KEY_FILE_BYTES,
+                "vault public key",
+            )?,
+        )?;
     }
     let store_present = store_path.exists();
     if store_present {
-        lillux::atomic_write_private(&store_backup, &std::fs::read(store_path)?)?;
+        lillux::atomic_write_private(
+            &store_backup,
+            &read_bounded_file(store_path, MAX_VAULT_ENVELOPE_BYTES, "sealed envelope")?,
+        )?;
     }
     let journal = toml::to_string(&RewrapJournal {
         version: 1,
@@ -168,13 +195,29 @@ pub fn write_sealed_secrets(
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     let mut plaintext_toml = String::new();
     for (k, v) in &sorted {
-        plaintext_toml.push_str(&format!("{k} = {}\n", toml_quote(v)));
+        let line = format!("{k} = {}\n", toml_quote(v));
+        let next_len = plaintext_toml
+            .len()
+            .checked_add(line.len())
+            .ok_or_else(|| anyhow!("vault: plaintext size overflow"))?;
+        if next_len > MAX_VAULT_PLAINTEXT_BYTES {
+            anyhow::bail!(
+                "vault: serialized plaintext is {next_len} bytes; maximum is {MAX_VAULT_PLAINTEXT_BYTES}"
+            );
+        }
+        plaintext_toml.push_str(&line);
     }
 
     let envelope = lillux::vault::seal(vault_pk, plaintext_toml.as_bytes())
         .map_err(|e| anyhow!("vault: seal failed: {e:#}"))?;
     let envelope_toml =
         toml::to_string(&envelope).map_err(|e| anyhow!("vault: serialize envelope: {e}"))?;
+    if envelope_toml.len() as u64 > MAX_VAULT_ENVELOPE_BYTES {
+        anyhow::bail!(
+            "vault: serialized envelope is {} bytes; maximum is {MAX_VAULT_ENVELOPE_BYTES}",
+            envelope_toml.len()
+        );
+    }
 
     lillux::atomic_write_private(store_path, envelope_toml.as_bytes())
         .map_err(|e| anyhow!("vault: write sealed store {}: {e:#}", store_path.display()))
@@ -187,18 +230,63 @@ pub fn read_sealed_secrets(
     if !store_path.exists() {
         return Ok(HashMap::new());
     }
-    let raw = std::fs::read_to_string(store_path)
-        .with_context(|| format!("read {}", store_path.display()))?;
+    let raw = read_bounded_envelope(store_path)?;
     let envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw)
         .with_context(|| format!("parse envelope TOML at {}", store_path.display()))?;
     let plaintext =
         lillux::vault::open(sk, &envelope).map_err(|e| anyhow!("open envelope: {e:#}"))?;
+    if plaintext.len() > MAX_VAULT_PLAINTEXT_BYTES {
+        anyhow::bail!(
+            "vault: decrypted plaintext is {} bytes; maximum is {MAX_VAULT_PLAINTEXT_BYTES}",
+            plaintext.len()
+        );
+    }
     let plaintext_str =
         std::str::from_utf8(&plaintext).context("decrypted plaintext is not UTF-8")?;
     let map: HashMap<String, String> =
         toml::from_str(plaintext_str).context("decrypted plaintext is not a TOML map")?;
     validate_decrypted_keys(&map, store_path)?;
     Ok(map)
+}
+
+fn read_bounded_envelope(store_path: &Path) -> Result<String> {
+    String::from_utf8(read_bounded_file(
+        store_path,
+        MAX_VAULT_ENVELOPE_BYTES,
+        "sealed envelope",
+    )?)
+    .with_context(|| format!("sealed envelope {} is not UTF-8", store_path.display()))
+}
+
+/// Read a vault-related file without trusting a potentially stale metadata
+/// length. Rewrap activation uses this for its generated staging files too, so
+/// a same-UID replacement cannot turn the final copy into an unbounded read.
+pub fn read_bounded_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let envelope_len = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    if envelope_len > maximum {
+        anyhow::bail!(
+            "vault: {label} {} is {envelope_len} bytes; maximum is {maximum}",
+            path.display()
+        );
+    }
+    let initial_capacity = usize::try_from(envelope_len)
+        .unwrap_or(0)
+        .min(maximum as usize);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    file.take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() as u64 > maximum {
+        anyhow::bail!(
+            "vault: {label} {} exceeds the {maximum}-byte maximum",
+            path.display()
+        );
+    }
+    Ok(bytes)
 }
 
 fn toml_quote(s: &str) -> String {
@@ -299,6 +387,23 @@ mod tests {
         assert!(
             msg.contains("open envelope"),
             "corruption should surface as an open failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_rejects_oversized_envelope_before_allocation() {
+        let key = VaultSecretKey::generate();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tmp.path().join("oversized-store.enc");
+        std::fs::File::create(&store)
+            .unwrap()
+            .set_len(MAX_VAULT_ENVELOPE_BYTES + 1)
+            .unwrap();
+
+        let error = read_sealed_secrets(&store, &key).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("maximum"),
+            "oversized envelope should fail at the file bound: {error:#}"
         );
     }
 

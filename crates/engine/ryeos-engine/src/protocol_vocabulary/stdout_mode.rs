@@ -16,6 +16,7 @@ pub enum StdoutMode {
 /// | --------------------- | -------- | --------- |
 /// | opaque_bytes          | YES      | NO        |
 /// | runtime_result_v1     | YES      | NO        |
+/// | method_call_result_v1 | YES      | NO        |
 /// | streaming_chunks_v1   | NO       | YES       |
 pub fn is_compatible_shape_mode(
     shape: StdoutShape,
@@ -24,6 +25,7 @@ pub fn is_compatible_shape_mode(
     match (shape, mode) {
         (StdoutShape::OpaqueBytes, StdoutMode::Terminal) => Ok(()),
         (StdoutShape::RuntimeResultV1, StdoutMode::Terminal) => Ok(()),
+        (StdoutShape::MethodCallResultV1, StdoutMode::Terminal) => Ok(()),
         (StdoutShape::StreamingChunksV1, StdoutMode::Streaming) => Ok(()),
         (shape, mode) => Err(VocabularyError::StdoutShapeModeMismatch {
             shape: format!("{:?}", shape),
@@ -58,6 +60,12 @@ mod tests {
             (StdoutShape::OpaqueBytes, StdoutMode::Streaming, false),
             (StdoutShape::RuntimeResultV1, StdoutMode::Terminal, true),
             (StdoutShape::RuntimeResultV1, StdoutMode::Streaming, false),
+            (StdoutShape::MethodCallResultV1, StdoutMode::Terminal, true),
+            (
+                StdoutShape::MethodCallResultV1,
+                StdoutMode::Streaming,
+                false,
+            ),
             (StdoutShape::StreamingChunksV1, StdoutMode::Terminal, false),
             (StdoutShape::StreamingChunksV1, StdoutMode::Streaming, true),
         ];

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:20Z:693abe16bf70d6bb6323937f2b22b2869c613fa89e2ec4c0a07d36b625178f19:WIznNjCubK3bJGFLT1BGp9kiRQ+4n3A05upq1A62TsZzTaRE3BG370ssZJ160x/KGxm08LjhUeR1xu7ejFY1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-13T10:38:44Z:19eb22ad51f0de5459fd81a17191e6101ff38c4f3d63bb6190fb629120525600:QEHiYrQIU6temEgTxvurZTjsS5eftTsqXTnOOHQZ/fsrt7x14DWsSJYuEC6zddap28MVYGV6v18xDa40KBaZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Transcript
 version: "1.0.0"
@@ -16,9 +16,9 @@ source:
 projections:
   expand:
     fields:
+      - payload.payload.key
+      - payload.payload.value
       - event_type
-      - thread_id
-      - chain_root_id
       - chain_seq
       - payload.graph_run_id
       - payload.node
@@ -32,6 +32,10 @@ projections:
       - payload.uri
       - payload.content_hash
   event_kinds:
+    seat.facet:
+      primary: payload.payload.key
+      meta: event_type
+      role: boundary
     cognition_out:
       primary: payload.content
       role: flow

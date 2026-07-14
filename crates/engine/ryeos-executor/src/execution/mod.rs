@@ -11,6 +11,7 @@ pub mod launch;
 pub mod launch_envelope;
 pub mod lillux_bridge;
 pub mod limits;
+pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;

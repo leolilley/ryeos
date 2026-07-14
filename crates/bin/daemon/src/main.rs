@@ -100,7 +100,8 @@ async fn main() -> Result<()> {
     }
 
     let mut config = Config::load(&cli.to_sources())?;
-    ryeosd::init_shutdown_channel();
+    ryeos_app::process::validate_durable_process_control_support()
+        .context("host does not satisfy RyeOS durable process-control requirements")?;
 
     // Verify operator-owned node initialization before any local repairs
     // or runtime-state writes. `ryeos init` is authoritative for bundle
@@ -121,6 +122,17 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // Install OS signal listeners before slow bootstrap/reconciliation. Tokio's
+    // signal handler is registered when this spawned future is first polled;
+    // buffering the result in a watch channel prevents SIGTERM during startup
+    // from taking the default, uncoordinated exit path.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_shutdown_tx = shutdown_tx.clone();
+    let signal_task = tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = signal_shutdown_tx.send(true);
+    });
 
     // Acquire the daemon state lock BEFORE unlinking any sockets or
     // writing runtime state. This prevents a second `ryeosd` (or
@@ -173,8 +185,16 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Resolve the sandbox exactly once. Engine-owned parser/composer handlers
+    // and ordinary execution share this immutable node-policy snapshot.
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load_for_daemon(&config.app_root, &config.uds_path)
+            .context("load node sandbox policy")?,
+    );
+
     // ── Two-phase node-config bootstrap ──
-    let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
+    let (engine, node_config_snapshot) =
+        bootstrap::load_node_config_two_phase(&config, Arc::clone(&sandbox))?;
 
     // Build the service registry early — self-check needs it.
     let services = Arc::new(build_service_registry());
@@ -303,8 +323,7 @@ async fn main() -> Result<()> {
     // Build UI state (browser sessions + session bus).
     let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
     let ui_state_for_hints = ui_state.clone();
-    let prospective_node_config_validator =
-        prospective_node_config_validator(ui_state.clone());
+    let prospective_node_config_validator = prospective_node_config_validator(ui_state.clone());
 
     // Build the route table from the node-config snapshot.
     let route_table = {
@@ -405,11 +424,6 @@ async fn main() -> Result<()> {
 
     let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
-    let sandbox = Arc::new(
-        ryeos_engine::sandbox::SandboxRuntime::load_for_daemon(&config.app_root, &config.uds_path)
-            .context("load node sandbox policy")?,
-    );
-
     // Bind the TCP listener BEFORE constructing AppState so the
     // status endpoint reports the actual bound address (when the
     // operator passes `:0`, the kernel assigns an ephemeral port).
@@ -477,6 +491,17 @@ async fn main() -> Result<()> {
             }
         },
     };
+    // Once the StateStore exists, bind the early signal channel to the durable
+    // admission gate. This task covers the rest of startup, before listeners or
+    // recovery launches reach the final coordinator select.
+    let admission_store = app_state.state_store.clone();
+    let admission_shutdown = shutdown_rx.clone();
+    let admission_task = tokio::spawn(async move {
+        wait_for_shutdown(admission_shutdown).await;
+        if let Err(error) = admission_store.close_process_attachment_admission() {
+            tracing::error!(error = %error, "failed to close admission from signal coordinator");
+        }
+    });
     let webhook_dedupe = Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
 
     // Session hints: lifecycle events fan out immediately; mid-run braid
@@ -498,11 +523,16 @@ async fn main() -> Result<()> {
                                 if ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
                                     &event.event_type,
                                 ) {
+                                    let status = ryeos_api::routes::invokers::stream_helpers::lifecycle_status(
+                                        &event.event_type,
+                                    );
                                     let payload = serde_json::json!({
                                         "kind": "thread",
-                                        "thread_id": event.thread_id,
-                                        "chain_root_id": event.chain_root_id,
-                                        "event_type": event.event_type,
+                                        "thread_id": &event.thread_id,
+                                        "chain_root_id": &event.chain_root_id,
+                                        "event_type": &event.event_type,
+                                        "status": status,
+                                        "updated_at": &event.ts,
                                     });
                                     for session_id in ui.browser_sessions.session_ids() {
                                         ui.session_bus.publish(
@@ -629,11 +659,16 @@ async fn main() -> Result<()> {
     }
 
     let uds_state = Arc::new(app_state.clone());
-    let uds_task = tokio::spawn(async move { uds::server::serve(uds_listener, uds_state).await });
+    let mut uds_task = tokio::spawn(uds::server::serve(
+        uds_listener,
+        uds_state,
+        shutdown_rx.clone(),
+    ));
 
     let repair_store = app_state.state_store.clone();
+    let repair_shutdown = shutdown_rx.clone();
     let mut projection_repair_task = tokio::spawn(async move {
-        ryeos_app::projection_repair::run(repair_store, shutdown_signal()).await
+        ryeos_app::projection_repair::run(repair_store, wait_for_shutdown(repair_shutdown)).await
     });
 
     // HTTP server is started BEFORE dispatching resume intents.
@@ -642,10 +677,10 @@ async fn main() -> Result<()> {
     // makes its first callback. Spawning the serve future here, then
     // selecting on it below, ensures the accept loop is live before
     // any reconciler-spawned child can start.
-    let shutdown = shutdown_signal();
-    let http_task = tokio::spawn(async move {
+    let http_shutdown = shutdown_rx.clone();
+    let mut http_task = tokio::spawn(async move {
         serve(tcp_listener, app)
-            .with_graceful_shutdown(shutdown)
+            .with_graceful_shutdown(wait_for_shutdown(http_shutdown))
             .await
     });
 
@@ -656,220 +691,312 @@ async fn main() -> Result<()> {
     // `drain_running_threads` covers them. Failures finalize the
     // thread immediately so it never sits in a non-terminal state
     // until the next daemon restart.
-    for intent in resume_intents {
-        let st = app_state.clone();
-        let threads = app_state.threads.clone();
-        tokio::spawn(async move {
-            // Continuation successor (machine handoff stranded by a crash):
-            // `launch_successor` claims the lease, rebuilds from the captured
-            // ResumeContext, runs the existing row, and finalizes it itself on a
-            // pre-run defect — so it needs only the thread id, not a rebuilt
-            // ExecutionParams.
-            if intent.kind != reconcile::ResumeKind::NativeResume {
-                use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
-                // Machine folds the chain (no stimulus); operator injects the
-                // seeded operator input. Both are claim-guarded — a duplicate with
-                // the live launch is a benign `Skipped`.
-                let outcome = match intent.kind {
-                    reconcile::ResumeKind::OperatorContinuation => {
-                        ryeos_executor::execution::launch::launch_operator_successor(
+    let mut startup_error: Option<anyhow::Error> = None;
+    if !*shutdown_rx.borrow() {
+        for intent in resume_intents {
+            let st = app_state.clone();
+            let threads = app_state.threads.clone();
+            tokio::spawn(async move {
+                // Continuation successor (machine handoff stranded by a crash):
+                // `launch_successor` claims the lease, rebuilds from the captured
+                // ResumeContext, runs the existing row, and finalizes it itself on a
+                // pre-run defect — so it needs only the thread id, not a rebuilt
+                // ExecutionParams.
+                if intent.kind != reconcile::ResumeKind::NativeResume {
+                    use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+                    // Machine folds the chain (no stimulus); operator injects the
+                    // seeded operator input. Both are claim-guarded — a duplicate with
+                    // the live launch is a benign `Skipped`.
+                    let outcome = match intent.kind {
+                        reconcile::ResumeKind::OperatorContinuation => {
+                            ryeos_executor::execution::launch::launch_operator_successor(
+                                st,
+                                &intent.thread_id,
+                            )
+                            .await
+                        }
+                        _ => {
+                            ryeos_executor::execution::launch::launch_successor(
+                                st,
+                                &intent.thread_id,
+                            )
+                            .await
+                        }
+                    };
+                    match outcome {
+                        Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+                        Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                            tracing::debug!(
+                                thread_id = %intent.thread_id,
+                                reason,
+                                "reconcile: successor launch skipped"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                thread_id = %intent.thread_id,
+                                error = %err,
+                                "reconcile: successor launch failed"
+                            );
+                        }
+                    }
+                    return;
+                }
+                // NativeResume routing. A runtime-registry kind (e.g. graph) captured
+                // a `runtime_ref` and MUST resume through the managed launch path,
+                // which builds the `LaunchEnvelope` the runtime reads from stdin — the
+                // executor-chain `run_existing_detached`/`spawn_item` path below cannot
+                // build one. A tool-subprocess native_resume (no `runtime_ref`) keeps
+                // that path.
+                if intent.resume_context.runtime_ref.is_some() {
+                    if let Err(err) =
+                        ryeos_executor::execution::launch::launch_existing_native_resume(
                             st,
                             &intent.thread_id,
                         )
                         .await
-                    }
-                    _ => {
-                        ryeos_executor::execution::launch::launch_successor(st, &intent.thread_id)
-                            .await
-                    }
-                };
-                match outcome {
-                    Ok(SuccessorLaunchOutcome::Launched(_)) => {}
-                    Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
-                        tracing::debug!(
-                            thread_id = %intent.thread_id,
-                            reason,
-                            "reconcile: successor launch skipped"
-                        );
-                    }
-                    Err(err) => {
+                    {
                         tracing::error!(
                             thread_id = %intent.thread_id,
                             error = %err,
-                            "reconcile: successor launch failed"
+                            "resume: managed native resume failed"
                         );
                     }
+                    return;
                 }
-                return;
-            }
-            // NativeResume routing. A runtime-registry kind (e.g. graph) captured
-            // a `runtime_ref` and MUST resume through the managed launch path,
-            // which builds the `LaunchEnvelope` the runtime reads from stdin — the
-            // executor-chain `run_existing_detached`/`spawn_item` path below cannot
-            // build one. A tool-subprocess native_resume (no `runtime_ref`) keeps
-            // that path.
-            if intent.resume_context.runtime_ref.is_some() {
-                if let Err(err) = ryeos_executor::execution::launch::launch_existing_native_resume(
+                let params =
+                    match ryeos_executor::execution::runner::execution_params_from_resume_context(
+                        &st,
+                        &intent.resume_context,
+                    ) {
+                        Ok(p) => p,
+                        Err(err) => {
+                            tracing::error!(
+                                thread_id = %intent.thread_id,
+                                error = %err,
+                                "resume: failed to build ExecutionParams from ResumeContext — finalizing"
+                            );
+                            if let Err(fin_err) = threads.finalize_thread(
+                                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                                    thread_id: intent.thread_id.clone(),
+                                    status: "failed".to_string(),
+                                    outcome_code: Some("resume_rebuild_failed".to_string()),
+                                    result: None,
+                                    error: Some(serde_json::json!({
+                                        "code": "resume_rebuild_failed",
+                                        "message": err.to_string(),
+                                    })),
+                                    metadata: None,
+                                    artifacts: Vec::new(),
+                                    final_cost: None,
+                                    summary_json: None,
+                                },
+                            ) {
+                                tracing::warn!(
+                                    thread_id = %intent.thread_id,
+                                    error = %fin_err,
+                                    "resume: finalize after rebuild failure also failed"
+                                );
+                            }
+                            return;
+                        }
+                    };
+                if let Err(err) = ryeos_executor::execution::runner::run_existing_detached(
                     st,
-                    &intent.thread_id,
+                    intent.thread_id.clone(),
+                    intent.chain_root_id,
+                    params,
+                    intent.prior_status,
                 )
                 .await
                 {
                     tracing::error!(
                         thread_id = %intent.thread_id,
                         error = %err,
-                        "resume: managed native resume failed"
+                        "resume: dispatch failed"
                     );
                 }
-                return;
-            }
-            let params =
-                match ryeos_executor::execution::runner::execution_params_from_resume_context(
-                    &st,
-                    &intent.resume_context,
-                ) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        tracing::error!(
-                            thread_id = %intent.thread_id,
-                            error = %err,
-                            "resume: failed to build ExecutionParams from ResumeContext — finalizing"
-                        );
-                        if let Err(fin_err) = threads.finalize_thread(
-                            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                                thread_id: intent.thread_id.clone(),
-                                status: "failed".to_string(),
-                                outcome_code: Some("resume_rebuild_failed".to_string()),
-                                result: None,
-                                error: Some(serde_json::json!({
-                                    "code": "resume_rebuild_failed",
-                                    "message": err.to_string(),
-                                })),
-                                metadata: None,
-                                artifacts: Vec::new(),
-                                final_cost: None,
-                                summary_json: None,
-                            },
-                        ) {
-                            tracing::warn!(
-                                thread_id = %intent.thread_id,
-                                error = %fin_err,
-                                "resume: finalize after rebuild failure also failed"
-                            );
-                        }
-                        return;
-                    }
-                };
-            if let Err(err) = ryeos_executor::execution::runner::run_existing_detached(
-                st,
-                intent.thread_id.clone(),
-                intent.chain_root_id,
-                params,
-                intent.prior_status,
-            )
-            .await
-            {
-                tracing::error!(
-                    thread_id = %intent.thread_id,
-                    error = %err,
-                    "resume: dispatch failed"
-                );
-            }
-        });
-    }
+            });
+        }
 
-    // Drive the follow reconcile actions collected above. Each launch is claim-
-    // guarded, so a duplicate with a live path is a benign `Skipped`. `Resume`
-    // wakes a suspended parent; `RelaunchChild` re-fires a child stranded in the
-    // pre-launch window.
-    // Launch-window recovery: release slots whose member chain settled while
-    // no kick could land (crash window), then admit and launch queued
-    // members. Post-listener for the same reason as the intents above —
-    // launched runtimes call back immediately.
-    ryeos_executor::execution::launch::sweep_launch_windows(&app_state);
+        // Drive the follow reconcile actions collected above. Each launch is claim-
+        // guarded, so a duplicate with a live path is a benign `Skipped`. `Resume`
+        // wakes a suspended parent; `RelaunchChild` re-fires a child stranded in the
+        // pre-launch window.
+        // Launch-window recovery: release slots whose member chain settled while
+        // no kick could land (crash window), then admit and launch queued
+        // members. Post-listener for the same reason as the intents above —
+        // launched runtimes call back immediately.
+        ryeos_executor::execution::launch::sweep_launch_windows(&app_state);
 
-    dispatch_follow_actions(&app_state, follow_actions);
+        dispatch_follow_actions(&app_state, follow_actions);
 
-    // Periodic recovery sweep: a follow-resume kick that fails LIVE (e.g. a
-    // content re-sign racing a resume) must not strand a suspended run until
-    // the next daemon restart — reconcile_follow's stale-waiter re-drive and
-    // the launch-window sweep both need a mid-life cadence, not just boot.
-    // Everything driven here is idempotent and claim-guarded, so overlap
-    // with live kicks is a benign skip.
-    {
-        let st = app_state.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(120));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // The first tick fires immediately; boot already swept.
-            tick.tick().await;
-            loop {
+        // Periodic recovery sweep: a follow-resume kick that fails LIVE (e.g. a
+        // content re-sign racing a resume) must not strand a suspended run until
+        // the next daemon restart — reconcile_follow's stale-waiter re-drive and
+        // the launch-window sweep both need a mid-life cadence, not just boot.
+        // Everything driven here is idempotent and claim-guarded, so overlap
+        // with live kicks is a benign skip.
+        {
+            let st = app_state.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(120));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The first tick fires immediately; boot already swept.
                 tick.tick().await;
-                if let Err(err) = ryeos_app::cascade::repair_cancelled_window_members(&st) {
-                    tracing::warn!(error = %err, "cancelled launch-window repair failed");
-                }
-                match reconcile::reconcile_follow(&st) {
-                    Ok(actions) => dispatch_follow_actions(&st, actions),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "periodic follow sweep failed")
+                loop {
+                    tick.tick().await;
+                    if let Err(err) = ryeos_app::cascade::repair_cancelled_window_members(&st) {
+                        tracing::warn!(error = %err, "cancelled launch-window repair failed");
                     }
+                    match reconcile::reconcile_follow(&st) {
+                        Ok(actions) => dispatch_follow_actions(&st, actions),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "periodic follow sweep failed")
+                        }
+                    }
+                    ryeos_executor::execution::launch::sweep_launch_windows(&st);
                 }
-                ryeos_executor::execution::launch::sweep_launch_windows(&st);
+            });
+        }
+
+        if !*shutdown_rx.borrow() {
+            // ── Maintenance schedule: apply the bundle-authored GC schedule so the
+            // scheduler reconcile below projects it like any other node schedule.
+            if let Err(err) = maintenance_schedule::ensure_maintenance_schedule(&app_state) {
+                tracing::warn!(error = %err, "failed to apply maintenance schedule");
             }
-        });
+
+            // Once listeners and recovery tasks exist, errors must flow through the
+            // unified shutdown/drain epilogue rather than returning with `?`.
+            let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
+                app_state.clone(),
+            )));
+            let scheduler_result = {
+                let _scheduler_reconcile_guard =
+                    app_state.scheduler_runtime_gate.clone().write_owned().await;
+                scheduler::reconcile::reconcile(&scheduler_ctx).await
+            };
+            match scheduler_result {
+                Ok(scheduler_intents) => {
+                    for intent in scheduler_intents {
+                        let st = scheduler_ctx.clone();
+                        tokio::spawn(async move {
+                            scheduler::timer::dispatch_recovery_fire(st, intent).await;
+                        });
+                    }
+                    tokio::spawn(scheduler::timer::run(scheduler_ctx, scheduler_reload_rx));
+                    tracing::info!("scheduler: timer loop started");
+                }
+                Err(error) => {
+                    startup_error = Some(error.context("scheduler reconciliation failed"));
+                    let _ = shutdown_tx.send(true);
+                }
+            }
+        }
+    } else {
+        tracing::info!(
+            "shutdown was requested during startup; skipping recovery and scheduler launches"
+        );
     }
 
-    // ── Maintenance schedule: apply the bundle-authored GC schedule so the
-    // scheduler reconcile below projects it like any other node schedule. Runs
-    // before reconcile; never overwrites an operator-paused/edited spec. ──
-    if let Err(err) = maintenance_schedule::ensure_maintenance_schedule(&app_state) {
-        tracing::warn!(error = %err, "failed to apply maintenance schedule");
-    }
-
-    // ── Scheduler reconciliation + timer start ──
-    let scheduler_ctx = Arc::new(ryeosd::scheduler_impl::AppSchedulerContext(Arc::new(
-        app_state.clone(),
-    )));
-    let scheduler_intents = {
-        let _scheduler_reconcile_guard =
-            app_state.scheduler_runtime_gate.clone().write_owned().await;
-        scheduler::reconcile::reconcile(&scheduler_ctx).await?
-    };
-    for intent in scheduler_intents {
-        let st = scheduler_ctx.clone();
-        tokio::spawn(async move {
-            scheduler::timer::dispatch_recovery_fire(st, intent).await;
-        });
-    }
-
-    tokio::spawn(scheduler::timer::run(scheduler_ctx, scheduler_reload_rx));
-    tracing::info!("scheduler: timer loop started");
-
+    let mut http_finished = false;
+    let mut uds_finished = false;
+    let mut exit_error = startup_error;
     tokio::select! {
-        result = http_task => {
-            result
-                .context("http task join failed")?
-                .context("http server exited unexpectedly")?;
+        biased;
+        _ = wait_for_shutdown(shutdown_rx.clone()) => {}
+        result = &mut http_task => {
+            http_finished = true;
+            if !*shutdown_rx.borrow() {
+                exit_error = Some(match result {
+                    Ok(Ok(())) => anyhow::anyhow!("http server exited unexpectedly"),
+                    Ok(Err(error)) => anyhow::Error::new(error).context("http server failed"),
+                    Err(error) => anyhow::Error::new(error).context("http task join failed"),
+                });
+            }
         }
-        result = uds_task => {
-            result.context("uds task join failed")??;
+        result = &mut uds_task => {
+            uds_finished = true;
+            if !*shutdown_rx.borrow() {
+                exit_error = Some(match result {
+                    Ok(Ok(())) => anyhow::anyhow!("UDS server exited unexpectedly"),
+                    Ok(Err(error)) => error.context("UDS server failed"),
+                    Err(error) => anyhow::Error::new(error).context("UDS task join failed"),
+                });
+            }
         }
     }
 
-    if tokio::time::timeout(Duration::from_secs(5), &mut projection_repair_task)
+    // This lock acquisition is the shutdown linearization point. It waits for
+    // every already-admitted attach/create/finalize mutation, then closes all
+    // later work before either listener is told to stop accepting.
+    if let Err(error) = app_state.state_store.close_process_attachment_admission() {
+        tracing::error!(error = %error, "failed to close shutdown admission");
+        if exit_error.is_none() {
+            exit_error = Some(error.context("close shutdown admission"));
+        }
+    }
+    let _ = shutdown_tx.send(true);
+
+    // All three tasks received the shutdown notification together. Reuse one
+    // absolute deadline while collecting them so a stuck listener and a stuck
+    // projection repair cannot each consume a fresh five-second allowance
+    // before process draining even begins.
+    // Keep one second of the CLI's default ten-second stop window outside the
+    // listener budget for exact SIGKILL verification and final marker/socket
+    // cleanup after the process-drain grace.
+    const COORDINATOR_SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
+    let coordinator_deadline = Instant::now()
+        .checked_add(COORDINATOR_SHUTDOWN_GRACE)
+        .unwrap_or_else(Instant::now);
+    if !http_finished
+        && tokio::time::timeout(
+            coordinator_deadline.saturating_duration_since(Instant::now()),
+            &mut http_task,
+        )
         .await
         .is_err()
     {
-        projection_repair_task.abort();
-        let _ = projection_repair_task.await;
+        tracing::warn!("HTTP graceful shutdown timed out; aborting server task");
+        http_task.abort();
+    }
+    if !uds_finished
+        && tokio::time::timeout(
+            coordinator_deadline.saturating_duration_since(Instant::now()),
+            &mut uds_task,
+        )
+        .await
+        .is_err()
+    {
+        tracing::warn!("UDS shutdown timed out; aborting server task");
+        uds_task.abort();
+        // Propagate cancellation through `serve` so dropping its JoinSet aborts
+        // every remaining wire task before process attachment draining begins.
+        // A decoded request's independently spawned execution owner is detached
+        // by that drop and remains governed by the closed attachment gate.
+        let _ = (&mut uds_task).await;
     }
 
-    // Record a clean, handled shutdown so the next startup can distinguish it
-    // from a crash/SIGKILL (which leaves the `running` marker behind).
-    lifecycle_marker::record_exit(&state_dir, "signal");
+    if tokio::time::timeout(
+        coordinator_deadline.saturating_duration_since(Instant::now()),
+        &mut projection_repair_task,
+    )
+    .await
+    .is_err()
+    {
+        projection_repair_task.abort();
+    }
 
     // Drain running threads on shutdown
-    drain_running_threads(&app_state);
+    if drain_running_threads(&app_state).await {
+        // Record a clean, handled shutdown only after every attached identity
+        // was proven terminated and cleared. A partial drain deliberately
+        // leaves the running marker for conservative startup recovery.
+        lifecycle_marker::record_exit(&state_dir, "signal");
+    } else {
+        tracing::error!("shutdown drain incomplete; preserving unclean lifecycle marker");
+    }
 
     // Cleanup daemon.json
     let _ = std::fs::remove_file(&daemon_json_path);
@@ -878,6 +1005,13 @@ async fn main() -> Result<()> {
         let _ = std::fs::remove_file(&config.uds_path);
     }
 
+    if let Some(error) = exit_error {
+        admission_task.abort();
+        signal_task.abort();
+        return Err(error);
+    }
+    admission_task.abort();
+    signal_task.abort();
     Ok(())
 }
 
@@ -971,62 +1105,141 @@ fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowRecon
     });
 }
 
-fn drain_running_threads(state: &AppState) {
-    // Include `created`: a runtime registers its pgid (attach_process) BEFORE
-    // it marks running, so there is a brief `created` + live-pgid window. The
-    // kill loop below only acts on rows with `Some(pgid)`, so unlaunched
-    // `created` rows (no pgid) are untouched.
-    let threads = match state
-        .state_store
-        .list_threads_by_status(&["created", "running"])
-    {
-        Ok(threads) => threads,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to list running threads during shutdown");
-            return;
-        }
-    };
-
-    if threads.is_empty() {
-        return;
+async fn drain_running_threads(state: &AppState) -> bool {
+    // Serialize shutdown against every future UDS/internal attachment. An
+    // attach that committed first appears below; one that arrives later is
+    // rejected and its spawn owner aborts the exact process.
+    if let Err(error) = state.state_store.close_process_attachment_admission() {
+        tracing::error!(error = %error, "failed to close process attachment admission");
+        return false;
     }
 
-    tracing::info!(count = threads.len(), "draining running threads");
+    // Every cooperative wait consumes the same node-owned deadline. All exact
+    // identity kills are submitted before any join is awaited, so N stubborn
+    // threads cannot turn a five-second shutdown grace into N sequential grace
+    // periods or keep the daemon alive until an operator force-kills it.
+    let drain_deadline = Instant::now()
+        .checked_add(Duration::from_secs(
+            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+        ))
+        .unwrap_or_else(Instant::now);
+    let attached_ids = match state.state_store.list_attached_thread_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list attached threads during shutdown");
+            return false;
+        }
+    };
+    if attached_ids.is_empty() {
+        return true;
+    }
+    tracing::info!(
+        count = attached_ids.len(),
+        "draining attached threads concurrently"
+    );
 
-    for thread in &threads {
-        if let Some(pgid) = thread.runtime.pgid {
-            let action = process::resolve_shutdown_action(
-                thread
-                    .runtime
-                    .launch_metadata
-                    .as_ref()
-                    .and_then(|lm| lm.cancellation_mode),
-            );
-            tracing::info!(
-                pgid,
-                thread_id = %thread.thread_id,
-                action = ?action,
-                "killing process group"
-            );
-            let result = process::kill_by_action(pgid, action);
-            if !result.success {
-                tracing::warn!(
-                    pgid,
-                    method = %result.method,
-                    "failed to kill process group"
-                );
+    let mut pending = Vec::with_capacity(attached_ids.len());
+    // `kill_by_action` proves post-SIGKILL group death for up to 200ms. Reserve
+    // slightly more than that inside the shared drain deadline instead of
+    // allowing the proof phase to extend every five-second graceful action.
+    const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
+    for thread_id in attached_ids {
+        let thread = match state.state_store.get_thread(&thread_id) {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                tracing::warn!(thread_id, "attached runtime row has no thread");
+                continue;
             }
-            // This death is the shutdown's doing, not the thread's — re-arm
-            // its auto-resume budget so the next boot's reconcile resumes it
-            // instead of exhausting `max_auto_resume_attempts` across
-            // deploys. Crashes skip the drain, so crash loops still exhaust.
-            if let Err(err) = state.state_store.reset_resume_attempts(&thread.thread_id) {
+            Err(error) => {
+                tracing::warn!(thread_id, error = %error, "failed to load attached thread");
+                continue;
+            }
+        };
+        let Some(identity) = thread.runtime.process_identity.clone() else {
+            tracing::warn!(thread_id, "attached row lost its durable process identity");
+            continue;
+        };
+        let action = process::resolve_shutdown_action(
+            thread
+                .runtime
+                .launch_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.cancellation_mode),
+        );
+        let kill_identity = identity.clone();
+        let kill_task = tokio::task::spawn_blocking(move || {
+            let bounded_action = match action {
+                process::ShutdownAction::Hard => process::ShutdownAction::Hard,
+                process::ShutdownAction::Graceful(grace) => process::ShutdownAction::Graceful(
+                    grace.min(
+                        drain_deadline
+                            .saturating_duration_since(Instant::now())
+                            .saturating_sub(HARD_KILL_PROOF_RESERVE),
+                    ),
+                ),
+            };
+            process::kill_by_action(&kill_identity, bounded_action)
+        });
+        pending.push((thread_id, thread.status, identity, kill_task));
+    }
+
+    for (thread_id, status, identity, kill_task) in pending {
+        let result = match kill_task.await {
+            Ok(result) => result,
+            Err(error) => {
                 tracing::warn!(
-                    thread_id = %thread.thread_id,
-                    error = %err,
+                    thread_id,
+                    error = %error,
+                    "shutdown process-kill worker failed"
+                );
+                continue;
+            }
+        };
+        if !result.success {
+            tracing::warn!(
+                thread_id,
+                method = result.method,
+                "failed to prove attached process termination during shutdown"
+            );
+            continue;
+        }
+        match state
+            .state_store
+            .clear_thread_process_if_matches(&thread_id, &identity)
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(thread_id, "shutdown identity changed before clear"),
+            Err(error) => tracing::warn!(
+                thread_id,
+                error = %error,
+                "failed to clear shutdown process identity"
+            ),
+        }
+        // This death is shutdown-owned, not a crash. Re-arm only live
+        // lifecycle rows; terminal-but-attached rows are already settled.
+        if !ryeos_app::state_store::is_terminal_status(&status) {
+            if let Err(error) = state.state_store.reset_resume_attempts(&thread_id) {
+                tracing::warn!(
+                    thread_id,
+                    error = %error,
                     "failed to re-arm resume budget during drain"
                 );
             }
+        }
+    }
+
+    match state.state_store.list_attached_thread_ids() {
+        Ok(remaining) if !remaining.is_empty() => {
+            tracing::error!(
+                remaining = ?remaining,
+                "shutdown drain exhausted with attached identities still present"
+            );
+            false
+        }
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(error = %error, "failed final shutdown drain audit");
+            false
         }
     }
 }
@@ -1050,18 +1263,20 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    let lifecycle_shutdown = async {
-        if let Some(mut rx) = ryeosd::subscribe_shutdown() {
-            let _ = rx.recv().await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-    };
-
     tokio::select! {
         _ = ctrl_c => {}
         _ = terminate => {}
-        _ = lifecycle_shutdown => {}
+    }
+}
+
+async fn wait_for_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
     }
 }
 
@@ -1118,8 +1333,16 @@ async fn run_service_standalone(
     )
     .context("reconcile interrupted bundle transactions")?;
 
+    // Resolve once so engine-owned handler launches and service execution use
+    // the same immutable node-policy snapshot.
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
+            .context("load node sandbox policy")?,
+    );
+
     // Two-phase node-config bootstrap (same as daemon-start path)
-    let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
+    let (engine, node_config_snapshot) =
+        bootstrap::load_node_config_two_phase(config, Arc::clone(&sandbox))?;
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
         &engine.kinds,
@@ -1165,10 +1388,6 @@ async fn run_service_standalone(
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
-    let sandbox = Arc::new(
-        ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
-            .context("load node sandbox policy")?,
-    );
     let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
     let standalone_node_config_validator =
         prospective_node_config_validator(standalone_ui_state.clone());
@@ -1258,7 +1477,8 @@ async fn run_service_standalone(
         endpoint = %result.endpoint,
         trust_class = ?result.trust_class,
         effective_caps = ?result.effective_caps,
-        audit_thread_id = %result.audit_thread_id,
+        invocation_id = %result.invocation_id,
+        recorded = result.recorded,
         "standalone service completed"
     );
 
@@ -1286,7 +1506,9 @@ mod shutdown_mapping_tests {
     fn graceful_mode_uses_declared_grace() {
         assert_eq!(
             resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 11 })),
-            ShutdownAction::Graceful(Duration::from_secs(11))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS
+            ))
         );
     }
 

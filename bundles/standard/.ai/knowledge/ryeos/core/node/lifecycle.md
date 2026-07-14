@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:fff683339800e1042034fa92809ab87830935b912dccd1161a3d3cd12493a5bb:P70w45Ng3IRZPPAl2QnNxJIedj9iW/yyhAmMWai1q2j9DIZ+MG0KDl0cujftzgyw6Qpw2UhhSGW/2c4p0l9rAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:c407608ec0696bb335e2a49e036a695a828cf83da392e2723496769956a29f34:E4x14T0O9HVvXpEzWxnLvukV8ieT2MtE7ZmhsJ40zpG8+tStBXpIobkD5yXWJzsLqjzb9pFSjl2Wy+bLgsUCCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Local node lifecycle semantics owned by the ryeos-node crate: init,
   start, stop, status, liveness, daemon metadata, and CLI preflight.
@@ -91,19 +91,25 @@ Default readiness timeout is 15 seconds.
 
 ## `ryeos stop`
 
-`stop` sends shutdown to the UDS that just proved the daemon is live; it
-never blind-fires at stale `daemon.json` paths. Default graceful timeout
-is 10 seconds.
+`stop` first establishes that the local daemon is live, then connects to a
+configured UDS candidate and asks the kernel for that socket peer's
+`SO_PEERCRED` PID and `SO_PEERPIDFD`. The pidfd is the process identity;
+`daemon.json` and the PID returned by `lifecycle.status` are never signal
+authority. The numeric peer PID is used only to verify that `/proc/<pid>/comm`
+or `/proc/<pid>/exe` identifies `ryeosd`.
 
-With `--force`, after graceful timeout, stop re-confirms live PID through
-a fresh `lifecycle.status` RPC immediately before signalling. It fails
-closed if no live daemon responds, response status is not `running`, or
-no PID is present. On Unix it verifies `/proc/<pid>/comm == "ryeosd"` or
-`/proc/<pid>/exe` basename `ryeosd` before `SIGTERM`. `ESRCH` is benign.
+The normal path sends `SIGTERM` through the peer pidfd. That enters the daemon's
+graceful shutdown coordinator, closes new runtime authoring, stops listeners,
+and drains attached workloads. The default wait is 10 seconds.
 
-Generation tokens and pidfd/SO_PEERCRED hardening were deliberately not
-added; fresh-RPC reconfirm plus `/proc` verification is the chosen
-portable floor.
+With `--force`, expiry of that wait causes a fresh socket connection, fresh
+kernel peer credentials, and fresh peer pidfd capture before `SIGKILL`
+escalation. Stop then waits another two seconds for disappearance. It fails
+closed when no configured socket has a verifiable live `ryeosd` peer. There is
+no numeric-PID or stale-metadata fallback.
+
+This contract requires the Linux pidfd and `SO_PEERPIDFD` primitives in the
+supported-node baseline; see [Platform Support](../platform-support.md).
 
 ## Lifecycle RPC timeout
 

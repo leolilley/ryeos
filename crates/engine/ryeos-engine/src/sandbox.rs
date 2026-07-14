@@ -3,7 +3,7 @@
 //! The policy has one fixed source: `<app-root>/.ai/node/sandbox.yaml`.
 //! [`SandboxRuntime::load`] reads, strictly parses, and resolves that policy
 //! once. Launch paths then share the resolved runtime and call [`SandboxRuntime::apply`]
-//! without reopening operator configuration at the process boundary.
+//! without reopening node configuration at the process boundary.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,46 @@ pub struct SandboxPolicy {
     pub network: SandboxNetworkPolicy,
     pub environment: SandboxEnvironmentPolicy,
     pub limits: SandboxLimitsPolicy,
+}
+
+impl SandboxPolicy {
+    /// Canonical first-init and in-memory-fixture policy. Keeping this typed
+    /// value in the engine gives node init and `SandboxRuntime::default()` one
+    /// source of truth while leaving the on-disk file create-once.
+    pub fn default_disabled() -> Self {
+        Self {
+            version: SANDBOX_POLICY_VERSION,
+            mode: SandboxMode::Disabled,
+            backend: SandboxBackendPolicy {
+                kind: SandboxBackendKind::Bubblewrap,
+                executable: PathBuf::from("/usr/bin/bwrap"),
+            },
+            filesystem: SandboxFilesystemPolicy {
+                readable: vec![
+                    "{node_public_identity}".to_string(),
+                    "{daemon_socket}".to_string(),
+                    "{bundle_roots}".to_string(),
+                    "{node_trusted_keys}".to_string(),
+                    "{verified_code}".to_string(),
+                ],
+                writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],
+            },
+            network: SandboxNetworkPolicy {
+                mode: SandboxNetworkMode::Host,
+            },
+            environment: SandboxEnvironmentPolicy {
+                allow: vec!["*".to_string()],
+            },
+            limits: SandboxLimitsPolicy {
+                open_files: Some(1024),
+                stdout_bytes: 8_388_608,
+                stderr_bytes: 8_388_608,
+                verified_artifact_file_bytes: 67_108_864,
+                verified_artifact_total_bytes: 268_435_456,
+                verified_artifact_files: 4_096,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,7 +171,7 @@ pub struct SandboxRuntime {
     state: SandboxRuntimeState,
     /// Canonical host path used for authority and overlap checks.
     app_root: Option<PathBuf>,
-    /// Operator/config spelling recreated inside the sandbox namespace.
+    /// Node-configured spelling recreated inside the sandbox namespace.
     app_root_destination: Option<PathBuf>,
     daemon_socket: Option<PathBuf>,
     verified_artifacts: Option<Arc<VerifiedArtifactStore>>,
@@ -489,6 +529,9 @@ impl VerifiedArtifactStore {
 pub enum SandboxProjectAuthority {
     External,
     RuntimeWorkspace,
+    /// Pure node handler launch. The project path supplies a read-only cwd;
+    /// no configured host writable mount is granted for this launch.
+    ReadOnly,
 }
 
 /// Verified file identity for executable code used by one launch.
@@ -511,6 +554,12 @@ pub struct SandboxLaunchContext<'a> {
     pub project_authority: SandboxProjectAuthority,
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,
+    /// Daemon-owned callback socket this launch is authorized to reach.
+    ///
+    /// This is a typed launch fact rather than an inference from child
+    /// environment names. Enforced mode validates it against the socket
+    /// identity pinned when the daemon loaded the sandbox policy.
+    pub daemon_socket_path: Option<&'a Path>,
     pub bundle_roots: &'a [PathBuf],
     pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [SandboxVerifiedCode],
@@ -682,6 +731,9 @@ impl SandboxRuntime {
             let mut request = request;
             let requested = request.limits.unwrap_or_default();
             request.limits = Some(lillux::SubprocessLimits {
+                // `mode: disabled` is an OS-confinement opt-out. Preserve a
+                // tighter limit already owned by the caller, but do not install
+                // the sandbox policy's RLIMIT_NOFILE until enforcement is on.
                 max_open_files: requested.max_open_files,
                 max_stdout_bytes: Some(
                     requested
@@ -834,23 +886,27 @@ impl SandboxRuntime {
                 )));
             }
         }
-        let resolved_writable_mounts = self
-            .inspection
-            .filesystem
-            .writable
-            .iter()
-            .map(|configured| {
-                resolve_writable_mount(
-                    configured,
-                    &project_destination,
-                    &canonical_project,
-                    &cwd_destination,
-                    &canonical_cwd,
-                    context.checkpoint_dir,
-                    canonical_checkpoint_dir.as_deref(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let resolved_writable_mounts =
+            if context.project_authority == SandboxProjectAuthority::ReadOnly {
+                Vec::new()
+            } else {
+                self.inspection
+                    .filesystem
+                    .writable
+                    .iter()
+                    .map(|configured| {
+                        resolve_writable_mount(
+                            configured,
+                            &project_destination,
+                            &canonical_project,
+                            &cwd_destination,
+                            &canonical_cwd,
+                            context.checkpoint_dir,
+                            canonical_checkpoint_dir.as_deref(),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
         let mut writable_mounts = Vec::<WritableMount>::new();
         for mount in resolved_writable_mounts.into_iter().flatten() {
             if let Some(existing) = writable_mounts.iter_mut().find(|existing| {
@@ -973,15 +1029,11 @@ impl SandboxRuntime {
                 .then_with(|| left.source.cmp(&right.source))
         });
         verified_code_mounts.dedup();
-        let requested_daemon_socket = envs
-            .iter()
-            .find(|(name, _)| name == "RYEOSD_SOCKET_PATH")
-            .map(|(_, value)| PathBuf::from(value));
-        if let Some(path) = requested_daemon_socket.as_deref() {
+        let requested_daemon_socket = context.daemon_socket_path;
+        if let Some(path) = requested_daemon_socket {
             validate_namespace_destination("requested daemon socket", path)?;
         }
         let canonical_requested_daemon_socket = requested_daemon_socket
-            .as_deref()
             .map(|requested| {
                 let configured = self.daemon_socket.as_deref().ok_or_else(|| {
                     refused(
@@ -1015,7 +1067,7 @@ impl SandboxRuntime {
                     self.app_root.as_deref(),
                     self.app_root_destination.as_deref(),
                     self.daemon_socket.as_deref(),
-                    requested_daemon_socket.as_deref(),
+                    requested_daemon_socket,
                     context.bundle_roots,
                     context.node_trusted_keys_dir,
                     &verified_code_mounts,
@@ -1072,7 +1124,7 @@ impl SandboxRuntime {
             }
         }
         if let (Some(requested), Some(canonical_requested)) = (
-            requested_daemon_socket.as_deref(),
+            requested_daemon_socket,
             canonical_requested_daemon_socket.as_deref(),
         ) {
             let socket_is_visible = readable_mounts
@@ -1107,8 +1159,6 @@ impl SandboxRuntime {
         let status_fd = status.writer_fd().to_string();
         inherited_fds.push(status.writer);
         let mut sandbox_args = vec![
-            "--die-with-parent".to_string(),
-            "--new-session".to_string(),
             "--json-status-fd".to_string(),
             status_fd,
             "--clearenv".to_string(),
@@ -1513,38 +1563,7 @@ impl SandboxRuntime {
 impl Default for SandboxRuntime {
     fn default() -> Self {
         Self::resolve(
-            SandboxPolicy {
-                version: SANDBOX_POLICY_VERSION,
-                mode: SandboxMode::Disabled,
-                backend: SandboxBackendPolicy {
-                    kind: SandboxBackendKind::Bubblewrap,
-                    executable: PathBuf::from("/usr/bin/bwrap"),
-                },
-                filesystem: SandboxFilesystemPolicy {
-                    readable: vec![
-                        "{node_public_identity}".to_string(),
-                        "{daemon_socket}".to_string(),
-                        "{bundle_roots}".to_string(),
-                        "{node_trusted_keys}".to_string(),
-                        "{verified_code}".to_string(),
-                    ],
-                    writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],
-                },
-                network: SandboxNetworkPolicy {
-                    mode: SandboxNetworkMode::Host,
-                },
-                environment: SandboxEnvironmentPolicy {
-                    allow: vec!["*".to_string()],
-                },
-                limits: SandboxLimitsPolicy {
-                    open_files: Some(1024),
-                    stdout_bytes: 8_388_608,
-                    stderr_bytes: 8_388_608,
-                    verified_artifact_file_bytes: 67_108_864,
-                    verified_artifact_total_bytes: 268_435_456,
-                    verified_artifact_files: 4_096,
-                },
-            },
+            SandboxPolicy::default_disabled(),
             None,
             None,
             None,
@@ -3054,7 +3073,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_apply_skips_confinement_but_applies_output_bounds() {
+    fn disabled_apply_skips_confinement_but_applies_node_resource_bounds() {
         let runtime = SandboxRuntime::default();
         let project = tempfile::tempdir().unwrap();
         let original = request(project.path());
@@ -3066,6 +3085,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3078,7 +3098,10 @@ mod tests {
         assert_eq!(applied.cmd, "/bin/sh");
         assert_eq!(applied.args, ["-c", "true"]);
         let limits = applied.limits.expect("disabled mode still bounds output");
-        assert_eq!(limits.max_open_files, None);
+        assert_eq!(
+            limits.max_open_files,
+            runtime.inspection().limits.open_files
+        );
         assert_eq!(
             limits.max_stdout_bytes,
             Some(runtime.inspection().limits.stdout_bytes)
@@ -3108,6 +3131,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3139,6 +3163,10 @@ mod tests {
         assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-ipc"));
         assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-uts"));
         assert!(bubblewrap_args.iter().any(|arg| arg == "--unshare-net"));
+        // Lillux already creates a new session for the retained Bubblewrap
+        // wrapper. The target must inherit that stable wrapper-led process
+        // group so descendants remain killable after the target PID exits.
+        assert!(!bubblewrap_args.iter().any(|arg| arg == "--new-session"));
         assert!(bubblewrap_args.iter().any(|arg| arg == "--clearenv"));
         assert!(bubblewrap_args
             .windows(2)
@@ -3183,6 +3211,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3232,6 +3261,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3269,6 +3299,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3310,6 +3341,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3347,6 +3379,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3384,6 +3417,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::RuntimeWorkspace,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3403,6 +3437,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::RuntimeWorkspace,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3437,6 +3472,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3478,6 +3514,7 @@ mod tests {
                 project_authority: SandboxProjectAuthority::External,
                 state_root: None,
                 checkpoint_dir: None,
+                daemon_socket_path: None,
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
@@ -3494,7 +3531,7 @@ mod tests {
 
     #[test]
     #[cfg(all(target_os = "linux", unix))]
-    fn daemon_socket_placeholder_mounts_only_the_pinned_socket() {
+    fn daemon_socket_placeholder_mounts_only_the_typed_pinned_socket() {
         use std::os::unix::net::UnixListener;
 
         let app_root = tempfile::tempdir().unwrap();
@@ -3503,27 +3540,19 @@ mod tests {
         let socket = socket_root.path().join("ryeosd.sock");
         let _listener = UnixListener::bind(&socket).unwrap();
         let policy = policy_yaml("enforce", Path::new("/usr/bin/bwrap"))
-            .replace("readable: []", "readable: [\"{daemon_socket}\"]")
-            .replace(
-                "allow: [\"PATH\"]",
-                "allow: [\"PATH\", \"RYEOSD_SOCKET_PATH\"]",
-            );
+            .replace("readable: []", "readable: [\"{daemon_socket}\"]");
         write_policy(app_root.path(), &policy);
         let runtime = SandboxRuntime::load_for_daemon(app_root.path(), &socket).unwrap();
-        let mut request = request(project.path());
-        request.envs.push((
-            "RYEOSD_SOCKET_PATH".to_string(),
-            socket.to_string_lossy().into_owned(),
-        ));
 
         let applied = runtime
             .apply(
-                request,
+                request(project.path()),
                 SandboxLaunchContext {
                     project_path: project.path(),
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: Some(&socket),
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3557,6 +3586,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3666,6 +3696,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3696,6 +3727,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
@@ -3737,6 +3769,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &verified,
@@ -3802,6 +3835,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &verified,
@@ -3840,6 +3874,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &verified,
@@ -3871,6 +3906,7 @@ mod tests {
                     project_authority: SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],

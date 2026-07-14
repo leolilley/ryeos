@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 
 use crate::bundle_events::{
-    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord,
+    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage,
+    BundleEventRecord, BundleEventScanCursor, BundleEventScanPage,
 };
 use crate::bundle_projection::BundleProjectionDb;
 use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
@@ -479,6 +480,117 @@ impl StateDb {
         crate::refs::read_generic_head_ref(&self.refs_root, namespace, name)
     }
 
+    pub fn terminal_service_chain_candidates(&self, cutoff: &str) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self.projection.connection().prepare(
+            "SELECT root.chain_root_id FROM threads root
+             WHERE root.thread_id = root.chain_root_id
+               AND root.kind = 'service_run'
+               AND root.finished_at IS NOT NULL AND root.finished_at < ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM threads member
+                   WHERE member.chain_root_id = root.chain_root_id
+                     AND (
+                       member.status NOT IN ('completed','failed','cancelled','killed','timed_out','continued')
+                       OR member.updated_at >= ?1
+                     )
+               )
+             ORDER BY root.finished_at",
+        )?;
+        let rows = stmt.query_map([cutoff], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn terminal_service_chain_is_retirable(
+        &self,
+        chain_root_id: &str,
+        cutoff: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self.projection.connection().query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM threads root
+                WHERE root.thread_id=?1 AND root.chain_root_id=?1 AND root.kind='service_run'
+                  AND root.finished_at IS NOT NULL AND root.finished_at < ?2
+                  AND NOT EXISTS (
+                    SELECT 1 FROM threads member WHERE member.chain_root_id=?1
+                    AND (
+                      member.status NOT IN ('completed','failed','cancelled','killed','timed_out','continued')
+                      OR member.updated_at >= ?2
+                    )
+                  )
+             )",
+            [chain_root_id, cutoff],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn remove_chain_head_ref(&self, chain_root_id: &str) -> anyhow::Result<bool> {
+        let removed =
+            crate::refs::remove_generic_head_ref(&self.refs_root, "chains", chain_root_id)?;
+        self.head_cache
+            .lock()
+            .expect("head_cache lock")
+            .invalidate(chain_root_id);
+        Ok(removed)
+    }
+
+    pub fn delete_chain_projection(&self, chain_root_id: &str) -> anyhow::Result<usize> {
+        let conn = self.projection.connection();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let thread_ids = "SELECT thread_id FROM threads WHERE chain_root_id=?1";
+            let mut deleted = 0usize;
+            deleted += conn.execute(
+                &format!("DELETE FROM event_replay_index WHERE thread_id IN ({thread_ids})"),
+                [chain_root_id],
+            )?;
+            deleted +=
+                conn.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute(
+                "DELETE FROM thread_edges WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_results WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_artifacts WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                &format!("DELETE FROM thread_facets WHERE thread_id IN ({thread_ids})"),
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_usage_latest WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_usage_subjects WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM projection_meta WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM threads WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            Ok::<_, rusqlite::Error>(deleted)
+        })();
+        match result {
+            Ok(deleted) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(deleted)
+            }
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(err.into())
+            }
+        }
+    }
+
     /// Advance a namespace-neutral signed head with compare-and-swap semantics.
     pub fn advance_generic_head_ref(
         &self,
@@ -534,6 +646,46 @@ impl StateDb {
         event_kind: &str,
     ) -> anyhow::Result<Vec<BundleEventRecord>> {
         bundle_events::scan_bundle_events(&self.cas_root, &self.refs_root, bundle_id, event_kind)
+    }
+
+    pub fn read_bundle_event_chain_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> anyhow::Result<BundleEventChainPage> {
+        bundle_events::read_bundle_event_chain_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            chain_id,
+            cursor,
+            limit,
+            max_serialized_bytes,
+        )
+    }
+
+    pub fn scan_bundle_events_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        cursor: Option<&BundleEventScanCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> anyhow::Result<BundleEventScanPage> {
+        bundle_events::scan_bundle_events_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            cursor,
+            limit,
+            max_serialized_bytes,
+        )
     }
 
     pub fn open_bundle_projection(

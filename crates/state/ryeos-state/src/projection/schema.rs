@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS threads (
     origin_site_id TEXT NOT NULL,
     upstream_thread_id TEXT,
     requested_by TEXT,
+    project_root TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -45,6 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_threads_chain_root ON threads(chain_root_id);
 CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);
 CREATE INDEX IF NOT EXISTS idx_threads_created_at ON threads(created_at);
 CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at);
+CREATE INDEX IF NOT EXISTS idx_threads_project_root ON threads(project_root);
 
 -- Events: durable thread events
 CREATE TABLE IF NOT EXISTS events (
@@ -66,6 +68,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_hash ON events(event_hash);
 CREATE INDEX IF NOT EXISTS idx_events_chain_root ON events(chain_root_id);
 CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
+CREATE INDEX IF NOT EXISTS idx_events_thread_type_seq ON events(thread_id, event_type, thread_seq);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 
 -- Event replay index: track indexed position per thread
@@ -434,6 +437,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "requested_by",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "project_root",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -1193,6 +1202,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_threads_project_root",
+                table: "threads",
+                columns: &["project_root"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_events_event_hash",
                 table: "events",
                 columns: &["event_hash"],
@@ -1208,6 +1223,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_events_thread_id",
                 table: "events",
                 columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_events_thread_type_seq",
+                table: "events",
+                columns: &["thread_id", "event_type", "thread_seq"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {

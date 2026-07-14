@@ -92,7 +92,19 @@ pub async fn try_offline_dispatch(
         ..Default::default()
     })
     .map_err(local_err)?;
-    let engine = boot_engine(&node_config, project_path, &bundle_roots)?;
+    let sandbox = std::sync::Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&node_config.app_root).map_err(|error| {
+            CliError::Local {
+                detail: format!("load node sandbox policy: {error}"),
+            }
+        })?,
+    );
+    let engine = boot_engine(
+        &node_config,
+        project_path,
+        &bundle_roots,
+        std::sync::Arc::clone(&sandbox),
+    )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
@@ -110,15 +122,6 @@ pub async fn try_offline_dispatch(
         .await
         .map(Some);
     }
-
-    // Executable tools use the same immutable node-policy snapshot as the
-    // daemon. Client binaries above are deliberately outside this boundary.
-    let sandbox =
-        ryeos_engine::sandbox::SandboxRuntime::load(&node_config.app_root).map_err(|error| {
-            CliError::Local {
-                detail: format!("load node sandbox policy: {error}"),
-            }
-        })?;
 
     if has_service_offline_dispatch(&item.composed_value) {
         return dispatch_service(
@@ -157,6 +160,7 @@ fn boot_engine(
     config: &ryeos_app::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
+    sandbox: std::sync::Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -169,6 +173,7 @@ fn boot_engine(
         bundle_roots,
         project_root.as_deref(),
         None, // no trust overlay
+        sandbox,
     )
     .map_err(local_err)
 }
@@ -583,6 +588,7 @@ fn exec_tool(
                 project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
                 state_root: None,
                 checkpoint_dir: None,
+                daemon_socket_path: None,
                 bundle_roots: std::slice::from_ref(bundle_root),
                 node_trusted_keys_dir: Some(
                     &app_root

@@ -1,9 +1,13 @@
-<!-- ryeos:signed:2026-07-14T02:11:07Z:3fcc0190530e62ac916182e7bb11097d42fff3c4e56384911660a4b2c1d978de:B+ZgDhvI74EKAgsUMKxYJIp+8ogVs0RrVnBce6yjFNcNEAEwvSmftUb9329+iYCMy5CFzl3p9Yt+oXoI8luvAA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:b9c6275850053c98e0c373bb50205f6b219421a99b4d13e3ad045a5794ac375c:uPEDJo5aZMVVHgWlPstmZg7WaWqNS281kPwfVgCbvjX9RlE73jyrJPKdTylTicv4kMUcbSFTVPxXmSaGpyMrDA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Tool Runtime Authority Model
 
 ## Status
 
-Not a new runtime binary yet. The current domain-events branch implements the first safe slice: direct tool executions may receive only exact, self-bundle domain-event callback capabilities derived from a signed bundle manifest.
+Not a new runtime binary yet. The current implementation provides the first
+safe resource-authority slice: direct tool executions may receive exact, self-
+bundle bundle-event, runtime-vault, and item-authoring capabilities derived
+from a signed bundle manifest. The callback protocol also exposes a baseline
+thread-local method surface, described separately below.
 
 This document records the full target model so future work does not accidentally turn tool metadata into a self-grant surface.
 
@@ -19,45 +23,70 @@ directive/graph item
   -> daemon-enforced runtime callbacks
 ```
 
-Direct tool execution did not have an equivalent model. A direct subprocess tool received daemon callback environment variables, but its callback token carried empty `effective_caps`, so runtime APIs such as `ryeos_runtime.events.append(...)` correctly denied.
+Direct tool execution now uses the signed `tool_callback_v1` protocol. That
+descriptor explicitly requests the daemon socket, callback token, thread-auth,
+thread, and project bindings; callback-free protocols mint and expose none of
+them. The callback token still carries only daemon-derived `effective_caps`; an
+empty set is deny-all for capability-gated resource operations.
 
-The missing concept is tool callback authority: what daemon APIs may a directly executed tool call, and who decides?
+The remaining design question is broader tool callback authority: what daemon
+APIs beyond the current signed-manifest slices may a directly executed tool
+call, and who decides?
 
 ## Non-goals
 
 - Do not let tool YAML declare arbitrary callback authority.
 - Do not reuse `required_caps` as callback authority.
 - Do not let runtime API callers provide or spoof `bundle_id`.
-- Do not grant wildcards for domain events.
-- Do not introduce cross-bundle domain-event access in the default direct-tool path.
+- Do not grant wildcards for bundle events.
+- Do not introduce cross-bundle bundle-event access in the default direct-tool path.
 - Do not use unsigned `manifest.source.yaml` as runtime authority.
 
 ## Current branch implementation
 
-For this branch, direct tool domain-event authority is intentionally narrow:
+Direct tool bundle-event authority is intentionally narrow:
 
 1. The daemon resolves and verifies the direct tool item.
 2. The executor derives `effective_bundle_id` from the verified canonical tool ref.
 3. The executor locates the resolved tool's containing `.ai` directory.
 4. The executor reads signed generated `.ai/manifest.yaml` only.
-5. If the signed manifest declares domain events, `manifest.name` must match the derived `effective_bundle_id`.
+5. If the signed manifest declares bundle events, `manifest.name` must match the derived `effective_bundle_id`.
 6. The executor mints only exact caps for declared event kinds and operations:
-   - `ryeos.append.domain_events.<bundle>/<event_kind>`
-   - `ryeos.scan.domain_events.<bundle>/<event_kind>`
+   - `ryeos.append.bundle-events.<bundle>/<event_kind>`
+   - `ryeos.scan.bundle-events.<bundle>/<event_kind>`
 7. The daemon runtime API still derives bundle identity from the callback token and enforces those exact caps.
 
-Missing or empty manifest declarations produce no caps. That is deny-by-default, not backward compatibility authority.
+Missing or empty manifest declarations produce no resource caps. That is deny-
+by-default for capability-gated bundle, vault, and authoring operations, not
+backward-compatibility authority.
+
+## Baseline thread-local callback surface
+
+`tool_callback_v1` selects callback transport and two server-side proofs. Some
+UDS methods are exact-thread or chain-local lifecycle operations rather than
+resource-capability operations: for example marking/finalizing the tool's own
+thread, appending its thread events, polling its own input, publishing an
+artifact, and bounded chain reads. A valid callback token (plus thread-auth
+where that method's access class requires it) can reach that baseline even when
+`effective_caps` is empty.
+
+That preserves the current local execution model, but it is not a complete
+least-privilege method-surface model for hostile tenants. Hosted tool execution
+should eventually narrow allowed callback methods per protocol/token or place
+every such operation behind explicit capabilities in addition to the outer
+cgroup and VM/microVM/worker boundary.
 
 ## Manifest shape
 
-Bundle manifests may declare domain-event authority like this:
+Bundle manifests may declare bundle-event authority like this:
 
 ```yaml
-domain_events:
-  - event_kind: email_event
-    operations: [append, scan]
-  - event_kind: suppression_event
-    operations: [append, scan]
+runtime_authority:
+  bundle_events:
+    - event_kind: email_event
+      operations: [append, scan]
+    - event_kind: suppression_event
+      operations: [append, scan]
 ```
 
 The manifest declares only event kinds and operations. It does not declare the bundle namespace for the cap. The namespace comes from the verified executing tool ref and must match `manifest.name` when declarations are non-empty.
@@ -114,9 +143,9 @@ is what lets those future layers be added once, beneath every tool/runtime path.
 
 Revisit a full managed tool-runtime authority design when direct tools need any of:
 
-- generic callback APIs beyond self-bundle domain events;
-- cross-bundle domain-event access;
-- caller-delegated caps narrower than the caller but broader than self-domain-events;
+- generic callback APIs beyond the current manifest authority blocks;
+- cross-bundle bundle-event or vault access;
+- caller-delegated caps narrower than the caller but broader than self-bundle authority;
 - user-visible approval grants;
 - per-tool sandbox profiles tied to authority;
 - nested tool execution authority;

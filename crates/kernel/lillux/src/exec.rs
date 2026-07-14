@@ -81,8 +81,10 @@ impl OutputLimitExceeded {
 ///
 /// Construct this only through [`bubblewrap_status_pipe`]. That factory and
 /// the parser form one protocol: the paired writer must be inherited by
-/// Bubblewrap and named by `--json-status-fd`; the launch must also use
-/// `--new-session`, making the reported command PID its initial host PGID.
+/// Bubblewrap and named by `--json-status-fd`. The sandbox command must remain
+/// in Bubblewrap's Lillux-owned process group (in particular, the launch must
+/// not use Bubblewrap's `--new-session`). Retaining the outer child then keeps
+/// that PGID owned until Lillux has terminated every remaining group member.
 pub struct SupervisedProcessStatus {
     reader: std::fs::File,
 }
@@ -239,15 +241,20 @@ type SharedCapture = Arc<Mutex<BoundedCapture>>;
 struct ProcessIdentity {
     pid: u32,
     pgid: i64,
-    /// Whether the promised process group was observed while its leader was
-    /// still alive. A status document can race a very short-lived target; in
-    /// that case the public identity remains useful for accounting, but Lillux
-    /// must not later signal an unverified, potentially recycled group ID.
-    group_observed: bool,
+}
+
+enum WrapperPoll {
+    Running,
+    /// Linux `waitid(WNOWAIT)` observed termination while preserving the
+    /// wrapper PID/PGID for one final identity-checked group cleanup.
+    ExitedUnreaped,
+    /// Non-Linux fallback where `Child::try_wait` necessarily reaped first.
+    ExitedReaped(process::ExitStatus),
 }
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const POST_STOP_DRAIN_READS: usize = 1024;
 const SUPERVISED_STATUS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SUPERVISED_STATUS_MAX_LINE_BYTES: usize = 64 * 1024;
 
@@ -255,7 +262,9 @@ const SUPERVISED_STATUS_MAX_LINE_BYTES: usize = 64 * 1024;
 pub struct RunningProcess {
     /// Identity of the supervised command. For a direct launch this is the
     /// spawned child; for Bubblewrap it is the command reported over
-    /// `--json-status-fd`.
+    /// `--json-status-fd`. Sandboxed commands share the outer launcher's PGID,
+    /// which remains reserved by the retained [`process::Child`] even if the
+    /// reported command exits before its same-group descendants.
     pub pid: u32,
     pub pgid: i64,
     /// The outer process is retained separately so timeout/overflow cleanup
@@ -273,7 +282,6 @@ pub struct RunningProcess {
     output_overflow_rx: std::sync::mpsc::Receiver<CapturedStream>,
     start: Instant,
     timeout: f64,
-    target_group_observed: bool,
     groups_terminated: bool,
     wrapper_reaped: bool,
 }
@@ -290,40 +298,31 @@ impl RunningProcess {
 
     /// Wait for the process to finish (or time out) and return the result.
     pub fn wait(mut self) -> SubprocessResult {
-        let timeout = if self.timeout.is_finite() && self.timeout > 0.0 {
-            Some(Duration::from_secs_f64(self.timeout))
-        } else {
-            None
-        };
+        let timeout = request_timeout_duration(self.timeout);
 
         loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => {
-                    self.wrapper_reaped = true;
-                    // A command may exit after leaving ordinary background
-                    // descendants in its process group. Synchronous execution
-                    // owns the whole group, so do not let those descendants
-                    // outlive the reported completion.
+            match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) => {
+                    // Preserve the wrapper as an unreaped zombie until every
+                    // owned group has been revalidated and signalled. Its PID
+                    // cannot be recycled during this window.
                     self.kill_supervised_processes();
-                    let (out, err) = self.finish_drains();
-                    let code = status.code().unwrap_or(-1);
-                    if let Some(exceeded) = output_limit_exceeded(&out, &err) {
-                        return self.output_limit_result(out, err, exceeded);
+                    match self.child.wait() {
+                        Ok(status) => {
+                            self.wrapper_reaped = true;
+                            return self.completed_result(status);
+                        }
+                        Err(error) => return self.wait_error_result(error),
                     }
-                    return SubprocessResult {
-                        success: code == 0,
-                        stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
-                        stderr: String::from_utf8_lossy(&err.bytes).into_owned(),
-                        exit_code: code,
-                        duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
-                        pid: self.pid,
-                        timed_out: false,
-                        output_limit_exceeded: None,
-                        stdout_truncated: false,
-                        stderr_truncated: false,
-                    };
                 }
-                Ok(None) => {
+                Ok(WrapperPoll::ExitedReaped(status)) => {
+                    self.wrapper_reaped = true;
+                    // On targets without WNOWAIT, revalidation safely skips a
+                    // vanished leader rather than signalling a recycled PGID.
+                    self.kill_supervised_processes();
+                    return self.completed_result(status);
+                }
+                Ok(WrapperPoll::Running) => {
                     if self.output_overflow_rx.try_recv().is_ok() {
                         self.kill_supervised_processes();
                         self.reap_wrapper();
@@ -340,29 +339,51 @@ impl RunningProcess {
                     }
                     thread::sleep(PROCESS_POLL_INTERVAL);
                 }
-                Err(e) => {
-                    // A failed wait must not silently orphan the supervised
-                    // command or its launcher.
-                    self.kill_supervised_processes();
-                    self.reap_wrapper();
-                    let (out, err) = self.finish_drains();
-                    return SubprocessResult {
-                        success: false,
-                        stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
-                        stderr: append_diagnostic(
-                            &String::from_utf8_lossy(&err.bytes),
-                            &format!("Wait failed: {e}"),
-                        ),
-                        exit_code: -1,
-                        duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
-                        pid: self.pid,
-                        timed_out: false,
-                        output_limit_exceeded: output_limit_exceeded(&out, &err),
-                        stdout_truncated: out.truncated,
-                        stderr_truncated: err.truncated,
-                    };
-                }
+                Err(error) => return self.wait_error_result(error),
             }
+        }
+    }
+
+    fn completed_result(&mut self, status: process::ExitStatus) -> SubprocessResult {
+        let (out, err) = self.finish_drains();
+        let code = status.code().unwrap_or(-1);
+        if let Some(exceeded) = output_limit_exceeded(&out, &err) {
+            return self.output_limit_result(out, err, exceeded);
+        }
+        SubprocessResult {
+            success: code == 0,
+            stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&err.bytes).into_owned(),
+            exit_code: code,
+            duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+            pid: self.pid,
+            timed_out: false,
+            output_limit_exceeded: None,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    fn wait_error_result(&mut self, error: std::io::Error) -> SubprocessResult {
+        // A failed observation/reap must not silently orphan the supervised
+        // command or its launcher.
+        self.kill_supervised_processes();
+        self.reap_wrapper();
+        let (out, err) = self.finish_drains();
+        SubprocessResult {
+            success: false,
+            stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
+            stderr: append_diagnostic(
+                &String::from_utf8_lossy(&err.bytes),
+                &format!("Wait failed: {error}"),
+            ),
+            exit_code: -1,
+            duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+            pid: self.pid,
+            timed_out: false,
+            output_limit_exceeded: output_limit_exceeded(&out, &err),
+            stdout_truncated: out.truncated,
+            stderr_truncated: err.truncated,
         }
     }
 
@@ -373,19 +394,15 @@ impl RunningProcess {
         #[cfg(unix)]
         {
             debug_assert_eq!(self.wrapper_pgid, self.wrapper_pid as i64);
-            // Kill the target group first. Bubblewrap's `--new-session` puts
-            // it outside the wrapper's group, so killing only the latter is
-            // insufficient. Then kill the wrapper group to force teardown and
-            // reaping. A descendant that deliberately creates another session
-            // is outside this local guarantee; hosted workers use cgroup.kill.
-            kill_observed_process_group(
-                self.pid,
-                self.pgid,
-                self.target_group_observed,
-            );
-            if self.wrapper_pgid != self.pgid {
-                kill_observed_process_group(self.wrapper_pid, self.wrapper_pgid, true);
-            }
+            debug_assert_eq!(self.pgid, self.wrapper_pgid);
+            // Lillux creates the outer launcher as a session/group leader and
+            // retains its Child handle until this cleanup completes. The live
+            // or unreaped leader therefore reserves the numeric PGID while the
+            // signal is sent, even if Bubblewrap already reaped its reported
+            // target leader. A descendant that deliberately creates another
+            // session is outside this local guarantee; hosted workers use
+            // cgroup.kill.
+            kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, !self.wrapper_reaped);
             // `Child` still owns the wrapper PID until it is reaped, so this
             // exact-PID fallback cannot hit a recycled process. It covers a
             // wrapper that moved groups or a group signal refused by the OS.
@@ -418,9 +435,10 @@ impl RunningProcess {
 
     fn finish_drains(&mut self) -> (BoundedCapture, BoundedCapture) {
         // Once the wrapper has exited (or has been killed), consume bytes that
-        // are already buffered and stop at the next WouldBlock. This prevents
-        // an escaped setsid descendant holding a pipe open from hanging the
-        // daemon, while preserving normal output already written.
+        // are already buffered and stop at the next WouldBlock or after a
+        // fixed number of post-stop reads. The latter bound prevents an
+        // escaped setsid descendant that keeps writing from hanging cleanup,
+        // while preserving ordinary output already present in the pipe.
         self.drain_stop.store(true, Ordering::Release);
         if let Some(handle) = self.stdin_thread.take() {
             let _ = handle.join();
@@ -489,6 +507,40 @@ impl Drop for RunningProcess {
     fn drop(&mut self) {
         self.abort_and_reap();
     }
+}
+
+#[cfg(target_os = "linux")]
+fn poll_wrapper(child: &mut process::Child) -> std::io::Result<WrapperPoll> {
+    let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    loop {
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return if unsafe { status.si_pid() } == 0 {
+                Ok(WrapperPoll::Running)
+            } else {
+                Ok(WrapperPoll::ExitedUnreaped)
+            };
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn poll_wrapper(child: &mut process::Child) -> std::io::Result<WrapperPoll> {
+    child.try_wait().map(|status| match status {
+        Some(status) => WrapperPoll::ExitedReaped(status),
+        None => WrapperPoll::Running,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -625,10 +677,11 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
 
     let mut stdout_handle = child.stdout.take().expect("stdout configured as piped");
     let mut stderr_handle = child.stderr.take().expect("stderr configured as piped");
-    if let Err(error) = configure_nonblocking_capture(&mut stdout_handle)
-        .and_then(|_| configure_nonblocking_capture(&mut stderr_handle))
+    if let Err(error) = configure_nonblocking_fd(&mut stdout_handle)
+        .and_then(|_| configure_nonblocking_fd(&mut stderr_handle))
     {
         kill_process_group_if_safe(wrapper_pgid);
+        let _ = child.kill();
         let _ = child.wait();
         return Err(spawn_failure(
             start,
@@ -669,38 +722,57 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
 
     // Never write request input on the spawning thread. A child can stop
     // reading before the pipe buffer is empty; the dedicated writer may then
-    // block, but bounded stdout/stderr draining and the request deadline are
-    // already established and remain able to terminate the workload.
-    let stdin_thread = spawn_stdin_writer(child.stdin.take(), stdin_data);
-
-    let (identity, status_thread) = if let Some(status) = supervised_status {
-        let (status_tx, status_rx) = std::sync::mpsc::channel();
-        let status_thread = match spawn_bubblewrap_status_reader(status, status_tx) {
-            Ok(handle) => handle,
+    // wait on WouldBlock, but it observes the same cleanup flag as the bounded
+    // drainers. The request deadline can therefore terminate and join every
+    // pipe worker even when the child never consumes the remaining input.
+    let mut stdin_thread =
+        match spawn_stdin_writer(child.stdin.take(), stdin_data, Arc::clone(&drain_stop)) {
+            Ok(thread) => thread,
             Err(error) => {
                 kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
                 let _ = child.wait();
                 drain_stop.store(true, Ordering::Release);
-                if let Some(handle) = stdin_thread {
-                    let _ = handle.join();
-                }
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!("Failed to spawn: initialize Bubblewrap status reader: {error}"),
+                    format!("Failed to spawn: configure nonblocking stdin: {error}"),
                 ));
             }
         };
+
+    let (identity, status_thread) = if let Some(status) = supervised_status {
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        let status_thread =
+            match spawn_bubblewrap_status_reader(status, status_tx, Arc::clone(&drain_stop)) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    kill_process_group_if_safe(wrapper_pgid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    drain_stop.store(true, Ordering::Release);
+                    if let Some(handle) = stdin_thread.take() {
+                        let _ = handle.join();
+                    }
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    return Err(spawn_failure(
+                        start,
+                        format!("Failed to spawn: initialize Bubblewrap status reader: {error}"),
+                    ));
+                }
+            };
         let setup_deadline = supervised_setup_deadline(start, timeout);
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
         let reported_pid = match status_rx.recv_timeout(setup_wait) {
             Ok(Ok(pid)) => pid,
             Ok(Err(error)) => {
                 kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
                 let _ = child.wait();
                 drain_stop.store(true, Ordering::Release);
-                if let Some(handle) = stdin_thread {
+                if let Some(handle) = stdin_thread.take() {
                     let _ = handle.join();
                 }
                 let _ = stdout_thread.join();
@@ -713,9 +785,10 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
                 let _ = child.wait();
                 drain_stop.store(true, Ordering::Release);
-                if let Some(handle) = stdin_thread {
+                if let Some(handle) = stdin_thread.take() {
                     let _ = handle.join();
                 }
                 let _ = stdout_thread.join();
@@ -731,9 +804,10 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
                 let _ = child.wait();
                 drain_stop.store(true, Ordering::Release);
-                if let Some(handle) = stdin_thread {
+                if let Some(handle) = stdin_thread.take() {
                     let _ = handle.join();
                 }
                 let _ = stdout_thread.join();
@@ -745,18 +819,14 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
                 ));
             }
         };
-        let identity = match resolve_supervised_identity(
-            reported_pid,
-            wrapper_pid,
-            wrapper_pgid,
-            setup_deadline,
-        ) {
+        let identity = match resolve_supervised_identity(reported_pid, wrapper_pid, wrapper_pgid) {
             Ok(identity) => identity,
             Err(error) => {
                 kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
                 let _ = child.wait();
                 drain_stop.store(true, Ordering::Release);
-                if let Some(handle) = stdin_thread {
+                if let Some(handle) = stdin_thread.take() {
                     let _ = handle.join();
                 }
                 let _ = stdout_thread.join();
@@ -774,7 +844,6 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
             ProcessIdentity {
                 pid: wrapper_pid,
                 pgid: wrapper_pgid,
-                group_observed: true,
             },
             None,
         )
@@ -796,7 +865,6 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
         output_overflow_rx,
         start,
         timeout,
-        target_group_observed: identity.group_observed,
         groups_terminated: false,
         wrapper_reaped: false,
     })
@@ -805,13 +873,27 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
 fn spawn_stdin_writer(
     stdin: Option<process::ChildStdin>,
     data: Option<String>,
-) -> Option<thread::JoinHandle<()>> {
+    stop: Arc<AtomicBool>,
+) -> Result<Option<thread::JoinHandle<()>>, String> {
     let (Some(mut stdin), Some(data)) = (stdin, data) else {
-        return None;
+        return Ok(None);
     };
-    Some(thread::spawn(move || {
-        let _ = stdin.write_all(data.as_bytes());
-    }))
+    configure_nonblocking_fd(&mut stdin)?;
+    Ok(Some(thread::spawn(move || {
+        let bytes = data.as_bytes();
+        let mut written = 0;
+        while written < bytes.len() && !stop.load(Ordering::Acquire) {
+            match stdin.write(&bytes[written..]) {
+                Ok(0) => break,
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                }
+                Err(_) => break,
+            }
+        }
+    })))
 }
 
 fn spawn_bounded_drain<R>(
@@ -828,10 +910,35 @@ where
     thread::spawn(move || {
         let mut read_buffer = [0u8; 8192];
         let mut overflow_reported = false;
+        let mut post_stop_reads = None;
         loop {
+            if stop.load(Ordering::Acquire) {
+                let remaining = post_stop_reads.get_or_insert(POST_STOP_DRAIN_READS);
+                if *remaining == 0 {
+                    let mut probe = [0u8; 1];
+                    match reader.read(&mut probe) {
+                        Ok(0) => {}
+                        Ok(_) => {
+                            let mut state =
+                                capture.lock().unwrap_or_else(|error| error.into_inner());
+                            state.truncated = true;
+                            if !overflow_reported {
+                                let _ = overflow_tx.send(stream);
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => {}
+                    }
+                    break;
+                }
+            }
             match reader.read(&mut read_buffer) {
                 Ok(0) => break,
                 Ok(read) => {
+                    if let Some(remaining) = post_stop_reads.as_mut() {
+                        *remaining -= 1;
+                    }
                     let mut state = capture.lock().unwrap_or_else(|error| error.into_inner());
                     let retain = match limit {
                         Some(limit) => limit
@@ -862,7 +969,7 @@ where
 }
 
 #[cfg(unix)]
-fn configure_nonblocking_capture<T>(reader: &mut T) -> Result<(), String>
+fn configure_nonblocking_fd<T>(reader: &mut T) -> Result<(), String>
 where
     T: std::os::fd::AsRawFd,
 {
@@ -872,7 +979,7 @@ where
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(format!(
-            "set O_NONBLOCK on capture descriptor {fd}: {}",
+            "set O_NONBLOCK on descriptor {fd}: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -880,20 +987,26 @@ where
 }
 
 #[cfg(not(unix))]
-fn configure_nonblocking_capture<T>(_reader: &mut T) -> Result<(), String> {
+fn configure_nonblocking_fd<T>(_reader: &mut T) -> Result<(), String> {
     Ok(())
 }
 
 fn spawn_bubblewrap_status_reader(
     mut status: SupervisedProcessStatus,
     initial_tx: std::sync::mpsc::Sender<Result<u32, String>>,
+    stop: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>, String> {
+    configure_nonblocking_fd(&mut status.reader)
+        .map_err(|error| format!("configure nonblocking status channel: {error}"))?;
     Ok(thread::spawn(move || {
         let mut initial_tx = Some(initial_tx);
         let mut pending = Vec::new();
         let mut buffer = [0u8; 4096];
 
         loop {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
             match status.reader.read(&mut buffer) {
                 Ok(0) => {
                     if !pending.is_empty() && initial_tx.is_some() {
@@ -926,6 +1039,12 @@ fn spawn_bubblewrap_status_reader(
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                }
                 Err(error) => {
                     if let Some(tx) = initial_tx.take() {
                         let _ = tx.send(Err(format!("read status channel: {error}")));
@@ -975,43 +1094,37 @@ fn resolve_supervised_identity(
         return Err(format!("unsafe child PID {pid}"));
     }
 
-    // Bubblewrap writes child-pid after starting the command, but the status
-    // write and the command's `--new-session` setsid can be observed in either
-    // order. Wait briefly for the promised target PGID instead of accidentally
-    // publishing the wrapper group as the workload identity.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    loop {
-        let pgid = unsafe { libc::getpgid(pid_i32) };
-        if pgid == pid_i32 {
-            let current_pgid = unsafe { libc::getpgrp() };
-            if pgid <= 1 || pgid == current_pgid || pgid as i64 == wrapper_pgid {
-                return Err(format!("unsafe child process group {pgid}"));
-            }
-            return Ok(ProcessIdentity {
-                pid,
-                pgid: pgid as i64,
-            });
-        }
-        if pgid < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                // A very short-lived command can exit between the status write
-                // and getpgid. Under the factory's `--new-session` contract its
-                // initial PGID was its PID; the wrapper wait will now settle it.
-                return Ok(ProcessIdentity {
-                    pid,
-                    pgid: pid as i64,
-                });
-            }
+    if wrapper_pgid <= 1
+        || wrapper_pgid > i32::MAX as i64
+        || wrapper_pgid != wrapper_pid as i64
+        || wrapper_pgid == unsafe { libc::getpgrp() } as i64
+    {
+        return Err(format!(
+            "unsafe retained launcher process group {wrapper_pgid}"
+        ));
+    }
+
+    // Group membership is inherited atomically at fork, so there is no
+    // target-side session-establishment race to wait through. If the target is
+    // still visible, require it to be in the retained launcher's group. If it
+    // has already exited, the trusted status PID remains useful for accounting
+    // and the retained launcher still owns the only PGID Lillux will signal.
+    let observed_pgid = unsafe { libc::getpgid(pid_i32) };
+    if observed_pgid < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
             return Err(format!("getpgid({pid}) failed: {error}"));
         }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "child PID {pid} did not establish its promised process group (observed {pgid})"
-            ));
-        }
-        thread::sleep(Duration::from_millis(5));
+    } else if observed_pgid as i64 != wrapper_pgid {
+        return Err(format!(
+            "child PID {pid} is outside retained launcher process group {wrapper_pgid} (observed {observed_pgid})"
+        ));
     }
+
+    Ok(ProcessIdentity {
+        pid,
+        pgid: wrapper_pgid,
+    })
 }
 
 #[cfg(not(unix))]
@@ -1022,6 +1135,53 @@ fn resolve_supervised_identity(
 ) -> Result<ProcessIdentity, String> {
     Err("supervised process identity is unsupported on this platform".to_string())
 }
+
+fn supervised_setup_deadline(start: Instant, timeout: f64) -> Instant {
+    let status_deadline = start
+        .checked_add(SUPERVISED_STATUS_SETUP_TIMEOUT)
+        .unwrap_or_else(Instant::now);
+    request_timeout_duration(timeout)
+        .and_then(|timeout| start.checked_add(timeout))
+        .map_or(status_deadline, |request_deadline| {
+            std::cmp::min(status_deadline, request_deadline)
+        })
+}
+
+fn request_timeout_duration(timeout: f64) -> Option<Duration> {
+    if !timeout.is_finite() || timeout <= 0.0 {
+        return None;
+    }
+    Duration::try_from_secs_f64(timeout).ok()
+}
+
+#[cfg(unix)]
+fn kill_owned_process_group(pid: u32, pgid: i64, leader_owned: bool) {
+    if !leader_owned || pgid <= 1 || pgid > i32::MAX as i64 {
+        return;
+    }
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    let current_pgid = unsafe { libc::getpgrp() } as i64;
+    if pgid == current_pgid {
+        return;
+    }
+
+    // Revalidate the retained group leader immediately before signalling. The
+    // caller still owns that leader as a live child or unreaped zombie, and a
+    // session leader cannot move to another process group, so the numeric PGID
+    // cannot be recycled between this check and the group signal. Platforms
+    // without WNOWAIT reach this helper after reaping and safely skip instead.
+    if unsafe { libc::getpgid(pid) } as i64 != pgid {
+        return;
+    }
+    unsafe {
+        libc::kill(-(pgid as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_owned_process_group(_pid: u32, _pgid: i64, _leader_owned: bool) {}
 
 #[cfg(unix)]
 fn kill_process_group_if_safe(pgid: i64) {
@@ -1489,7 +1649,6 @@ fn do_stream(
             return 125;
         }
     };
-    write_stdin(&mut child, stdin_data);
 
     let stderr_handle = child.stderr.take();
     let stderr_thread = thread::spawn(move || {
@@ -1529,8 +1688,7 @@ fn do_stream(
     });
 
     // Wait with timeout. A non-positive timeout is the no-timeout sentinel.
-    let timeout_rx = if timeout > 0.0 {
-        let timeout_dur = Duration::from_secs_f64(timeout);
+    let timeout_rx = if let Some(timeout_dur) = request_timeout_duration(timeout) {
         let (tx, rx) = std::sync::mpsc::channel();
         let _timer = thread::spawn(move || {
             thread::sleep(timeout_dur);
@@ -1540,10 +1698,31 @@ fn do_stream(
     } else {
         None
     };
+    let stream_stop = Arc::new(AtomicBool::new(false));
+    let mut stdin_thread = match spawn_stdin_writer(
+        child.stdin.take(),
+        stdin_data.map(str::to_owned),
+        Arc::clone(&stream_stop),
+    ) {
+        Ok(thread) => thread,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            stream_stop.store(true, Ordering::Release);
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            eprintln!("Failed to configure nonblocking stdin: {error}");
+            return 125;
+        }
+    };
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                stream_stop.store(true, Ordering::Release);
+                if let Some(handle) = stdin_thread.take() {
+                    let _ = handle.join();
+                }
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
                 return status.code().unwrap_or(1);
@@ -1552,6 +1731,10 @@ fn do_stream(
                 if timeout_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                     let _ = child.kill();
                     let _ = child.wait();
+                    stream_stop.store(true, Ordering::Release);
+                    if let Some(handle) = stdin_thread.take() {
+                        let _ = handle.join();
+                    }
                     let _ = stdout_thread.join();
                     let _ = stderr_thread.join();
                     eprintln!("Command timed out after {timeout} seconds");
@@ -1560,6 +1743,12 @@ fn do_stream(
                 thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                stream_stop.store(true, Ordering::Release);
+                if let Some(handle) = stdin_thread.take() {
+                    let _ = handle.join();
+                }
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
                 eprintln!("Wait failed: {e}");

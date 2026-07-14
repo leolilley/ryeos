@@ -294,6 +294,7 @@ pub fn resolve_pinned_snapshot_context(
                 &bundle_roots,
                 Some(exec_dir.as_path()),
                 None,
+                Arc::clone(&state.sandbox),
             )
             .map_err(|e| {
                 ProjectSourceError::CheckoutFailed(format!("per-request engine build failed: {e}"))

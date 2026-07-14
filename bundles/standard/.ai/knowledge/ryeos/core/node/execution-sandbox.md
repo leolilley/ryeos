@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:5c240d228e522d7852eb320f1bdcd8aa03fb30fa31abd5d42f784c9ec70c9590:aY3ATpvcQerYdjvCZS/2CDBxrhrrtj7naL1+gGj9eCcp/3K4tSue815mp9mY2YasABe3fUnUc6Bbm4NEFpMPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:908aed43ce468c28fdc54280de976d12b8cddf9398a5a416613855db4493aa8d:fxGgAMbw1jam9pIm98/IxBKEWei4eHPi/u/RuDkBgAl5/YgP4v7lF00+ICgjS6ArpumxBUFVpCeqdNqVvO7cBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, sandbox, bubblewrap, security, subprocess, node-policy]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Node contract for the node-owned subprocess sandbox: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -96,7 +96,9 @@ source digest. `ryeos node status` is the narrower local lifecycle probe.
 - `network.mode` is `host` or `isolated`.
 - `environment.allow` entries are exact names, `*`, or prefix patterns ending
   in one `*`.
-- `limits.open_files` is an optional per-spawn file-descriptor limit.
+- `limits.open_files` is an optional per-spawn file-descriptor limit in
+  `mode: enforce`. Disabled mode preserves a tighter limit already owned by a
+  caller but does not install the sandbox policy's `RLIMIT_NOFILE`.
 - `limits.stdout_bytes` and `limits.stderr_bytes` are mandatory positive
   bounds on bytes retained from each output stream. The node continues
   draining after a bound is crossed and terminates the supervised workload.
@@ -138,7 +140,9 @@ The narrow readable placeholders mean:
 - `{node_public_identity}` exposes only the exact regular, non-symlink
   `<app-root>/.ai/node/identity/public-identity.json`, never the private key.
 - `{daemon_socket}` exposes only the daemon-pinned, non-symlink Unix socket
-  when the launch requests callback IPC. The exact placeholder mount is
+  when a typed launch fact requests callback IPC. RyeOS does not infer this
+  authority from an environment-variable name. The requested path must equal
+  the socket pinned at daemon startup, and the exact placeholder mount is
   required; a surrounding directory is not substituted for it.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
 - `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
@@ -203,12 +207,36 @@ still use host identifiers, and the sandbox does not claim PID or same-UID
 signal isolation.
 
 Bubblewrap reports the target's host PID through a private
-`--json-status-fd` pipe. Because `--new-session` makes that initial PID the
-target process-group leader, Lillux supervises and terminates both that group
-and the outer Bubblewrap group on timeout, cancellation, output overflow, or a
-wait failure. A descendant that deliberately creates another session remains
-outside this local process-group guarantee; hostile hosted workers additionally
-use `cgroup.kill` at the outer worker boundary.
+`--json-status-fd` pipe for accounting. Lillux creates a new session before it
+executes Bubblewrap, and the target inherits the retained wrapper's process
+group. The wrapper remains unreaped while Lillux terminates that group, which
+keeps the PGID reserved even if the initial target exits while descendants are
+still running. Timeout, cancellation, output overflow, and wait failure all use
+that stable group ownership. A descendant that deliberately creates another
+session remains outside this local process-group guarantee; hostile hosted
+workers additionally use `cgroup.kill` at the outer worker boundary.
+
+Managed launches pin the exact target and retained group leader before durable
+attachment. The version-1 process identity records the boot ID, numeric target
+and leader IDs, and both `/proc` start-time ticks. Every later target or group
+signal first opens a pidfd, proves the stored incarnation, and uses pidfd
+signalling; RyeOS never turns a stored PID/PGID into raw `kill` authority.
+Self-attaching runtimes must match their accepted UDS `SO_PEERCRED` PID and are
+pinned through that socket's `SO_PEERPIDFD`.
+
+Normal shutdown closes authoring and tears down attached identities within a
+shared node-owned grace bound. After an unclean daemon exit, the exclusive
+state lock proves that any still-live, exactly matched attachment belongs to the
+previous daemon; startup kills that group before recovery launches a
+replacement. A same-boot attachment whose leader birth identity can no longer
+be proven is quarantined rather than cleared or signalled.
+
+One unavoidable local crash window remains between kernel process creation and
+publication of the durable attachment. An immediate daemon `SIGKILL` in that
+window can leave an untracked process group that state-based recovery cannot
+name. A hosted hostile-workload boundary must place the daemon/launch handoff
+inside an outer cgroup, VM, microVM, or dedicated worker that owns whole-workload
+teardown independently of the attachment row.
 
 Configured writable binds are installed first. Read-only policy mounts, the
 verified-code authority mirror and exact artifact, and any non-system command
@@ -230,14 +258,23 @@ failure refuses the spawn.
 ## Launch coverage
 
 The immutable runtime covers engine plan subprocesses, managed and streaming
-runtime launches, compose-context children, handler workspaces, tool environment
-import probes, and offline executable dispatch. Graph runtimes parse the exact
+runtime launches, compose-context children, external parser/composer handlers
+and their boot validation, tool environment import probes, and offline
+executable dispatch. Handler binaries retain their signed executor-manifest
+hash, execute from captured exact bytes, see installed bundle roots read-only,
+and receive no configured host writable mounts. Graph runtimes parse the exact
 verified bytes carried in their launch envelope rather than reopening a mutable
-source path.
+source path. Callback-free streaming protocol executors also receive a durable
+thread row and exact attached process identity, so shutdown owns them rather
+than leaving an untracked blocking subprocess.
 
 Locally launched CLI client applications are not node workloads and do not pass
 through this policy; they run with the invoking user's terminal and desktop
 authority. Hosted execution paths do not launch those client applications.
+Maintainer-only bundle signing is likewise an explicitly named authoring path
+that may run before a node policy exists; it uses local maintainer authority and
+does not claim OS confinement. Node boot, admission, preflight, doctor, item
+signing, and runtime handler dispatch use the immutable node policy instead.
 
 HTTP live-filesystem execution requires an explicit project path to name a real
 project root containing `.ai`. No-project requests receive a private,
@@ -264,6 +301,9 @@ access, the target environment, and open file descriptors. It is not a virtual
 machine, does not defend against kernel vulnerabilities, and does not yet set
 CPU, memory, or per-sandbox process quotas. Do not model a process quota with
 `RLIMIT_NPROC`: it is scoped to the daemon's real UID rather than one sandbox.
+Host PIDs remain visible to syscalls, same-UID signal isolation is not claimed,
+and transitive imports, libraries, and assets remain live read-only rather than
+content-pinned.
 Disabled means no OS sandbox, not unverified execution; resolution, signature,
 authorization, and capability checks remain active.
 
@@ -292,5 +332,5 @@ execution in enforce mode, and observable policy generations available now. It
 is the base for safely evaluating third-party
 bundles, remote project execution, and future workload tiers. It does not yet
 provide CPU, memory, or process-count isolation; production multi-tenant hosting
-still needs cgroup quotas and may require stronger VM or microVM separation for
+still needs cgroup quotas plus a VM, microVM, or dedicated outer worker for
 hostile code.

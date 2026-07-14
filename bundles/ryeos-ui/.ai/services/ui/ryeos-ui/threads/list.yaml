@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-06T12:24:56Z:a483746fff9f04463d96d54a0b0f59f68ed175df2e1ce55ec897ba992206c4f6:k8UKwogcNZTKMTYA2zc9q7kB2hvuwVdtjo7BqZcE5mbUEDug2ggjbcuBuf3bG+Ey/1/L2R2iBTHhqj5m8pMXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:b3b54795a4b199cac2ab32e75b0fae9065209905b4baa0f0321da599ad131740:RTMvKwNHA8et8f9fGoSc3DKaLC+4gJD0TkQid+qNe+7jd1aSGc662OSUzPNJHvBmB1lqvZlrQECt1xFDBVDVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/threads/list
 version: "1.0.0"
 description: Thread listing for RyeOS UI — returns recent threads with status, kind, item_ref, and timestamps.
 endpoint: ui.ryeos.threads.list
+ui_read_only: true
+record_thread: false
 availability: daemon_only

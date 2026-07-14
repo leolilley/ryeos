@@ -23,6 +23,8 @@ pub struct Request {
     pub tokens: Vec<String>,
     #[serde(default)]
     pub project_path: Option<String>,
+    #[serde(default)]
+    pub arguments: Value,
 }
 
 pub async fn handle(
@@ -40,16 +42,18 @@ pub async fn handle(
         .resolve(&req.tokens)
         .map_err(|e| HandlerError::BadRequest(format!("unresolved command: {e}")))?;
 
+    let parameters = ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(
+        &matched.tail,
+        Some(&matched.command),
+        &req.arguments,
+    )
+    .map_err(HandlerError::BadRequest)?;
+
     let item_ref = match &matched.command.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
         CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => {
             // The ref itself is a tail argument (e.g. `execute <ref>`).
-            let bound = ryeos_runtime::arg_binder::bind_argv_with_command(
-                &matched.tail,
-                Some(&matched.command),
-            )
-            .map_err(HandlerError::BadRequest)?;
-            let Some(found) = bound.get(item_ref_arg).and_then(Value::as_str) else {
+            let Some(found) = parameters.get(item_ref_arg).and_then(Value::as_str) else {
                 return Err(HandlerError::BadRequest(format!(
                     "command requires `{item_ref_arg}` argument"
                 )));
@@ -75,10 +79,6 @@ pub async fn handle(
             ));
         }
     };
-
-    let parameters =
-        ryeos_runtime::arg_binder::bind_argv_with_command(&matched.tail, Some(&matched.command))
-            .map_err(HandlerError::BadRequest)?;
 
     let project_path = req
         .project_path

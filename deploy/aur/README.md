@@ -61,5 +61,6 @@ mirror.
 
 Interrupted release runs are resumable when existing images already carry the
 expected workflow signature, and an archive-only upload can safely derive its
-missing checksum. See the [release recovery guide](../../docs/release-recovery.md)
+missing checksum. See the
+[release recovery guide](../../.ai/knowledge/ryeos/development/release-process.md#interrupted-release-recovery)
 for the deliberately manual, fail-closed cases.

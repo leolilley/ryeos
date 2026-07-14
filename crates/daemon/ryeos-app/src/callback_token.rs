@@ -11,9 +11,6 @@ use crate::execution_provenance::ExecutionProvenance;
 /// Default TTL for callback tokens when no explicit duration is requested.
 const DEFAULT_CALLBACK_TTL_SECS: u64 = 300;
 
-/// Maximum allowed TTL — tokens requesting longer lifetimes are capped.
-const MAX_CALLBACK_TTL_SECS: u64 = 3600;
-
 #[derive(Debug, Clone)]
 pub struct CallbackCapability {
     pub token: String,
@@ -249,11 +246,6 @@ impl CallbackCapabilityStore {
     }
 }
 
-pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
-    let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
-    Duration::from_secs(secs.min(MAX_CALLBACK_TTL_SECS))
-}
-
 /// Margin added to a run's hard timeout so the run-scoped token outlives the
 /// finalization callback that fires at/just after the deadline.
 const LAUNCH_TTL_MARGIN_SECS: u64 = 300;
@@ -266,9 +258,8 @@ const MAX_LAUNCH_TTL_SECS: u64 = 7 * 24 * 3600;
 /// TTL for a **run-scoped** launch token (the callback + thread-auth tokens a
 /// launched runtime holds for its whole life).
 ///
-/// Unlike [`compute_ttl`], it is deliberately NOT capped at
-/// [`MAX_CALLBACK_TTL_SECS`] (3600s): the token must outlive the run's hard
-/// timeout (`duration_seconds`) plus the finalization window, or a run allowed
+/// The token must outlive the run's hard timeout (`duration_seconds`) plus the
+/// finalization window, or a run allowed
 /// to exceed 3600s loses callback/auth authority before it can finalize — a
 /// silent mid-run failure. The token is thread-scoped and invalidated at run
 /// end, so a TTL that tracks the run's duration is the correct lifetime; a
@@ -743,16 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn compute_ttl_defaults_to_300() {
-        assert_eq!(compute_ttl(None), Duration::from_secs(300));
-    }
-
-    #[test]
-    fn compute_ttl_caps_at_3600() {
-        assert_eq!(compute_ttl(Some(9999)), Duration::from_secs(3600));
-    }
-
-    #[test]
     fn launch_token_ttl_outlives_a_run_past_3600() {
         // The bug: a run allowed to exceed 3600s must NOT lose its callback
         // token before it finalizes. The run-scoped TTL covers the run duration
@@ -794,11 +775,6 @@ mod tests {
             launch_token_ttl(None),
             Duration::from_secs(DEFAULT_CALLBACK_TTL_SECS + LAUNCH_TTL_MARGIN_SECS)
         );
-    }
-
-    #[test]
-    fn compute_ttl_uses_provided_value() {
-        assert_eq!(compute_ttl(Some(600)), Duration::from_secs(600));
     }
 
     // ── ThreadAuthStore ──────────────────────────────────────────────

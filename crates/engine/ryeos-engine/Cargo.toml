@@ -3,7 +3,7 @@ name = "ryeos-engine"
 version = "0.1.0"
 edition = "2021"
 description = "Native policy engine for Rye OS — resolution, trust, planning"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
 base64 = { workspace = true }

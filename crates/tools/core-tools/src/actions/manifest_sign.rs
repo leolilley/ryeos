@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use lillux::crypto::SigningKey;
 use serde::Serialize;
 
-use crate::actions::publish::generate_and_sign_manifest;
+use crate::actions::publish::generate_and_sign_manifest_in_place;
 
 #[derive(Debug, Serialize)]
 pub struct ManifestSignReport {
@@ -39,6 +39,39 @@ pub fn manifest_sign(
     name: Option<&str>,
     signing_key: &SigningKey,
 ) -> Result<ManifestSignReport> {
+    let live_root = bundle_source.to_path_buf();
+    let canonical_live_root = std::fs::canonicalize(bundle_source).with_context(|| {
+        format!(
+            "canonicalize bundle source before manifest signing {}",
+            bundle_source.display()
+        )
+    })?;
+    let effective_name = match name {
+        Some(name) => name.to_string(),
+        None => canonical_live_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .context("bundle_source path has no UTF-8 directory name")?,
+    };
+    super::publisher_transaction::with_staged_bundle_generation(bundle_source, |staging| {
+        let mut report = manifest_sign_in_place(staging, &effective_name, signing_key)?;
+        report.bundle_source = live_root.clone();
+        let live_manifest_path = report
+            .manifest_generated
+            .strip_prefix(staging)
+            .map(|relative| live_root.join(relative))
+            .unwrap_or_else(|_| report.manifest_generated.clone());
+        report.manifest_generated = live_manifest_path;
+        Ok(report)
+    })
+}
+
+fn manifest_sign_in_place(
+    bundle_source: &Path,
+    effective_name: &str,
+    signing_key: &SigningKey,
+) -> Result<ManifestSignReport> {
     if !bundle_source.is_dir() {
         anyhow::bail!(
             "bundle_source is not a directory: {}",
@@ -51,7 +84,7 @@ pub fn manifest_sign(
     }
 
     let (manifest_generated, manifest_changed) =
-        generate_and_sign_manifest(&ai_dir, bundle_source, name, signing_key)
+        generate_and_sign_manifest_in_place(bundle_source, effective_name, signing_key)
             .context("manifest generation failed")?;
 
     let author_fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());

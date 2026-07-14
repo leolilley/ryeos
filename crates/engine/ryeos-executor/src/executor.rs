@@ -101,8 +101,10 @@ pub struct ServiceExecutionResult {
     pub trust_class: ryeos_engine::contracts::TrustClass,
     /// Effective caps after enforcement (live mode only; empty in standalone).
     pub effective_caps: Vec<String>,
-    /// The thread ID of the audit record.
-    pub audit_thread_id: String,
+    /// Correlation ID for this invocation. It is retrievable as a durable
+    /// thread only when `recorded` is true.
+    pub invocation_id: String,
+    pub recorded: bool,
 }
 
 /// Resolve and verify any item ref (kind-agnostic).
@@ -112,10 +114,8 @@ pub struct ServiceExecutionResult {
 /// 2. Resolve through the engine.
 /// 3. Verify trust chain (signature + content hash).
 ///
-/// Error wording is keyed off `ref_kind_label`: `None` produces neutral
-/// "ref '<...>' ..." messages; `Some("service")` produces the original
-/// service-flavored "service '<...>' ..." wording so existing pin tests
-/// and callers see no diff.
+/// `ref_kind_label` affects diagnostic wording only; resolution and routing
+/// always come from the parsed canonical ref and verified registries.
 pub fn resolve_and_verify(
     engine: &Arc<ryeos_engine::engine::Engine>,
     plan_ctx: &ryeos_engine::contracts::PlanContext,
@@ -164,7 +164,7 @@ pub async fn execute_service(
     state: &AppState,
 ) -> Result<ServiceExecutionResult> {
     let verified = resolve_and_verify(&ctx.engine, &ctx.plan_ctx, service_ref, Some("service"))?;
-    execute_service_verified(verified, service_ref, params, mode, ctx, state, None).await
+    execute_service_verified(verified, service_ref, params, mode, ctx, state, None, None).await
 }
 
 /// Execute a service given an already-verified item.
@@ -179,6 +179,11 @@ pub async fn execute_service(
 /// source that minted the id before launch) receive every persisted event
 /// from the very first lifecycle event onward. When `None`, a fresh
 /// `svc-<ts>-<rand>` id is minted as before.
+///
+/// `local_handler_context` is trusted out-of-band context supplied by a local
+/// transport. It is selected only when the verified service item explicitly
+/// declares `ui_dispatch: session_local`; ordinary services always receive the
+/// verified execution principal derived from `ctx`.
 pub async fn execute_service_verified(
     verified: ryeos_engine::contracts::VerifiedItem,
     service_ref: &str,
@@ -187,12 +192,19 @@ pub async fn execute_service_verified(
     ctx: &ExecutionContext,
     state: &AppState,
     pre_minted_thread_id: Option<&str>,
+    local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
 ) -> Result<ServiceExecutionResult> {
     let trust_class = verified.trust_class;
 
     // 3. Extract endpoint + required_caps
     let endpoint = extract_endpoint(&verified.resolved.metadata.extra)?;
     let required_caps = extract_required_caps(&verified.resolved.metadata.extra);
+    let authored_record_thread =
+        ryeos_app::service_registry::extract_record_thread(&verified.resolved.metadata.extra)?;
+    // A caller that pre-minted an externally subscribed ID has promised a
+    // durable stream. Preserve that promise regardless of the service's normal
+    // high-frequency read policy.
+    let record_thread = authored_record_thread || pre_minted_thread_id.is_some();
 
     // 4. Availability check
     let avail = availability_for_endpoint(state.service_descriptors, &endpoint)
@@ -233,7 +245,7 @@ pub async fn execute_service_verified(
     // Honor a caller-supplied thread id when provided so external
     // subscribers (route SSE sources) registered against the id see
     // every persisted lifecycle event from the very first one.
-    let audit_thread_id = match pre_minted_thread_id {
+    let invocation_id = match pre_minted_thread_id {
         Some(id) => id.to_string(),
         None => format!(
             "svc-{}-{:08x}",
@@ -243,8 +255,8 @@ pub async fn execute_service_verified(
     };
 
     let create_params = ryeos_app::thread_lifecycle::ThreadCreateParams {
-        thread_id: audit_thread_id.clone(),
-        chain_root_id: audit_thread_id.clone(),
+        thread_id: invocation_id.clone(),
+        chain_root_id: invocation_id.clone(),
         kind: "service_run".to_string(),
         item_ref: service_ref.to_string(),
         executor_ref: endpoint.clone(),
@@ -253,13 +265,19 @@ pub async fn execute_service_verified(
         origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
         upstream_thread_id: None,
         requested_by: Some(ctx.principal_fingerprint.clone()),
+        project_root: match &ctx.plan_ctx.project_context {
+            ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
+                Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+            }
+            _ => None,
+        },
         usage_subject: None,
         usage_subject_asserted_by: None,
     };
 
-    let audit_ok = state.threads.create_thread(&create_params).is_ok();
+    let audit_ok = record_thread && state.threads.create_thread(&create_params).is_ok();
     if audit_ok {
-        let _ = state.threads.mark_running(&audit_thread_id);
+        let _ = state.threads.mark_running(&invocation_id);
     }
 
     // 6. Inject typed handler context for service handlers.
@@ -270,11 +288,21 @@ pub async fn execute_service_verified(
     //    - live: cap enforcement already passed (step 5)
     //    - standalone: operator authority from filesystem
 
-    let hctx = ryeos_app::handler_context::HandlerContext::new(
-        ctx.principal_fingerprint.clone(),
-        ctx.caller_scopes.clone(),
-        true,
-    );
+    let verified_handler_context = || {
+        ryeos_app::handler_context::HandlerContext::new(
+            ctx.principal_fingerprint.clone(),
+            ctx.caller_scopes.clone(),
+            true,
+        )
+    };
+    let hctx = match ryeos_app::service_registry::extract_ui_dispatch(
+        &verified.resolved.metadata.extra,
+    )? {
+        ryeos_app::service_registry::UiDispatchMode::SessionLocal => {
+            local_handler_context.unwrap_or_else(verified_handler_context)
+        }
+        ryeos_app::service_registry::UiDispatchMode::Verified => verified_handler_context(),
+    };
 
     // 7. Dispatch to handler
     let handler = state
@@ -292,7 +320,7 @@ pub async fn execute_service_verified(
             Ok(value) => {
                 let _ = state.threads.finalize_thread(
                     &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                        thread_id: audit_thread_id.clone(),
+                        thread_id: invocation_id.clone(),
                         status: "completed".to_string(),
                         outcome_code: Some("success".to_string()),
                         result: Some(value.clone()),
@@ -307,7 +335,7 @@ pub async fn execute_service_verified(
             Err(e) => {
                 let _ = state.threads.finalize_thread(
                     &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                        thread_id: audit_thread_id.clone(),
+                        thread_id: invocation_id.clone(),
                         status: "failed".to_string(),
                         outcome_code: Some("handler_error".to_string()),
                         result: None,
@@ -323,7 +351,7 @@ pub async fn execute_service_verified(
     }
 
     // 7c. Standalone NDJSON audit (only in Standalone mode, not projection-backed)
-    if mode == ExecutionMode::Standalone {
+    if mode == ExecutionMode::Standalone && record_thread {
         let audit_path = standalone_audit::default_audit_path(&state.config.app_root);
         let record = standalone_audit::StandaloneAuditRecord {
             ts: lillux::time::iso8601_now(),
@@ -387,7 +415,8 @@ pub async fn execute_service_verified(
         endpoint,
         trust_class,
         effective_caps,
-        audit_thread_id,
+        invocation_id,
+        recorded: audit_ok,
     })
 }
 

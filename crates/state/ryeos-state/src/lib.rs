@@ -33,7 +33,10 @@ pub mod sync;
 pub mod verify;
 
 pub use admission::{admit_root, AdmissionRequest, AdmissionResult};
-pub use bundle_events::{BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord};
+pub use bundle_events::{
+    BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage, BundleEventRecord,
+    BundleEventScanCursor, BundleEventScanPage,
+};
 pub use bundle_outbox::{
     claim_bundle_outbox_messages, enqueue_bundle_outbox_message, ensure_bundle_outbox_schema,
     get_bundle_outbox_message, mark_bundle_outbox_delivered, mark_bundle_outbox_failed,

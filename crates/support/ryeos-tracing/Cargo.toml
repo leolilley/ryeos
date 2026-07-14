@@ -3,7 +3,7 @@ name = "ryeos-tracing"
 version = "0.1.0"
 edition = "2021"
 description = "Shared tracing infrastructure for Rye OS workspace"
-license = "MIT"
+license.workspace = true
 
 [features]
 default = []

@@ -1,9 +1,134 @@
-//! Subprocess terminator execution for managed runtimes, streaming tools, and
-//! ordinary tool subprocesses.
+//! Subprocess terminator execution for managed runtimes, callback-free streams,
+//! and ordinary tool subprocesses.
 
 use super::*;
 
 // ── Unified subprocess terminator ─────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ManagedProtocolRoute {
+    CallbackRuntime,
+    FramedStreaming,
+}
+
+/// Enforce the one ordinary-subprocess wire contract everywhere admission can
+/// happen. Keeping this check shared prevents accepted preflight from minting
+/// a thread that the runner later rejects for protocol shape.
+pub(crate) fn validate_ordinary_protocol_contract(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    kind: &str,
+) -> Result<(), DispatchError> {
+    use ryeos_engine::protocol_vocabulary::{LifecycleMode, StdinShape, StdoutMode, StdoutShape};
+
+    if protocol.descriptor.lifecycle.mode != LifecycleMode::DetachedOk
+        || protocol.descriptor.stdin.shape != StdinShape::Opaque
+        || protocol.descriptor.stdout.shape != StdoutShape::OpaqueBytes
+        || protocol.descriptor.stdout.mode != StdoutMode::Terminal
+    {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: format!(
+                "ordinary subprocess protocol '{}' has unsupported wire contract: expected opaque stdin, terminal opaque_bytes stdout, and detached_ok lifecycle; got {:?} stdin, {:?}/{:?} stdout, and {:?} lifecycle",
+                protocol.canonical_ref,
+                protocol.descriptor.stdin.shape,
+                protocol.descriptor.stdout.shape,
+                protocol.descriptor.stdout.mode,
+                protocol.descriptor.lifecycle.mode,
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Classify a verified managed protocol once for both preflight and live
+/// dispatch. A callback-free managed subprocess is daemon-owned only when its
+/// descriptor carries the framed streaming contract; other terminal shapes
+/// (for example a local TTY client launcher) belong to a different surface.
+pub(super) fn classify_managed_protocol(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    kind: &str,
+) -> Result<ManagedProtocolRoute, DispatchError> {
+    use ryeos_engine::protocol_vocabulary::{
+        CallbackChannel, EnvInjectionSource, LifecycleMode, StdinShape, StdoutMode, StdoutShape,
+    };
+
+    if protocol.descriptor.callback_channel != CallbackChannel::None {
+        if protocol.descriptor.stdin.shape != StdinShape::LaunchEnvelopeV1
+            || protocol.descriptor.stdout.shape != StdoutShape::RuntimeResultV1
+            || protocol.descriptor.stdout.mode != StdoutMode::Terminal
+            || protocol.descriptor.lifecycle.mode != LifecycleMode::Managed
+        {
+            return Err(DispatchError::SchemaMisconfigured {
+                kind: kind.to_string(),
+                detail: format!(
+                    "managed callback protocol '{}' has unsupported wire contract: expected launch_envelope_v1 stdin, terminal runtime_result_v1 stdout, and managed lifecycle; got {:?} stdin, {:?}/{:?} stdout, and {:?} lifecycle",
+                    protocol.canonical_ref,
+                    protocol.descriptor.stdin.shape,
+                    protocol.descriptor.stdout.shape,
+                    protocol.descriptor.stdout.mode,
+                    protocol.descriptor.lifecycle.mode,
+                ),
+            });
+        }
+        return Ok(ManagedProtocolRoute::CallbackRuntime);
+    }
+    if protocol.descriptor.stdin.shape == StdinShape::LaunchEnvelopeV1 {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: format!(
+                "managed callback-free protocol '{}' requests a launch envelope, but the daemon's framed-streaming surface has no runtime envelope authority",
+                protocol.canonical_ref,
+            ),
+        });
+    }
+    if let Some(injection) = protocol.descriptor.env_injections.iter().find(|injection| {
+        matches!(
+            injection.source,
+            EnvInjectionSource::CallbackSocketPath
+                | EnvInjectionSource::CallbackToken
+                | EnvInjectionSource::ThreadAuthToken
+        )
+    }) {
+        return Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: format!(
+                "managed callback-free protocol '{}' requests unavailable env source {:?} for injection '{}'",
+                protocol.canonical_ref, injection.source, injection.name,
+            ),
+        });
+    }
+    match (
+        protocol.descriptor.stdout.mode,
+        protocol.descriptor.stdout.shape,
+    ) {
+        (StdoutMode::Streaming, StdoutShape::StreamingChunksV1) => {
+            Ok(ManagedProtocolRoute::FramedStreaming)
+        }
+        (mode, shape) => Err(DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: format!(
+                "managed callback-free protocol '{}' declares stdout {shape:?}/{mode:?}; \
+                 daemon dispatch currently owns only the verified framed-streaming contract",
+                protocol.canonical_ref,
+            ),
+        }),
+    }
+}
+
+/// Validate the separate wire used when a kind's method dispatcher spawns its
+/// selected runtime. A method call is managed and callback-capable, but it does
+/// not consume or emit the normal runtime launch/result envelopes.
+pub(super) fn validate_method_protocol_contract(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    kind: &str,
+) -> Result<(), DispatchError> {
+    ryeos_engine::protocols::validate_method_runtime_protocol(&protocol.descriptor).map_err(
+        |reason| DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: format!("method protocol '{}' {reason}", protocol.canonical_ref),
+        },
+    )
+}
 
 pub(crate) async fn dispatch_subprocess(
     sctx: SubprocessDispatchContext<'_>,
@@ -89,6 +214,7 @@ pub(crate) async fn dispatch_subprocess(
             .await
         }
         LifecycleMode::DetachedOk => {
+            validate_ordinary_protocol_contract(protocol, &current_ref.kind)?;
             dispatch_tool_subprocess(
                 current_ref,
                 thread_profile,
@@ -118,10 +244,12 @@ async fn dispatch_managed_subprocess(
         role,
     } = sctx;
 
-    use ryeos_engine::protocol_vocabulary::CallbackChannel;
-    if protocol.descriptor.callback_channel == CallbackChannel::None {
+    if classify_managed_protocol(protocol, &canonical_ref.kind)?
+        == ManagedProtocolRoute::FramedStreaming
+    {
         return dispatch_streaming_subprocess(
             canonical_ref,
+            hop_thread_profile,
             hop_verified,
             request,
             ctx,
@@ -186,7 +314,6 @@ async fn dispatch_managed_subprocess(
     // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
-        executor_ref: &prepared.executor_ref,
         // The serving runtime's canonical ref, captured so a continuation
         // successor reattaches the same runtime identity (not just the kind's
         // current default).
@@ -197,7 +324,6 @@ async fn dispatch_managed_subprocess(
         provenance: &request.provenance,
         parameters: &params,
         metadata_required_secrets: &prepared.resolved.resolved_item.metadata.required_secrets,
-        required_envelope_fields: &prepared.required_envelope_fields,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
         parent_execution_context: request.parent_execution_context.as_ref(),
@@ -254,11 +380,12 @@ async fn dispatch_managed_subprocess(
 
 async fn dispatch_streaming_subprocess(
     current_ref: &CanonicalRef,
+    thread_profile: &str,
     verified: Option<&VerifiedItem>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
-    _protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
     let item_ref_str = current_ref.to_string();
     let engine_roots = ctx
@@ -277,49 +404,14 @@ async fn dispatch_streaming_subprocess(
         })
         .collect();
 
-    let effective_parsers = ctx
-        .engine
-        .effective_parser_dispatcher(Some(request.project_path))
-        .map_err(|e| {
-            DispatchError::InvalidRef(current_ref.to_string(), format!("parser dispatcher: {e}"))
-        })?;
-
-    let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
-        current_ref,
-        &ctx.engine.kinds,
-        &effective_parsers,
-        &engine_roots,
-        &ctx.engine.trust_store,
-        &ctx.engine.composers,
-    )
-    .map_err(|e| {
-        DispatchError::InvalidRef(
-            current_ref.to_string(),
-            format!("resolution pipeline failed: {e}"),
-        )
-    })?;
-
-    let single_root = project_single_root(&resolution_output)?;
-
-    let stdin_data =
-        serde_json::to_string(&single_root).map_err(|e| DispatchError::Internal(e.into()))?;
-
-    // Streaming tools are *items*, not runtime-hosted kinds — each
-    // tool ships its own binary in the bundle (e.g.
-    // `bin/<triple>/ryeos-core-tools`) and the dispatcher
-    // resolves it from the verified item's `executor_id` metadata.
-    // Phase2's first cut wrongly routed this through
-    // `RuntimeRegistry::lookup_for(kind)` — which only finds runtimes
-    // declared via `kind: runtime` YAMLs (directive/graph/knowledge),
-    // never streaming tools — so every streaming dispatch hit
-    // `no runtime serves kind 'streaming_tool'`. The fix is to use the
-    // streaming tool's own binary, which is the `executor_id` field
-    // the kind-schema's `inventory_schema_keys` already surfaces on
-    // `ResolvedItem.metadata`.
+    // A callback-free streaming terminator owns its executable directly rather
+    // than borrowing a runtime-registry host. The kind schema exposes that
+    // signed direct-binary identity through `executor_id`; no kind or protocol
+    // name participates in the routing decision.
     let verified_item = verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
         kind: current_ref.kind.clone(),
         detail: format!(
-            "streaming tool '{item_ref_str}' dispatched without a verified item — \
+            "callback-free streaming item '{item_ref_str}' dispatched without a verified item — \
              the dispatch loop must resolve before reaching a streaming terminator"
         ),
     })?;
@@ -332,10 +424,9 @@ async fn dispatch_streaming_subprocess(
         .ok_or_else(|| DispatchError::SchemaMisconfigured {
             kind: current_ref.kind.clone(),
             detail: format!(
-                "streaming tool '{item_ref_str}' has no `executor_id` in its YAML \
-                 — every `kind: streaming_tool` item must declare \
-                 `executor_id: <bare-binary-name>` so the daemon can resolve the \
-                 binary against the system bundle's `bin/<triple>/` CAS"
+                "callback-free streaming item '{item_ref_str}' has no direct `executor_id`; \
+                 its kind schema must extract a signed bare binary identity so the daemon \
+                 can resolve it against the installed bundle executor manifest"
             ),
         })?;
     let executor_ref = format!("native:{executor_id}");
@@ -362,72 +453,385 @@ async fn dispatch_streaming_subprocess(
         source_path: executor.path,
         content_hash: executor.content_hash,
     }];
+    // Mint the authoritative id before building the protocol environment so
+    // the child and its durable lifecycle row observe the exact same identity.
+    // This is still pure pre-launch setup: no row exists until every declared
+    // injection has been resolved and validated below.
+    let thread_id = request
+        .pre_minted_thread_id
+        .clone()
+        .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
     let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
         &state.config.app_root,
     );
-    let envs = ryeos_app::process::build_subprocess_envs_with_roots(
-        &std::collections::BTreeMap::new(),
-        &[],
-        roots,
-    )
-    .map_err(|e| DispatchError::Internal(e.into()))?;
-    let subprocess_request = lillux::SubprocessRequest {
-        cmd: executor_path_str,
-        args: vec![],
-        cwd: Some(request.project_path.to_string_lossy().into_owned()),
-        envs,
-        stdin_data: Some(stdin_data),
-        timeout: 120.0,
-        limits: None,
-        inherited_fds: Vec::new(),
-        supervised_status: None,
+    let env_request = ryeos_engine::subprocess_spec::SubprocessBuildRequest {
+        cmd: std::path::PathBuf::from(&executor_path_str),
+        args: Vec::new(),
+        cwd: request.project_path.to_path_buf(),
+        timeout: std::time::Duration::from_secs(120),
+        item_ref: current_ref.clone(),
+        thread_id: thread_id.clone(),
+        project_path: request.project_path.to_path_buf(),
+        acting_principal: request.acting_principal.to_string(),
+        cas_root: state
+            .state_store
+            .cas_root()
+            .map_err(DispatchError::Internal)?,
+        callback_token: None,
+        callback_socket_path: None,
+        callback_project_path: None,
+        thread_auth_token: None,
+        params: request.params.clone(),
+        resolution_output: None,
     };
-    let subprocess_request = state
-        .sandbox
-        .apply(
-            subprocess_request,
-            ryeos_engine::sandbox::SandboxLaunchContext {
-                project_path: request.project_path,
-                project_authority: request.provenance.sandbox_project_authority(),
-                state_root: request.provenance.state_root_override(),
-                checkpoint_dir: None,
-                bundle_roots: &bundle_roots,
-                node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
-                verified_code: &sandbox_verified_code,
-                item_ref: &item_ref_str,
-                thread_id: "streaming-tool",
-            },
-        )
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
-    let workspace_lifeline = request.provenance.workspace_lifeline();
-    let result = tokio::task::spawn_blocking(move || {
-        let _workspace_lifeline = workspace_lifeline;
-        lillux::run(subprocess_request)
-    })
-    .await
-    .map_err(|e| DispatchError::Internal(e.into()))?;
-
-    if !result.success {
-        return Err(DispatchError::SubprocessRunFailed {
-            item_ref: item_ref_str,
+    let stdin_bytes = ryeos_engine::protocol_vocabulary::build_stdin(
+        protocol.descriptor.stdin.shape,
+        &env_request,
+    )
+    .map_err(|error| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: format!(
+            "protocol '{}' stdin contract is unavailable for this streaming launch: {error}",
+            protocol.canonical_ref
+        ),
+    })?;
+    let stdin_data =
+        String::from_utf8(stdin_bytes).map_err(|error| DispatchError::SchemaMisconfigured {
+            kind: current_ref.kind.clone(),
             detail: format!(
-                "streaming tool exited with code {}: {}",
-                result.exit_code,
-                &result.stderr[..result.stderr.len().min(500)]
+                "protocol '{}' produced non-UTF-8 stdin for the text subprocess bridge: {error}",
+                protocol.canonical_ref
             ),
-        });
+        })?;
+    let protocol_bindings = protocol
+        .descriptor
+        .env_injections
+        .iter()
+        .map(|injection| {
+            let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                injection.source,
+                &env_request,
+            )
+            .map_err(|error| DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: format!(
+                    "protocol '{}' env injection '{}' is unavailable for this streaming launch: {error}",
+                    protocol.canonical_ref, injection.name
+                ),
+            })?;
+            Ok(ryeos_app::env_contract::EnvBinding::new(
+                injection.name.clone(),
+                value,
+                ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
+                    source: injection.source,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, DispatchError>>()?;
+    let envs = ryeos_app::env_contract::EnvContractBuilder::new()
+        .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        }))
+        .map_err(|error| DispatchError::Internal(error.into()))?
+        .with_daemon_roots(roots)
+        .map_err(|error| DispatchError::Internal(error.into()))?
+        .with_typed_bindings(protocol_bindings)
+        .map_err(|error| DispatchError::Internal(error.into()))?
+        .build();
+    // Streaming execution used to run as an untracked `lillux::run` blocking
+    // task. A forced UDS shutdown could therefore drop the request future while
+    // leaving a process absent from the daemon's exact-identity drain. Give
+    // every invocation the same durable lifecycle/process owner as the other
+    // inline terminators before any process can be spawned.
+    let (chain_root_id, upstream_thread_id) =
+        if let Some(parent) = request.parent_execution_context.as_ref() {
+            let durable_parent = state
+                .threads
+                .get_thread(&parent.parent_thread_id)
+                .map_err(DispatchError::Internal)?
+                .ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "streaming parent thread not found: {}",
+                        parent.parent_thread_id
+                    ))
+                })?;
+            (durable_parent.chain_root_id, Some(durable_parent.thread_id))
+        } else {
+            (thread_id.clone(), None)
+        };
+    state
+        .threads
+        .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
+            thread_id: thread_id.clone(),
+            chain_root_id,
+            kind: thread_profile.to_string(),
+            item_ref: item_ref_str.clone(),
+            executor_ref: executor_ref.clone(),
+            launch_mode: request.launch_mode.to_string(),
+            current_site_id: ctx.plan_ctx.current_site_id.clone(),
+            origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+            upstream_thread_id,
+            requested_by: Some(request.acting_principal.to_string()),
+            project_root: Some(
+                request
+                    .project_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| request.project_path.to_path_buf()),
+            ),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+        })
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "streaming thread creation failed for {thread_id}: {error}"
+            ))
+        })?;
+    let mut lifecycle_owner =
+        crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &thread_id);
+
+    if let Some(parent) = request.parent_execution_context.as_ref() {
+        let inherited_stop = match state.state_store.record_child_link(
+            &parent.parent_thread_id,
+            &thread_id,
+            "dispatch",
+        ) {
+            Ok(inherited_stop) => inherited_stop,
+            Err(link_error) => {
+                let link_error_message = link_error.to_string();
+                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                    state,
+                    &thread_id,
+                    json!({
+                        "code": "child_link_failed",
+                        "reason": link_error_message.clone(),
+                    }),
+                );
+                match cleanup {
+                    Ok(
+                        ryeos_app::thread_lifecycle::FinalizeCreatedUnattachedOutcome::NotCurrent {
+                            ref thread,
+                            process_attached,
+                            launch_claimed,
+                        },
+                    ) => {
+                        lifecycle_owner.disarm();
+                        tracing::warn!(
+                            thread_id,
+                            status = %thread.status,
+                            process_attached,
+                            launch_claimed,
+                            "streaming child advanced while failed lineage cleanup was attempted"
+                        );
+                    }
+                    Ok(_) => lifecycle_owner.disarm(),
+                    Err(cleanup_error) => {
+                        return Err(DispatchError::Internal(anyhow::anyhow!(
+                            "record streaming child lineage for {} failed: {}; conditional cleanup also failed: {:#}",
+                            parent.parent_thread_id,
+                            link_error_message,
+                            cleanup_error,
+                        )));
+                    }
+                }
+                return Err(DispatchError::Internal(anyhow::anyhow!(
+                    "record streaming child lineage for {}: {}",
+                    parent.parent_thread_id,
+                    link_error_message,
+                )));
+            }
+        };
+        if inherited_stop.is_some() {
+            let settled = crate::execution::process_attachment::finalize_requested_stop_if_present(
+                state, &thread_id,
+            )
+            .map_err(DispatchError::Internal)?;
+            if !settled {
+                return Err(DispatchError::Internal(anyhow::anyhow!(
+                    "parent {} propagated a stop to streaming child {thread_id}, but the child had no durable stop",
+                    parent.parent_thread_id,
+                )));
+            }
+            lifecycle_owner.disarm();
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "parent {} was stop-requested before streaming child launch",
+                parent.parent_thread_id,
+            )));
+        }
     }
 
-    let frames = ryeos_engine::protocol_vocabulary::read_all_frames(std::io::Cursor::new(
-        result.stdout.as_bytes(),
-    ))
-    .map_err(|e| {
-        DispatchError::Internal(anyhow::anyhow!("frame read failed for streaming tool: {e}"))
-    })?;
+    let execution: Result<(Value, usize, usize), DispatchError> = async {
+        state
+            .threads
+            .mark_running(&thread_id)
+            .map_err(DispatchError::Internal)?;
 
-    serde_json::to_value(&frames)
-        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("frame serialize: {e}")))
+        let subprocess_request = lillux::SubprocessRequest {
+            cmd: executor_path_str,
+            args: vec![],
+            cwd: Some(request.project_path.to_string_lossy().into_owned()),
+            envs,
+            stdin_data: Some(stdin_data),
+            timeout: 120.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+        let subprocess_request = state
+            .sandbox
+            .apply(
+                subprocess_request,
+                ryeos_engine::sandbox::SandboxLaunchContext {
+                    project_path: request.project_path,
+                    project_authority: request.provenance.sandbox_project_authority(),
+                    state_root: request.provenance.state_root_override(),
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &bundle_roots,
+                    node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
+                    verified_code: &sandbox_verified_code,
+                    item_ref: &item_ref_str,
+                    thread_id: &thread_id,
+                },
+            )
+            .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        let workspace_lifeline = request.provenance.workspace_lifeline();
+        let process_state = state.clone();
+        let process_thread_id = thread_id.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::execution::process_attachment::run_lillux_attached(
+                &process_state,
+                &process_thread_id,
+                subprocess_request,
+                workspace_lifeline,
+            )
+        })
+        .await
+        .map_err(|error| DispatchError::Internal(error.into()))?
+        .map_err(DispatchError::Internal)?;
+
+        if !result.success {
+            return Err(DispatchError::SubprocessRunFailed {
+                item_ref: item_ref_str.clone(),
+                detail: format!(
+                    "exit_code={}, stderr={}",
+                    result.exit_code,
+                    result.stderr.chars().take(500).collect::<String>()
+                ),
+            });
+        }
+
+        let framed_stdout_bytes = result.stdout.len();
+        let frames = ryeos_engine::protocol_vocabulary::read_all_frames(std::io::Cursor::new(
+            result.stdout.as_bytes(),
+        ))
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "frame read failed for streaming subprocess: {error}"
+            ))
+        })?;
+
+        let frame_count = frames.len();
+        let frames = serde_json::to_value(&frames).map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!("frame serialize: {error}"))
+        })?;
+        Ok((frames, frame_count, framed_stdout_bytes))
+    }
+    .await;
+
+    match execution {
+        Ok((frames, frame_count, framed_stdout_bytes)) => finalize_streaming_success(
+            state,
+            &thread_id,
+            frames,
+            frame_count,
+            framed_stdout_bytes,
+            &mut lifecycle_owner,
+        ),
+        Err(error) => Err(finalize_streaming_failure(
+            state,
+            &thread_id,
+            error,
+            &mut lifecycle_owner,
+        )),
+    }
+}
+
+fn finalize_streaming_success(
+    state: &AppState,
+    thread_id: &str,
+    frames: Value,
+    frame_count: usize,
+    framed_stdout_bytes: usize,
+    lifecycle_owner: &mut crate::execution::process_attachment::LifecycleOwnerGuard,
+) -> Result<Value, DispatchError> {
+    let outcome = crate::dispatch::finalize_method_thread_if_needed(
+        state,
+        thread_id,
+        "completed",
+        Some(json!({
+            "streaming": {
+                "frame_count": frame_count,
+                "framed_stdout_bytes": framed_stdout_bytes,
+            }
+        })),
+    )
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "finalize successful streaming subprocess: {error:#}"
+        ))
+    })?;
+    lifecycle_owner.disarm();
+    match outcome {
+        crate::dispatch::MethodFinalizeOutcome::Finalized => Ok(frames),
+        crate::dispatch::MethodFinalizeOutcome::AlreadyTerminal => {
+            Err(DispatchError::Internal(anyhow::anyhow!(
+                "streaming thread {thread_id} became terminal before its successful result was committed"
+            )))
+        }
+        crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => {
+            Err(DispatchError::Internal(anyhow::anyhow!(
+                "streaming thread {thread_id} completed after a durable stop won"
+            )))
+        }
+        crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown => {
+            Err(DispatchError::Internal(anyhow::anyhow!(
+                "streaming thread {thread_id} was interrupted by daemon shutdown and preserved for recovery"
+            )))
+        }
+    }
+}
+
+fn finalize_streaming_failure(
+    state: &AppState,
+    thread_id: &str,
+    execution_error: DispatchError,
+    lifecycle_owner: &mut crate::execution::process_attachment::LifecycleOwnerGuard,
+) -> DispatchError {
+    let error_code = execution_error.code();
+    let error_message = execution_error.to_string();
+    match crate::dispatch::finalize_method_thread_if_needed(
+        state,
+        thread_id,
+        "failed",
+        Some(json!({
+            "code": error_code,
+            "reason": error_message,
+        })),
+    ) {
+        Ok(_) => {
+            lifecycle_owner.disarm();
+            execution_error
+        }
+        Err(cleanup_error) => DispatchError::Internal(anyhow::anyhow!(
+            "streaming subprocess execution failed: {}; terminal cleanup also failed: {:#}",
+            execution_error,
+            cleanup_error,
+        )),
+    }
 }
 
 async fn dispatch_tool_subprocess(
@@ -459,16 +863,6 @@ async fn dispatch_tool_subprocess(
     )?;
 
     resolved.kind = thread_profile.to_string();
-
-    if resolved.executor_ref.starts_with("runtime:") {
-        return Err(DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: format!(
-                "subprocess terminator received an item whose resolved executor is a runtime ref ('{}'); this should have been routed through Managed lifecycle — fix the kind schema",
-                resolved.executor_ref
-            ),
-        });
-    }
 
     // Data-driven execution routine: walk the wrapper's executor chain to its
     // terminal and branch on the terminal's typed `terminal_executor.kind` —
@@ -572,6 +966,10 @@ async fn dispatch_tool_subprocess(
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
         runtime_ref: None,
+        parent_thread_id: request
+            .parent_execution_context
+            .as_ref()
+            .map(|parent| parent.parent_thread_id.clone()),
     };
 
     if request.launch_mode == "detached" {

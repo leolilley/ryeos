@@ -3,18 +3,20 @@
 //! clobber where a "cancelled" parent keeps authoring via a live inline child).
 //!
 //! Lineage comes from the runtime child-link table
-//! ([`StateStore::descendant_thread_ids`]); each descendant's CURRENT pgid is
-//! resolved from `thread_runtime` at signal time, never a stored copy — the pgid
-//! attaches/updates after thread creation. A descendant with no live pgid (not
-//! yet attached, or already gone) is skipped. The cascade only SIGNALS: a killed
-//! child's own launcher, blocked waiting on the subprocess, observes the exit and
-//! finalizes the row — the cascade does not finalize on its behalf.
+//! ([`StateStore::descendant_thread_ids`]); each descendant's current durable
+//! process identity is resolved from `thread_runtime` at signal time. A
+//! descendant without an attached identity is skipped. The cascade only
+//! SIGNALS: a killed child's own launcher, blocked waiting on the subprocess,
+//! observes the exit and finalizes the row — the cascade does not finalize on
+//! its behalf.
+
+use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
 use ryeos_engine::contracts::CancellationMode;
 
-use crate::process::signal_process_group;
+use crate::process::{signal_exact_group, signal_exact_target};
 use crate::state::AppState;
 use crate::state_store::StateStore;
 use crate::thread_lifecycle::ThreadFinalizeParams;
@@ -58,7 +60,7 @@ fn signal_name(signal: i32) -> &'static str {
 }
 
 /// Signal every live descendant of `root_thread_id` per `mode`, resolving each
-/// child's current pgid at signal time. Returns a per-child report for the
+/// child's current durable process identity at signal time. Returns a per-child report for the
 /// caller's response/log. A store error on the descendant walk propagates; a
 /// single child's missing pgid or failed signal is recorded in the report, not
 /// raised — one unreachable child must not abort the cascade.
@@ -67,11 +69,29 @@ pub fn cascade_descendants(
     root_thread_id: &str,
     mode: CascadeMode,
 ) -> anyhow::Result<Vec<Value>> {
-    let descendants = store.descendant_thread_ids(root_thread_id)?;
-    Ok(descendants
-        .iter()
-        .map(|child| signal_thread(store, child, mode))
-        .collect())
+    const MAX_FIXED_POINT_PASSES: usize = 16;
+    let mut seen = BTreeSet::new();
+    let mut report = Vec::new();
+    for _ in 0..MAX_FIXED_POINT_PASSES {
+        let descendants = store.descendant_thread_ids(root_thread_id)?;
+        let new_children = descendants
+            .into_iter()
+            .filter(|child| seen.insert(child.clone()))
+            .collect::<Vec<_>>();
+        if new_children.is_empty() {
+            return Ok(report);
+        }
+        report.extend(
+            new_children
+                .iter()
+                .map(|child| signal_thread(store, child, mode)),
+        );
+    }
+    report.push(json!({
+        "thread_id": root_thread_id,
+        "warning": "descendant_fixed_point_pass_limit_reached",
+    }));
+    Ok(report)
 }
 
 /// Cancel durable descendants that have not yet been admitted. Membership is
@@ -83,15 +103,16 @@ pub fn cancel_queued_descendants(
 ) -> anyhow::Result<Vec<String>> {
     let descendants = state.state_store.descendant_thread_ids(root_thread_id)?;
     // Admission is only a durable marker, not proof of a spawn. Include admitted
-    // members only while the authoritative row is still created with no live pgid.
+    // members only while the authoritative row is still created and unattached.
     let mut cancellable = Vec::new();
     for root in descendants {
         let Some(thread) = state.state_store.get_thread(&root)? else {
             continue;
         };
-        if thread.status == "created"
-            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
-        {
+        // A durable process identity proves the launch crossed attachment,
+        // even if its target has exited while Lillux still owns the retained
+        // wrapper/group cleanup. Never reclassify such a row as unspawned.
+        if thread.status == "created" && thread.runtime.process_identity.is_none() {
             cancellable.push(root);
         }
     }
@@ -141,7 +162,7 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
         // normal signal cascade and let its launcher observe process termination.
         if !crate::state_store::is_terminal_status(&thread.status)
             && thread.status == "created"
-            && !thread.runtime.pgid.is_some_and(crate::process::pgid_alive)
+            && thread.runtime.process_identity.is_none()
         {
             state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: thread.thread_id.clone(),
@@ -162,16 +183,14 @@ pub fn repair_cancelled_window_members(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Signal one thread's process group per `mode`, resolving its CURRENT pgid at
+/// Signal one thread's verified execution identity per `mode`, resolving it at
 /// signal time. Returns a report value and NEVER errors: a missing/unreadable
-/// row, a terminal thread, or an absent/non-positive pgid each yields a skip
-/// marker, so one unreachable thread never aborts a wider cascade.
+/// row or an absent/incomplete identity yields a skip marker, so one unreachable
+/// thread never aborts a wider cascade. Stop intent is tombstoned before the
+/// identity decision, closing the created→attach race for every caller.
 ///
-/// A terminal thread is skipped because its `pgid` is never cleared on finalize —
-/// signalling it would target a possibly OS-recycled group (an unrelated
-/// process). A non-positive pgid is skipped because `kill(-0, …)` would hit the
-/// daemon's own group and a negative value an arbitrary PID (`kill_by_action`
-/// guards only the daemon pgid, not `<= 0`).
+/// A terminal row is still signalled when it retains an attached identity: a
+/// managed runtime may self-finalize before the outer owned wrapper has exited.
 pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> Value {
     let thread = match store.get_thread(thread_id) {
         Ok(Some(thread)) => thread,
@@ -180,21 +199,47 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
             return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() })
         }
     };
-    if crate::state_store::is_terminal_status(&thread.status) {
+    let stop_intent = match mode {
+        CascadeMode::Graceful => crate::state_store::StopIntent::Cancel,
+        CascadeMode::Hard => crate::state_store::StopIntent::Kill,
+    };
+    let runtime = match store.request_thread_stop(thread_id, stop_intent) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return json!({
+                "thread_id": thread_id,
+                "skipped": "stop_tombstone_failed",
+                "error": error.to_string(),
+            })
+        }
+    };
+    if crate::state_store::is_terminal_status(&thread.status) && runtime.process_identity.is_none()
+    {
         return json!({ "thread_id": thread_id, "skipped": "terminal", "status": thread.status });
     }
-    let pgid = match thread.runtime.pgid {
+    let pgid = match runtime.pgid {
         Some(pgid) if pgid > 0 => pgid,
         Some(_) => return json!({ "thread_id": thread_id, "skipped": "invalid_pgid" }),
         None => return json!({ "thread_id": thread_id, "skipped": "no_pgid" }),
     };
-    let cancellation_mode = thread
-        .runtime
+    let Some(identity) = runtime.process_identity.as_ref() else {
+        return json!({ "thread_id": thread_id, "pgid": pgid, "skipped": "no_process_identity" });
+    };
+    let cancellation_mode = runtime
         .launch_metadata
         .as_ref()
         .and_then(|lm| lm.cancellation_mode);
-    let signal = cancel_signal(mode, cancellation_mode);
-    let result = signal_process_group(pgid, signal);
+    let effective_mode = match runtime.stop_intent {
+        Some(crate::state_store::StopIntent::Kill) => CascadeMode::Hard,
+        Some(crate::state_store::StopIntent::Cancel) => CascadeMode::Graceful,
+        None => mode,
+    };
+    let signal = cancel_signal(effective_mode, cancellation_mode);
+    let result = if signal == libc::SIGKILL {
+        signal_exact_group(identity, signal)
+    } else {
+        signal_exact_target(identity, signal)
+    };
     json!({
         "thread_id": thread_id,
         "pgid": pgid,

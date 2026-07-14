@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-03T09:54:33Z:a15cd0f244d27aa002b3783b60cef5343b1b85ab68f25095bef017251e09c85a:Lwa5mctJYnUmd2OHErt9PWl+cKpbrVf/m5Z5qberZMRY2Tt00u+tr3eavgQig/8pSwxeSs/xgjVRC4ONFrQ4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:b5f5f6786ab1321f679efce2cc7725a1e89eedb99561de8ac424d2f0f86165b3:oRwE1exXsJzLsonEYEtqjtPIVdgWQ5AItWBXk4y7zlAa9UWyDMZEBa596frcSZuKwESqiIkLgtKFFdTlYVpeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Per-route audit of the UDS runtime-callback surface: every runtime.*
   method, the access tier that gates it, and the exact prelude check it
@@ -14,9 +14,8 @@ description: >
 
 The daemon's Unix-domain-socket RPC dispatcher gates every `runtime.*`
 method at the transport boundary — before the handler runs — in
-`crates/bin/daemon/src/uds/server.rs::dispatch_runtime_method`
-(the prelude, lines ~136-202). This document records which tier gates
-each route. It is the route-level companion to
+`crates/bin/daemon/src/uds/server.rs::dispatch_runtime_method`. This document
+records which tier gates each route. It is the route-level companion to
 [callback-auth.md](callback-auth.md), which documents the token types,
 TTLs, env injection, and revocation.
 
@@ -26,12 +25,19 @@ exact-thread token never acts on another thread.
 
 ## The four tiers
 
-| Tier | Prelude check | Selector | server.rs |
-|---|---|---|---|
-| thread-auth | `thread_auth.validate(tat, thread_id)`; handler re-validates the callback token and derives principal/provenance/caps from server-side state | `is_thread_auth_method` | validate at ~:149; selector ~:278-283 |
-| two-proof | `thread_auth.validate(tat, thread_id)` **and** `callback_tokens.validate_token_and_thread(token, thread_id)` — both proofs required | literal match on the method | ~:159-179 |
-| chain-read | `callback_tokens.validate_token_only(token)` then `authorize_chain_read` (cap thread and target must share a chain root) | `is_chain_read_method` | ~:180-187; selector ~:287-292; authz ~:298-329 |
-| exact-thread write | `callback_tokens.validate_token_and_thread(token, thread_id)` — the token's thread must equal the target thread | else branch (default) | ~:188-202 |
+| Tier | Prelude check | Selector |
+|---|---|---|
+| thread-auth | `thread_auth.validate(tat, thread_id)`; handler re-validates the callback token and derives principal/provenance/caps from server-side state | `is_thread_auth_method` |
+| two-proof | `thread_auth.validate(tat, thread_id)` **and** `callback_tokens.validate_token_and_thread(token, thread_id)` — both proofs required | literal match on the method |
+| chain-read | `callback_tokens.validate_token_only(token)` then `authorize_chain_read` (cap thread and target must share a chain root) | `is_chain_read_method` |
+| exact-thread | `callback_tokens.validate_token_and_thread(token, thread_id)` — the token's thread must equal the target thread | else branch (default) |
+
+Authentication is followed by a lifecycle admission check under the
+authoritative state-store lock. Authoring and sensitive reads require the
+thread to be Running, without durable stop intent, while the daemon shutdown
+gate is open. Stop completion retains only the narrow claim/complete/finalize
+surface. Terminal state immediately revokes both callback credential classes;
+requests already past token validation still meet the locked lifecycle check.
 
 ## Per-route disposition
 
@@ -41,22 +47,22 @@ exact-thread token never acts on another thread.
 | `runtime.spawn_follow_child` | thread-auth | Same prelude as dispatch_action; admission checks in the handler. |
 | `runtime.poll_input` | two-proof | Durable `cognition_in` write for a running thread; both proofs required. |
 | `runtime.author_item` | two-proof | Validated `ThreadAuthState` is retained and passed to the author service, which additionally requires LiveFs provenance + path-traversal checks. |
-| `runtime.get_thread` | chain-read | Rehydrate a predecessor within the same chain. |
+| `runtime.get_thread` | chain-read | Rehydrate a predecessor within the same chain. Returns the slim thread + result shape; artifacts and facets are not embedded. |
 | `runtime.replay_events` | chain-read | Accepts `thread_id` or `chain_root_id`; both resolve to a chain root. |
 | `runtime.get_thread_events` | chain-read | Alias of the replay handler. |
 | `runtime.append_event` | exact-thread write | |
 | `runtime.append_events` | exact-thread write | Batch append. |
 | `runtime.bundle_events_append` | exact-thread write | Handler receives the capability and enforces the bundle scope. |
-| `runtime.bundle_events_read_chain` | exact-thread write | A *read* by name, but gated exact-thread — not a chain read — and bundle-scoped in the service. |
-| `runtime.bundle_events_scan` | exact-thread write | Bundle-scoped in the service. |
-| `runtime.vault_put` / `vault_get` / `vault_delete` / `vault_list` | exact-thread write | Vault refs rejected on bundle mismatch against the token's `effective_bundle_id`. |
+| `runtime.bundle_events_read_chain` | exact-thread | A *read* by name, but gated to the exact executing thread — not a chain-wide token — and bundle-scoped in the service. |
+| `runtime.bundle_events_scan` | exact-thread | Bundle-scoped in the service. |
+| `runtime.vault_put` / `vault_get` / `vault_delete` / `vault_list` | exact-thread write | Vault refs rejected on bundle mismatch against the token's `effective_bundle_id`. List uses an exclusive lexical cursor, defaults to 64 keys, and accepts at most 128. |
 | `runtime.finalize_thread` | exact-thread write | |
 | `runtime.mark_running` | exact-thread write | |
 | `runtime.request_continuation` | exact-thread write | |
 | `runtime.publish_artifact` | exact-thread write | |
 | `runtime.get_facets` | exact-thread write | |
 | `runtime.submit_command` / `claim_commands` / `complete_command` | exact-thread write | |
-| `runtime.attach_process` | exact-thread write | The runtime self-reports only its pid; the process group is always derived daemon-side (`pgid_of`, server.rs ~:348) — never trusted from the runtime. |
+| `runtime.attach_process` | exact-thread | The runtime reports only its own PID. It must equal the accepted socket's kernel `SO_PEERCRED` PID; `SO_PEERPIDFD` pins that exact incarnation, then the daemon derives and records the target/group birth tuple. Runtime-supplied PGIDs are never accepted. |
 
 ## Deeper (post-prelude) checks
 
@@ -71,12 +77,36 @@ authorizes the *content* of the request:
 - **author_item provenance**: `ryeos_app::runtime_item_author_service`
   requires LiveFs provenance and applies path-traversal checks.
 
-## Ungated / local-control surface
+## Ungated / local-status surface
 
-Only `system.health` is ungated. `lifecycle.status` and
-`lifecycle.shutdown` are local UDS control methods on the bare namespace
-(no `runtime.` prefix, no token) and carry no thread authority. Every
-other bare-namespace method returns `unknown_method`.
+Only `system.health` and read-only `lifecycle.status` are ungated bare methods.
+They carry no thread authority. There is no UDS shutdown method: sandboxed
+runtimes may receive this socket, so local lifecycle control uses a
+kernel-authenticated socket peer pidfd and OS signals. Every other
+bare-namespace method returns `unknown_method`.
+
+The transport caps frames and responses at 10 MiB, holds a 32 MiB aggregate
+in-flight request budget, limits the server to 32 connections, and times out
+frame I/O. Runtime thread-event replay is capped at 32 records and a 6 MiB
+conservative serialized page; bundle-event reads are capped at 16 records and
+8 MiB of serialized records. These service-level cursors and byte budgets
+prevent valid small requests from materializing unbounded event histories
+before response framing.
+
+Runtime-vault list responses are independently capped at 64 KiB and return
+`{namespace, keys, next_cursor}`. Its cursor bounds service response
+materialization only: the current sealed backend opens and validates the whole
+bounded vault map (at most 1,024 entries, 256-byte physical keys, 256 KiB
+values, 4 MiB plaintext, and a 6 MiB sealed envelope) before choosing a page.
+Narrow per-scope storage reads require the deferred sharded/scoped backend.
+
+During coordinated shutdown the listener stops accepting immediately and idle
+persistent streams exit before reading another frame. A request that already
+decoded owns its frame-memory permit and any peer pidfd in an independent task,
+so it can finish while connection tasks drain under the daemon's shared
+deadline. If that deadline forces the wire server to abort, the admitted owner
+remains fenced by closed process admission and the exact-identity process drain;
+dropping a socket waiter cannot orphan a spawned workload.
 
 ## Boundary guards
 

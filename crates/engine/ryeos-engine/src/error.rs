@@ -357,14 +357,6 @@ pub enum EngineError {
     )]
     MultipleRuntimeDefaults { kind: String, defaults: Vec<String> },
 
-    #[error("runtime `{runtime}` serves kind `{kind}` whose terminator declares protocol `{found}`, expected `{expected}`")]
-    RuntimeProtocolMismatch {
-        runtime: String,
-        kind: String,
-        expected: String,
-        found: String,
-    },
-
     #[error("runtime `{runtime}` serves unknown kind `{kind}`")]
     RuntimeServesUnknownKind { kind: String, runtime: String },
 

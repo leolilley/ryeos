@@ -1,4 +1,4 @@
-export async function runEffect(effect) {
+export async function runEffect(effect, invocationContext = {}) {
   const kind = effect.kind;
   switch (kind.type) {
     case "fetch_dimension":
@@ -20,7 +20,7 @@ export async function runEffect(effect) {
         kind: kind.kind,
       })));
     case "fetch_source": {
-      const resp = await dispatchInvocation(kind.source_ref, kind.params ?? {});
+      const resp = await dispatchInvocation(kind.source_ref, kind.params ?? {}, invocationContext);
       return result(effect, "source_data", resp?.result?.result ?? resp?.result ?? resp);
     }
     case "list_files":
@@ -35,12 +35,13 @@ export async function runEffect(effect) {
     case "read_file":
       return result(effect, "file_read", await fileJson("/ui/api/ryeos-ui/files/read", kind));
     case "dispatch_invocation":
-      return result(effect, "invocation_dispatch", await dispatchInvocation(kind.item_ref, kind.params ?? {}));
+      return result(effect, "invocation_dispatch", await dispatchInvocation(kind.item_ref, kind.params ?? {}, invocationContext));
     case "submit_thread_command":
       // Steer the head thread through the shared control channel (session lane).
       return result(effect, "thread_command_submitted", await dispatchInvocation(
         "service:commands/submit",
         { thread_id: kind.thread_id, command_type: kind.command_type },
+        invocationContext,
       ));
     case "invoke": {
       // One daemon path, session-authed: refs and tokens both dispatch
@@ -48,9 +49,16 @@ export async function runEffect(effect) {
       const target = kind.target || {};
       const body =
         target.form === "tokens"
-          ? { itemRef: "service:commands/dispatch", params: { tokens: target.tokens, ...(kind.params ?? {}) } }
+          ? {
+              itemRef: "service:commands/dispatch",
+              params: {
+                project_path: "",
+                tokens: target.tokens,
+                arguments: kind.params ?? {},
+              },
+            }
           : { itemRef: target.item_ref, params: kind.params ?? {} };
-      const resp = await dispatchInvocation(body.itemRef, body.params);
+      const resp = await dispatchInvocation(body.itemRef, body.params, invocationContext);
       // execute envelope: resp.result = { thread: {...}, result: <contract> }
       const inner = resp?.result?.result ?? resp?.result ?? resp;
       return result(effect, "invoked", inner);
@@ -123,10 +131,22 @@ export async function applyUiIntent(intent, payload = {}, options = {}) {
   });
 }
 
-async function dispatchInvocation(itemRef, params = {}) {
+function bindInvocationContext(params, context) {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return params;
+  const bound = { ...params };
+  for (const [name, value] of Object.entries(context || {})) {
+    if (!Object.hasOwn(bound, name)) continue;
+    if (bound[name] !== "" && bound[name] !== null) continue;
+    if (value === undefined || value === null || value === "") continue;
+    bound[name] = value;
+  }
+  return bound;
+}
+
+async function dispatchInvocation(itemRef, params = {}, context = {}) {
   return postJson("/ui/api/invocations/dispatch", {
     target: { kind: "ref", ref: itemRef },
-    params,
+    params: bindInvocationContext(params, context),
   });
 }
 

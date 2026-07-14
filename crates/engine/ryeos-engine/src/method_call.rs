@@ -7,7 +7,7 @@
 //! args, both, or neither.
 //!
 //! This is *pre-resolution* intent — distinct from
-//! [`ryeos_runtime::method_wire::MethodCallEnvelope`], which is the
+//! [`crate::method_wire::MethodCallEnvelope`], which is the
 //! *post-resolution* wire to the runtime process (method required, args
 //! validated into a payload). Keeping the two apart is deliberate: one
 //! expresses what was asked, the other what was resolved.

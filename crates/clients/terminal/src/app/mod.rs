@@ -10,7 +10,7 @@ mod hints;
 mod keys;
 mod seat;
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
@@ -151,8 +151,9 @@ pub async fn run(
     // A live-filter edit defers its list refetch to the tick (debounce), so
     // typing a filter never blocks on a per-keystroke daemon round-trip.
     let mut feed_dirty = false;
-    let mut pending_hints: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut last_hint_flush_ms = 0;
+    let mut pending_hints: HashSet<String> = HashSet::new();
+    let mut hint_batch_started_ms: Option<u64> = None;
+    let mut last_seat_touch_ms = now_ms();
 
     loop {
         if dirty {
@@ -273,11 +274,30 @@ pub async fn run(
             Some(message) = session_rx.recv() => {
                 match message {
                     hints::SessionMessage::Hint { kind, payload } => {
-                        pending_hints.insert(kind, payload);
+                        let effects = core.dispatch(RyeOsEvent::HintReceived {
+                            kind: kind.clone(),
+                            payload,
+                        });
+                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        if pending_hints.is_empty() {
+                            hint_batch_started_ms = Some(now_ms());
+                        }
+                        pending_hints.insert(kind);
+                        dirty = true;
                     }
                     hints::SessionMessage::DaemonEvent { payload } => {
                         let effects = core.dispatch(RyeOsEvent::DaemonEvent { payload });
                         spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        dirty = true;
+                    }
+                    hints::SessionMessage::Resubscribed => {
+                        // The stream was down for a while; every hint from
+                        // the gap is lost. One full refetch instead of
+                        // trusting whatever the screen froze on.
+                        let effects = core.initial_effects();
+                        spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
+                        pending_hints.clear();
+                        hint_batch_started_ms = None;
                         dirty = true;
                     }
                 }
@@ -317,15 +337,23 @@ pub async fn run(
             }
             _ = tick.tick() => {
                 let tick_now = now_ms();
-                if !pending_hints.is_empty()
-                    && tick_now.saturating_sub(last_hint_flush_ms) >= HINT_FLUSH_MS
-                {
-                    last_hint_flush_ms = tick_now;
-                    let hints = std::mem::take(&mut pending_hints);
-                    let mut effects = Vec::new();
-                    for (kind, payload) in hints {
-                        effects.extend(core.note_hint(&kind, &payload));
+                if tick_now.saturating_sub(last_seat_touch_ms) >= 60_000 {
+                    last_seat_touch_ms = tick_now;
+                    if let Some(thread_id) = seat_thread.clone() {
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            seat::touch_seat_thread(&client, &thread_id).await;
+                        });
                     }
+                }
+                if hint_batch_started_ms
+                    .is_some_and(|started| tick_now.saturating_sub(started) >= HINT_FLUSH_MS)
+                {
+                    let hints = std::mem::take(&mut pending_hints);
+                    hint_batch_started_ms = None;
+                    let effects = core.dispatch(RyeOsEvent::HintFlushBatch {
+                        kinds: hints.into_iter().collect(),
+                    });
                     spawn_effects(&client, project_path_of(&core), effects, &effect_tx);
                 }
                 // Flush a debounced live-filter refetch once typing has settled.

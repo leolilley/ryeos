@@ -8,6 +8,7 @@
 //! `*.kind-schema.yaml` files found under `{AI_DIR}/node/engine/kinds/`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -32,12 +33,17 @@ use crate::node_config::BundleRecord;
 /// daemon's operator config root from the resolved app root. Use this for
 /// the daemon's startup engine; use `build_engine_for_roots` directly for
 /// the per-request (pushed_head) engine overlay.
-pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
+pub fn build_engine(
+    config: &Config,
+    bundle_roots: &[PathBuf],
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+) -> Result<Engine> {
     build_engine_for_roots(
         config,
         bundle_roots,
         None, // no project root at startup — resolved per-request
         None, // no overlay — daemon's persistent trust store wins
+        sandbox,
     )
 }
 
@@ -76,6 +82,7 @@ pub fn build_engine_for_roots(
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
     if bundle_roots.is_empty() {
@@ -151,7 +158,7 @@ pub fn build_engine_for_roots(
         composers,
         protocol_registry,
         runtimes,
-    } = build_node_bundle_admission(&bundle_roots, &node_trust_store)?;
+    } = build_node_bundle_admission(&bundle_roots, &node_trust_store, sandbox)?;
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
@@ -175,8 +182,9 @@ pub fn build_engine_for_roots(
 pub fn admit_node_bundle_roots(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
-    build_node_bundle_admission(bundle_roots, node_trust_store).map(|_| ())
+    build_node_bundle_admission(bundle_roots, node_trust_store, sandbox).map(|_| ())
 }
 
 /// Verify that the signed node bundle registrations and installed manifests
@@ -239,6 +247,7 @@ struct NodeBundleAdmission {
 fn build_node_bundle_admission(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<NodeBundleAdmission> {
     if bundle_roots.is_empty() {
         anyhow::bail!("prospective node bundle set is empty");
@@ -253,11 +262,8 @@ fn build_node_bundle_admission(
         .filter(|root| root.is_dir())
         .collect();
 
-    ryeos_engine::binary_resolver::verify_bundle_executor_manifests(
-        bundle_roots,
-        node_trust_store,
-    )
-    .context("node bundle executor admission failed")?;
+    ryeos_engine::binary_resolver::verify_bundle_executor_manifests(bundle_roots, node_trust_store)
+        .context("node bundle executor admission failed")?;
 
     let kinds = if schema_roots.is_empty() {
         anyhow::bail!(
@@ -289,7 +295,7 @@ fn build_node_bundle_admission(
         .iter()
         .map(|root| (root.clone(), TrustClass::TrustedBundle))
         .collect();
-    let handler_registry = HandlerRegistry::load_base(&tagged_roots, node_trust_store)
+    let handler_registry = HandlerRegistry::load_base(&tagged_roots, node_trust_store, sandbox)
         .context("failed to load handler descriptors from bundle roots")?;
     let handler_registry = std::sync::Arc::new(handler_registry);
     let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, node_trust_store)

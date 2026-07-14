@@ -43,7 +43,7 @@ done
 signer_fingerprint="${signer_fingerprint^^}"
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-version="$("$root/scripts/release/resolve-version.sh" push "$tag" "")"
+version="$("$root"/scripts/release/resolve-version.sh push "$tag" "")"
 expected_bundle_name="ryeos-bundles-${version}-x86_64.tar.gz"
 [[ "$(basename "$bundle_archive")" == "$expected_bundle_name" ]] || {
     echo "AUR release: bundle archive must be named $expected_bundle_name" >&2

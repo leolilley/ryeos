@@ -85,6 +85,32 @@ pub(super) fn with_staged_bundle_generation<T>(
     Ok(result)
 }
 
+/// Redirect roots that name content inside `live_root` to the private staged
+/// generation. Publisher validation must never mix files from the live and
+/// staged generations, including when a bundle provides its own registries.
+pub(super) fn roots_for_staged_generation(
+    live_root: &Path,
+    staging: &Path,
+    roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let canonical_live = fs::canonicalize(live_root).ok();
+    roots
+        .iter()
+        .map(|root| {
+            let relative = canonical_live.as_ref().and_then(|live| {
+                fs::canonicalize(root)
+                    .ok()
+                    .and_then(|canonical| canonical.strip_prefix(live).ok().map(Path::to_path_buf))
+            });
+            match relative {
+                Some(relative) => staging.join(relative),
+                None if root == live_root => staging.to_path_buf(),
+                None => root.clone(),
+            }
+        })
+        .collect()
+}
+
 fn create_staging_directory(parent: &Path, bundle_root: &Path) -> Result<PathBuf> {
     let name = bundle_root
         .file_name()

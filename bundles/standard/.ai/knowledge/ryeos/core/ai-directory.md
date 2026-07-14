@@ -1,5 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:ee955d2ec101ecc7d9682eaa690407b8c5ed02e2b69f3f64a65fb148e6590d0f:aCN+AOZkPxdD4YEYemqHozGVz++ZYw7rSV8UW50FuvCuhA8Z+uNgQa17LMLA0MPUrYo0QDtYuqWBOXVwhkjBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-# ryeos:signed:2026-06-07T05:37:38Z:31e05eb8a0b55e27535e2b575aa77476d56a869b845c84099f2a0860240b9706:VmlT8saN+g88+R/8uZ6XmTZQfy4wIMYDxc/dCyKaUq33gXWAflwolNeYdd2wzlDcjnKjpKROvkDE7gQEeglwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<!-- ryeos:signed:2026-07-14T10:12:30Z:fde5218bff2a792d871bf447be4cf3951aa2f4f2978f071c6ddeb5d14a64ee5d:cW6x0EfhdJdgfxBU0yhh9nKspkHwRlBkRbgPoheGmhaI6LvlGbFBZV3KE14wkBRf0+ZHI4uF7xj/5+2yi3B7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -38,7 +37,9 @@ machine, not the LLM workflow layer:
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
 ├── parsers/ryeos/core/                  # javascript, markdown/frontmatter,
 │                                         # python/tool-header, yaml/yaml
-├── protocols/ryeos/core/                # opaque, runtime_v1, tool_streaming_v1
+├── protocols/ryeos/core/                # cli_exec, opaque, runtime_v1,
+│                                         # method_runtime_v1, tool_callback_v1,
+│                                         # tool_streaming_v1
 ├── services/                            # bundle, fetch, verify, objects,
 │                                         # remote, vault, system, health, etc.
 └── tools/ryeos/core/                    # fetch/sign/verify, identity,

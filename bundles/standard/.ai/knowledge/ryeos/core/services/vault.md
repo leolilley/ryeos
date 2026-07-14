@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T04:30:05Z:8377367593aacecd4768ec47b117b19491013e52d48bc0b1f760ffaabbb6e990:cwfHSvq9P+6rUdIyIW37LLpMCf8EmV7A+mTgP8DPPqgO/UVjQRUS2yxL449bfp0ocsrM3lMJAFaC7bGwXgevCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:11510f27ac0cebcbd8976f02dadb1b84c55e85f822ee6981aa4f8bbcd9b8e108:UrwNrRsi8k/Wa0pWbd1OKfUXyIUjiVEaXGBEZXUkiOkckCllYu629KExFTuP6vjXp//qo6P1N+kPQUJVAZsgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -20,9 +20,45 @@ namespace. Remote vault commands proxy to these same routes on the target
 node, so granting `ryeos.execute.service.vault.*` to a remote caller is
 operator-level access to the target node vault.
 
+The current sealed backend is one bounded encrypted envelope. Every read,
+runtime-vault get/list, and read-modify-write operation opens and validates the
+whole plaintext map; mutations then seal the whole map again. The enforced
+storage bounds are:
+
+| Boundary | Maximum |
+|---|---:|
+| entries in the shared envelope | 1,024 |
+| physical key | 256 bytes |
+| value | 256 KiB |
+| serialized/decrypted plaintext | 4 MiB |
+| sealed envelope on disk | 6 MiB |
+
+These are storage-admission and read bounds, not merely HTTP or UDS response
+limits. Operator secrets and internally represented runtime-vault entries
+share the same envelope and therefore the same aggregate limits.
+
 These services are separate from runtime vault bindings: launch preflight
 resolves required secrets before spawning a subprocess, then injects only
 the declared bindings into the runtime environment.
+
+## Runtime-vault listing
+
+The bundle-scoped runtime-vault API keeps its existing logical refs:
+
+```text
+vault://bundle/<bundle-id>/<namespace>/<key>
+```
+
+Runtime namespaces and keys are `[A-Za-z0-9_]+` segments of at most 64
+characters. `runtime.vault_list` accepts an optional exclusive lexical
+`cursor` and a `limit` (default 64, maximum 128), and returns sorted keys plus
+`next_cursor`. Its serialized response is capped at 64 KiB.
+
+This pagination bounds callback materialization and wire responses; it does
+not provide narrow storage I/O. The sealed backend still decrypts and
+validates the complete bounded envelope before selecting a page. A sharded or
+first-class scoped backend that can read one bundle/namespace without opening
+the global map is deferred advanced work.
 
 ## Runtime secret bindings
 

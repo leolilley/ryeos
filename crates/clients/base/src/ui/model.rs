@@ -162,6 +162,65 @@ fn clamp_to_char_boundary(value: &str, cursor: usize) -> usize {
     cursor
 }
 
+fn patch_thread_record(
+    record: &mut serde_json::Value,
+    thread_id: &str,
+    status: &str,
+    updated_at: &str,
+) -> bool {
+    let serde_json::Value::Object(map) = record else {
+        return false;
+    };
+    if map.get("thread_id").and_then(serde_json::Value::as_str) != Some(thread_id) {
+        return false;
+    }
+    let current = map
+        .get("updated_at")
+        .and_then(serde_json::Value::as_str);
+    if current.is_some_and(|current| current > updated_at) {
+        return false;
+    }
+    let unchanged = map.get("status").and_then(serde_json::Value::as_str) == Some(status)
+        && current == Some(updated_at);
+    if unchanged {
+        return false;
+    }
+    map.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+    map.insert(
+        "updated_at".to_string(),
+        serde_json::Value::String(updated_at.to_string()),
+    );
+    true
+}
+
+fn patch_thread_collection(
+    response: &mut serde_json::Value,
+    collection_path: &str,
+    thread_id: &str,
+    status: &str,
+    updated_at: &str,
+) -> bool {
+    let mut collection = response;
+    for part in collection_path.split('.') {
+        let Some(next) = collection.get_mut(part) else {
+            return false;
+        };
+        collection = next;
+    }
+    let Some(records) = collection.as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for record in records {
+        changed |= patch_thread_record(record, thread_id, status, updated_at);
+    }
+    changed
+}
+
+fn is_thread_collection(path: Option<&str>) -> bool {
+    path.is_some_and(|path| path.rsplit('.').next() == Some("threads"))
+}
+
 /// Layout-neutral key for a transient input buffer. The buffer belongs to
 /// a view instance, not to a placement: the same `view:` rendered twice
 /// (two tiles, a tile and a slot) has independent buffer state. The
@@ -401,14 +460,23 @@ pub struct RyeOsDataState {
     /// re-project long transcripts on every frame.
     #[serde(default, skip)]
     pub(crate) timeline_sources: HashMap<String, RyeOsTimelineSourceCache>,
-    /// The newest fetch effect id issued for each source key. A response only
-    /// lands if it is that newest request (freshness guard): when a single-lens
-    /// tile is reused for a new selection its source keys are stable, so an
-    /// older in-flight fetch (the previous selection) resolving late must not
-    /// overwrite the current one. Without this, a detail lens with several
-    /// section fetches could render mixed data from two threads.
+    /// The newest fetch effect id issued for each source key (the current
+    /// revalidation target; informational once a floor exists).
     #[serde(default)]
     pub source_epoch: HashMap<String, u64>,
+    /// The result id currently STORED per source key. Responses land
+    /// MONOTONICALLY against this — a superseded-but-first response still
+    /// renders (a refetch cadence faster than the query latency must not
+    /// starve the view into a permanent "loading"), while an out-of-order
+    /// older response never overwrites a newer one.
+    #[serde(default)]
+    pub source_stored_epoch: HashMap<String, u64>,
+    /// Minimum acceptable result id per source key, raised when the key's
+    /// SUBJECT changes (lens swap, drill return, selection facet write):
+    /// a straggler for the previous subject must never land under the new
+    /// one, no matter what is or isn't stored.
+    #[serde(default)]
+    pub source_floor: HashMap<String, u64>,
     /// The newest applied result id per shared dataset snapshot
     /// (dimension, topology, projects, threads, items). Effect batches
     /// resolve concurrently, so an older snapshot can arrive after a
@@ -427,6 +495,7 @@ pub(crate) struct RyeOsTimelineSourceCache {
     pub entries: Vec<super::timeline::RyeOsTimelineEntryVm>,
     pub indents: Vec<u8>,
     pub sources: Vec<Option<super::timeline::TimelineEntrySource>>,
+    pub arrivals: Vec<Option<u64>>,
     /// Section (turn) index per entry, parallel to `entries`. Depends only on
     /// `entries`, so it is derived once here rather than rescanned by every
     /// windowed render frame (`timeline::fold_timeline_window`).
@@ -513,8 +582,19 @@ pub struct RyeOsCore {
     pub active_workspace: usize,
     pub runtime: RyeOsRuntimeState,
     pub pending_effects: BTreeMap<u64, RyeOsEffectKind>,
+    /// Latest hint-driven reconciliation requested while the same source key
+    /// already had a fetch in flight. Transient client backpressure: at most
+    /// one request runs and one trailing request waits per source.
+    #[serde(default, skip)]
+    pub(crate) deferred_source_fetches: BTreeMap<String, DeferredSourceFetch>,
     pub generation: u64,
     pub next_effect_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeferredSourceFetch {
+    pub source_ref: String,
+    pub params: serde_json::Value,
 }
 
 impl RyeOsCore {
@@ -747,8 +827,8 @@ impl RyeOsCore {
     /// Hint arrival: semantic hook for transient "look" notices. Visual pulse
     /// state is layered on this entry point; refetches are content-bound via
     /// `refresh.on_hint`.
-    pub fn note_hint(&mut self, kind: &str, payload: &serde_json::Value) -> Vec<RyeOsEffect> {
-        if kind == "thread"
+    pub fn note_hint_received(&mut self, kind: &str, payload: &serde_json::Value) {
+        let attention_changed = kind == "thread"
             && payload
                 .get("event_type")
                 .and_then(serde_json::Value::as_str)
@@ -757,11 +837,86 @@ impl RyeOsCore {
                         event,
                         "thread_failed" | "thread_killed" | "thread_timed_out"
                     )
-                })
-        {
+                });
+        if attention_changed {
             self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
         }
-        self.effects_for_hint(kind)
+        let patched = kind == "thread" && self.patch_thread_hint(payload);
+        if attention_changed || patched {
+            self.bump_generation();
+        }
+    }
+
+    fn patch_thread_hint(&mut self, payload: &serde_json::Value) -> bool {
+        let Some(thread_id) = payload.get("thread_id").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(status) = payload.get("status").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        let Some(updated_at) = payload.get("updated_at").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+
+        // Resolve only live view instances whose authored source selects a
+        // thread collection. Transcript/event sources also contain thread_id,
+        // but are not lifecycle rows and must remain byte-for-byte untouched.
+        let mut instances: Vec<(String, String)> = self
+            .workspace
+            .tile_ids()
+            .into_iter()
+            .filter_map(|tile_id| {
+                let tile = self.workspace.tiles.get(&tile_id)?;
+                Some((tile_id.0.to_string(), tile.view.view_ref.clone()))
+            })
+            .collect();
+        instances.extend(self.visible_dock_views());
+        let mut targets = Vec::new();
+        for (source_key, view_ref) in instances {
+            let Some(binding) = self.views.get(&view_ref) else {
+                continue;
+            };
+            if binding.widget == "sections" {
+                for (index, section) in binding.sections.iter().enumerate() {
+                    if is_thread_collection(section.source.collection.as_deref()) {
+                        targets.push((
+                            super::content::section_source_key(&source_key, index),
+                            section.source.collection.clone().unwrap_or_default(),
+                        ));
+                    }
+                }
+            } else if is_thread_collection(
+                binding.source.as_ref().and_then(|source| source.collection.as_deref()),
+            ) {
+                let collection = binding
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.collection.clone())
+                    .unwrap_or_default();
+                targets.push((source_key, collection));
+            }
+        }
+
+        let mut changed_sources = Vec::new();
+        for (source_key, collection) in targets {
+            let Some(source) = self.data.sources.get_mut(&source_key) else {
+                continue;
+            };
+            let old = source.clone();
+            if patch_thread_collection(source, &collection, thread_id, status, updated_at) {
+                changed_sources.push((source_key, old, source.clone()));
+            }
+        }
+        let mut changed = !changed_sources.is_empty();
+        if let Some(threads) = &mut self.data.threads {
+            for row in &mut threads.threads {
+                changed |= patch_thread_record(row, thread_id, status, updated_at);
+            }
+        }
+        for (source_key, old, new) in changed_sources {
+            self.note_source_row_changes(&source_key, Some(&old), &new);
+        }
+        changed
     }
 
     pub(crate) fn bump_activity_pulse(&mut self, amount: f32) {
@@ -778,7 +933,15 @@ impl RyeOsCore {
     /// declares `refresh.on_hint: <kind>` or includes it in an array. Content
     /// decides its own liveness.
     pub fn effects_for_hint(&mut self, kind: &str) -> Vec<RyeOsEffect> {
-        let mut targets: Vec<(String, String)> = self
+        self.effects_for_hints(&[kind.to_string()])
+    }
+
+    /// Reconcile one client coalescing window. Targets are unioned across hint
+    /// kinds before any effects are emitted, then each source key goes through
+    /// the hint single-flight gate. This prevents `[thread, activity]` views
+    /// from issuing duplicate reads for one burst.
+    pub fn effects_for_hints(&mut self, kinds: &[String]) -> Vec<RyeOsEffect> {
+        let mut targets: std::collections::BTreeSet<(String, String)> = self
             .workspace
             .tile_ids()
             .into_iter()
@@ -786,7 +949,9 @@ impl RyeOsCore {
                 let tile = self.workspace.tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
-                refresh_matches_hint(binding.refresh.get("on_hint"), kind)
+                kinds
+                    .iter()
+                    .any(|kind| refresh_matches_hint(binding.refresh.get("on_hint"), kind))
                     .then(|| (tile_id.0.to_string(), view_ref.clone()))
             })
             .collect();
@@ -795,13 +960,17 @@ impl RyeOsCore {
                 .into_iter()
                 .filter(|(_, view_ref)| {
                     self.views.get(view_ref).is_some_and(|binding| {
-                        refresh_matches_hint(binding.refresh.get("on_hint"), kind)
+                        kinds
+                            .iter()
+                            .any(|kind| refresh_matches_hint(binding.refresh.get("on_hint"), kind))
                     })
                 }),
         );
         targets
             .into_iter()
-            .flat_map(|(source_key, view_ref)| self.emit_fetch_source_keyed(source_key, &view_ref))
+            .flat_map(|(source_key, view_ref)| {
+                self.emit_fetch_source_keyed_policy(source_key, &view_ref, true)
+            })
             .collect()
     }
 
@@ -828,6 +997,15 @@ impl RyeOsCore {
         &mut self,
         source_key: String,
         view_ref: &str,
+    ) -> Vec<RyeOsEffect> {
+        self.emit_fetch_source_keyed_policy(source_key, view_ref, false)
+    }
+
+    fn emit_fetch_source_keyed_policy(
+        &mut self,
+        source_key: String,
+        view_ref: &str,
+        hint_single_flight: bool,
     ) -> Vec<RyeOsEffect> {
         let Some(binding) = self.views.get(view_ref) else {
             return Vec::new();
@@ -856,7 +1034,9 @@ impl RyeOsCore {
             // otherwise blank a sections view every coalesced activity tick.
             return resolved
                 .into_iter()
-                .filter_map(|(key, source, params)| self.build_fetch_source(key, &source, params))
+                .filter_map(|(key, source, params)| {
+                    self.build_fetch_source(key, &source, params, hint_single_flight)
+                })
                 .collect();
         }
         let Some(source) = binding.source.clone() else {
@@ -886,7 +1066,7 @@ impl RyeOsCore {
                 params = serde_json::json!({ param: text });
             }
         }
-        self.build_fetch_source(source_key, &source, params)
+        self.build_fetch_source(source_key, &source, params, hint_single_flight)
             .into_iter()
             .collect()
     }
@@ -896,15 +1076,81 @@ impl RyeOsCore {
     /// `@facet:selection.item` before anything is selected): that resolves to
     /// null — nothing to fetch — and dispatching the null arg the op rejects
     /// is a 500, not an empty view.
+    /// Raise the acceptance floor to this batch's fetch ids and evict the
+    /// keys' stored payloads: the SUBJECT behind these keys changed, so a
+    /// response older than this batch must never land under it. Ordinary
+    /// refetches skip this — they keep prior data rendering while the
+    /// fresh response is in flight.
+    pub(crate) fn floor_source_fetches(&mut self, effects: &[RyeOsEffect], evict: bool) {
+        for effect in effects {
+            if let RyeOsEffectKind::FetchSource { tile_id, .. } = &effect.kind {
+                self.data.source_floor.insert(tile_id.clone(), effect.id);
+                if evict {
+                    self.data.sources.remove(tile_id);
+                    self.data.source_stored_epoch.remove(tile_id);
+                    self.data.timeline_sources.remove(tile_id);
+                }
+            }
+        }
+    }
+
+    /// Drop every cached and in-flight source instance owned by one bound
+    /// view host. Subject transitions call this before resolving the new
+    /// parameters, so an unresolved new subject stays empty and responses for
+    /// the prior subject are ignored rather than landing under the new route.
+    pub(crate) fn invalidate_view_sources(&mut self, source_key: &str, view_ref: &str) {
+        let Some(binding) = self.views.get(view_ref) else {
+            return;
+        };
+        let keys = if binding.widget == "sections" {
+            (0..binding.sections.len())
+                .map(|index| super::content::section_source_key(source_key, index))
+                .collect::<Vec<_>>()
+        } else {
+            vec![source_key.to_string()]
+        };
+        self.pending_effects.retain(|_, kind| {
+            !matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if keys.contains(tile_id))
+        });
+        for key in keys {
+            self.data.sources.remove(&key);
+            self.data.source_epoch.remove(&key);
+            self.data.source_stored_epoch.remove(&key);
+            self.data.source_floor.remove(&key);
+            self.data.timeline_sources.remove(&key);
+            self.deferred_source_fetches.remove(&key);
+        }
+    }
+
     fn build_fetch_source(
         &mut self,
         source_key: String,
         source: &super::content::SourceBinding,
         params: serde_json::Value,
+        hint_single_flight: bool,
     ) -> Option<RyeOsEffect> {
         if facet_param_unresolved(&source.params, &params) {
             return None;
         }
+        if hint_single_flight
+            && self.pending_effects.values().any(|kind| {
+                matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == &source_key)
+            })
+        {
+            self.deferred_source_fetches.insert(
+                source_key,
+                DeferredSourceFetch {
+                    source_ref: source.item_ref.clone(),
+                    params,
+                },
+            );
+            return None;
+        }
+        // A fetch that can launch now supersedes any parked request for this
+        // key. This is especially important for explicit subject changes
+        // (lens/filter/project): an older deferred hint must never refetch the
+        // previous subject after the new request settles.
+        self.deferred_source_fetches.remove(&source_key);
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.clone(),
             source_ref: source.item_ref.clone(),
@@ -914,6 +1160,52 @@ impl RyeOsCore {
         // for the same key that resolves later is then dropped on arrival.
         self.data.source_epoch.insert(source_key, effect.id);
         Some(effect)
+    }
+
+    /// Release one trailing hint reconciliation after the prior request for
+    /// the same source key settles. If another (non-hint) request is still in
+    /// flight, leave the trailing request parked until the final one settles.
+    pub(crate) fn release_deferred_source_fetch(
+        &mut self,
+        source_key: &str,
+    ) -> Option<RyeOsEffect> {
+        if self.pending_effects.values().any(|kind| {
+            matches!(kind, RyeOsEffectKind::FetchSource { tile_id, .. } if tile_id == source_key)
+        }) {
+            return None;
+        }
+        if !self.source_key_is_live(source_key) {
+            self.deferred_source_fetches.remove(source_key);
+            return None;
+        }
+        let deferred = self.deferred_source_fetches.remove(source_key)?;
+        let effect = self.emit(RyeOsEffectKind::FetchSource {
+            tile_id: source_key.to_string(),
+            source_ref: deferred.source_ref,
+            params: deferred.params,
+        });
+        self.data
+            .source_epoch
+            .insert(source_key.to_string(), effect.id);
+        Some(effect)
+    }
+
+    fn source_key_is_live(&self, source_key: &str) -> bool {
+        let host_key = source_key
+            .split_once("#section")
+            .map(|(host, _)| host)
+            .unwrap_or(source_key);
+        if host_key.starts_with("dock:") {
+            return self
+                .visible_dock_views()
+                .iter()
+                .any(|(key, _)| key == host_key);
+        }
+        host_key
+            .parse::<u64>()
+            .ok()
+            .map(crate::ids::TileId::new)
+            .is_some_and(|tile_id| self.workspace.tiles.contains_key(&tile_id))
     }
 
     /// Visible content-bound slot views, keyed for source fetches.
@@ -1080,7 +1372,7 @@ impl RyeOsCore {
     }
 
     pub(crate) fn rebuild_timeline_source_cache(&mut self, source_key: &str) {
-        self.data.timeline_sources.remove(source_key);
+        let previous = self.data.timeline_sources.remove(source_key);
         let Some(tile_id) = parse_source_tile_key(source_key) else {
             return;
         };
@@ -1105,12 +1397,47 @@ impl RyeOsCore {
             sources.insert(0, None);
         }
         let (sections, collapsible) = super::timeline::timeline_section_index(&entries);
+        let previous_by_key: HashMap<String, (String, Option<u64>)> = previous
+            .as_ref()
+            .map(|cache| {
+                cache
+                    .sources
+                    .iter()
+                    .zip(cache.entries.iter())
+                    .zip(cache.arrivals.iter())
+                    .filter_map(|((source, entry), arrived)| {
+                        Some((
+                            source.as_ref()?.key.clone(),
+                            (serde_json::to_string(entry).ok()?, *arrived),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let baseline = previous.is_none();
+        let arrivals = sources
+            .iter()
+            .zip(entries.iter())
+            .map(|(source, entry)| {
+                let source = source.as_ref()?;
+                if baseline {
+                    return None;
+                }
+                let signature = serde_json::to_string(entry).ok()?;
+                match previous_by_key.get(&source.key) {
+                    Some((old_signature, arrived)) if old_signature == &signature => arrived
+                        .filter(|at| self.runtime.now_ms.saturating_sub(*at) <= 2_000),
+                    _ => Some(self.runtime.now_ms),
+                }
+            })
+            .collect();
         self.data.timeline_sources.insert(
             source_key.to_string(),
             RyeOsTimelineSourceCache {
                 entries,
                 indents,
                 sources,
+                arrivals,
                 sections,
                 collapsible,
             },
@@ -1397,15 +1724,28 @@ impl RyeOsCore {
         };
         let mut live = std::collections::BTreeSet::new();
         let mut changed = false;
-        for (key, signature) in new_rows {
+        for (key, (signature, tone)) in new_rows {
             live.insert(key.clone());
-            if old_rows.get(&key) != Some(&signature) {
-                changed_rows.insert(key, now_ms);
-                changed = true;
-            }
+            let flash = match old_rows.get(&key) {
+                Some((old_signature, _)) if *old_signature == signature => continue,
+                // A tone transition (created→running, →completed, →failed)
+                // flashes in the NEW tone; a same-tone content change
+                // flashes generic (None → the renderer's accent). A newly
+                // arrived row announces itself in its own tone.
+                Some((_, old_tone)) => (*old_tone != tone).then_some(tone).flatten(),
+                None => tone,
+            };
+            changed_rows.insert(
+                key,
+                crate::workspace::RowFlash {
+                    at_ms: now_ms,
+                    tone: flash,
+                },
+            );
+            changed = true;
         }
-        changed_rows.retain(|key, changed_at| {
-            live.contains(key) && now_ms.saturating_sub(*changed_at) <= 2_000
+        changed_rows.retain(|key, flash| {
+            live.contains(key) && now_ms.saturating_sub(flash.at_ms) <= 2_000
         });
         if changed {
             self.bump_activity_pulse(0.35);
@@ -1531,12 +1871,14 @@ pub(crate) fn row_key(record: &serde_json::Value, index: usize) -> String {
     format!("index:{index}")
 }
 
+/// Per-row `(signature, projected tone)` — the signature detects change,
+/// the tone names the transition so the flash can speak it.
 fn projected_row_signatures(
     binding: &super::content::ViewBinding,
     response: &serde_json::Value,
     start: usize,
     end: usize,
-) -> std::collections::BTreeMap<String, String> {
+) -> std::collections::BTreeMap<String, (String, Option<String>)> {
     let records = super::content::source_collection(binding, response);
     let start = start.min(records.len());
     let end = end.min(records.len()).max(start);
@@ -1553,7 +1895,7 @@ fn projected_row_signatures(
                     "tone": record.tone,
                 })
                 .to_string();
-                (row_key(&record.raw, index), signature)
+                (row_key(&record.raw, index), (signature, record.tone.clone()))
             })
             .collect(),
         "table" => {
@@ -1570,7 +1912,7 @@ fn projected_row_signatures(
                         "tone": record.tone,
                     })
                     .to_string();
-                    (row_key(&record.raw, index), signature)
+                    (row_key(&record.raw, index), (signature, record.tone.clone()))
                 })
                 .collect()
         }
@@ -1646,6 +1988,7 @@ impl Default for RyeOsCore {
             active_workspace: 0,
             runtime: RyeOsRuntimeState::default(),
             pending_effects: BTreeMap::new(),
+            deferred_source_fetches: BTreeMap::new(),
             generation: 0,
             next_effect_id: 0,
         }

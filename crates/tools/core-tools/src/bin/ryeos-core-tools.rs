@@ -1146,21 +1146,27 @@ fn run_doctor(
         ..Default::default()
     })
     .context("load config for offline doctor engine")?;
+    let sandbox = ryeos_engine::sandbox::SandboxRuntime::load(&app_root).map(std::sync::Arc::new);
     // A failed engine build is non-fatal: the static checks still run and the
     // import dry-run reports `unavailable` (e.g. when doctoring a bundle that
     // provides its own parsers, where the offline engine can't bootstrap them).
-    let engine = ryeos_app::engine_init::build_engine_for_roots(
-        &config,
-        &dependency_roots,
-        Some(&source_path),
-        None,
-    );
+    let engine = match &sandbox {
+        Ok(sandbox) => ryeos_app::engine_init::build_engine_for_roots(
+            &config,
+            &dependency_roots,
+            Some(&source_path),
+            None,
+            std::sync::Arc::clone(sandbox),
+        ),
+        Err(error) => Err(anyhow::anyhow!(
+            "node sandbox policy unavailable for engine handlers: {error}"
+        )),
+    };
     let engine_err = engine
         .as_ref()
         .err()
         .map(|e| format!("{e:#}"))
         .unwrap_or_default();
-    let sandbox = ryeos_engine::sandbox::SandboxRuntime::load(&app_root);
     let sandbox_err = sandbox
         .as_ref()
         .err()
@@ -1169,7 +1175,10 @@ fn run_doctor(
 
     let report = ryeos_core_tools::actions::doctor::run_doctor(
         engine.as_ref().map_err(|_| engine_err.as_str()),
-        sandbox.as_ref().map_err(|_| sandbox_err.as_str()),
+        sandbox
+            .as_ref()
+            .map(std::sync::Arc::clone)
+            .map_err(|_| sandbox_err.as_str()),
         &source_path,
         &dependency_roots,
         &operator_config_root,
@@ -1343,11 +1352,16 @@ fn run_bundle_verify(
                 .expect("could not determine XDG data directory")
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
+    let sandbox = std::sync::Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&app_root)
+            .context("load node sandbox policy")?,
+    );
 
     let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         &source_path,
         &dependency_roots,
         &ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config(),
+        sandbox,
     )
     .context("bundle verify failed")?;
 
@@ -1455,15 +1469,7 @@ fn run_bundle_sign(
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)
         .context("load trust store for registry roots")?;
 
-    if source_path.join(ryeos_engine::AI_DIR).join("bin").is_dir() {
-        ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(
-            &source_path,
-            &signing_key,
-        )
-        .context("rebuild source bundle binary manifest")?;
-    }
-
-    let report = ryeos_core_tools::actions::sign_bundle::sign_bundle_items_with_trust(
+    let report = ryeos_core_tools::actions::sign_bundle::rebuild_and_sign_bundle_items_with_trust(
         &source_path,
         &dependency_roots,
         &signing_key,

@@ -1,7 +1,9 @@
-# ryeos:signed:2026-07-06T12:24:55Z:db170d56991ea899b678f3f33cb257aa961dcbec52d95dcc477b129358b7d0fa:AVM5KTPQYpkb1EWelOJVQpWgcLs8v1/PVYLYGvBZh0Gr2gFBdcbE0MZ6AyL9q82+e0g1nYoRXOjAS7BSJB34Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T02:18:23Z:9c15732031f5a2e1d87808fe5a0bf0fc69fc0e936ca650d2471c7189b7931602:354+zuSFZWORH58JFtSoSshBfnQ5OZB67BsgNofDDkeXMv3Xsk0N20j4rFp24k0l9PJ3SOAghXjY8G2nPL/IBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/files/read
 version: "1.0.0"
 description: Safe scoped file reading for RyeOS UI — constrained to session project root or project .ai directory. Truncated at 256 KiB.
 endpoint: ui.ryeos.files.read
+ui_read_only: true
+record_thread: false
 availability: daemon_only

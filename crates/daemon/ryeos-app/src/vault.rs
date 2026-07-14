@@ -64,10 +64,13 @@ use ryeos_engine::roots;
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
 pub use ryeos_vault::paths::default_sealed_store_path;
-pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
+pub use ryeos_vault::policy::{
+    is_internal_runtime_vault_key, validate_decrypted_keys, validate_key_name,
+    validate_secret_value, BLOCKED_NAMES, INTERNAL_RUNTIME_VAULT_PREFIX, MAX_VAULT_ENTRIES,
+    MAX_VAULT_ENVELOPE_BYTES, MAX_VAULT_KEY_BYTES, MAX_VAULT_PLAINTEXT_BYTES,
+    MAX_VAULT_VALUE_BYTES,
+};
 pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
-
-pub const INTERNAL_RUNTIME_VAULT_PREFIX: &str = "INTERNAL_RUNTIME_VAULT_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultScope {
@@ -120,10 +123,6 @@ pub fn validate_runtime_vault_segment(label: &str, value: &str) -> Result<()> {
         bail!("runtime vault {label} must match [A-Za-z0-9_]+");
     }
     Ok(())
-}
-
-pub fn is_internal_runtime_vault_key(name: &str) -> bool {
-    name.starts_with(INTERNAL_RUNTIME_VAULT_PREFIX)
 }
 
 fn validate_operator_secret_name(name: &str) -> Result<()> {
@@ -492,29 +491,12 @@ impl SealedEnvelopeVault {
         &self,
         secret_key: &lillux::vault::VaultSecretKey,
     ) -> Result<HashMap<String, String>> {
-        if !self.store_path.exists() {
-            return Ok(HashMap::new());
-        }
-        let raw = std::fs::read_to_string(&self.store_path).map_err(|e| {
+        ryeos_vault::sealed::read_sealed_secrets(&self.store_path, secret_key).map_err(|error| {
             anyhow!(
-                "vault: read sealed store {}: {e}",
+                "vault: read sealed store {}: {error:#}",
                 self.store_path.display()
             )
-        })?;
-        let envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw).map_err(|e| {
-            anyhow!(
-                "vault: sealed store {} is not a valid envelope TOML: {e}",
-                self.store_path.display()
-            )
-        })?;
-        let plaintext = lillux::vault::open(secret_key, &envelope)
-            .map_err(|e| anyhow!("vault: open envelope: {e:#}"))?;
-        let plaintext_str = std::str::from_utf8(&plaintext)
-            .map_err(|e| anyhow!("vault: decrypted plaintext is not UTF-8: {e}"))?;
-        let map: HashMap<String, String> = toml::from_str(plaintext_str)
-            .map_err(|e| anyhow!("vault: decrypted plaintext is not a valid TOML map: {e}"))?;
-        validate_decrypted_keys(&map, &self.store_path)?;
-        Ok(map)
+        })
     }
 
     fn read_all_internal(&self) -> Result<HashMap<String, String>> {
@@ -558,6 +540,7 @@ impl NodeVault for SealedEnvelopeVault {
         validate_operator_secret_name(name)?;
         // Validate key name
         validate_key_name(name)?;
+        validate_secret_value(value)?;
         self.read_modify_write(|map| {
             map.insert(name.to_string(), value.to_string());
             Ok(())
@@ -588,6 +571,7 @@ impl NodeVault for SealedEnvelopeVault {
                 bundle_id,
                 namespace,
             } => {
+                validate_secret_value(value)?;
                 let physical_key = runtime_physical_key(bundle_id, namespace, key)?;
                 self.read_modify_write(|map| {
                     map.insert(physical_key, value.to_string());

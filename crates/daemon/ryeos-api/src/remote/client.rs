@@ -158,11 +158,19 @@ async fn read_json_checked_with_limit(
 /// for the OS connect timeout (minutes).
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Total-request cap for control-plane calls (health, discovery,
-/// listings, signed GETs). Deliberately NOT applied to `signed_post`:
-/// `/execute` and CAS transfers may legitimately run far longer and
-/// are bounded by the connect timeout plus server-side limits.
+/// Total-request cap for control-plane calls (health, discovery, listings,
+/// signed GETs). Deliberately not applied to generic `signed_post`: execution
+/// and general CAS APIs may legitimately run longer. Bounded bundle transfers
+/// use their own explicit timeout below.
 const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Total wall-clock cap for one bundle export or bounded bundle-object batch.
+///
+/// General signed POSTs include long-running execution calls and intentionally
+/// remain uncapped here. Bundle transfer calls have independently bounded
+/// payloads, so they can also carry a finite liveness bound without changing
+/// the execution API's semantics.
+const BUNDLE_TRANSFER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
@@ -387,29 +395,69 @@ impl RemoteClient {
         hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit_inner(hashes, max_response_bytes, None)
+            .await
+    }
+
+    /// Fetch one or more bounded object batches for bundle transfer. Every
+    /// underlying HTTP request has both a response-byte limit and a total
+    /// wall-clock timeout; generic CAS callers retain their existing behavior.
+    pub async fn objects_get_bundle_batch_with_response_limit(
+        &self,
+        hashes: &[String],
+        max_response_bytes: usize,
+    ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit_inner(
+            hashes,
+            max_response_bytes,
+            Some(BUNDLE_TRANSFER_REQUEST_TIMEOUT),
+        )
+        .await
+    }
+
+    async fn objects_get_with_response_limit_inner(
+        &self,
+        hashes: &[String],
+        max_response_bytes: usize,
+        total_timeout: Option<std::time::Duration>,
+    ) -> Result<ObjectsGetResponse> {
         if hashes_request_body_size(hashes) > HASH_REQUEST_BODY_BUDGET_BYTES {
             let mut entries = Vec::new();
             for chunk in chunk_hashes_for_body_budget(hashes, HASH_REQUEST_BODY_BUDGET_BYTES) {
                 entries.extend(
-                    self.objects_get_once(&chunk, max_response_bytes)
+                    self.objects_get_once(&chunk, max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
             }
             return Ok(ObjectsGetResponse { entries });
         }
-        self.objects_get_once(hashes, max_response_bytes).await
+        self.objects_get_once(hashes, max_response_bytes, total_timeout)
+            .await
     }
 
     async fn objects_get_once(
         &self,
         hashes: &[String],
         max_response_bytes: usize,
+        total_timeout: Option<std::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({ "hashes": hashes });
-        let resp = self
-            .signed_post_with_response_limit("/objects/get", &body, max_response_bytes)
-            .await?;
+        let resp = match total_timeout {
+            Some(timeout) => {
+                self.signed_post_with_response_limit_and_timeout(
+                    "/objects/get",
+                    &body,
+                    max_response_bytes,
+                    timeout,
+                )
+                .await?
+            }
+            None => {
+                self.signed_post_with_response_limit("/objects/get", &body, max_response_bytes)
+                    .await?
+            }
+        };
         let entries = resp
             .get("entries")
             .and_then(|v| v.as_array())
@@ -791,7 +839,13 @@ impl RemoteClient {
     /// POST /bundle/export (authenticated) — export a bundle as CAS objects.
     pub async fn bundle_export(&self, bundle_name: &str) -> Result<Value> {
         let body = serde_json::json!({ "bundle_name": bundle_name });
-        self.signed_post("/bundle/export", &body).await
+        self.signed_post_with_response_limit_and_timeout(
+            "/bundle/export",
+            &body,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            BUNDLE_TRANSFER_REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     // ── Internal ──────────────────────────────────────────────────
@@ -846,6 +900,31 @@ impl RemoteClient {
             .with_context(|| format!("POST {} failed", url))?;
 
         read_json_checked_with_limit("POST", &url, resp, max_response_bytes).await
+    }
+
+    /// Apply a total timeout around request signing, connect/send, and the
+    /// complete bounded response-body read. This is deliberately opt-in so
+    /// long-running signed POST endpoints such as `/execute` are unchanged.
+    async fn signed_post_with_response_limit_and_timeout(
+        &self,
+        path: &str,
+        body: &Value,
+        max_response_bytes: usize,
+        total_timeout: std::time::Duration,
+    ) -> Result<Value> {
+        tokio::time::timeout(
+            total_timeout,
+            self.signed_post_with_response_limit(path, body, max_response_bytes),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "POST {}{} exceeded bundle-transfer timeout of {} seconds",
+                self.base_url,
+                path,
+                total_timeout.as_secs()
+            )
+        })?
     }
 
     async fn unsigned_post(&self, path: &str, body: &Value) -> Result<Value> {

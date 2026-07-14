@@ -127,6 +127,13 @@ pub struct GcResult {
     /// Sync-job attempt rows dropped alongside their retired jobs.
     #[serde(default)]
     pub deleted_sync_job_attempts: usize,
+    /// Running seat sessions settled after their runtime lease expired.
+    #[serde(default)]
+    pub reaped_seats: usize,
+    #[serde(default)]
+    pub retired_service_chains: usize,
+    #[serde(default)]
+    pub deleted_service_chain_rows: usize,
     pub freed_bytes: u64,
     pub compaction: Option<CompactionResult>,
     pub duration_ms: u64,

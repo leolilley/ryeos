@@ -3,7 +3,7 @@ name = "ryeos-scheduler"
 version = "0.1.0"
 edition = "2021"
 description = "Scheduler for ryeosd — cron, timers, SQLite projection"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/leolilley/ryeos"
 
 [dependencies]

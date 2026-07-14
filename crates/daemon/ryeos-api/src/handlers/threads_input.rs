@@ -25,7 +25,9 @@ use serde_json::{json, Value};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::live_input_queue::EnqueueOutcome;
+use ryeos_app::live_input_queue::{
+    serialized_live_input_bytes, EnqueueOutcome, MAX_LIVE_INPUT_SERIALIZED_BYTES,
+};
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::objects::{LiveInput, LiveInputIntent, ThreadStatus};
@@ -136,6 +138,13 @@ pub async fn handle(
     if req.input.trim().is_empty() {
         return Err(HandlerError::BadRequest("input is empty".to_string()));
     }
+    let operator_input = LiveInput::new(req.input.clone(), req.intent);
+    let input_bytes = serialized_live_input_bytes(&operator_input);
+    if input_bytes > MAX_LIVE_INPUT_SERIALIZED_BYTES {
+        return Err(HandlerError::BadRequest(format!(
+            "operator input is {input_bytes} serialized bytes; maximum is {MAX_LIVE_INPUT_SERIALIZED_BYTES}"
+        )));
+    }
 
     // Full daemon-authored execution facts for a kind — every arm returns both
     // so the client gates the operator-input affordance on
@@ -201,8 +210,10 @@ pub async fn handle(
                 // the runtime next polls), then — for an interrupt — nudge the
                 // runtime to cut its current cognition.
                 FollowUpDecision::Live => {
-                    let input = LiveInput::new(req.input.clone(), req.intent);
-                    let pending = match state.live_input.enqueue(&detail.thread_id, input) {
+                    let pending = match state
+                        .live_input
+                        .enqueue(&detail.thread_id, operator_input.clone())
+                    {
                         EnqueueOutcome::Accepted { pending } => pending,
                         EnqueueOutcome::Full { pending } => {
                             return Ok(json!({
@@ -231,6 +242,11 @@ pub async fn handle(
                                 "execution": exec_facts(&detail.kind),
                             }));
                         }
+                        EnqueueOutcome::TooLarge { bytes, max } => {
+                            return Err(HandlerError::BadRequest(format!(
+                                "operator input is {bytes} serialized bytes; maximum is {max}"
+                            )));
+                        }
                     };
 
                     // Default notice reports the staged depth so the operator can
@@ -242,8 +258,11 @@ pub async fn handle(
                     // already enqueued, so on any signal failure we degrade to a
                     // cooperative steer (it still folds at the next boundary).
                     if req.intent.is_interrupt() {
-                        let outcome = match detail.runtime.pgid {
-                            Some(pgid) => ryeos_app::process::interrupt_process_group(pgid),
+                        let outcome = match detail.runtime.process_identity.as_ref() {
+                            Some(identity) => ryeos_app::process::interrupt_process(identity),
+                            None if detail.runtime.pgid.is_some() => {
+                                ryeos_app::process::SignalResult::MissingIdentity
+                            }
                             None => ryeos_app::process::SignalResult::MissingPgid,
                         };
                         if outcome != ryeos_app::process::SignalResult::Delivered {
@@ -354,6 +373,7 @@ pub async fn handle(
         origin_site_id: previous.origin_site_id.clone(),
         upstream_thread_id: Some(previous.thread_id.clone()),
         requested_by: Some(ctx.fingerprint.clone()),
+        project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
     };

@@ -149,8 +149,10 @@ authority lives in the target node's authorized-key store.
 
 ## Install
 
-The supported production target is Linux x86-64 with glibc. Official container
-images are currently `linux/amd64`, and packaged bundle executables target
+The supported production target is Linux 6.9 or newer on x86-64 with glibc.
+The kernel floor supplies the pidfd process-group and authenticated Unix-peer
+primitives used for durable cancellation and lifecycle control. Official
+container images are currently `linux/amd64`, and packaged bundle executables target
 `x86_64-unknown-linux-gnu`. Other targets are tracked in the
 [platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
 the sandbox or durability contracts.
@@ -241,8 +243,8 @@ docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
 
 That switch pins the image's `PUBLISHER_TRUST.toml` files before preflight. Do
 not use it for release images. See the
-[publisher trust boundary](docs/security/publisher-trust.md) for the complete
-operator contract.
+[official publisher trust contract](bundles/standard/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
+for the complete operator contract.
 
 The release gate exercises two distinct profiles: default-disabled startup and
 signed execution without extra capabilities, then explicitly enforced startup,

@@ -169,6 +169,7 @@ pub async fn handle(
                     project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
+                    daemon_socket_path: None,
                     bundle_roots: &sandbox_bundle_roots,
                     node_trusted_keys_dir: Some(&sandbox_node_trusted_keys_dir),
                     verified_code: &sandbox_verified_code,

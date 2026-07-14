@@ -2,7 +2,7 @@
 name = "ryeos-graph-runtime"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license.workspace = true
 description = "Native graph walker runtime for Rye OS"
 
 [[bin]]

@@ -23,9 +23,19 @@ pub fn build_effective_item_engine(
         app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })?;
+    let sandbox = std::sync::Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
+            .context("load node sandbox policy")?,
+    );
 
-    ryeos_app::engine_init::build_engine_for_roots(&config, bundle_roots, project_path, None)
-        .context("build effective-item engine")
+    ryeos_app::engine_init::build_engine_for_roots(
+        &config,
+        bundle_roots,
+        project_path,
+        None,
+        sandbox,
+    )
+    .context("build effective-item engine")
 }
 
 pub fn resolve_effective_composed_value(

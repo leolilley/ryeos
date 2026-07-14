@@ -5,8 +5,14 @@
 
 use anyhow::Context;
 use rusqlite::OptionalExtension;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::projection::ProjectionDb;
+
+/// Stay below SQLite's conservative host-parameter ceiling regardless of the
+/// connection's compile-time `MAX_VARIABLE_NUMBER`.
+const THREAD_ID_QUERY_BATCH: usize = 500;
 
 // ============= Row types =============
 
@@ -23,6 +29,7 @@ pub struct ThreadRow {
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
+    pub project_root: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -43,6 +50,7 @@ impl ThreadRow {
             origin_site_id: row.get("origin_site_id")?,
             upstream_thread_id: row.get("upstream_thread_id")?,
             requested_by: row.get("requested_by")?,
+            project_root: row.get("project_root")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             started_at: row.get("started_at")?,
@@ -84,6 +92,47 @@ impl EventRow {
             payload: row.get("payload")?,
         })
     }
+
+    fn replay_serialized_size_upper_bound(&self) -> anyhow::Result<usize> {
+        // Covers JSON keys, punctuation, numeric fields, and the outer record
+        // framing. Dynamic strings are measured after JSON escaping and the
+        // payload is already stored as encoded JSON.
+        let mut bytes = self
+            .payload
+            .len()
+            .checked_add(512)
+            .context("replay event serialized byte count overflow")?;
+        for value in [
+            &self.event_hash,
+            &self.chain_root_id,
+            &self.thread_id,
+            &self.event_type,
+            &self.durability,
+            &self.ts,
+        ] {
+            bytes = bytes
+                .checked_add(serde_json::to_vec(value)?.len())
+                .context("replay event serialized byte count overflow")?;
+        }
+        for value in [
+            self.prev_chain_event_hash.as_ref(),
+            self.prev_thread_event_hash.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes
+                .checked_add(serde_json::to_vec(value)?.len())
+                .context("replay event serialized byte count overflow")?;
+        }
+        Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayEventRowsPage {
+    pub rows: Vec<EventRow>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +339,7 @@ impl UsageSummaryRow {
 const THREAD_COLUMNS: &str = r#"
     thread_id, chain_root_id, kind, status,
     item_ref, executor_ref, launch_mode,
-    current_site_id, origin_site_id, upstream_thread_id, requested_by,
+    current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
     created_at, updated_at, started_at, finished_at
 "#;
 
@@ -300,6 +349,40 @@ pub fn get_thread(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Option<T
     stmt.query_row([thread_id], ThreadRow::from_row)
         .optional()
         .context("query get_thread")
+}
+
+/// Fetch selected projected thread rows in bounded batches.
+pub fn get_threads_many(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+) -> anyhow::Result<Vec<ThreadRow>> {
+    let mut threads = Vec::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        if placeholders.is_empty() {
+            continue;
+        }
+        let sql =
+            format!("SELECT {THREAD_COLUMNS} FROM threads WHERE thread_id IN ({placeholders})");
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare get_threads_many")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(batch.iter()),
+                ThreadRow::from_row,
+            )
+            .context("query get_threads_many")?;
+        threads.extend(
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("read get_threads_many rows")?,
+        );
+    }
+    Ok(threads)
 }
 
 pub fn list_threads_by_chain(
@@ -401,6 +484,11 @@ pub struct ThreadListFilter {
     /// Keep only ACTIVE (non-terminal) threads — the agent's live cognition,
     /// what the one key is running now rather than the settled history.
     pub active_only: bool,
+    /// Exclude item refs beginning with any of these prefixes. Exclusions are
+    /// applied in SQL before ordering and limit.
+    pub exclude_item_prefixes: Vec<String>,
+    /// Exact local project scope. Unattributed rows do not match.
+    pub project_root: Option<PathBuf>,
 }
 
 pub fn list_threads_sorted(
@@ -492,6 +580,24 @@ pub fn list_threads_query(
             params.push(status);
         }
     }
+    for prefix in &filter.exclude_item_prefixes {
+        if prefix.is_empty() {
+            continue;
+        }
+        // Keep the literal, case-sensitive semantics of Rust starts_with;
+        // LIKE would interpret '%' and '_' in an authored prefix as wildcards.
+        conditions.push("substr(item_ref, 1, length(?)) != ?");
+        params.push(prefix);
+        params.push(prefix);
+    }
+    let project_root = filter
+        .project_root
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    if let Some(project_root) = &project_root {
+        conditions.push("project_root = ?");
+        params.push(project_root);
+    }
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -539,33 +645,180 @@ pub fn get_thread_result(
     db: &ProjectionDb,
     thread_id: &str,
 ) -> anyhow::Result<Option<ThreadResultRow>> {
+    let max_content_bytes = crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES;
+    let lengths = db
+        .connection()
+        .query_row(
+            "SELECT length(result), length(CAST(error AS BLOB)), \
+                    COALESCE(length(CAST(thread_id AS BLOB)), 0) \
+                  + COALESCE(length(CAST(chain_root_id AS BLOB)), 0) \
+                  + COALESCE(length(CAST(status AS BLOB)), 0) \
+                  + COALESCE(length(result), 0) \
+                  + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
+                  + COALESCE(length(CAST(error AS BLOB)), 0) \
+                  + COALESCE(length(CAST(updated_at AS BLOB)), 0) \
+             FROM thread_results WHERE thread_id = ?1",
+            [thread_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .context("query get_thread_result lengths")?;
+    let Some((result_bytes, error_bytes, row_bytes)) = lengths else {
+        return Ok(None);
+    };
+    let result_bytes = usize::try_from(result_bytes.unwrap_or(0))
+        .context("thread result has an invalid byte length")?;
+    let error_bytes = usize::try_from(error_bytes.unwrap_or(0))
+        .context("thread error has an invalid byte length")?;
+    let row_bytes =
+        usize::try_from(row_bytes).context("thread result row has an invalid length")?;
+    if result_bytes > max_content_bytes {
+        anyhow::bail!(
+            "thread {thread_id} result is {result_bytes} bytes; maximum is {max_content_bytes}"
+        );
+    }
+    if error_bytes > max_content_bytes {
+        anyhow::bail!(
+            "thread {thread_id} error is {error_bytes} bytes; maximum is {max_content_bytes}"
+        );
+    }
+    let total_bytes = result_bytes
+        .checked_add(error_bytes)
+        .context("thread result content byte count overflow")?;
+    if total_bytes > max_content_bytes {
+        anyhow::bail!(
+            "thread {thread_id} result and error total {total_bytes} bytes; maximum is {max_content_bytes}"
+        );
+    }
+    if row_bytes > max_content_bytes {
+        anyhow::bail!(
+            "thread {thread_id} result row is {row_bytes} bytes; maximum is {max_content_bytes}"
+        );
+    }
+
+    let max_content_bytes_sql = i64::try_from(max_content_bytes)
+        .context("thread result byte maximum exceeds SQLite i64")?;
     let mut stmt = db
         .connection()
         .prepare(
             "SELECT thread_id, chain_root_id, status, result, outcome_code, error, updated_at \
-             FROM thread_results WHERE thread_id = ?",
+             FROM thread_results WHERE thread_id = ?1 \
+               AND (result IS NULL OR length(result) <= ?2) \
+               AND (error IS NULL OR length(CAST(error AS BLOB)) <= ?2) \
+               AND COALESCE(length(result), 0) \
+                   + COALESCE(length(CAST(error AS BLOB)), 0) <= ?2 \
+               AND COALESCE(length(CAST(thread_id AS BLOB)), 0) \
+                   + COALESCE(length(CAST(chain_root_id AS BLOB)), 0) \
+                   + COALESCE(length(CAST(status AS BLOB)), 0) \
+                   + COALESCE(length(result), 0) \
+                   + COALESCE(length(CAST(outcome_code AS BLOB)), 0) \
+                   + COALESCE(length(CAST(error AS BLOB)), 0) \
+                   + COALESCE(length(CAST(updated_at AS BLOB)), 0) <= ?2",
         )
         .context("prepare get_thread_result")?;
-    stmt.query_row([thread_id], ThreadResultRow::from_row)
+    let row = stmt
+        .query_row(
+            rusqlite::params![thread_id, max_content_bytes_sql],
+            ThreadResultRow::from_row,
+        )
         .optional()
-        .context("query get_thread_result")
+        .context("query get_thread_result")?;
+    row.map(Some).ok_or_else(|| {
+        anyhow::anyhow!(
+            "thread {thread_id} result changed after its bounded length preflight or exceeds the byte maximum"
+        )
+    })
 }
 
-pub fn list_thread_artifacts(
+pub fn list_thread_artifacts_bounded(
     db: &ProjectionDb,
     thread_id: &str,
+    limit: usize,
+    max_kind_bytes: usize,
+    max_metadata_bytes: usize,
+    max_total_metadata_bytes: usize,
 ) -> anyhow::Result<Vec<ArtifactRow>> {
+    if limit == 0 {
+        anyhow::bail!("thread artifact limit must be positive");
+    }
     let mut stmt = db
         .connection()
         .prepare(
-            "SELECT chain_root_id, thread_id, kind, metadata, created_at \
-             FROM thread_artifacts WHERE thread_id = ? ORDER BY created_at",
+            "SELECT chain_root_id, thread_id, \
+                    CASE WHEN length(CAST(kind AS BLOB)) <= ?3 THEN kind ELSE NULL END AS kind, \
+                    CASE WHEN metadata IS NULL OR length(metadata) <= ?4 THEN metadata ELSE NULL END AS metadata, \
+                    created_at, length(CAST(kind AS BLOB)) AS kind_len, \
+                    length(metadata) AS metadata_len \
+             FROM thread_artifacts WHERE thread_id = ?1 \
+             ORDER BY created_at, artifact_id LIMIT ?2",
         )
-        .context("prepare list_thread_artifacts")?;
-    let rows = stmt
-        .query_map([thread_id], ArtifactRow::from_row)
-        .context("query list_thread_artifacts")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+        .context("prepare bounded thread artifacts")?;
+    let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut rows = stmt
+        .query(rusqlite::params![
+            thread_id,
+            sql_limit,
+            i64::try_from(max_kind_bytes).unwrap_or(i64::MAX),
+            i64::try_from(max_metadata_bytes).unwrap_or(i64::MAX),
+        ])
+        .context("query bounded thread artifacts")?;
+    let mut artifacts = Vec::with_capacity(limit.min(32));
+    let mut total_metadata_bytes = 0usize;
+    while let Some(row) = rows.next().context("read bounded thread artifact row")? {
+        if artifacts.len() == limit {
+            anyhow::bail!("thread {thread_id} exceeds the {limit}-artifact maximum");
+        }
+        let kind_len = usize::try_from(row.get::<_, i64>("kind_len")?)
+            .context("thread artifact kind has an invalid length")?;
+        if kind_len == 0 || kind_len > max_kind_bytes {
+            anyhow::bail!(
+                "thread {thread_id} artifact kind is {kind_len} bytes; maximum is {max_kind_bytes}"
+            );
+        }
+        let metadata_len = row.get::<_, Option<i64>>("metadata_len")?.unwrap_or(0);
+        let metadata_len = usize::try_from(metadata_len)
+            .context("thread artifact metadata has an invalid negative/oversized length")?;
+        if metadata_len > max_metadata_bytes {
+            anyhow::bail!(
+                "thread {thread_id} artifact metadata is {metadata_len} bytes; maximum is {max_metadata_bytes}"
+            );
+        }
+        total_metadata_bytes = total_metadata_bytes
+            .checked_add(metadata_len)
+            .context("thread artifact metadata total overflow")?;
+        if total_metadata_bytes > max_total_metadata_bytes {
+            anyhow::bail!(
+                "thread {thread_id} artifact metadata exceeds the {max_total_metadata_bytes}-byte total"
+            );
+        }
+        // Read the BLOB only after its SQLite length has passed the bound.
+        artifacts.push(ArtifactRow::from_row(row)?);
+    }
+    Ok(artifacts)
+}
+
+pub fn thread_artifact_stats(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<(usize, usize, usize)> {
+    let (count, kind_bytes, metadata_bytes): (i64, i64, i64) = db.connection().query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(CAST(kind AS BLOB))), 0), \
+                COALESCE(SUM(COALESCE(length(metadata), 0)), 0) \
+         FROM thread_artifacts WHERE thread_id = ?",
+        [thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    Ok((
+        usize::try_from(count).context("thread artifact count is invalid")?,
+        usize::try_from(kind_bytes).context("thread artifact kind byte total is invalid")?,
+        usize::try_from(metadata_bytes).context("thread artifact byte total is invalid")?,
+    ))
 }
 
 pub fn list_thread_children(db: &ProjectionDb, parent_id: &str) -> anyhow::Result<Vec<ThreadRow>> {
@@ -628,7 +881,8 @@ pub fn replay_events(
     }
 
     sql.push_str(" ORDER BY chain_seq LIMIT ?");
-    params.push(Box::new(limit as i64));
+    let sql_limit = i64::try_from(limit).context("replay_events limit exceeds SQLite i64")?;
+    params.push(Box::new(sql_limit));
 
     let mut stmt = db
         .connection()
@@ -640,6 +894,120 @@ pub fn replay_events(
         .query_map(param_refs.as_slice(), EventRow::from_row)
         .context("query replay_events")?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// Replay a bounded page without materializing an unbounded event history.
+///
+/// The byte budget is a conservative upper bound for serialized response
+/// records, including escaped metadata strings and JSON payload bytes. One
+/// extra capped row may be inspected to determine whether another page exists.
+pub fn replay_events_bounded(
+    db: &ProjectionDb,
+    chain_root_id: &str,
+    thread_id: Option<&str>,
+    after_seq: Option<i64>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<ReplayEventRowsPage> {
+    if limit == 0 {
+        anyhow::bail!("replay_events_bounded limit must be greater than zero");
+    }
+    if max_serialized_bytes == 0 {
+        anyhow::bail!("replay_events_bounded byte budget must be greater than zero");
+    }
+
+    // Returning NULL for an oversized legacy payload lets us reject it before
+    // rusqlite allocates the BLOB. Current writers cannot create such a row
+    // because the complete ThreadEvent object has the same or smaller ceiling.
+    let mut sql = String::from(
+        "SELECT event_id, event_hash, chain_root_id, chain_seq, thread_id, thread_seq, \
+                event_type, durability, ts, prev_chain_event_hash, \
+                prev_thread_event_hash, \
+                CASE WHEN length(payload) <= ? THEN payload ELSE NULL END AS payload, \
+                length(payload) AS payload_bytes \
+         FROM events WHERE chain_root_id = ?",
+    );
+    let max_event_payload_bytes = crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES;
+    let sql_max_event_payload_bytes = i64::try_from(max_event_payload_bytes)
+        .context("thread event byte limit exceeds SQLite i64")?;
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(sql_max_event_payload_bytes),
+        Box::new(chain_root_id.to_string()),
+    ];
+
+    if let Some(tid) = thread_id {
+        sql.push_str(" AND thread_id = ?");
+        params.push(Box::new(tid.to_string()));
+    }
+    if let Some(seq) = after_seq {
+        sql.push_str(" AND chain_seq > ?");
+        params.push(Box::new(seq));
+    }
+
+    sql.push_str(" ORDER BY chain_seq LIMIT ?");
+    let query_limit = limit
+        .checked_add(1)
+        .context("replay_events_bounded limit overflow")?;
+    let sql_limit =
+        i64::try_from(query_limit).context("replay_events_bounded limit exceeds SQLite i64")?;
+    params.push(Box::new(sql_limit));
+
+    let mut stmt = db
+        .connection()
+        .prepare(&sql)
+        .context("prepare replay_events_bounded")?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut query_rows = stmt
+        .query(param_refs.as_slice())
+        .context("query replay_events_bounded")?;
+
+    let mut rows = Vec::with_capacity(limit.min(64));
+    let mut serialized_bytes = 0usize;
+    let mut has_more = false;
+    while let Some(row) = query_rows
+        .next()
+        .context("read replay_events_bounded row")?
+    {
+        if rows.len() == limit {
+            has_more = true;
+            break;
+        }
+
+        let payload_bytes_i64: i64 = row
+            .get("payload_bytes")
+            .context("read replay event payload byte count")?;
+        let payload_bytes = usize::try_from(payload_bytes_i64)
+            .context("replay event payload has invalid byte count")?;
+        if payload_bytes > max_event_payload_bytes {
+            anyhow::bail!(
+                "replay event payload is {} bytes (max {})",
+                payload_bytes,
+                max_event_payload_bytes
+            );
+        }
+
+        let event = EventRow::from_row(row).context("decode replay_events_bounded row")?;
+        let event_bytes = event.replay_serialized_size_upper_bound()?;
+        let next_serialized_bytes = serialized_bytes
+            .checked_add(event_bytes)
+            .context("replay page serialized byte count overflow")?;
+        if next_serialized_bytes > max_serialized_bytes {
+            if rows.is_empty() {
+                anyhow::bail!(
+                    "single replay event requires {} serialized bytes (page budget {})",
+                    event_bytes,
+                    max_serialized_bytes
+                );
+            }
+            has_more = true;
+            break;
+        }
+
+        serialized_bytes = next_serialized_bytes;
+        rows.push(event);
+    }
+
+    Ok(ReplayEventRowsPage { rows, has_more })
 }
 
 /// The thread that owns the chain's highest-`chain_seq` event — the thread a
@@ -688,6 +1056,154 @@ pub fn continuation_successor(
         .get("successor_thread_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string()))
+}
+
+/// Raw batch counterpart to [`continuation_successor`]. JSON decoding is left
+/// to the caller so it can happen after releasing an outer store lock.
+pub fn continuation_successor_payloads(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+    max_items: usize,
+    max_payload_bytes: usize,
+    max_total_bytes: usize,
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    latest_event_payloads_bounded(
+        db,
+        thread_ids,
+        crate::event_types::THREAD_CONTINUED,
+        max_items,
+        max_payload_bytes,
+        max_total_bytes,
+    )
+}
+
+/// Return the latest payload of one event type for each selected thread.
+/// Aggregate/count-only queries prove the full page fits before a second pass
+/// selects any BLOB. The guarded CASE remains a defense against drift or a
+/// malformed projection outside the daemon's serialized state-store lock.
+fn latest_event_payloads_bounded(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+    event_type: &str,
+    max_items: usize,
+    max_payload_bytes: usize,
+    max_total_bytes: usize,
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if max_items == 0 {
+        anyhow::bail!("latest event payload item budget must be positive");
+    }
+
+    let mut total_items = 0usize;
+    let mut total_bytes = 0usize;
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(length(e.payload)), 0), \
+                    COALESCE(MAX(length(e.payload)), 0) \
+             FROM events e INNER JOIN ( \
+                 SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
+                 WHERE event_type = ? AND thread_id IN ({placeholders}) \
+                 GROUP BY thread_id \
+             ) latest ON latest.thread_id = e.thread_id \
+                     AND latest.thread_seq = e.thread_seq \
+             WHERE e.event_type = ?"
+        );
+        let mut params = Vec::with_capacity(batch.len() + 2);
+        params.push(rusqlite::types::Value::Text(event_type.to_string()));
+        params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
+        params.push(rusqlite::types::Value::Text(event_type.to_string()));
+        let (items, bytes, largest): (i64, i64, i64) =
+            db.connection()
+                .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        let items = usize::try_from(items).context("latest event payload count is invalid")?;
+        let bytes = usize::try_from(bytes).context("latest event payload total is invalid")?;
+        let largest = usize::try_from(largest).context("latest event payload length is invalid")?;
+        if largest > max_payload_bytes {
+            anyhow::bail!(
+                "latest {event_type} payload is {largest} bytes; maximum is {max_payload_bytes}"
+            );
+        }
+        total_items = total_items
+            .checked_add(items)
+            .context("latest event payload count overflow")?;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .context("latest event payload byte total overflow")?;
+        if total_items > max_items {
+            anyhow::bail!(
+                "latest {event_type} payloads contain {total_items} items; maximum is {max_items}"
+            );
+        }
+        if total_bytes > max_total_bytes {
+            anyhow::bail!(
+                "latest {event_type} payloads total {total_bytes} bytes; maximum is {max_total_bytes}"
+            );
+        }
+    }
+
+    let mut payloads = HashMap::with_capacity(total_items);
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT e.thread_id, \
+                    CASE WHEN length(e.payload) <= ? THEN e.payload ELSE NULL END, \
+                    length(e.payload) \
+             FROM events e INNER JOIN ( \
+                 SELECT thread_id, MAX(thread_seq) AS thread_seq FROM events \
+                 WHERE event_type = ? AND thread_id IN ({placeholders}) \
+                 GROUP BY thread_id \
+             ) latest ON latest.thread_id = e.thread_id \
+                     AND latest.thread_seq = e.thread_seq \
+             WHERE e.event_type = ?"
+        );
+        let mut params = Vec::with_capacity(batch.len() + 3);
+        params.push(rusqlite::types::Value::Integer(
+            i64::try_from(max_payload_bytes).unwrap_or(i64::MAX),
+        ));
+        params.push(rusqlite::types::Value::Text(event_type.to_string()));
+        params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
+        params.push(rusqlite::types::Value::Text(event_type.to_string()));
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare bounded latest event payloads")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .context("query bounded latest event payloads")?;
+        for row in rows {
+            let (thread_id, payload, payload_len) =
+                row.context("read bounded latest event payload row")?;
+            let payload_len = usize::try_from(payload_len)
+                .context("latest event payload has an invalid length")?;
+            if payload_len > max_payload_bytes {
+                anyhow::bail!(
+                    "latest {event_type} payload is {payload_len} bytes; maximum is {max_payload_bytes}"
+                );
+            }
+            let payload = payload.ok_or_else(|| {
+                anyhow::anyhow!("bounded latest {event_type} payload unexpectedly returned NULL")
+            })?;
+            payloads.insert(thread_id, payload);
+        }
+    }
+    Ok(payloads)
 }
 
 /// The `successor_request_fingerprint` recorded in the source's `thread_continued`
@@ -980,18 +1496,227 @@ pub fn thread_status_counts(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<FacetRow>> {
+pub fn get_facets_bounded(
+    db: &ProjectionDb,
+    thread_id: &str,
+    limit: usize,
+    max_key_bytes: usize,
+    max_value_bytes: usize,
+    max_content_bytes: usize,
+) -> anyhow::Result<Vec<FacetRow>> {
+    if limit == 0 {
+        anyhow::bail!("thread facet limit must be positive");
+    }
     let mut stmt = db
         .connection()
         .prepare(
-            "SELECT thread_id, key, value \
-             FROM thread_facets WHERE thread_id = ? ORDER BY key",
+            "SELECT thread_id, \
+                    CASE WHEN length(CAST(key AS BLOB)) <= ?3 THEN key ELSE NULL END AS key, \
+                    CASE WHEN length(value) <= ?4 THEN value ELSE NULL END AS value, \
+                    length(CAST(key AS BLOB)) AS key_len, \
+                    length(value) AS value_len \
+             FROM thread_facets WHERE thread_id = ?1 ORDER BY key LIMIT ?2",
         )
-        .context("prepare get_facets")?;
-    let rows = stmt
-        .query_map([thread_id], FacetRow::from_row)
-        .context("query get_facets")?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+        .context("prepare bounded thread facets")?;
+    let sql_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut rows = stmt
+        .query(rusqlite::params![
+            thread_id,
+            sql_limit,
+            i64::try_from(max_key_bytes).unwrap_or(i64::MAX),
+            i64::try_from(max_value_bytes).unwrap_or(i64::MAX),
+        ])
+        .context("query bounded thread facets")?;
+    let mut facets = Vec::with_capacity(limit.min(32));
+    let mut content_bytes = 0usize;
+    while let Some(row) = rows.next().context("read bounded thread facet row")? {
+        if facets.len() == limit {
+            anyhow::bail!("thread {thread_id} exceeds the {limit}-facet maximum");
+        }
+        let key_len = usize::try_from(row.get::<_, i64>("key_len")?)
+            .context("thread facet key has an invalid length")?;
+        let value_len = usize::try_from(row.get::<_, i64>("value_len")?)
+            .context("thread facet value has an invalid length")?;
+        if key_len > max_key_bytes || value_len > max_value_bytes {
+            anyhow::bail!(
+                "thread {thread_id} facet exceeds bounds (key={key_len}/{max_key_bytes}, value={value_len}/{max_value_bytes})"
+            );
+        }
+        content_bytes = content_bytes
+            .checked_add(key_len)
+            .and_then(|bytes| bytes.checked_add(value_len))
+            .context("thread facet content total overflow")?;
+        if content_bytes > max_content_bytes {
+            anyhow::bail!(
+                "thread {thread_id} facet content exceeds the {max_content_bytes}-byte total"
+            );
+        }
+        // Read the BLOB only after SQLite's length has passed the bound.
+        facets.push(FacetRow::from_row(row)?);
+    }
+    Ok(facets)
+}
+
+pub fn thread_facet_stats(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<(usize, usize)> {
+    let (count, content_bytes): (i64, i64) = db.connection().query_row(
+        "SELECT COUNT(*), \
+                COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0) \
+         FROM thread_facets WHERE thread_id = ?",
+        [thread_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((
+        usize::try_from(count).context("thread facet count is invalid")?,
+        usize::try_from(content_bytes).context("thread facet byte total is invalid")?,
+    ))
+}
+
+pub fn thread_facet_value_bytes(
+    db: &ProjectionDb,
+    thread_id: &str,
+    key: &str,
+) -> anyhow::Result<Option<usize>> {
+    let value_bytes = db
+        .connection()
+        .query_row(
+            "SELECT length(value) FROM thread_facets WHERE thread_id = ?1 AND key = ?2",
+            rusqlite::params![thread_id, key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    value_bytes
+        .map(|bytes| usize::try_from(bytes).context("thread facet value length is invalid"))
+        .transpose()
+}
+
+/// Aggregate facet cardinality/content for selected threads without selecting
+/// any value BLOBs. Callers use this as a preflight before the guarded fetch.
+pub fn thread_facet_stats_many(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+) -> anyhow::Result<Vec<(String, usize, usize)>> {
+    if thread_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stats = Vec::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT thread_id, COUNT(*), \
+                    COALESCE(SUM(length(CAST(key AS BLOB)) + length(value)), 0) \
+             FROM thread_facets WHERE thread_id IN ({placeholders}) GROUP BY thread_id"
+        );
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare many-facet stats")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .context("query many-facet stats")?;
+        for row in rows {
+            let (thread_id, items, content_bytes) = row?;
+            stats.push((
+                thread_id,
+                usize::try_from(items).context("many-facet count is invalid")?,
+                usize::try_from(content_bytes).context("many-facet byte total is invalid")?,
+            ));
+        }
+    }
+    Ok(stats)
+}
+
+/// Fetch facets for a selected thread page with global item/content budgets and
+/// per-row CASE guards. The caller must run `thread_facet_stats_many` first
+/// under the same lock to keep aggregate allocation fail-before-read.
+pub fn get_facets_many_bounded(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+    max_items: usize,
+    max_key_bytes: usize,
+    max_value_bytes: usize,
+    max_content_bytes: usize,
+) -> anyhow::Result<Vec<FacetRow>> {
+    if thread_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if max_items == 0 {
+        anyhow::bail!("many-facet item budget must be positive");
+    }
+    let mut facets = Vec::new();
+    let mut content_bytes = 0usize;
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat("?")
+            .take(batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let key_bound_param = batch.len() + 1;
+        let value_bound_param = batch.len() + 2;
+        let limit_param = batch.len() + 3;
+        let sql = format!(
+            "SELECT thread_id, \
+                    CASE WHEN length(CAST(key AS BLOB)) <= ?{key_bound_param} THEN key ELSE NULL END AS key, \
+                    CASE WHEN length(value) <= ?{value_bound_param} THEN value ELSE NULL END AS value, \
+                    length(CAST(key AS BLOB)) AS key_len, length(value) AS value_len \
+             FROM thread_facets WHERE thread_id IN ({placeholders}) \
+             ORDER BY thread_id, key LIMIT ?{limit_param}"
+        );
+        let remaining = max_items.saturating_sub(facets.len());
+        let mut params = batch
+            .iter()
+            .cloned()
+            .map(rusqlite::types::Value::Text)
+            .collect::<Vec<_>>();
+        params.push(rusqlite::types::Value::Integer(
+            i64::try_from(max_key_bytes).unwrap_or(i64::MAX),
+        ));
+        params.push(rusqlite::types::Value::Integer(
+            i64::try_from(max_value_bytes).unwrap_or(i64::MAX),
+        ));
+        params.push(rusqlite::types::Value::Integer(
+            i64::try_from(remaining.saturating_add(1)).unwrap_or(i64::MAX),
+        ));
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare bounded many-facet query")?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(params.iter()))
+            .context("query bounded many-facet rows")?;
+        while let Some(row) = rows.next().context("read bounded many-facet row")? {
+            if facets.len() == max_items {
+                anyhow::bail!("selected thread facets exceed the {max_items}-item maximum");
+            }
+            let key_len = usize::try_from(row.get::<_, i64>("key_len")?)
+                .context("many-facet key has an invalid length")?;
+            let value_len = usize::try_from(row.get::<_, i64>("value_len")?)
+                .context("many-facet value has an invalid length")?;
+            if key_len > max_key_bytes || value_len > max_value_bytes {
+                anyhow::bail!(
+                    "selected thread facet exceeds per-entry bounds (key={key_len}/{max_key_bytes}, value={value_len}/{max_value_bytes})"
+                );
+            }
+            content_bytes = content_bytes
+                .checked_add(key_len)
+                .and_then(|bytes| bytes.checked_add(value_len))
+                .context("many-facet content total overflow")?;
+            if content_bytes > max_content_bytes {
+                anyhow::bail!(
+                    "selected thread facet content exceeds the {max_content_bytes}-byte maximum"
+                );
+            }
+            facets.push(FacetRow::from_row(row)?);
+        }
+    }
+    Ok(facets)
 }
 
 /// A graph thread's current node: the `(node, step)` of its latest
@@ -1031,6 +1756,25 @@ pub fn current_graph_node(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as u32;
     Ok(node.map(|n| (n, step)))
+}
+
+/// Latest graph-step payload per selected thread, fetched in bounded grouped
+/// queries. Callers decode after releasing any outer store lock.
+pub fn current_graph_node_payloads(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+    max_items: usize,
+    max_payload_bytes: usize,
+    max_total_bytes: usize,
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    latest_event_payloads_bounded(
+        db,
+        thread_ids,
+        crate::event_types::GRAPH_STEP_STARTED,
+        max_items,
+        max_payload_bytes,
+        max_total_bytes,
+    )
 }
 
 const THREAD_USAGE_LATEST_COLUMNS: &str = r#"
@@ -1564,6 +2308,25 @@ mod tests {
     }
 
     #[test]
+    fn get_thread_result_rejects_oversized_blob_before_reading_it() {
+        let db = test_db();
+        let oversized =
+            i64::try_from(crate::objects::MAX_THREAD_EVENT_SERIALIZED_BYTES + 1).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO thread_results \
+                 (thread_id, chain_root_id, status, result, updated_at) \
+                 VALUES ('T-large', 'chain-A', 'completed', zeroblob(?1), 'now')",
+                [oversized],
+            )
+            .unwrap();
+
+        let error = get_thread_result(&db, "T-large").unwrap_err();
+        assert!(error.to_string().contains("result is"));
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
     fn list_thread_children_via_edges() {
         let db = test_db();
         insert_thread(&db, "T-parent", "chain-A", ThreadStatus::Running);
@@ -1691,7 +2454,9 @@ mod tests {
     #[test]
     fn list_thread_artifacts_empty() {
         let db = test_db();
-        let arts = list_thread_artifacts(&db, "T-1").unwrap();
+        let arts =
+            list_thread_artifacts_bounded(&db, "T-1", 512, 1024, 256 * 1024, 4 * 1024 * 1024)
+                .unwrap();
         assert!(arts.is_empty());
     }
 

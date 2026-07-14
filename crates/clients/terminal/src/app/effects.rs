@@ -85,7 +85,7 @@ async fn effect_data(
             // ONE generic source mechanism: any service ref through the
             // same execute path; result keyed to the subscribing tile. A
             // view OPTS INTO project scoping by declaring an (empty)
-            // `project_path` param — the executor fills it with the seat's
+            // `project_path` param — this client fills it from the seat's
             // project. Sources that don't declare it never receive it, so
             // substrate ops that reject the field don't break.
             let mut params = params.clone();
@@ -162,13 +162,16 @@ async fn effect_data(
             }
             ryeos_client_base::ui::effect::InvokeRef::Tokens { tokens } => {
                 // One daemon path: tokens resolve + bind server-side.
-                let mut params = serde_json::json!({ "tokens": tokens });
+                let mut command = serde_json::json!({
+                    "tokens": tokens,
+                    "arguments": params,
+                });
                 if let Some(project) = project_path {
-                    params["project_path"] = serde_json::Value::String(project.to_string());
+                    command["project_path"] = serde_json::Value::String(project.to_string());
                 }
                 let body = serde_json::json!({
                     "item_ref": "service:commands/dispatch",
-                    "parameters": params,
+                    "parameters": command,
                 });
                 let envelope = client.signed_post("/execute", &body).await?;
                 Ok(envelope.get("result").cloned().unwrap_or(envelope))

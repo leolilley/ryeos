@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:612320d96f87de10ff4f9012a6d0c6ced8f4ce847dfe829ca17ca468b4b6fd29:1KcxZ68zSDi0eAfZVMGlx4ja6U+AxZ7cr8+EQWw2aYn2oFiFIFSad7h0L5+1EPBTa6YMEVMooEPhGbx8gcJVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:6cf84c9cc834f0b858bff75218abb0adb972ef6237830a5bb690d37fff0bef04:bWlTu9VkDMJCwzOHQoOH8oTbZuHOkMa6f3iZxq58R6+S1Qz/QU9W5yy6kZ4mopCQO/tSko3NHhcXjfR+FZ2lAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
-version: "2.1.0"
+version: "2.2.0"
 description: >
-  Daemon process lifecycle: strict startup ordering, local lifecycle RPC,
-  daemon.json metadata, and shutdown cleanup.
+  Daemon process lifecycle: strict startup ordering, local lifecycle status,
+  exact signal control, daemon.json metadata, and shutdown cleanup.
 ---
 
 # Daemon Process Lifecycle
@@ -21,20 +21,22 @@ Daemon startup is fail-closed and side-effect-minimal until operator
 initialization has been verified:
 
 1. `Cli::parse` and `Config::load` — side-effect-free config.
-2. `bootstrap::verify_initialized` — requires signed bundle
+2. Prove Linux pidfd process-group signalling and `SO_PEERPIDFD` support;
+   unsupported hosts fail before initialization repair or executable work.
+3. `bootstrap::verify_initialized` — requires signed bundle
    registrations and bails with `Run: ryeos init` guidance if absent.
-3. Subcommand dispatch — `run-service` standalone takes its own state
+4. Subcommand dispatch — `run-service` standalone takes its own state
    lock immediately after init verification.
-4. Acquire daemon state lock before removing any socket.
-5. Initialize tracing/file sink only after init verification and state
+5. Acquire daemon state lock before removing any socket.
+6. Initialize tracing/file sink only after init verification and state
    lock acquisition.
-6. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
+7. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
    and fail when operator init artifacts are missing.
-7. Remove stale configured socket and ensure runtime paths.
-8. Two-phase node-config bootstrap, engine construction, and sandbox-policy
+8. Remove stale configured socket and ensure runtime paths.
+9. Two-phase node-config bootstrap, engine construction, and sandbox-policy
    snapshot resolution. Invalid policy fails startup; disabled mode does not
    require or inspect Bubblewrap.
-9. Service self-check, route table build, listeners, scheduler, and metadata
+10. Service self-check, route table build, listeners, scheduler, and metadata
    write.
 
 The state-lock-before-socket-unlink ordering prevents a second daemon
@@ -57,15 +59,18 @@ holder PID.
 created by `ryeos init` and repairs only daemon-local files. See
 [Daemon Bootstrap](bootstrap.md).
 
-## Local lifecycle UDS RPC
+## Local lifecycle UDS surface
 
-The daemon UDS server exposes local lifecycle methods:
+The daemon UDS server exposes one read-only lifecycle method:
 
 - `lifecycle.status` — returns `status: "running"`, PID, version,
   started timestamp, bind address, and UDS path.
-- `lifecycle.shutdown` — accepts graceful shutdown.
 
-These are local UDS control messages, not public HTTP routes.
+It is a local UDS status message, not a public HTTP route and not signal
+authority. There is deliberately no unauthenticated shutdown RPC because
+sandboxed runtimes may receive the callback socket. Local `ryeos stop` captures
+the connected socket peer through `SO_PEERCRED` and `SO_PEERPIDFD` and signals
+that exact process incarnation.
 
 ## `daemon.json`
 
@@ -77,6 +82,18 @@ and the configured UDS socket best-effort.
 
 ## Runtime shutdown
 
-Shutdown can be triggered by Ctrl-C/SIGTERM or `lifecycle.shutdown`. The
-daemon stops serving, drains running threads, applies configured process
-shutdown actions, removes metadata/socket files best-effort, and exits.
+Graceful shutdown is triggered by Ctrl-C or `SIGTERM`. An early signal watcher
+is installed before slow bootstrap work. Once application state exists, the
+coordinator first closes the durable shutdown gate so no new root thread,
+callback mutation, continuation, or scheduler launch can be admitted. It then
+stops the HTTP and UDS listeners, lets already-decoded UDS requests finish under
+the same absolute listener deadline, drains attached process groups within the
+node-owned bound, removes metadata/socket files best-effort, and exits. A forced
+wire-task abort does not abort an admitted request's execution owner; the closed
+attachment gate and exact-identity drain still own any process it can spawn. A
+clean lifecycle marker is written only when every required drain step completes.
+
+`ryeos stop --force` may escalate to pidfd `SIGKILL` after its timeout. That
+terminates the daemon immediately and therefore cannot promise graceful drain;
+the durable exact process identities and exclusive startup lock drive the next
+startup's orphan teardown and reconciliation.

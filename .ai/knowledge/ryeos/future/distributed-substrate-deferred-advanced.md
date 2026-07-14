@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-07-14T02:22:19Z:6373179d01d314e96e7994b99c5389805eccd1dfcf2b32e8f342bcb5fff8ee01:Wf2LJkvZJfKglVGr/hIbLW/uAvkVmlrYumpmLyT5lo35geTeoJp+0WU1qtKCofj+/i7B0CEiFF9PnSKWvjzQAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:25cfbf6f5e862669a92315504d9cf5f2a64bc2238072dd8e63896964c79fe6f1:K0aGS96nCkegloTp8otnafOhJMlBeWKnFalfjJgLx58ZxvJel17YGcbpOok+nRlqb7rXSV9ty/pwi7OFeKz6BA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
 title: Distributed Substrate Deferred Advanced Implementation
 entry_type: implementation_guide
-version: "0.3.0"
+version: "0.4.0"
 author: amp
 created_at: 2026-05-30T00:00:00Z
 description: Future implementation notes intentionally left out of the immediate distributed substrate hardening path, with triggers for when to pull them forward.
@@ -98,6 +98,9 @@ Host PIDs and same-UID signals are not isolated by the current inner sandbox.
 The outer worker design must remove that shared authority rather than claiming
 Bubblewrap alone solved it. Durable job records should therefore carry an
 explicit isolation class and worker/cgroup identity once this path is activated.
+That outer identity also closes the spawn-to-durable-attachment crash window:
+if a node dies after creating a process but before committing its exact birth
+tuple, the worker/cgroup remains an independently nameable teardown boundary.
 
 ### CAS attribution and staging metadata
 

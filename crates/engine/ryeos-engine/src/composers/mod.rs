@@ -16,8 +16,8 @@
 //!   * `ComposerRegistry::from_kinds` walks loaded kind schemas and
 //!     binds each kind name to its declared handler PLUS the
 //!     handler-validated config blob. The `compose()` call spawns
-//!     the handler binary as a subprocess (env-cleared via
-//!     `lillux::exec::lib_run`) and decodes the wire response into a
+//!     the handler binary through the immutable node sandbox and decodes the
+//!     wire response into a
 //!     `KindComposedView`.
 //!
 //! The engine code never names a kind in Rust string literals — the
@@ -72,6 +72,7 @@ struct BoundComposer {
 #[derive(Debug, Clone)]
 pub struct ComposerRegistry {
     composers: HashMap<String, BoundComposer>,
+    launch_runtime: Arc<crate::handlers::subprocess::HandlerLaunchRuntime>,
 }
 
 impl ComposerRegistry {
@@ -80,6 +81,7 @@ impl ComposerRegistry {
     pub fn new() -> Self {
         Self {
             composers: HashMap::new(),
+            launch_runtime: Arc::new(crate::handlers::subprocess::HandlerLaunchRuntime::disabled()),
         }
     }
 
@@ -160,13 +162,17 @@ impl ComposerRegistry {
             });
         }
 
-        Ok(Self { composers })
+        Ok(Self {
+            composers,
+            launch_runtime: Arc::clone(handlers.launch_runtime()),
+        })
     }
 
-    /// Test/escape-hatch registration. Production code goes through
-    /// `from_kinds`; this exists so test setups can install or
-    /// override a composer for a synthetic kind.
-    pub fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
+    /// Test-only registration for synthetic kinds. Production code has no
+    /// constructor that can attach a composer without the registry's immutable
+    /// node sandbox snapshot.
+    #[cfg(test)]
+    pub(crate) fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
         self.composers
             .insert(kind.to_string(), BoundComposer { handler, config });
     }
@@ -192,7 +198,7 @@ impl ComposerRegistry {
     }
 
     /// Run the composer for `kind`. Spawns the handler subprocess
-    /// (env-cleared via `lillux::exec::lib_run`), serializes
+    /// through the immutable node sandbox, serializes
     /// `(root, ancestors)` as a slim `ComposeRequest`, and decodes
     /// the response into a `KindComposedView`.
     ///
@@ -240,8 +246,13 @@ impl ComposerRegistry {
                 .collect(),
         });
 
-        let resp = run_handler_subprocess(&bound.handler, &request, COMPOSE_TIMEOUT)
-            .map_err(engine_to_resolution_error)?;
+        let resp = run_handler_subprocess(
+            &bound.handler,
+            &request,
+            COMPOSE_TIMEOUT,
+            &self.launch_runtime,
+        )
+        .map_err(engine_to_resolution_error)?;
 
         match resp {
             HandlerResponse::ComposeOk(success) => Ok(success_to_view(success)),

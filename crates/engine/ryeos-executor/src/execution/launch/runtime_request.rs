@@ -1,13 +1,19 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
+
+use ryeos_engine::canonical_ref::CanonicalRef;
 
 use super::{EnvelopeCallback, LaunchEnvelope, RuntimeResult};
 
 pub(super) struct SpawnRuntimeParams<'a> {
+    pub state: &'a ryeos_app::state::AppState,
     pub descriptor: &'a ryeos_engine::protocols::ProtocolDescriptor,
+    /// Exact verified runtime item selected by the runtime registry.
+    pub item_ref: &'a CanonicalRef,
+    pub acting_principal: &'a str,
     pub binary: &'a str,
     pub project_path: &'a Path,
     pub project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
@@ -19,9 +25,8 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub thread_id: &'a str,
     pub vault_bindings: &'a [(String, String)],
     pub provider_secret_name: Option<&'a str>,
-    pub thread_auth_token: &'a str,
+    pub thread_auth_token: Option<&'a str>,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
-    pub app_root: &'a Path,
     pub sandbox: &'a ryeos_engine::sandbox::SandboxRuntime,
     pub verified_command: &'a ryeos_engine::sandbox::SandboxVerifiedCode,
     pub cas_root: &'a Path,
@@ -31,9 +36,39 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub is_resume: bool,
 }
 
+struct AttachedProcessGuard<'a> {
+    state: &'a ryeos_app::state::AppState,
+    thread_id: &'a str,
+    identity: ryeos_app::process::ExecutionProcessIdentity,
+}
+
+impl Drop for AttachedProcessGuard<'_> {
+    fn drop(&mut self) {
+        match self
+            .state
+            .state_store
+            .clear_thread_process_if_matches(self.thread_id, &self.identity)
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                thread_id = self.thread_id,
+                "managed runtime identity changed before compare-and-clear"
+            ),
+            Err(error) => tracing::error!(
+                thread_id = self.thread_id,
+                error = %error,
+                "failed to clear managed runtime identity after owned wait"
+            ),
+        }
+    }
+}
+
 pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
     let SpawnRuntimeParams {
+        state,
         descriptor,
+        item_ref,
+        acting_principal,
         binary,
         project_path,
         project_authority,
@@ -47,7 +82,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         provider_secret_name,
         thread_auth_token,
         roots,
-        app_root,
         sandbox,
         verified_command,
         cas_root,
@@ -55,15 +89,22 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         is_resume,
     } = params;
     let secret_map: BTreeMap<String, String> = vault_bindings.iter().cloned().collect();
+    let callback_socket_requested = descriptor.env_injections.iter().any(|injection| {
+        injection.source
+            == ryeos_engine::protocol_vocabulary::EnvInjectionSource::CallbackSocketPath
+    });
+    let callback_ipc_requested = descriptor.callback_channel
+        != ryeos_engine::protocol_vocabulary::CallbackChannel::None
+        || callback_socket_requested;
+    let sandbox_daemon_socket_path =
+        callback_ipc_requested.then_some(callback.socket_path.as_path());
 
-    let item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse("runtime:spawn")
-        .expect("hardcoded runtime:spawn ref is valid");
     let callback_bindings = ryeos_engine::protocols::CallbackBindings {
         socket_path: callback.socket_path.to_string_lossy().to_string(),
         token: callback.token.clone(),
     };
     let build_request = ryeos_engine::protocols::BuildRequest {
-        item_ref: &item_ref,
+        item_ref,
         binary_path: Path::new(binary),
         args: &[
             "--project-path".to_string(),
@@ -71,14 +112,13 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         ],
         cwd: project_path,
         project_path,
+        callback_project_path: state_root.unwrap_or(project_path),
         thread_id,
         callback: Some(&callback_bindings),
-        vault_bindings,
         launch_envelope: Some(envelope),
         timeout: std::time::Duration::from_secs(timeout_secs),
-        acting_principal: "",
+        acting_principal,
         cas_root,
-        app_root,
         thread_auth_token,
     };
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)
@@ -141,6 +181,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         .build();
 
     let request = super::super::lillux_bridge::to_lillux_request(&spec);
+    let sandbox_item_ref = item_ref.to_string();
     let request = sandbox
         .apply(
             request,
@@ -149,15 +190,67 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
                 project_authority,
                 state_root,
                 checkpoint_dir,
+                daemon_socket_path: sandbox_daemon_socket_path,
                 bundle_roots: &envelope.roots.bundle_roots,
                 node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
                 verified_code: std::slice::from_ref(verified_command),
-                item_ref: &envelope.resolution.root.resolved_ref,
+                item_ref: &sandbox_item_ref,
                 thread_id,
             },
         )
         .map_err(|error| anyhow::anyhow!("sandbox apply failed: {error}"))?;
-    let result = lillux::run(request);
+    let spawned = match lillux::spawn(request) {
+        Ok(spawned) => spawned,
+        Err(result) => {
+            drop(workspace_lifeline);
+            return Ok(runtime_failure_result(
+                &result.stderr,
+                result.timed_out,
+                result.output_limit_exceeded.map(|limit| limit.as_str()),
+            ));
+        }
+    };
+    let process_identity =
+        match crate::execution::process_attachment::capture_or_adopt_owned_identity(
+            state,
+            thread_id,
+            spawned.pid as i64,
+            spawned.pgid,
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                spawned.abort();
+                drop(workspace_lifeline);
+                return Err(error.context("capture managed runtime process identity"));
+            }
+        };
+    // Install compare-clear ownership before the in-process attach. The runtime
+    // can win the UDS self-attach race, then stop/finalize before this call.
+    let _attached_process_guard = AttachedProcessGuard {
+        state,
+        thread_id,
+        identity: process_identity.clone(),
+    };
+    if let Err(error) =
+        state
+            .threads
+            .attach_process(&ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
+                thread_id: thread_id.to_string(),
+                pid: spawned.pid as i64,
+                pgid: spawned.pgid,
+                process_identity: Some(process_identity.clone()),
+                metadata: None,
+                // Spawn metadata was seeded before launch. An empty self-attach
+                // preserves it while establishing the immutable process identity.
+                launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            })
+    {
+        spawned.abort();
+        drop(workspace_lifeline);
+        return Err(error.context("attach managed runtime process identity"));
+    }
+    let result = spawned.wait();
+    drop(_attached_process_guard);
     drop(workspace_lifeline);
 
     if !result.success {
@@ -202,11 +295,12 @@ fn runtime_failure_result(
 }
 
 fn decode_runtime_stdout(stdout: &str) -> Result<RuntimeResult> {
+    let preview: String = stdout.chars().take(500).collect();
     serde_json::from_str(stdout).map_err(|error| {
         anyhow::anyhow!(
             "failed to parse runtime stdout: {}\nstdout: {}",
             error,
-            &stdout[..stdout.len().min(500)]
+            preview
         )
     })
 }

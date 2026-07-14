@@ -1,0 +1,11 @@
+# ryeos:signed:2026-07-14T01:35:00Z:fb9df7766827a3dcb110187208e7d7025f8119aa320928976bd998d49cd06efb:djglp4FIcrlkf0pnUnxY0JlZoCtoO7U480VkOyhjb4R452J+i2gEqviHAO2Z0ak8sac5KVEe0HzB/fOQhbqBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat/touch
+version: "1.0.0"
+description: Refresh the runtime presence lease for an owned running operator seat
+endpoint: seat.touch
+record_thread: false
+availability: daemon_only
+required_caps: ["ryeos.execute.service.seat/touch"]
+schema:
+  thread_id: string

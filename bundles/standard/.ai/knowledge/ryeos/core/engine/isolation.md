@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:b2ce588a96a54932d6bdd3b38678d70200d73795c9c7fc7601ef4a475ead757a:bANALMrRSPRcWUoDTW7wioB76TcS1zIr0HIle6L+U2o4ONTHlKKAU8csT+WHVgc+k9cwXZhdr0jfGtUkhvHLCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:da7c12223a16cb556b0b5f357df68d48ba5c6652bcef042cd1fbcd6ef5f4740f:tGvFVgcN773shZ/zh9So8Dp/tiw3X7BUeV50Y3w/Z2f68yd3eP3M4bV2PiH9W1kaHL6rui1IfgVcMdPhMUhSDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -45,7 +45,8 @@ This applies at two levels:
 1. **Handler binaries** — parser and composer handlers receive an empty
    env vec. No daemon secrets, no API keys, no PATH.
 2. **Runtime subprocesses** — directive, graph, and knowledge runtimes
-   receive only the vars explicitly composed by `build_spawn_env()`.
+   receive only the typed bindings composed by the final environment-contract
+   builder.
 
 ### What This Prevents
 
@@ -73,9 +74,11 @@ HTTP_PROXY, HTTPS_PROXY, NO_PROXY, SSL_CERT_FILE, SSL_CERT_DIR
 (and lowercase proxy forms)
 ```
 
-### Daemon-injected vars
+### Protocol and daemon bindings
 
-These are set automatically by the protocol builder:
+The verified protocol declares its own environment injections; the daemon
+produces only those requested values. The table below is the union of common
+protocol and lifecycle bindings, not a list granted to every subprocess:
 
 | Variable | Purpose |
 |---|---|
@@ -83,7 +86,7 @@ These are set automatically by the protocol builder:
 | `RYEOSD_CALLBACK_TOKEN` | Auth token for daemon callbacks |
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |
-| `RYEOSD_PROJECT_PATH` | Project root path |
+| `RYEOSD_PROJECT_PATH` | Callback authorization/state anchor; a deliberate state-root override when present, otherwise the effective project root |
 | `RYE_THREAD_ID` | Thread ID for tool primitives |
 | `RYEOS_ITEM_PATH` | Resolved item source path |
 | `RYEOS_ITEM_KIND` | Resolved item kind |
@@ -93,6 +96,11 @@ These are set automatically by the protocol builder:
 | `RYEOS_APP_ROOT` | App root path |
 | `RYEOS_CHECKPOINT_DIR` | Per-thread checkpoint directory |
 | `RYEOS_RESUME` | Set to `1` on resume re-spawns |
+
+For example, `runtime_v1` and the default `tool_callback_v1` declare their
+`RYEOSD_*` callback bindings, while `opaque` and `tool_streaming_v1` declare only
+callback-free `RYE_*` identity/project bindings. Callback-free launches receive
+no callback tokens or daemon-socket sandbox mount.
 
 ### Host env passthrough (tools only)
 
@@ -110,18 +118,19 @@ heavy upload endpoint cannot starve a lightweight health check.
 
 ## Callback Capability Boundaries
 
-Child processes cannot escalate beyond their parent's capabilities.
-Callback tokens carry `effective_caps` — the composed capability set from
-the kind's permission model. When the child process calls back to the
-daemon, the dispatcher enforces these caps before dispatch:
+Child processes cannot escalate beyond their parent's capabilities. Callback
+tokens carry `effective_caps` — the composed capability set from the kind's
+permission model. Capability-gated callback operations enforce these caps at
+dispatch:
 
-1. Empty `effective_caps` = deny-all
+1. Empty `effective_caps` = deny all capability-gated resource operations
 2. Wildcard `"*"` in `effective_caps` = allow everything
 3. Otherwise: structured + regex matching against the required caps
 
-The daemon does not trust the runtime to self-police. Enforcement
-happens at the trust boundary (the UDS callback). See
-[callback-auth](../protocols/callback-auth.md) for details.
+Exact-thread and chain-local lifecycle methods instead enforce their declared
+callback-token, thread-auth, or two-proof access class. The daemon does not
+trust the runtime to self-police; enforcement happens at the UDS callback trust
+boundary. See [callback-auth](../protocols/callback-auth.md) for details.
 
 ## Resume Capability Preservation
 
@@ -130,6 +139,3 @@ gets a fresh callback token but with the **same** `effective_caps` the
 pre-crash run had. The caps are persisted in `ResumeContext` in the
 runtime database and restored verbatim on resume — the reconciler does
 not re-derive them.
-
-If a persisted row lacks `effective_caps` (pre-V5.5 data), it defaults
-to an empty `Vec` which is deny-all. This is the safe default.

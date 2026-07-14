@@ -545,6 +545,10 @@ pub enum MethodDispatchVia {
 #[serde(deny_unknown_fields)]
 pub struct MethodDispatchDecl {
     pub via: MethodDispatchVia,
+    /// Signed wire contract used when the selected runtime is spawned for a
+    /// method call. This is distinct from the runtime kind's normal launch
+    /// protocol because method runtimes consume `MethodCallEnvelope`.
+    pub protocol: String,
     /// Method invoked when a request carries no explicit `call.method`.
     ///
     /// Optional by design: a schema may omit it, in which case every
@@ -646,10 +650,8 @@ pub enum LaunchAugmentationDecl {
         /// Which kind handles composition. Daemon's interpreter uses
         /// this for prefix validation and runtime lookup.
         target_kind: String,
-        /// Runtime handler method name to dispatch. For knowledge this
-        /// defaults to augmentation-private `compose_positions`, which is
-        /// intentionally not a generic schema method.
-        #[serde(default = "default_target_method")]
+        /// Runtime handler method name to dispatch. Required so the schema,
+        /// rather than daemon defaults, owns the private method selection.
         target_method: String,
         /// Derived field on the consumer kind's KindComposedView
         /// holding the position → refs map.
@@ -673,9 +675,6 @@ pub enum LaunchAugmentationDecl {
     },
 }
 
-fn default_target_method() -> String {
-    "compose_positions".to_string()
-}
 fn default_source_derived() -> String {
     "composed_context".to_string()
 }
@@ -1822,7 +1821,7 @@ fn parse_execution_schema(
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "{display}: kind declares `methods` but no `method_dispatch` \
-                     (declare `method_dispatch: {{ via: runtime_registry, default: <method> }}`)"
+                     (declare `method_dispatch: {{ via: runtime_registry, protocol: <protocol-ref>, default: <method> }}`)"
                 ),
             });
         }
@@ -3059,6 +3058,7 @@ execution:
     supports_continuation: false
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: compose
   methods:
     compose:
@@ -3079,6 +3079,7 @@ execution:
             .method_dispatch
             .as_ref()
             .expect("method_dispatch present");
+        assert_eq!(md.protocol, "protocol:ryeos/core/method_runtime_v1");
         assert_eq!(md.default.as_deref(), Some("compose"));
         assert!(exec.terminator.is_none());
         assert!(exec.delegate.is_none());
@@ -3091,6 +3092,7 @@ execution:
 execution:
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: compose
   methods:
     compose:
@@ -3134,6 +3136,7 @@ execution:
 execution:
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: query
   methods:
     compose: {}
@@ -3170,6 +3173,7 @@ execution:
     protocol: protocol:ryeos/core/runtime_v1
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: compose
   methods:
     compose: {}
@@ -3190,6 +3194,7 @@ execution:
     via: runtime_registry
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: compose
   methods:
     compose: {}
@@ -3215,6 +3220,7 @@ execution:
     supports_continuation: false
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: compose
   methods:
     compose: {}
@@ -3284,7 +3290,7 @@ execution:
     }
 
     #[test]
-    fn launch_augmentations_defaults_applied() {
+    fn launch_augmentations_non_routing_defaults_applied() {
         let yaml = "\
 execution:
   delegate:
@@ -3292,6 +3298,7 @@ execution:
   launch_augmentations:
     - step: compose_context_positions
       target_kind: knowledge
+      target_method: compose_positions
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         match &exec.launch_augmentations[0] {
@@ -3313,6 +3320,19 @@ execution:
                 assert!(runtime_config.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn launch_augmentation_requires_target_method() {
+        let yaml = "\
+execution:
+  delegate:
+    via: runtime_registry
+  launch_augmentations:
+    - step: compose_context_positions
+      target_kind: knowledge
+";
+        assert!(parse_exec(yaml).is_err());
     }
 
     #[test]

@@ -137,6 +137,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     seat::OPEN_DESCRIPTOR,
     seat::LIST_DESCRIPTOR,
     seat::APPEND_DESCRIPTOR,
+    seat::TOUCH_DESCRIPTOR,
     seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,
     usage_summary::DESCRIPTOR,

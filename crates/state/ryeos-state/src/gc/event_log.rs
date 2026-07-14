@@ -32,6 +32,12 @@ pub struct GcEvent {
     /// Sync-job attempt rows dropped alongside their retired jobs.
     #[serde(default)]
     pub deleted_sync_job_attempts: usize,
+    #[serde(default)]
+    pub reaped_seats: usize,
+    #[serde(default)]
+    pub retired_service_chains: usize,
+    #[serde(default)]
+    pub deleted_service_chain_rows: usize,
     pub freed_bytes: u64,
     pub snapshots_compacted: usize,
     pub duration_ms: u64,
@@ -58,6 +64,9 @@ impl GcEvent {
             deleted_fire_records: result.deleted_fire_records,
             deleted_sync_jobs: result.deleted_sync_jobs,
             deleted_sync_job_attempts: result.deleted_sync_job_attempts,
+            reaped_seats: result.reaped_seats,
+            retired_service_chains: result.retired_service_chains,
+            deleted_service_chain_rows: result.deleted_service_chain_rows,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
@@ -113,6 +122,9 @@ mod tests {
             deleted_fire_records: 0,
             deleted_sync_jobs: 0,
             deleted_sync_job_attempts: 0,
+            reaped_seats: 0,
+            retired_service_chains: 0,
+            deleted_service_chain_rows: 0,
             freed_bytes: 4096,
             snapshots_compacted: 0,
             duration_ms: 150,
@@ -148,6 +160,9 @@ mod tests {
                 deleted_fire_records: 0,
                 deleted_sync_jobs: 0,
                 deleted_sync_job_attempts: 0,
+                reaped_seats: 0,
+                retired_service_chains: 0,
+                deleted_service_chain_rows: 0,
                 freed_bytes: 1024,
                 snapshots_compacted: 0,
                 duration_ms: 100,

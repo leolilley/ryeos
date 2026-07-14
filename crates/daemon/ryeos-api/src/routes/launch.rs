@@ -242,6 +242,7 @@ pub(crate) fn spawn_dispatch_launch(
                                 origin_site_id: origin_site_id_for_failure_row.clone(),
                                 upstream_thread_id: None,
                                 requested_by: Some(principal_id.clone()),
+                                project_root: None,
                                 usage_subject: usage_subject_for_failure_row.clone(),
                                 usage_subject_asserted_by:
                                     usage_subject_asserted_by_for_failure_row.clone(),

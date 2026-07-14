@@ -7,6 +7,7 @@
 //! advisory checks report `unknown` rather than a false green.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -61,16 +62,26 @@ pub struct DoctorReport {
 /// immutable node policy snapshot cannot be loaded.
 pub fn run_doctor(
     engine: Result<&Engine, &str>,
-    sandbox: Result<&SandboxRuntime, &str>,
+    sandbox: Result<Arc<SandboxRuntime>, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
 ) -> DoctorReport {
     let mut checks = vec![
         check_manifest(source),
-        check_verify(source, dependency_roots, operator_config_root),
+        check_verify(
+            source,
+            dependency_roots,
+            operator_config_root,
+            sandbox.as_ref().map(Arc::clone).map_err(|reason| *reason),
+        ),
     ];
-    checks.extend(check_imports(engine, sandbox, source, operator_config_root));
+    checks.extend(check_imports(
+        engine,
+        sandbox.as_deref().map_err(|reason| *reason),
+        source,
+        operator_config_root,
+    ));
     checks.push(advisory_bundle_events(source));
 
     let ok = checks.iter().all(|c| c.status != FAIL);
@@ -85,12 +96,34 @@ pub fn run_doctor(
 fn check_manifest(source: &Path) -> CheckResult {
     let ai_dir = source.join(ryeos_engine::AI_DIR);
     let source_path = ai_dir.join("manifest.source.yaml");
-    if !source_path.exists() {
-        return CheckResult::new(
-            "manifest",
-            NA,
-            json!({ "note": "no .ai/manifest.source.yaml — manifests are optional" }),
-        );
+    match std::fs::symlink_metadata(&source_path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({
+                    "error": ".ai/manifest.source.yaml must be a regular non-symlink file",
+                }),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({
+                    "error": "required .ai/manifest.source.yaml is missing",
+                    "remedy": "add the bundle manifest source, then run `ryeos bundle publish`",
+                }),
+            );
+        }
+        Err(error) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": format!("cannot inspect manifest.source.yaml: {error}") }),
+            );
+        }
     }
     let raw = match std::fs::read_to_string(&source_path) {
         Ok(raw) => raw,
@@ -138,16 +171,33 @@ fn check_manifest(source: &Path) -> CheckResult {
     let declares_runtime_authority = !source_manifest.runtime_authority.is_empty();
 
     let generated = ai_dir.join("manifest.yaml");
-    if !generated.exists() {
-        return CheckResult::new(
-            "manifest",
-            FAIL,
-            json!({
-                "error": "manifest.source.yaml present but .ai/manifest.yaml is not generated",
-                "remedy": "run `ryeos bundle manifest-sign` (or `bundle publish`)",
-                "declared_name": declared_name,
-            }),
-        );
+    match std::fs::symlink_metadata(&generated) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": ".ai/manifest.yaml must be a regular non-symlink file" }),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({
+                    "error": "manifest.source.yaml present but .ai/manifest.yaml is not generated",
+                    "remedy": "run `ryeos bundle manifest-sign` (or `bundle publish`)",
+                    "declared_name": declared_name,
+                }),
+            );
+        }
+        Err(error) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": format!("cannot inspect manifest.yaml: {error}") }),
+            );
+        }
     }
     let dir_name = source
         .file_name()
@@ -190,11 +240,23 @@ fn check_verify(
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
+    sandbox: Result<Arc<SandboxRuntime>, &str>,
 ) -> CheckResult {
+    let sandbox = match sandbox {
+        Ok(sandbox) => sandbox,
+        Err(reason) => {
+            return CheckResult::new(
+                "verify",
+                FAIL,
+                json!({ "error": format!("sandbox policy unavailable: {reason}") }),
+            )
+        }
+    };
     match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         source,
         dependency_roots,
         operator_config_root,
+        sandbox,
     ) {
         Ok(report) => {
             let warnings: Vec<String> = report.warnings.iter().map(|w| format!("{w:?}")).collect();
@@ -357,6 +419,7 @@ fn import_one(
             project_authority: SandboxProjectAuthority::External,
             state_root: None,
             checkpoint_dir: None,
+            daemon_socket_path: None,
             bundle_roots: sandbox_bundle_roots,
             node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
             verified_code: &sandbox_verified_code,
@@ -445,11 +508,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_check_na_when_no_source() {
+    fn manifest_check_fails_when_no_source() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
         let r = check_manifest(tmp.path());
-        assert_eq!(r.status, NA);
+        assert_eq!(r.status, FAIL);
+        assert!(r.detail["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("required")));
     }
 
     #[test]

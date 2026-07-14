@@ -81,19 +81,31 @@ pub async fn handle(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match stop_thread_and_descendants(&state, &thread_id, mode) {
-            Ok((report, cancelled_roots)) => {
+        let stop_state = Arc::clone(&state);
+        let stop_thread_id = thread_id.clone();
+        let stop_result = tokio::task::spawn_blocking(move || {
+            stop_thread_and_descendants(&stop_state, &stop_thread_id, mode)
+        })
+        .await;
+        match stop_result {
+            Ok(Ok((report, cancelled_roots))) => {
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(&state, &root);
                 }
                 tracing::info!(thread_id = %thread_id, command_type = %command_type,
                     report = %report, "cancel/kill signalled target and descendants");
             }
-            Err(e) => tracing::warn!(
+            Ok(Err(e)) => tracing::warn!(
                 thread_id = %thread_id,
                 command_type = %command_type,
                 error = %e,
                 "cancel/kill stop failed on command submit"
+            ),
+            Err(e) => tracing::warn!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                error = %e,
+                "cancel/kill stop worker failed on command submit"
             ),
         }
     }

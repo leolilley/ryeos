@@ -310,15 +310,13 @@ mod interpreter_resolution_tests {
     fn falls_back_to_path_candidate_when_no_venv() {
         let root = tempfile::tempdir().unwrap();
         let got = resolve_interpreter(&python_like(None), Some(root.path())).unwrap();
-        assert!(Path::new(&got).is_absolute());
-        assert_eq!(Path::new(&got).file_name().unwrap(), "python3");
+        assert_eq!(Path::new(&got), resolve_path_candidate("python3").unwrap());
     }
 
     #[test]
     fn falls_back_to_path_candidate_when_no_project_root() {
         let got = resolve_interpreter(&python_like(None), None).unwrap();
-        assert!(Path::new(&got).is_absolute());
-        assert_eq!(Path::new(&got).file_name().unwrap(), "python3");
+        assert_eq!(Path::new(&got), resolve_path_candidate("python3").unwrap());
     }
 
     #[test]

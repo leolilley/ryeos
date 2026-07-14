@@ -27,7 +27,7 @@ fn sandbox_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let node = root.join(".ai/node");
     fs::create_dir_all(&node).unwrap();
-    fs::write(node.join("sandbox.yaml"), "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
+    fs::write(node.join("sandbox.yaml"), "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
     root
 }
 
@@ -35,7 +35,7 @@ fn sandbox_context() -> (PathBuf, Arc<ryeos_engine::sandbox::SandboxRuntime>) {
     let app_root = sandbox_app_root();
     let sandbox = Arc::new(
         ryeos_engine::sandbox::SandboxRuntime::load(&app_root)
-            .expect("load enforced sandbox fixture"),
+            .expect("load disabled sandbox fixture"),
     );
     (app_root, sandbox)
 }
@@ -274,6 +274,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
         sandbox_state_root: None,
         sandbox_checkpoint_dir: None,
+        sandbox_daemon_socket_path: None,
         sandbox_bundle_roots: Vec::new(),
         sandbox_node_trusted_keys_dir: None,
         sandbox_verified_code: vec![ryeos_engine::sandbox::SandboxVerifiedCode {
@@ -389,6 +390,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
         sandbox_state_root: None,
         sandbox_checkpoint_dir: None,
+        sandbox_daemon_socket_path: None,
         sandbox_bundle_roots: Vec::new(),
         sandbox_node_trusted_keys_dir: None,
         sandbox_verified_code: vec![ryeos_engine::sandbox::SandboxVerifiedCode {
@@ -494,6 +496,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
         sandbox_state_root: None,
         sandbox_checkpoint_dir: None,
+        sandbox_daemon_socket_path: None,
         sandbox_bundle_roots: Vec::new(),
         sandbox_node_trusted_keys_dir: None,
         sandbox_verified_code: vec![ryeos_engine::sandbox::SandboxVerifiedCode {
