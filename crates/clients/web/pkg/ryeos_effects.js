@@ -163,6 +163,7 @@ function resultKindFor(effect) {
   if (type === "open_project") return "project_opened";
   if (type === "fetch_threads") return "threads";
   if (type === "fetch_items") return "items";
+  if (type === "fetch_source") return "source_data";
   if (type === "list_files") return "files_list";
   if (type === "fetch_file_space") return "file_space";
   if (type === "read_file") return "file_read";
