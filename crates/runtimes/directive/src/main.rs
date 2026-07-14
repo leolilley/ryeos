@@ -19,29 +19,59 @@ mod runner;
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
 use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 
-/// Render the stimulus that opens a run: interpolate the directive body with the
-/// envelope inputs, then append any inputs the body did not itself reference.
-/// Shared by the fresh-launch and chained-resume paths so both produce the same
-/// stimulus.
+/// Compile and render the stimulus that opens a run, then append inputs the
+/// authored template did not reference directly.
+///
+/// Callers invoke this only on fresh launches and operator follow-ups. A
+/// suppressed machine continuation must not call it: its unused prompt is
+/// deliberately neither compiled nor rendered.
 fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<String> {
-    let interpolated_prompt = if inputs.is_null() {
-        prompt_template.to_string()
-    } else {
-        let context = serde_json::json!({ "inputs": inputs });
-        match ryeos_runtime::interpolate(&serde_json::json!(prompt_template), &context)? {
-            serde_json::Value::String(rendered) => rendered,
-            other => anyhow::bail!("directive body interpolated to a non-string value: {other}"),
+    let compilation_limits = ryeos_runtime::CompilationLimits::default();
+    let compiled = ryeos_runtime::compile_template_for(
+        prompt_template,
+        "directive.user_prompt",
+        &compilation_limits,
+    )?;
+
+    let mut referenced_inputs = std::collections::BTreeSet::new();
+    for reference in compiled.references().iter() {
+        if reference.root() == "inputs" && reference.is_dynamic() {
+            anyhow::bail!(
+                "directive user prompt cannot use a dynamic inputs[...] reference; \
+                 use an exact inputs.name or inputs[\"name\"] reference"
+            );
         }
+        if reference.root() != "inputs" {
+            anyhow::bail!(
+                "directive user prompt expression root `{}` is not available; only `inputs` is allowed",
+                reference.root()
+            );
+        }
+        match reference.segments() {
+            [ryeos_runtime::ReferenceSegment::Key(key)] => {
+                referenced_inputs.insert(key.clone());
+            }
+            _ => anyhow::bail!(
+                "directive user prompt references must name exactly one input with \
+                 inputs.name or inputs[\"name\"]"
+            ),
+        }
+    }
+
+    let context = serde_json::json!({ "inputs": inputs });
+    let evaluation_limits = ryeos_runtime::EvaluationLimits::default();
+    let mut session = ryeos_runtime::EvaluationSession::new(&context, &evaluation_limits);
+    let interpolated_prompt = match session.render_template(&compiled)? {
+        serde_json::Value::String(rendered) => rendered,
+        other => anyhow::bail!("directive body expression produced a non-string value: {other}"),
     };
 
-    // Surface only the inputs the template did NOT already place via a
-    // `{input:KEY}` / `${inputs.KEY}` reference.
+    // Surface only inputs the compiled AST did not place explicitly.
     let prompt = match inputs.as_object() {
         Some(obj) if !obj.is_empty() => {
-            let referenced = ryeos_runtime::referenced_input_keys(prompt_template);
             let leftover: serde_json::Map<String, serde_json::Value> = obj
                 .iter()
-                .filter(|(key, _)| !referenced.contains(key.as_str()))
+                .filter(|(key, _)| !referenced_inputs.contains(key.as_str()))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
             if leftover.is_empty() {
@@ -442,4 +472,50 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_stimulus;
+    use serde_json::json;
+
+    #[test]
+    fn rendered_stimulus_appends_only_unreferenced_inputs() {
+        let rendered = render_stimulus(
+            "Question: ${inputs.question} / ${inputs[\"question\"]}",
+            &json!({"question": "why?", "depth": 3}),
+        )
+        .expect("render directive stimulus");
+
+        assert!(rendered.starts_with("Question: why? / why?"));
+        assert!(!rendered.contains("\"question\""));
+        assert!(rendered.contains("\"depth\": 3"));
+    }
+
+    #[test]
+    fn rendered_stimulus_rejects_dynamic_input_references() {
+        let error = render_stimulus(
+            "${inputs[inputs.selected]}",
+            &json!({"selected": "question", "question": "why?"}),
+        )
+        .expect_err("dynamic input reference must fail");
+
+        assert!(error.to_string().contains("dynamic inputs[...]"));
+    }
+
+    #[test]
+    fn rendered_stimulus_rejects_non_input_roots() {
+        let error = render_stimulus("${state.question}", &json!({"question": "why?"}))
+            .expect_err("non-input root must fail");
+
+        assert!(error.to_string().contains("only `inputs` is allowed"));
+    }
+
+    #[test]
+    fn rendered_stimulus_requires_a_string_result() {
+        let error = render_stimulus("${inputs.count}", &json!({"count": 3}))
+            .expect_err("whole prompt must produce a string");
+
+        assert!(error.to_string().contains("non-string value"));
+    }
 }
