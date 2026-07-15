@@ -951,23 +951,6 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
     if !runtime_columns.iter().any(|c| c == "stop_intent") {
         tx.execute_batch("ALTER TABLE thread_runtime ADD COLUMN stop_intent TEXT")?;
     }
-    // This generation intentionally has no raw-PID compatibility path. Old
-    // unsandboxed session leaders can survive their daemon, while their bare
-    // pid/pgid fields cannot prove which incarnation is still running. Refuse
-    // the database instead of clearing the row and duplicate-launching beside
-    // a possibly live process. The operator must explicitly quarantine/reset
-    // the foreign runtime DB before this generation will reconcile it.
-    let unauthenticated_process_rows: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM thread_runtime
-          WHERE process_identity IS NULL AND (pid IS NOT NULL OR pgid IS NOT NULL)",
-        [],
-        |row| row.get(0),
-    )?;
-    if unauthenticated_process_rows > 0 {
-        bail!(
-            "runtime.db contains {unauthenticated_process_rows} process row(s) without durable identity; refusing legacy pid/pgid state"
-        );
-    }
     let legacy = {
         let mut stmt = tx.prepare(
             "SELECT follow_key, child_thread_id, child_chain_root_id,
@@ -1063,6 +1046,16 @@ pub struct RuntimeDb {
     conn: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnauthenticatedProcessRow {
+    pub thread_id: String,
+}
+
+/// Keep startup reconciliation bounded independently of the size of runtime
+/// history. The thread id is the stable keyset cursor and is already indexed by
+/// the table's primary key.
+pub(crate) const UNAUTHENTICATED_PROCESS_PAGE_SIZE: usize = 512;
+
 impl RuntimeDb {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -1075,6 +1068,81 @@ impl RuntimeDb {
         let spec = runtime_schema_spec();
         sqlite_schema::prepare_owned(&conn, &spec, SCHEMA_SQL, path, migrate_owned_runtime_db)?;
         Ok(Self { conn })
+    }
+
+    pub(crate) fn unauthenticated_process_rows_after(
+        &self,
+        after_thread_id: Option<&str>,
+    ) -> Result<Vec<UnauthenticatedProcessRow>> {
+        let mut rows = Vec::with_capacity(UNAUTHENTICATED_PROCESS_PAGE_SIZE);
+        if let Some(after_thread_id) = after_thread_id {
+            let mut stmt = self.conn.prepare(
+                "SELECT thread_id FROM thread_runtime
+                  WHERE thread_id > ?1
+                    AND process_identity IS NULL
+                    AND (pid IS NOT NULL OR pgid IS NOT NULL)
+                  ORDER BY thread_id
+                  LIMIT ?2",
+            )?;
+            let selected = stmt.query_map(
+                params![after_thread_id, UNAUTHENTICATED_PROCESS_PAGE_SIZE as i64],
+                |row| {
+                    Ok(UnauthenticatedProcessRow {
+                        thread_id: row.get(0)?,
+                    })
+                },
+            )?;
+            rows.extend(selected.collect::<rusqlite::Result<Vec<_>>>()?);
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT thread_id FROM thread_runtime
+                  WHERE process_identity IS NULL
+                    AND (pid IS NOT NULL OR pgid IS NOT NULL)
+                  ORDER BY thread_id
+                  LIMIT ?1",
+            )?;
+            let selected =
+                stmt.query_map(params![UNAUTHENTICATED_PROCESS_PAGE_SIZE as i64], |row| {
+                    Ok(UnauthenticatedProcessRow {
+                        thread_id: row.get(0)?,
+                    })
+                })?;
+            rows.extend(selected.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn clear_unauthenticated_process_fields(
+        &self,
+        thread_ids: &[String],
+    ) -> Result<usize> {
+        if thread_ids.is_empty() {
+            return Ok(0);
+        }
+        if thread_ids.len() > UNAUTHENTICATED_PROCESS_PAGE_SIZE {
+            bail!(
+                "process-field cleanup batch contains {} rows; maximum is {}",
+                thread_ids.len(),
+                UNAUTHENTICATED_PROCESS_PAGE_SIZE
+            );
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        let mut cleared = 0;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE thread_runtime
+                    SET pid = NULL, pgid = NULL
+                  WHERE thread_id = ?1
+                    AND process_identity IS NULL
+                    AND (pid IS NOT NULL OR pgid IS NOT NULL)",
+            )?;
+            for thread_id in thread_ids {
+                cleared += stmt.execute(params![thread_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(cleared)
     }
 
     pub fn insert_thread_runtime(&self, thread_id: &str, chain_root_id: &str) -> Result<()> {
@@ -3631,10 +3699,12 @@ mod tests {
             .unwrap();
             conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
                 .unwrap();
-            // Seed a runtime row so we also prove the migration preserves data.
+            // Seed the exact pre-identity shape: schema migration preserves it
+            // for StateStore to reconcile against authoritative thread status.
             conn.execute(
-                "INSERT INTO thread_runtime (thread_id, chain_root_id) VALUES (?1, ?2)",
-                params!["t-old", "c-old"],
+                "INSERT INTO thread_runtime (thread_id, chain_root_id, pid, pgid)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["t-old", "c-old", 101_i64, 101_i64],
             )
             .unwrap();
         }
@@ -3649,6 +3719,12 @@ mod tests {
         );
         // …and pre-existing runtime state survived the migration.
         assert!(db.get_runtime_info("t-old").unwrap().is_some());
+        assert_eq!(
+            db.unauthenticated_process_rows_after(None).unwrap(),
+            vec![UnauthenticatedProcessRow {
+                thread_id: "t-old".into()
+            }]
+        );
     }
 
     #[test]

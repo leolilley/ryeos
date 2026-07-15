@@ -29,15 +29,24 @@ pub(super) fn with_staged_bundle_generation<T>(
             bundle_root.display()
         )
     })?;
-    // Serialize the read-copy-author-exchange sequence. Without this lock two
-    // publishers can both branch from the same old generation and the later
-    // exchange silently discard the first publisher's complete result.
-    let _lock = lillux::ExclusiveFileLock::acquire(&bundle_root)
-        .with_context(|| format!("lock publisher bundle {}", bundle_root.display()))?;
     let parent = bundle_root
         .parent()
         .ok_or_else(|| anyhow!("publisher bundle root has no parent"))?;
     require_real_directory(parent, "publisher bundle parent")?;
+    let bundle_name = bundle_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("publisher bundle root has no UTF-8 directory name"))?;
+
+    // Serialize the read-copy-author-exchange sequence. The persistent flock
+    // anchor lives in an explicit sibling namespace: it must remain outside
+    // the bundle directory that is atomically exchanged, but it is publisher
+    // coordination rather than bundle content or CAS state.
+    let lock_target = parent
+        .join(".publisher-locks")
+        .join(format!("{bundle_name}.publish"));
+    let _lock = lillux::ExclusiveFileLock::acquire(&lock_target)
+        .with_context(|| format!("lock publisher bundle {}", bundle_root.display()))?;
 
     let staging = create_staging_directory(parent, &bundle_root)?;
     let mut cleanup = StagingCleanup::new(staging.clone());
@@ -263,6 +272,12 @@ mod tests {
             .collect()
     }
 
+    fn publisher_lock_anchor(parent: &Path, bundle_name: &str) -> PathBuf {
+        parent
+            .join(".publisher-locks")
+            .join(format!(".{bundle_name}.publish.lock"))
+    }
+
     #[test]
     fn failed_authoring_leaves_the_live_generation_unchanged() {
         let temp = tempfile::tempdir().unwrap();
@@ -286,6 +301,8 @@ mod tests {
         assert_eq!(fs::read(bundle.join("second")).unwrap(), b"old-second");
         assert!(!bundle.join("third").exists());
         assert!(sibling_staging_entries(temp.path(), "bundle").is_empty());
+        assert!(publisher_lock_anchor(temp.path(), "bundle").is_file());
+        assert!(!temp.path().join(".bundle.lock").exists());
     }
 
     #[test]

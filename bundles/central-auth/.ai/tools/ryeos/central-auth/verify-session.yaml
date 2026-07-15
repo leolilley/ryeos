@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:5021f48a59f2fb7bf63134d436e0892e1d427f3e87e0c700a4d17465e7e97d6b:ys1chSVmyUa8EyOxBFSiJFwduyMN8zSECzTmRmrMYkGkcS2oKFd9TNVdb5OJIAnUftmHGCu5Q1ad85xp3imXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:1bb8761fa61e7ff1ac8b12cdbd6167caeb82c777d7f6099a641519b8b90cd093:edrFKa9GCjr7nGXvRDMZLmszs4CzPF4qgiRuexYXoC5QTw8EgbtmmnU4M7gyBr2MXeLnu7keKGq/Dxy0YX/jCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "verify-session"
@@ -9,7 +9,7 @@ description: "Verify a session token and optionally check one required capabilit
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "verify-session"
   input_data: "{params_json}"
   timeout_secs: 15
