@@ -421,6 +421,7 @@ fn run_gc_and_log(
         state_authority,
         cas_guard,
         Some(signer),
+        &ryeos_state::signer::trust_store_for_signer(signer),
         params,
         &operational_roots,
     )

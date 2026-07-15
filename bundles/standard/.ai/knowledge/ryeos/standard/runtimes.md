@@ -71,13 +71,11 @@ It performs graph traversal natively in Rust.
 
 See [Graphs](graphs/graphs.md) for the full graph YAML format.
 
-The graph node-result cache uses `RYEOS_CACHE_DIR/<graph-id>` when that variable
-is set; otherwise it uses `$TMPDIR/ryeos-graph-cache/<graph-id>`. Enforced mode
-normalizes `TMPDIR=/tmp` and gives each sandbox launch a private `/tmp` tmpfs,
-so the default cache is ephemeral and cannot be relied on across runtime
-processes. Native-resume durability comes from `RYEOS_CHECKPOINT_DIR` and the
-policy's daemon-validated `{checkpoint_dir}` mount instead. A custom
-`RYEOS_CACHE_DIR` persists only when node policy exposes that path writable.
+The graph node-result cache is private in-process state scoped to one graph
+execution. `cache_result` can replay a repeated ordinary action inside that
+execution without rebilling it, but cache authority never crosses a restart,
+resume, graph run, or filesystem boundary. Native-resume durability comes only
+from `RYEOS_CHECKPOINT_DIR` and its daemon-validated checkpoint mount.
 
 ## Knowledge Runtime (`runtime:knowledge-runtime`)
 

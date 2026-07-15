@@ -394,6 +394,8 @@ fn spawn_dispatch_launch_inner(
                                     usage_subject_asserted_by_for_failure_row.clone(),
                                 parameters: dispatch_req.params.clone(),
                                 ref_bindings: root_admission.ref_bindings().clone(),
+                                root_raw_content_digest:
+                                    admitted_subject.raw_content_digest.clone(),
                                 resolved_item: admitted_subject.clone(),
                                 plan_context: exec_ctx.plan_ctx.clone(),
                                 root_admission: Some(root_admission.clone()),

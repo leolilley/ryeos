@@ -2909,6 +2909,10 @@ pub struct ResolvedItem {
     /// Lower-priority candidates that were shadowed by the winner
     pub shadowed: Vec<ShadowedCandidate>,
     pub materialized_project_root: Option<PathBuf>,
+    /// SHA-256 of the signature-stripped bytes that runtimes parse. Unlike
+    /// `content_hash`, this excludes the signature envelope and therefore
+    /// matches `LaunchEnvelope.resolution.root.raw_content_digest`.
+    pub raw_content_digest: String,
     pub content_hash: String,
     pub signature_header: Option<SignatureHeader>,
     pub source_format: ResolvedSourceFormat,
@@ -3069,13 +3073,9 @@ pub struct ExecutionArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalCost {
-    #[serde(default)]
-    pub turns: i64,
-    #[serde(default)]
-    pub input_tokens: i64,
-    #[serde(default)]
-    pub output_tokens: i64,
-    #[serde(default)]
+    pub turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
     pub spend: f64,
     #[serde(default)]
     pub provider: Option<String>,

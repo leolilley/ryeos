@@ -668,6 +668,7 @@ async fn dispatch_streaming_subprocess(
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.params.clone(),
             ref_bindings: request.ref_bindings.clone(),
+            root_raw_content_digest: verified_subject.resolved.raw_content_digest.clone(),
             resolved_item: verified_subject.resolved.clone(),
             plan_context: ctx.plan_ctx.clone(),
             root_admission,

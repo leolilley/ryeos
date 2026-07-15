@@ -1413,6 +1413,7 @@ pub(crate) async fn dispatch_method(
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.params.clone(),
             ref_bindings: request.ref_bindings.clone(),
+            root_raw_content_digest: history_subject.resolved.raw_content_digest.clone(),
             resolved_item: history_subject.resolved.clone(),
             plan_context: ctx.plan_ctx.clone(),
             root_admission: Some(root_admission.clone()),
@@ -1500,6 +1501,7 @@ pub(crate) async fn dispatch_method(
         child_provenance,
         None,
         Some(method_subject.item_ref.clone()),
+        history_subject.resolved.raw_content_digest.clone(),
         serde_json::Value::Null,
         0,
     );
@@ -4062,6 +4064,7 @@ metadata:
             resolved_from: source_space.as_str().into(),
             shadowed: Vec::new(),
             materialized_project_root: None,
+            raw_content_digest: ryeos_engine::item_resolution::content_hash(source_body),
             content_hash: ryeos_engine::item_resolution::content_hash(&source),
             signature_header: Some(signature_header),
             source_format: ryeos_engine::contracts::ResolvedSourceFormat {
@@ -4083,6 +4086,7 @@ metadata:
             usage_subject: None,
             usage_subject_asserted_by: None,
             parameters: serde_json::Value::Null,
+            root_raw_content_digest: resolved_item.raw_content_digest.clone(),
             ref_bindings: std::collections::BTreeMap::new(),
             root_admission: None,
             resolved_item,

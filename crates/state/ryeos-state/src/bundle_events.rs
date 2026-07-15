@@ -3,6 +3,8 @@
 use std::path::Path;
 
 use anyhow::Context;
+use base64::Engine as _;
+use lillux::crypto::Verifier as _;
 use serde::{Deserialize, Serialize};
 
 use crate::objects::{
@@ -80,20 +82,30 @@ pub struct BundleEventRecord {
     pub event: BundleEventObject,
 }
 
-/// A newest-first page from one bundle event chain. `next_cursor`, when
-/// present, is the exact hash of the next older event.
+/// A newest-first page from one bundle event chain.
 #[derive(Debug, Clone)]
 pub struct BundleEventChainPage {
     pub records: Vec<BundleEventRecord>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<BundleEventCursor>,
 }
 
-/// Stable keyset cursor for a cross-chain bundle event scan.
+/// Signed, identity-bound keyset cursor for bundle-event pagination.
+///
+/// The cursor names an event reachable from one verified chain head. Any head
+/// advance makes the cursor stale, preventing callers from substituting an
+/// arbitrary CAS object or continuing across a changed authoritative view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BundleEventScanCursor {
+pub struct BundleEventCursor {
+    pub schema: u32,
+    pub kind: String,
+    pub bundle_id: String,
+    pub event_kind: String,
     pub chain_id: String,
+    pub head_hash: String,
     pub event_hash: String,
+    pub signer: String,
+    pub signature: String,
 }
 
 /// A newest-first page from one chain in a cross-chain scan. Chains are
@@ -101,7 +113,115 @@ pub struct BundleEventScanCursor {
 #[derive(Debug, Clone)]
 pub struct BundleEventScanPage {
     pub records: Vec<BundleEventRecord>,
-    pub next_cursor: Option<BundleEventScanCursor>,
+    pub next_cursor: Option<BundleEventCursor>,
+}
+
+#[derive(Debug)]
+struct BundleEventHashPage {
+    records: Vec<BundleEventRecord>,
+    next_hash: Option<String>,
+}
+
+const BUNDLE_EVENT_CURSOR_KIND: &str = "bundle_event_cursor";
+
+impl BundleEventCursor {
+    fn new(
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+        head_hash: &str,
+        event_hash: &str,
+        signer: &dyn Signer,
+        trust_store: &refs::TrustStore,
+    ) -> anyhow::Result<Self> {
+        crate::signer::ensure_signer_trusted(signer, trust_store)?;
+        let mut cursor = Self {
+            schema: SCHEMA_VERSION,
+            kind: BUNDLE_EVENT_CURSOR_KIND.to_string(),
+            bundle_id: bundle_id.to_string(),
+            event_kind: event_kind.to_string(),
+            chain_id: chain_id.to_string(),
+            head_hash: head_hash.to_string(),
+            event_hash: event_hash.to_string(),
+            signer: signer.fingerprint().to_string(),
+            signature: String::new(),
+        };
+        cursor.validate_structure(false)?;
+        let canonical = cursor.canonical_unsigned()?;
+        cursor.signature = base64::engine::general_purpose::STANDARD
+            .encode(signer.sign(canonical.as_bytes()));
+        cursor.verify(bundle_id, event_kind, trust_store)?;
+        Ok(cursor)
+    }
+
+    fn verify(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        trust_store: &refs::TrustStore,
+    ) -> anyhow::Result<()> {
+        self.validate_structure(true)?;
+        if self.bundle_id != bundle_id || self.event_kind != event_kind {
+            anyhow::bail!(
+                "bundle event cursor identity mismatch: expected {}/{}, got {}/{}",
+                bundle_id,
+                event_kind,
+                self.bundle_id,
+                self.event_kind
+            );
+        }
+        let verifying_key = trust_store
+            .get(&self.signer)
+            .ok_or_else(|| anyhow::anyhow!("bundle event cursor signer is not trusted"))?;
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.signature)
+            .context("failed to decode bundle event cursor signature")?;
+        let signature = lillux::crypto::Signature::from_slice(&signature_bytes).map_err(|error| {
+            anyhow::anyhow!("failed to parse bundle event cursor signature: {error}")
+        })?;
+        let canonical = self.canonical_unsigned()?;
+        verifying_key
+            .verify(canonical.as_bytes(), &signature)
+            .map_err(|error| {
+                anyhow::anyhow!("bundle event cursor signature verification failed: {error}")
+            })
+    }
+
+    fn validate_structure(&self, require_signature: bool) -> anyhow::Result<()> {
+        if self.schema != SCHEMA_VERSION {
+            anyhow::bail!("unsupported bundle event cursor schema: {}", self.schema);
+        }
+        if self.kind != BUNDLE_EVENT_CURSOR_KIND {
+            anyhow::bail!("invalid bundle event cursor kind: {}", self.kind);
+        }
+        validate_bundle_identifier("cursor bundle_id", &self.bundle_id)?;
+        validate_bundle_identifier("cursor event_kind", &self.event_kind)?;
+        validate_bundle_identifier("cursor chain_id", &self.chain_id)?;
+        validate_canonical_hash("cursor head_hash", &self.head_hash)?;
+        validate_canonical_hash("cursor event_hash", &self.event_hash)?;
+        validate_canonical_hash("cursor signer", &self.signer)?;
+        if require_signature && self.signature.is_empty() {
+            anyhow::bail!("bundle event cursor signature must not be empty");
+        }
+        if self.signature.len() > 128 {
+            anyhow::bail!("bundle event cursor signature is too long");
+        }
+        Ok(())
+    }
+
+    fn canonical_unsigned(&self) -> anyhow::Result<String> {
+        lillux::canonical_json(&serde_json::json!({
+            "schema": self.schema,
+            "kind": self.kind,
+            "bundle_id": self.bundle_id,
+            "event_kind": self.event_kind,
+            "chain_id": self.chain_id,
+            "head_hash": self.head_hash,
+            "event_hash": self.event_hash,
+            "signer": self.signer,
+        }))
+        .context("canonicalize unsigned bundle event cursor")
+    }
 }
 #[tracing::instrument(
     name = "state:bundle_event_append",
@@ -412,37 +532,83 @@ pub fn read_bundle_event_chain_page(
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
-    cursor: Option<&str>,
+    cursor: Option<&BundleEventCursor>,
     limit: usize,
     max_serialized_bytes: usize,
+    signer: &dyn Signer,
 ) -> anyhow::Result<BundleEventChainPage> {
     validate_bundle_identifier("bundle_id", bundle_id)?;
     validate_bundle_identifier("event_kind", event_kind)?;
     validate_bundle_identifier("chain_id", chain_id)?;
     validate_bundle_event_page_bounds(limit, max_serialized_bytes)?;
 
-    let start_hash = if let Some(cursor) = cursor {
-        validate_canonical_hash("bundle event chain cursor", cursor)?;
-        Some(cursor.to_string())
-    } else {
-        refs::read_verified_generic_head_ref_in_directory(
-            refs_directory,
-            BUNDLE_EVENTS_NAMESPACE,
-            &chain_ref_name(bundle_id, event_kind, chain_id),
-            trust_store,
-        )?
-        .map(|head| head.target_hash)
+    let current_head = refs::read_verified_generic_head_ref_in_directory(
+        refs_directory,
+        BUNDLE_EVENTS_NAMESPACE,
+        &chain_ref_name(bundle_id, event_kind, chain_id),
+        trust_store,
+    )?;
+    let Some(current_head) = current_head else {
+        if cursor.is_some() {
+            anyhow::bail!("bundle event cursor names a chain with no current head");
+        }
+        return Ok(BundleEventChainPage {
+            records: Vec::new(),
+            next_cursor: None,
+        });
+    };
+    let head_hash = current_head.target_hash;
+    let start_hash = match cursor {
+        Some(cursor) => {
+            cursor.verify(bundle_id, event_kind, trust_store)?;
+            if cursor.chain_id != chain_id {
+                anyhow::bail!(
+                    "bundle event cursor chain mismatch: expected {}, got {}",
+                    chain_id,
+                    cursor.chain_id
+                );
+            }
+            if cursor.head_hash != head_hash {
+                anyhow::bail!(
+                    "stale bundle event cursor for chain {}: anchored at {}, current head {}",
+                    chain_id,
+                    cursor.head_hash,
+                    head_hash
+                );
+            }
+            cursor.event_hash.clone()
+        }
+        None => head_hash.clone(),
     };
 
-    read_bundle_event_chain_page_from_hash(
+    let page = read_bundle_event_chain_page_from_hash(
         cas,
         bundle_id,
         event_kind,
         chain_id,
-        start_hash,
+        Some(start_hash),
         limit,
         max_serialized_bytes,
-    )
+    )?;
+    let next_cursor = page
+        .next_hash
+        .as_deref()
+        .map(|event_hash| {
+            BundleEventCursor::new(
+                bundle_id,
+                event_kind,
+                chain_id,
+                &head_hash,
+                event_hash,
+                signer,
+                trust_store,
+            )
+        })
+        .transpose()?;
+    Ok(BundleEventChainPage {
+        records: page.records,
+        next_cursor,
+    })
 }
 
 /// Scan bounded pages across bundle event chains without collecting every
@@ -453,22 +619,42 @@ pub fn scan_bundle_events_page(
     trust_store: &refs::TrustStore,
     bundle_id: &str,
     event_kind: &str,
-    cursor: Option<&BundleEventScanCursor>,
+    cursor: Option<&BundleEventCursor>,
     limit: usize,
     max_serialized_bytes: usize,
+    signer: &dyn Signer,
 ) -> anyhow::Result<BundleEventScanPage> {
     validate_bundle_identifier("bundle_id", bundle_id)?;
     validate_bundle_identifier("event_kind", event_kind)?;
     validate_bundle_event_page_bounds(limit, max_serialized_bytes)?;
 
-    let Some((chain_id, start_hash)) = (match cursor {
+    let Some((chain_id, head_hash, start_hash)) = (match cursor {
         Some(cursor) => {
-            validate_bundle_identifier("scan cursor chain_id", &cursor.chain_id)?;
-            validate_canonical_hash("scan cursor event_hash", &cursor.event_hash)?;
-            Some((cursor.chain_id.clone(), cursor.event_hash.clone()))
+            cursor.verify(bundle_id, event_kind, trust_store)?;
+            let current_head = refs::read_verified_generic_head_ref_in_directory(
+                refs_directory,
+                BUNDLE_EVENTS_NAMESPACE,
+                &chain_ref_name(bundle_id, event_kind, &cursor.chain_id),
+                trust_store,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("bundle event cursor names a chain with no current head"))?;
+            if cursor.head_hash != current_head.target_hash {
+                anyhow::bail!(
+                    "stale bundle event cursor for chain {}: anchored at {}, current head {}",
+                    cursor.chain_id,
+                    cursor.head_hash,
+                    current_head.target_hash
+                );
+            }
+            Some((
+                cursor.chain_id.clone(),
+                cursor.head_hash.clone(),
+                cursor.event_hash.clone(),
+            ))
         }
         None => {
             next_bundle_event_chain_head(refs_directory, bundle_id, event_kind, None, trust_store)?
+                .map(|(chain_id, head_hash)| (chain_id, head_hash.clone(), head_hash))
         }
     }) else {
         return Ok(BundleEventScanPage {
@@ -487,11 +673,16 @@ pub fn scan_bundle_events_page(
         max_serialized_bytes,
     )?;
 
-    let next_cursor = if let Some(event_hash) = page.next_cursor {
-        Some(BundleEventScanCursor {
-            chain_id,
-            event_hash,
-        })
+    let next_cursor = if let Some(event_hash) = page.next_hash {
+        Some(BundleEventCursor::new(
+            bundle_id,
+            event_kind,
+            &chain_id,
+            &head_hash,
+            &event_hash,
+            signer,
+            trust_store,
+        )?)
     } else {
         next_bundle_event_chain_head(
             refs_directory,
@@ -500,10 +691,18 @@ pub fn scan_bundle_events_page(
             Some(&chain_id),
             trust_store,
         )?
-        .map(|(chain_id, event_hash)| BundleEventScanCursor {
-            chain_id,
-            event_hash,
+        .map(|(chain_id, head_hash)| {
+            BundleEventCursor::new(
+                bundle_id,
+                event_kind,
+                &chain_id,
+                &head_hash,
+                &head_hash,
+                signer,
+                trust_store,
+            )
         })
+        .transpose()?
     };
 
     Ok(BundleEventScanPage {
@@ -520,7 +719,7 @@ fn read_bundle_event_chain_page_from_hash(
     mut next_hash: Option<String>,
     limit: usize,
     max_serialized_bytes: usize,
-) -> anyhow::Result<BundleEventChainPage> {
+) -> anyhow::Result<BundleEventHashPage> {
     let mut records = Vec::with_capacity(limit.min(64));
     let mut serialized_bytes = 0usize;
     let mut expected_seq = None;
@@ -589,9 +788,9 @@ fn read_bundle_event_chain_page_from_hash(
         records.push(record);
     }
 
-    Ok(BundleEventChainPage {
+    Ok(BundleEventHashPage {
         records,
-        next_cursor: next_hash,
+        next_hash,
     })
 }
 
@@ -1270,5 +1469,103 @@ mod tests {
         req.bundle_id = Some("other-bundle".to_string());
         let err = append_bundle_event(&cas_root, &refs_root, req, &signer, &trust).unwrap_err();
         assert!(format!("{err:#}").contains("bundle_id mismatch"));
+    }
+
+    #[test]
+    fn bundle_event_cursor_is_signed_and_identity_bound() {
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let cursor = BundleEventCursor::new(
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &signer,
+            &trust,
+        )
+        .unwrap();
+
+        cursor
+            .verify("ryeos-email", "email_event", &trust)
+            .unwrap();
+        assert!(cursor
+            .verify("other-bundle", "email_event", &trust)
+            .is_err());
+
+        let mut forged = cursor;
+        forged.event_hash = "c".repeat(64);
+        let error = forged
+            .verify("ryeos-email", "email_event", &trust)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("signature verification failed"));
+    }
+
+    #[test]
+    fn bundle_event_cursor_rejects_an_advanced_head() {
+        let (_tmp, cas_root, refs_root) = roots();
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let first = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_1", "email_planned"),
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        let mut second_request = append_request("email_1", "email_approved");
+        second_request.expected_chain_head_hash = Some(first.event_hash);
+        let second = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            second_request,
+            &signer,
+            &trust,
+        )
+        .unwrap();
+        let (_runtime, cas, refs_directory) =
+            pin_bundle_event_authority(&cas_root, &refs_root).unwrap();
+        let cursor = read_bundle_event_chain_page(
+            &cas,
+            &refs_directory,
+            &trust,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            None,
+            1,
+            usize::MAX,
+            &signer,
+        )
+        .unwrap()
+        .next_cursor
+        .expect("two-event chain must yield a cursor");
+
+        let mut third_request = append_request("email_1", "email_sent");
+        third_request.expected_chain_head_hash = Some(second.event_hash);
+        append_bundle_event(
+            &cas_root,
+            &refs_root,
+            third_request,
+            &signer,
+            &trust,
+        )
+        .unwrap();
+
+        let error = read_bundle_event_chain_page(
+            &cas,
+            &refs_directory,
+            &trust,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            Some(&cursor),
+            1,
+            usize::MAX,
+            &signer,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("stale bundle event cursor"));
     }
 }

@@ -4,7 +4,9 @@ use std::fs::{self, File};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -179,10 +181,58 @@ pub const MAX_COMMAND_REQUESTED_BY_BYTES: usize = 4 * 1024;
 pub const MAX_COMMAND_CLAIM_ITEMS: usize = 32;
 /// Exact serialized command-result budget, below the 10 MiB UDS frame limit.
 pub const MAX_COMMAND_CLAIM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const CONTINUATION_SEED_MARKER: &[u8] = b"continuation_seed_v1";
+pub(crate) const CONTINUATION_SEED_RECONCILE_PAGE_SIZE: usize = 512;
+
 /// A live thread cannot accumulate unbounded terminalization work.
 pub const MAX_OPEN_COMMANDS_PER_THREAD: usize = 128;
 /// Aggregate variable content retained by a thread's open commands.
 pub const MAX_OPEN_COMMAND_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum exact callback response retained for a completed hook dispatch.
+/// This remains below the callback UDS frame budget and prevents the ledger
+/// from becoming an unbounded response store.
+pub const MAX_HOOK_DISPATCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct NewHookDispatch {
+    pub dispatch_key: String,
+    pub chain_root_id: String,
+    pub caller_thread_id: String,
+    pub event: String,
+    pub hook_id: String,
+    pub request_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookDispatchStatus {
+    Pending,
+    Completed,
+}
+
+impl HookDispatchStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Completed => "completed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "completed" => Ok(Self::Completed),
+            other => bail!("invalid hook dispatch status `{other}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HookDispatchReservation {
+    Execute,
+    Replay(Value),
+    PendingUnknown,
+}
 
 /// Validate the closed command vocabulary at the durable database boundary.
 ///
@@ -377,6 +427,28 @@ CREATE TABLE IF NOT EXISTS thread_commands (
 
 CREATE INDEX IF NOT EXISTS idx_thread_commands_thread_status
     ON thread_commands(thread_id, status);
+
+CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
+    dispatch_key TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    caller_thread_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    hook_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+    response_json BLOB,
+    response_hash TEXT,
+    created_at_ms INTEGER NOT NULL,
+    completed_at_ms INTEGER,
+    CHECK (
+        (status = 'pending' AND response_json IS NULL AND response_hash IS NULL AND completed_at_ms IS NULL)
+        OR
+        (status = 'completed' AND response_json IS NOT NULL AND response_hash IS NOT NULL AND completed_at_ms IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_hook_dispatch_ledger_chain_root
+    ON hook_dispatch_ledger(chain_root_id);
 
 CREATE TABLE IF NOT EXISTS thread_launch_claim (
     thread_id TEXT PRIMARY KEY,
@@ -596,6 +668,77 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "completed_at",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "hook_dispatch_ledger",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "dispatch_key",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "caller_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "event",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "hook_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "status",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "response_json",
+                        col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "response_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completed_at_ms",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: false,
                     },
@@ -922,6 +1065,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_hook_dispatch_ledger_chain_root",
+                table: "hook_dispatch_ledger",
+                columns: &["chain_root_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_follow_waiter_successor",
                 table: "follow_waiter",
                 columns: &["parent_successor_thread_id"],
@@ -1121,6 +1270,69 @@ impl ryeos_state::RuntimeLivenessInspector for RuntimeDb {
     }
 }
 
+fn validate_sha256(field: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("{field} must be a lowercase 64-character hexadecimal SHA-256 digest");
+    }
+    Ok(())
+}
+
+fn validate_new_hook_dispatch(seed: &NewHookDispatch) -> Result<()> {
+    validate_sha256("dispatch_key", &seed.dispatch_key)?;
+    validate_sha256("request_hash", &seed.request_hash)?;
+    for (field, value, limit) in [
+        ("chain_root_id", seed.chain_root_id.as_str(), 4 * 1024),
+        ("caller_thread_id", seed.caller_thread_id.as_str(), 4 * 1024),
+        ("event", seed.event.as_str(), 1024),
+        ("hook_id", seed.hook_id.as_str(), 4 * 1024),
+    ] {
+        if value.is_empty() {
+            bail!("hook dispatch {field} cannot be empty");
+        }
+        if value.len() > limit {
+            bail!("hook dispatch {field} exceeds {limit} byte limit");
+        }
+    }
+    Ok(())
+}
+
+fn decode_completed_hook_response(
+    dispatch_key: &str,
+    response_json: Option<&[u8]>,
+    response_hash: Option<&str>,
+) -> Result<Value> {
+    let response_json = response_json
+        .with_context(|| format!("completed hook dispatch `{dispatch_key}` has no response"))?;
+    if response_json.len() > MAX_HOOK_DISPATCH_RESPONSE_BYTES {
+        bail!("completed hook dispatch `{dispatch_key}` exceeds response size limit");
+    }
+    let response_hash = response_hash
+        .with_context(|| format!("completed hook dispatch `{dispatch_key}` has no response hash"))?;
+    validate_sha256("response_hash", response_hash)?;
+    let actual_hash = lillux::sha256_hex(response_json);
+    if actual_hash != response_hash {
+        bail!("completed hook dispatch `{dispatch_key}` response hash mismatch");
+    }
+    let response: Value = serde_json::from_slice(response_json)
+        .with_context(|| format!("completed hook dispatch `{dispatch_key}` has invalid JSON"))?;
+    let canonical = lillux::canonical_json(&response)
+        .context("canonicalize completed hook dispatch response")?;
+    if canonical.as_bytes() != response_json {
+        bail!("completed hook dispatch `{dispatch_key}` response is not canonical JSON");
+    }
+    serde_json::from_value::<ryeos_runtime::callback_contract::CallbackDispatchResponse>(
+        response.clone(),
+    )
+    .with_context(|| {
+        format!("completed hook dispatch `{dispatch_key}` violates callback response contract")
+    })?;
+    Ok(response)
+}
+
 impl RuntimeDb {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
@@ -1135,6 +1347,158 @@ impl RuntimeDb {
             _wal_file: None,
             _shm_file: None,
         })
+    }
+
+    /// Atomically reserve the only permitted execution of a hook occurrence.
+    /// A durable pending row is deliberately never reclaimed: after a crash
+    /// the daemon cannot prove whether the external action ran, so re-dispatch
+    /// would violate the at-most-once contract.
+    pub fn reserve_hook_dispatch(
+        &self,
+        seed: &NewHookDispatch,
+    ) -> Result<HookDispatchReservation> {
+        validate_new_hook_dispatch(seed)?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO hook_dispatch_ledger(
+                dispatch_key, chain_root_id, caller_thread_id, event, hook_id,
+                request_hash, status, created_at_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                seed.dispatch_key,
+                seed.chain_root_id,
+                seed.caller_thread_id,
+                seed.event,
+                seed.hook_id,
+                seed.request_hash,
+                HookDispatchStatus::Pending.as_str(),
+                now,
+            ],
+        )?;
+        if inserted == 1 {
+            tx.commit()?;
+            return Ok(HookDispatchReservation::Execute);
+        }
+
+        let (request_hash, status, response_json, response_hash): (
+            String,
+            String,
+            Option<Vec<u8>>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT request_hash, status, response_json, response_hash
+               FROM hook_dispatch_ledger WHERE dispatch_key=?1",
+            params![seed.dispatch_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if request_hash != seed.request_hash {
+            bail!(
+                "hook dispatch key `{}` was reused with a different request hash",
+                seed.dispatch_key
+            );
+        }
+
+        let reservation = match HookDispatchStatus::parse(&status)? {
+            HookDispatchStatus::Pending => {
+                if response_json.is_some() || response_hash.is_some() {
+                    bail!(
+                        "pending hook dispatch `{}` contains terminal response fields",
+                        seed.dispatch_key
+                    );
+                }
+                HookDispatchReservation::PendingUnknown
+            }
+            HookDispatchStatus::Completed => HookDispatchReservation::Replay(
+                decode_completed_hook_response(
+                    &seed.dispatch_key,
+                    response_json.as_deref(),
+                    response_hash.as_deref(),
+                )?,
+            ),
+        };
+        tx.commit()?;
+        Ok(reservation)
+    }
+
+    /// Seal the exact callback response for a previously reserved dispatch.
+    /// Repeating the same completion is harmless; any divergent completion is
+    /// an integrity failure.
+    pub fn complete_hook_dispatch(
+        &self,
+        dispatch_key: &str,
+        request_hash: &str,
+        response: &Value,
+    ) -> Result<()> {
+        validate_sha256("dispatch_key", dispatch_key)?;
+        validate_sha256("request_hash", request_hash)?;
+        serde_json::from_value::<ryeos_runtime::callback_contract::CallbackDispatchResponse>(
+            response.clone(),
+        )
+        .context("hook dispatch response violates CallbackDispatchResponse")?;
+        let response_json = lillux::canonical_json(response)
+            .context("canonicalize hook dispatch response")?
+            .into_bytes();
+        if response_json.len() > MAX_HOOK_DISPATCH_RESPONSE_BYTES {
+            bail!(
+                "hook dispatch response exceeds {} byte limit",
+                MAX_HOOK_DISPATCH_RESPONSE_BYTES
+            );
+        }
+        let response_hash = lillux::sha256_hex(&response_json);
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, Option<Vec<u8>>, Option<String>)> = tx
+            .query_row(
+                "SELECT request_hash, status, response_json, response_hash
+                   FROM hook_dispatch_ledger WHERE dispatch_key=?1",
+                params![dispatch_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((stored_request_hash, status, stored_json, stored_hash)) = existing else {
+            bail!("hook dispatch `{dispatch_key}` was not reserved");
+        };
+        if stored_request_hash != request_hash {
+            bail!("hook dispatch `{dispatch_key}` request hash changed before completion");
+        }
+
+        match HookDispatchStatus::parse(&status)? {
+            HookDispatchStatus::Pending => {
+                let updated = tx.execute(
+                    "UPDATE hook_dispatch_ledger
+                        SET status=?3, response_json=?4, response_hash=?5, completed_at_ms=?6
+                      WHERE dispatch_key=?1 AND request_hash=?2 AND status=?7",
+                    params![
+                        dispatch_key,
+                        request_hash,
+                        HookDispatchStatus::Completed.as_str(),
+                        response_json,
+                        response_hash,
+                        now,
+                        HookDispatchStatus::Pending.as_str(),
+                    ],
+                )?;
+                if updated != 1 {
+                    bail!("hook dispatch `{dispatch_key}` lost its pending reservation");
+                }
+            }
+            HookDispatchStatus::Completed => {
+                let replay = decode_completed_hook_response(
+                    dispatch_key,
+                    stored_json.as_deref(),
+                    stored_hash.as_deref(),
+                )?;
+                let replay_json = lillux::canonical_json(&replay)
+                    .context("canonicalize replayed hook dispatch response")?
+                    .into_bytes();
+                if replay_json != response_json {
+                    bail!("hook dispatch `{dispatch_key}` has a divergent completion");
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -1294,6 +1658,194 @@ impl RuntimeDb {
             params![thread_id, chain_root_id],
         )?;
         Ok(())
+    }
+
+    /// Atomically seed the runtime identity for a continuation successor.
+    ///
+    /// A daemon crash may leave this row behind before the authoritative state
+    /// handoff commits. Re-seeding that exact unattached orphan is idempotent;
+    /// any attached, stopped, claimed, or cross-chain row fails closed.
+    pub fn seed_continuation_runtime(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        let launch_metadata_json = serde_json::to_string(launch_metadata)
+            .context("failed to encode continuation launch_metadata")?;
+        let tx = self.conn.unchecked_transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT chain_root_id, pid, pgid, process_identity,
+                        stop_requested_at_ms, stop_intent, metadata, launch_metadata
+                   FROM thread_runtime WHERE thread_id = ?1",
+                params![thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<Vec<u8>>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let claimed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_launch_claim WHERE thread_id = ?1)",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        if claimed {
+            bail!("continuation runtime row {thread_id} already has a launch claim");
+        }
+
+        if let Some((
+            existing_chain_root_id,
+            pid,
+            pgid,
+            process_identity,
+            stop_requested_at_ms,
+            stop_intent,
+            metadata,
+            existing_launch_metadata,
+        )) = existing
+        {
+            if existing_chain_root_id != chain_root_id {
+                bail!(
+                    "continuation runtime row {thread_id} belongs to chain {existing_chain_root_id}, not {chain_root_id}"
+                );
+            }
+            if pid.is_some()
+                || pgid.is_some()
+                || process_identity.is_some()
+                || stop_requested_at_ms.is_some()
+                || stop_intent.is_some()
+                || metadata.as_deref() != Some(CONTINUATION_SEED_MARKER)
+                || existing_launch_metadata.as_deref() != Some(launch_metadata_json.as_str())
+            {
+                bail!(
+                    "continuation runtime row {thread_id} is not the exact unattached, unclaimed seed"
+                );
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO thread_runtime
+                    (thread_id, chain_root_id, pid, pgid, metadata, launch_metadata)
+                 VALUES (?1, ?2, NULL, NULL, ?3, ?4)",
+                params![
+                    thread_id,
+                    chain_root_id,
+                    CONTINUATION_SEED_MARKER,
+                    launch_metadata_json
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove a continuation runtime seed after its authoritative state commit
+    /// failed. The exact metadata match prevents cleanup from deleting a row
+    /// that another owner has repurposed since it was seeded.
+    pub fn remove_seeded_continuation_runtime(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<bool> {
+        let launch_metadata_json = serde_json::to_string(launch_metadata)
+            .context("failed to encode continuation launch_metadata for cleanup")?;
+        Ok(self.conn.execute(
+            "DELETE FROM thread_runtime
+              WHERE thread_id = ?1
+                AND chain_root_id = ?2
+                AND launch_metadata = ?3
+                AND metadata = ?4
+                AND pid IS NULL
+                AND pgid IS NULL
+                AND process_identity IS NULL
+                AND stop_requested_at_ms IS NULL
+                AND stop_intent IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM thread_launch_claim
+                     WHERE thread_launch_claim.thread_id = thread_runtime.thread_id
+                )",
+            params![
+                thread_id,
+                chain_root_id,
+                launch_metadata_json,
+                CONTINUATION_SEED_MARKER
+            ],
+        )? > 0)
+    }
+
+    pub fn continuation_seed_rows_after(
+        &self,
+        after_thread_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if limit == 0 || limit > CONTINUATION_SEED_RECONCILE_PAGE_SIZE {
+            bail!(
+                "continuation seed reconcile limit must be 1..={CONTINUATION_SEED_RECONCILE_PAGE_SIZE}"
+            );
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT thread_id, chain_root_id
+               FROM thread_runtime
+              WHERE metadata = ?1
+                AND (?2 IS NULL OR thread_id > ?2)
+              ORDER BY thread_id
+              LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![CONTINUATION_SEED_MARKER, after_thread_id, limit as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn clear_continuation_seed_marker(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE thread_runtime
+                SET metadata = NULL
+              WHERE thread_id = ?1
+                AND chain_root_id = ?2
+                AND metadata = ?3",
+            params![thread_id, chain_root_id, CONTINUATION_SEED_MARKER],
+        )? > 0)
+    }
+
+    pub fn remove_orphaned_continuation_seed(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM thread_runtime
+              WHERE thread_id = ?1
+                AND chain_root_id = ?2
+                AND metadata = ?3
+                AND pid IS NULL
+                AND pgid IS NULL
+                AND process_identity IS NULL
+                AND stop_requested_at_ms IS NULL
+                AND stop_intent IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM thread_launch_claim
+                     WHERE thread_launch_claim.thread_id = thread_runtime.thread_id
+                )",
+            params![thread_id, chain_root_id, CONTINUATION_SEED_MARKER],
+        )? > 0)
     }
 
     pub fn delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
@@ -1542,6 +2094,10 @@ impl RuntimeDb {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
             let mut deleted = 0usize;
+            deleted += self.conn.execute(
+                "DELETE FROM hook_dispatch_ledger WHERE chain_root_id=?1",
+                params![chain_root_id],
+            )?;
             // Signed chain truth supplies the authoritative members. Include
             // any runtime row structurally attributed to the same chain so a
             // replay after the head-removal boundary cannot leave orphaned
@@ -3509,6 +4065,208 @@ mod tests {
         (tmp, db)
     }
 
+    fn hook_seed() -> NewHookDispatch {
+        NewHookDispatch {
+            dispatch_key: "a".repeat(64),
+            chain_root_id: "T-root".into(),
+            caller_thread_id: "T-caller".into(),
+            event: "graph_step_completed".into(),
+            hook_id: "hook:system/audit".into(),
+            request_hash: "b".repeat(64),
+        }
+    }
+
+    fn hook_response() -> Value {
+        serde_json::json!({
+            "thread": {"id": "T-hook", "status": "completed"},
+            "result": {"accepted": true, "cost": 7}
+        })
+    }
+
+    #[test]
+    fn hook_dispatch_reserve_pending_complete_and_replay() {
+        let (_tmp, db) = fresh_db();
+        let seed = hook_seed();
+        assert!(matches!(
+            db.reserve_hook_dispatch(&seed).unwrap(),
+            HookDispatchReservation::Execute
+        ));
+        assert!(matches!(
+            db.reserve_hook_dispatch(&seed).unwrap(),
+            HookDispatchReservation::PendingUnknown
+        ));
+
+        let response = hook_response();
+        db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .unwrap();
+        let HookDispatchReservation::Replay(replayed) =
+            db.reserve_hook_dispatch(&seed).unwrap()
+        else {
+            panic!("completed hook dispatch must replay");
+        };
+        assert_eq!(replayed, response);
+        db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .unwrap();
+    }
+
+    #[test]
+    fn hook_dispatch_pending_survives_restart_and_completed_replays_to_successor() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let seed = hook_seed();
+        {
+            let db = RuntimeDb::open(&path).unwrap();
+            assert!(matches!(
+                db.reserve_hook_dispatch(&seed).unwrap(),
+                HookDispatchReservation::Execute
+            ));
+        }
+        let db = RuntimeDb::open(&path).unwrap();
+        assert!(matches!(
+            db.reserve_hook_dispatch(&seed).unwrap(),
+            HookDispatchReservation::PendingUnknown
+        ));
+        let response = hook_response();
+        db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .unwrap();
+
+        let mut successor = seed;
+        successor.caller_thread_id = "T-successor".to_string();
+        let HookDispatchReservation::Replay(replayed) =
+            db.reserve_hook_dispatch(&successor).unwrap()
+        else {
+            panic!("successor segment must replay the chain-scoped response");
+        };
+        assert_eq!(replayed, response);
+    }
+
+    #[test]
+    fn hook_dispatch_crash_boundaries_never_invoke_twice() {
+        let (_tmp, db) = fresh_db();
+
+        // Reservation committed, then the handler disappears before dispatch.
+        let before_dispatch = hook_seed();
+        let mut invocations = 0;
+        assert!(matches!(
+            db.reserve_hook_dispatch(&before_dispatch).unwrap(),
+            HookDispatchReservation::Execute
+        ));
+        assert!(matches!(
+            db.reserve_hook_dispatch(&before_dispatch).unwrap(),
+            HookDispatchReservation::PendingUnknown
+        ));
+        assert_eq!(invocations, 0);
+
+        // The child returns, but completion is lost: redrive observes pending
+        // and must not invoke the child again.
+        let mut before_completion = hook_seed();
+        before_completion.dispatch_key = "c".repeat(64);
+        assert!(matches!(
+            db.reserve_hook_dispatch(&before_completion).unwrap(),
+            HookDispatchReservation::Execute
+        ));
+        invocations += 1;
+        assert!(matches!(
+            db.reserve_hook_dispatch(&before_completion).unwrap(),
+            HookDispatchReservation::PendingUnknown
+        ));
+        assert_eq!(invocations, 1);
+
+        // Completion commits but the response is lost in transport: redrive
+        // returns the exact response, including the cost-bearing leaf result,
+        // without a second invocation.
+        let mut after_completion = hook_seed();
+        after_completion.dispatch_key = "d".repeat(64);
+        assert!(matches!(
+            db.reserve_hook_dispatch(&after_completion).unwrap(),
+            HookDispatchReservation::Execute
+        ));
+        invocations += 1;
+        let response = hook_response();
+        db.complete_hook_dispatch(
+            &after_completion.dispatch_key,
+            &after_completion.request_hash,
+            &response,
+        )
+        .unwrap();
+        let HookDispatchReservation::Replay(replayed) = db
+            .reserve_hook_dispatch(&after_completion)
+            .unwrap()
+        else {
+            panic!("completed dispatch must replay after response loss");
+        };
+        assert_eq!(replayed, response);
+        assert_eq!(invocations, 2);
+    }
+
+    #[test]
+    fn hook_dispatch_rejects_identity_and_completion_drift() {
+        let (_tmp, db) = fresh_db();
+        let seed = hook_seed();
+        db.reserve_hook_dispatch(&seed).unwrap();
+
+        let mut conflicting_seed = seed.clone();
+        conflicting_seed.request_hash = "c".repeat(64);
+        assert!(db.reserve_hook_dispatch(&conflicting_seed).is_err());
+
+        let response = hook_response();
+        db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .unwrap();
+        let divergent = serde_json::json!({
+            "thread": {"id": "T-hook", "status": "completed"},
+            "result": {"accepted": false}
+        });
+        assert!(db
+            .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &divergent)
+            .is_err());
+    }
+
+    #[test]
+    fn hook_dispatch_rejects_invalid_oversize_and_corrupt_responses() {
+        let (_tmp, db) = fresh_db();
+        let seed = hook_seed();
+        db.reserve_hook_dispatch(&seed).unwrap();
+        assert!(db
+            .complete_hook_dispatch(
+                &seed.dispatch_key,
+                &seed.request_hash,
+                &serde_json::json!({"result": {}}),
+            )
+            .is_err());
+        let oversize = serde_json::json!({
+            "thread": {},
+            "result": {"body": "x".repeat(MAX_HOOK_DISPATCH_RESPONSE_BYTES)}
+        });
+        assert!(db
+            .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &oversize)
+            .is_err());
+
+        let response = hook_response();
+        db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE hook_dispatch_ledger SET response_json=?2 WHERE dispatch_key=?1",
+                params![seed.dispatch_key, b"{}".as_slice()],
+            )
+            .unwrap();
+        assert!(db.reserve_hook_dispatch(&seed).is_err());
+    }
+
+    #[test]
+    fn deleting_chain_runtime_removes_hook_ledger_without_making_it_live() {
+        let (_tmp, db) = fresh_db();
+        let seed = hook_seed();
+        db.reserve_hook_dispatch(&seed).unwrap();
+        assert!(!db.chain_has_live_state(&seed.chain_root_id).unwrap());
+        assert_eq!(db.delete_chain_runtime(&seed.chain_root_id).unwrap(), 1);
+        let count: i64 = db
+            .conn
+            .query_row("SELECT count(*) FROM hook_dispatch_ledger", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     fn fake_process_identity(pid: i64, pgid: i64) -> ExecutionProcessIdentity {
         ExecutionProcessIdentity {
             schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
@@ -4170,6 +4928,41 @@ mod tests {
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 2);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 2);
+    }
+
+    #[test]
+    fn continuation_runtime_seed_is_retry_safe_and_conditionally_cleaned() {
+        let (_tmp, db) = fresh_db();
+        let initial = RuntimeLaunchMetadata::default();
+        db.seed_continuation_runtime("T-next", "T-root", &initial)
+            .unwrap();
+
+        db.seed_continuation_runtime("T-next", "T-root", &initial)
+            .unwrap();
+
+        let replacement = RuntimeLaunchMetadata {
+            cancellation_mode: Some(CancellationMode::Hard),
+            ..Default::default()
+        };
+        let error = db
+            .seed_continuation_runtime("T-next", "T-root", &replacement)
+            .unwrap_err();
+        assert!(error.to_string().contains("exact unattached"));
+        let stored = db
+            .get_runtime_info("T-next")
+            .unwrap()
+            .unwrap()
+            .launch_metadata
+            .unwrap();
+        assert_eq!(stored.cancellation_mode, None);
+
+        assert!(db
+            .remove_seeded_continuation_runtime("T-next", "T-root", &initial)
+            .unwrap());
+        assert!(db.get_runtime_info("T-next").unwrap().is_none());
+        assert!(!db
+            .remove_seeded_continuation_runtime("T-next", "T-root", &initial)
+            .unwrap());
     }
 
     #[test]

@@ -65,6 +65,7 @@ struct SpawnFollowChildParams {
     launch_window_width: Option<u32>,
     #[serde(default)]
     frontier_id: Option<String>,
+    completion: ryeos_runtime::TerminalCompletion,
 }
 
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {

@@ -7,23 +7,12 @@ use crate::callback::{CallbackError, ReplayResponse, RuntimeCallbackAPI, Termina
 use crate::envelope::EnvelopeCallback;
 use crate::events::{RuntimeEventType, StorageClass};
 
-/// Map an event type name to the storage class the daemon's
-/// `EventStoreService::validate_storage_class` accepts.
-///
-/// V5.5 D11: this function delegates to `RuntimeEventType::storage_class`
-/// — the typed enum is the single source of truth. Unknown event names
-/// fall through to `"indexed"` so the daemon validator (which also
-/// delegates to the enum's `parse`) can produce the canonical error
-/// message at append time. Callers that have a `RuntimeEventType`
-/// already should use `append_runtime_event` directly.
-pub fn storage_class_for(event_type: &str) -> &'static str {
-    match RuntimeEventType::parse(event_type) {
-        Ok(t) => t.storage_class().as_str(),
-        Err(_) => StorageClass::Indexed.as_str(),
-    }
+/// Map a typed event to the storage class accepted by the daemon.
+pub fn storage_class_for(event_type: RuntimeEventType) -> &'static str {
+    event_type.storage_class().as_str()
 }
 
-fn storage_class_for_payload(event_type: &str, payload: &Value) -> &'static str {
+fn storage_class_for_payload(event_type: RuntimeEventType, payload: &Value) -> &'static str {
     // Progressive streamed cognition_out is live-only (ephemeral): deltas, partial
     // tool args, AND complete `tool_use` blocks. The DURABLE record of a turn's
     // tool calls is `emit_turn_complete`'s `cognition_out{tool_calls}` — persisting
@@ -31,12 +20,10 @@ fn storage_class_for_payload(event_type: &str, payload: &Value) -> &'static str 
     // resume (reconstruct_messages reads `tool_calls`, not `tool_use`). Must stay
     // in lock-step with the daemon's `is_ephemeral_allowed`. (The payload keys are
     // JSON field names, not event types, so they stay string-keyed.)
-    if matches!(
-        RuntimeEventType::parse(event_type),
-        Ok(RuntimeEventType::CognitionOut)
-    ) && (payload.get("delta").is_some()
-        || payload.get("tool_use_partial").is_some()
-        || payload.get("tool_use").is_some())
+    if event_type == RuntimeEventType::CognitionOut
+        && (payload.get("delta").is_some()
+            || payload.get("tool_use_partial").is_some()
+            || payload.get("tool_use").is_some())
     {
         return StorageClass::Ephemeral.as_str();
     }
@@ -167,39 +154,17 @@ impl CallbackClient {
         )
     }
 
-    /// Advisory: warn-and-continue OK when disconnected.
-    pub async fn append_event(&self, event_type: &str, payload: Value) -> Result<()> {
-        let storage_class = storage_class_for_payload(event_type, &payload);
-        let is_transcript =
-            RuntimeEventType::parse(event_type).is_ok_and(RuntimeEventType::is_transcript);
-        match &self.inner {
-            Some(client) => {
-                client
-                    .append_event(&self.thread_id, event_type, payload, storage_class)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                Ok(())
-            }
-            None if is_transcript => Err(anyhow::anyhow!(
-                "callback append_event({event_type}) called without an inner UDS client \
-                 (socket missing); transcript-bearing event must not be silently dropped"
-            )),
-            None => Ok(()),
-        }
-    }
-
-    /// V5.5 D11: typed event emitter. Prefer this over `append_event`
-    /// for new code — adding a new event variant to
-    /// `RuntimeEventType` makes this method emit it without any
-    /// further string-based dispatch. The daemon validator delegates
-    /// to the same enum, so the producer/consumer surfaces stay in
-    /// lock-step.
+    /// Typed event emitter. The daemon validator delegates to the same enum, so
+    /// producer and consumer vocabulary remain in lock-step. Transcript-bearing
+    /// events fail closed when the callback channel is absent; advisory events
+    /// remain no-ops when disconnected.
     pub async fn append_runtime_event(
         &self,
         event_type: RuntimeEventType,
         payload: Value,
     ) -> Result<()> {
-        let storage_class = storage_class_for_payload(event_type.as_str(), &payload);
+        let storage_class = storage_class_for_payload(event_type, &payload);
+        let is_transcript = event_type.is_transcript();
         match &self.inner {
             Some(client) => {
                 client
@@ -208,6 +173,11 @@ impl CallbackClient {
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
             }
+            None if is_transcript => Err(anyhow::anyhow!(
+                "callback append_runtime_event({}) called without an inner UDS client \
+                 (socket missing); transcript-bearing event must not be silently dropped",
+                event_type.as_str()
+            )),
             None => Ok(()),
         }
     }
@@ -300,7 +270,11 @@ impl CallbackClient {
     /// Resume-critical: a handoff MUST reach the daemon. NOT advisory — a missing
     /// UDS client (disconnected) is a hard error, never a silent `Ok(null)` that
     /// would settle the thread `continued` with no successor.
-    pub async fn request_continuation(&self, log_reason: Option<&str>) -> Result<Value> {
+    pub async fn request_continuation(
+        &self,
+        log_reason: Option<&str>,
+        completion: TerminalCompletion,
+    ) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback request_continuation called without an inner UDS client \
@@ -308,7 +282,7 @@ impl CallbackClient {
             )
         })?;
         client
-            .request_continuation(&self.thread_id, log_reason)
+            .request_continuation(&self.thread_id, log_reason, completion)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -327,6 +301,7 @@ impl CallbackClient {
         ref_bindings: std::collections::BTreeMap<String, String>,
         child_parameters: Value,
         frontier_id: Option<String>,
+        completion: TerminalCompletion,
     ) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -348,6 +323,7 @@ impl CallbackClient {
             }],
             launch_window_width: None,
             frontier_id,
+            completion,
         };
         client
             .spawn_follow_child(request)
@@ -363,6 +339,7 @@ impl CallbackClient {
         children: Vec<crate::callback::FollowChildSpec>,
         launch_window_width: Option<u32>,
         frontier_id: Option<String>,
+        completion: TerminalCompletion,
     ) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| anyhow::anyhow!(
             "callback spawn_follow_children called without an inner UDS client (socket missing); the follow suspend cannot be recorded"
@@ -377,6 +354,7 @@ impl CallbackClient {
                 children,
                 launch_window_width,
                 frontier_id,
+                completion,
             })
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -655,13 +633,19 @@ impl CallbackClient {
     /// from the directive body + inputs at launch, so it is not otherwise
     /// recoverable from events).
     pub async fn emit_stimulus(&self, content: &str) -> Result<()> {
-        self.append_event("cognition_in", serde_json::json!({ "content": content }))
-            .await
+        self.append_runtime_event(
+            RuntimeEventType::CognitionIn,
+            serde_json::json!({ "content": content }),
+        )
+        .await
     }
 
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
-        self.append_event("cognition_in", serde_json::json!({"turn": turn}))
-            .await
+        self.append_runtime_event(
+            RuntimeEventType::CognitionIn,
+            serde_json::json!({"turn": turn}),
+        )
+        .await
     }
 
     /// Resume-critical: seal a cognition cut short by a live interrupt. Emits a
@@ -683,7 +667,8 @@ impl CallbackClient {
                 }
             }
         }
-        self.append_event("cognition_out", data).await
+        self.append_runtime_event(RuntimeEventType::CognitionOut, data)
+            .await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -706,7 +691,8 @@ impl CallbackClient {
             data["input_tokens"] = serde_json::json!(input);
             data["output_tokens"] = serde_json::json!(output);
         }
-        self.append_event("cognition_out", data).await
+        self.append_runtime_event(RuntimeEventType::CognitionOut, data)
+            .await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -724,7 +710,8 @@ impl CallbackClient {
             data["call_id"] = serde_json::json!(id);
         }
         data["effective_caps"] = serde_json::json!(effective_caps);
-        self.append_event("tool_call_start", data).await
+        self.append_runtime_event(RuntimeEventType::ToolCallStart, data)
+            .await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -780,20 +767,24 @@ impl CallbackClient {
         if let Some(reason) = truncated_reason {
             data["truncated_reason"] = serde_json::json!(reason);
         }
-        self.append_event("tool_call_result", data).await
+        self.append_runtime_event(RuntimeEventType::ToolCallResult, data)
+            .await
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
     /// Maps to `thread_failed`.
     pub async fn emit_error(&self, error: &str) -> Result<()> {
-        self.append_event("thread_failed", serde_json::json!({"message": error}))
-            .await
+        self.append_runtime_event(
+            RuntimeEventType::ThreadFailed,
+            serde_json::json!({"message": error}),
+        )
+        .await
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn emit_thread_continued(&self, previous_id: &str) -> Result<()> {
-        self.append_event(
-            "thread_continued",
+        self.append_runtime_event(
+            RuntimeEventType::ThreadContinued,
             serde_json::json!({"previous_thread_id": previous_id}),
         )
         .await
@@ -811,11 +802,17 @@ impl CallbackClient {
                  (socket missing); thread usage ACK is required for settlement"
             )
         })?;
-        let storage_class = storage_class_for("thread_usage");
+        let event_type = RuntimeEventType::ThreadUsage;
+        let storage_class = storage_class_for(event_type);
         let payload = serde_json::to_value(usage)
             .map_err(|e| anyhow::anyhow!("serialize ThreadUsage: {e}"))?;
         client
-            .append_event(&self.thread_id, "thread_usage", payload, storage_class)
+            .append_event(
+                &self.thread_id,
+                event_type.as_str(),
+                payload,
+                storage_class,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
@@ -823,8 +820,11 @@ impl CallbackClient {
 
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn stream_opened(&self, turn: u32) -> Result<()> {
-        self.append_event("stream_opened", serde_json::json!({"turn": turn}))
-            .await
+        self.append_runtime_event(
+            RuntimeEventType::StreamOpened,
+            serde_json::json!({"turn": turn}),
+        )
+        .await
     }
 
     // ── native_async streaming contract ─────────────────────────────
@@ -856,7 +856,8 @@ impl CallbackClient {
         if let Some(map) = wrapped.as_object_mut() {
             map.insert("payload".into(), value);
         }
-        self.append_event("stream_snapshot", wrapped).await
+        self.append_runtime_event(RuntimeEventType::StreamSnapshot, wrapped)
+            .await
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -874,7 +875,8 @@ impl CallbackClient {
         if let Some(map) = wrapped.as_object_mut() {
             map.insert("payload".into(), value);
         }
-        self.append_event("stream_snapshot", wrapped).await
+        self.append_runtime_event(RuntimeEventType::StreamSnapshot, wrapped)
+            .await
     }
 }
 
@@ -896,7 +898,7 @@ mod tests {
             json!({"turn": 1, "tool_use": {"id": "x", "name": "f", "arguments": {}}}),
         ] {
             assert_eq!(
-                storage_class_for_payload("cognition_out", &payload),
+                storage_class_for_payload(RuntimeEventType::CognitionOut, &payload),
                 StorageClass::Ephemeral.as_str(),
                 "payload {payload} should be ephemeral"
             );
@@ -908,13 +910,13 @@ mod tests {
         // The durable record of a turn (with tool_calls array) is indexed.
         let payload = json!({"turn": 1, "content": "done", "tool_calls": []});
         assert_eq!(
-            storage_class_for_payload("cognition_out", &payload),
+            storage_class_for_payload(RuntimeEventType::CognitionOut, &payload),
             StorageClass::Indexed.as_str()
         );
         // An interrupted seal (no progressive keys) is also durable.
         let interrupted = json!({"turn": 1, "content": "par", "interrupted": true});
         assert_eq!(
-            storage_class_for_payload("cognition_out", &interrupted),
+            storage_class_for_payload(RuntimeEventType::CognitionOut, &interrupted),
             StorageClass::Indexed.as_str()
         );
     }
@@ -974,6 +976,7 @@ mod tests {
             &self,
             _thread_id: &str,
             _log_reason: Option<&str>,
+            _completion: TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
@@ -1240,6 +1243,7 @@ mod tests {
                 facets: None,
                 launch_window: None,
             },
+            hook_dispatch: None,
         };
         let err = client.dispatch_action(req).await.unwrap_err();
         let msg = err.to_string();
@@ -1250,22 +1254,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_event_noop_when_disconnected() {
+    async fn append_runtime_event_transcript_types_error_when_disconnected() {
         let client = make_client();
-        client
-            .append_event("turn_start", json!({"turn": 1}))
-            .await
-            .unwrap();
+        for event_type in [
+            RuntimeEventType::CognitionIn,
+            RuntimeEventType::CognitionOut,
+            RuntimeEventType::ToolCallStart,
+            RuntimeEventType::ToolCallResult,
+        ] {
+            let err = client
+                .append_runtime_event(event_type, json!({"turn": 1}))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("socket missing"),
+                "{event_type:?}: {err}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn append_event_transcript_type_errors_when_disconnected() {
+    async fn append_runtime_event_non_transcript_type_noops_when_disconnected() {
         let client = make_client();
-        let err = client
-            .append_event("cognition_in", json!({"turn": 1}))
+        client
+            .append_runtime_event(RuntimeEventType::StreamOpened, json!({"turn": 1}))
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("socket missing"), "got: {err}");
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1280,7 +1294,7 @@ mod tests {
         let client = make_client();
         let err = client
             .finalize_thread(TerminalCompletion {
-                status: "completed".to_string(),
+                status: crate::ThreadTerminalStatus::Completed,
                 outcome_code: Some("success".to_string()),
                 result: None,
                 error: None,
@@ -1348,15 +1362,8 @@ mod tests {
             .unwrap();
     }
 
-    /// V5.4 P2.2 — every event name the runtime can emit MUST be in
-    /// the daemon's `EventStoreService::validate_event_type` allow-list,
-    /// and every storage class returned by `storage_class_for` MUST be
-    /// in `validate_storage_class`. The list below is the canonical
-    /// set of names produced by `CallbackClient`'s typed emitters
-    /// AND the bare `append_event` calls in `ryeos-directive-runtime`'s
-    /// `runner.rs`. If a new emitter is added without aligning the
-    /// daemon validator (or vice versa), this test fails loudly here
-    /// instead of being silently dropped at the daemon boundary.
+    /// Every typed event the runtime emits must serialize to a name and storage
+    /// class accepted by the daemon.
     ///
     /// We mirror the validator's two allow-lists rather than depending
     /// on `ryeosd` (which would be a circular dep).
@@ -1404,33 +1411,30 @@ mod tests {
         const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only", "ephemeral"];
 
         // Every event the runtime can emit, post-P2.2:
-        let runtime_emits: &[&str] = &[
-            // Typed emitters in CallbackClient
-            "cognition_in",     // emit_turn_start
-            "cognition_out",    // emit_turn_complete
-            "tool_call_start",  // emit_tool_dispatch
-            "tool_call_result", // emit_tool_result
-            "thread_failed",    // emit_error
-            "thread_continued", // emit_thread_continued
-            "stream_snapshot",  // emit_progress / emit_status
-            // Bare append_event calls in crates/runtimes/directive/runner.rs
-            "stream_opened",       // State::Streaming
-            "cognition_reasoning", // FiringHooks
-            "thread_usage",        // emit_thread_usage
-                                   // tool_call_result(blocked) re-uses the validator name
-                                   // already covered above.
+        let runtime_emits = [
+            RuntimeEventType::CognitionIn,
+            RuntimeEventType::CognitionOut,
+            RuntimeEventType::ToolCallStart,
+            RuntimeEventType::ToolCallResult,
+            RuntimeEventType::ThreadFailed,
+            RuntimeEventType::ThreadContinued,
+            RuntimeEventType::StreamSnapshot,
+            RuntimeEventType::StreamOpened,
+            RuntimeEventType::CognitionReasoning,
+            RuntimeEventType::ThreadUsage,
         ];
 
         for ev in runtime_emits {
+            let wire_name = ev.as_str();
             assert!(
-                VALIDATOR_EVENTS.contains(ev),
-                "runtime emits {ev:?} but the daemon's validate_event_type \
+                VALIDATOR_EVENTS.contains(&wire_name),
+                "runtime emits {wire_name:?} but the daemon's validate_event_type \
                  does not accept it — runtime <> daemon vocabulary drift"
             );
             let sc = storage_class_for(ev);
             assert!(
                 VALIDATOR_STORAGE.contains(&sc),
-                "storage_class_for({ev:?}) returned {sc:?} which is not in \
+                "storage_class_for({wire_name:?}) returned {sc:?} which is not in \
                  the daemon's accepted set"
             );
         }
@@ -1439,18 +1443,21 @@ mod tests {
     #[test]
     fn cognition_out_progressive_payloads_are_ephemeral() {
         assert_eq!(
-            storage_class_for_payload("cognition_out", &json!({"turn": 1, "delta": "hi"})),
+            storage_class_for_payload(
+                RuntimeEventType::CognitionOut,
+                &json!({"turn": 1, "delta": "hi"}),
+            ),
             "ephemeral"
         );
         assert_eq!(
             storage_class_for_payload(
-                "cognition_out",
+                RuntimeEventType::CognitionOut,
                 &json!({"turn": 1, "tool_use_partial": {"id": "c", "delta": "{}"}}),
             ),
             "ephemeral"
         );
         assert_eq!(
-            storage_class_for_payload("cognition_out", &json!({"turn": 1})),
+            storage_class_for_payload(RuntimeEventType::CognitionOut, &json!({"turn": 1})),
             "indexed"
         );
     }
@@ -1514,6 +1521,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }

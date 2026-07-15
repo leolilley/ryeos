@@ -710,6 +710,7 @@ mod tests {
                 resolved_from: "bundle:core".to_string(),
                 shadowed: Vec::new(),
                 materialized_project_root: None,
+                raw_content_digest: "raw-item-hash".to_string(),
                 content_hash: "item-hash".to_string(),
                 signature_header: Some(SignatureHeader {
                     timestamp: "2026-01-01T00:00:00Z".to_string(),

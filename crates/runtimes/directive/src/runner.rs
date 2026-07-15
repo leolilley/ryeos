@@ -13,8 +13,11 @@ use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
 use crate::resume::ResumeState;
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::envelope::RuntimeResult;
-use ryeos_runtime::TerminalCompletion;
+use ryeos_runtime::envelope::{
+    normalize_hook_dispatch_result, RuntimeCost, RuntimeResult, RuntimeResultStatus,
+};
+use ryeos_runtime::events::RuntimeEventType;
+use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
 
 mod request_context;
 
@@ -63,7 +66,7 @@ pub enum State {
         raw_args: String,
     },
     FiringHooks {
-        event: String,
+        occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
         context: Value,
         resume_to: Box<State>,
     },
@@ -97,8 +100,10 @@ pub struct Runner {
     execution: ExecutionConfig,
     model_name: String,
     thread_id: String,
+    definition_ref: String,
+    definition_hash: String,
     initial_turn: u32,
-    hooks: Vec<ryeos_runtime::HookDefinition>,
+    hooks: Vec<ryeos_runtime::CompiledHook>,
     /// Declared directive outputs — used to validate `directive_return`
     /// arguments before finalization. `None` = no outputs declared,
     /// any arguments accepted.
@@ -121,6 +126,16 @@ pub struct Runner {
     /// Shared HTTP client — created once and reused across all turns.
     /// Connection pooling keeps TCP/TLS handshakes to a minimum.
     http_client: reqwest::Client,
+    /// Persistence that must succeed before any callback can make the thread
+    /// terminal. Keeping this inside the runner closes the authority gap where
+    /// stdout could report a transcript failure after the callback had already
+    /// committed `completed`.
+    terminal_persistence: TerminalPersistence,
+}
+
+struct TerminalPersistence {
+    state_root: std::path::PathBuf,
+    source_path: String,
 }
 
 struct RunGuard {
@@ -215,60 +230,6 @@ fn retry_backoff(
     Some(std::time::Duration::from_millis(delay_ms))
 }
 
-fn normalize_hook_dispatch_result(
-    result: Value,
-) -> Result<Value, ryeos_runtime::callback::CallbackError> {
-    let Some(obj) = result.as_object() else {
-        return Ok(result);
-    };
-
-    let is_native_runtime_envelope = obj.contains_key("success")
-        && obj.contains_key("status")
-        && obj.contains_key("result")
-        && (obj.contains_key("outputs")
-            || obj.contains_key("warnings")
-            || obj.contains_key("cost"));
-    if is_native_runtime_envelope {
-        let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        let status = obj
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if !success || status != "completed" {
-            let message = obj
-                .get("error")
-                .or_else(|| obj.get("result"))
-                .map(Value::to_string)
-                .unwrap_or_else(|| format!("hook child returned status `{status}`"));
-            return Err(ryeos_runtime::callback::CallbackError::ActionFailed {
-                code: "hook_child_failed".to_string(),
-                message,
-                retryable: false,
-            });
-        }
-
-        return Ok(obj.get("result").cloned().unwrap_or(Value::Null));
-    }
-
-    let is_managed_envelope =
-        obj.contains_key("outcome_code") && obj.contains_key("result") && obj.contains_key("error");
-    if is_managed_envelope {
-        let error = obj.get("error").filter(|value| !value.is_null());
-        if let Some(error) = error {
-            let message = error.to_string();
-            return Err(ryeos_runtime::callback::CallbackError::ActionFailed {
-                code: "hook_child_failed".to_string(),
-                message,
-                retryable: false,
-            });
-        }
-
-        return Ok(obj.get("result").cloned().unwrap_or(Value::Null));
-    }
-
-    Ok(result)
-}
-
 pub struct RunnerConfig {
     pub messages: Vec<ProviderMessage>,
     pub tools: Vec<ToolSchema>,
@@ -289,11 +250,15 @@ pub struct RunnerConfig {
     pub execution: ExecutionConfig,
     pub model_name: String,
     pub thread_id: String,
-    pub hooks: Vec<ryeos_runtime::HookDefinition>,
+    pub definition_ref: String,
+    pub definition_hash: String,
+    pub hooks: Vec<ryeos_runtime::CompiledHook>,
     pub outputs: Option<Vec<OutputSpec>>,
     pub return_nudge: ReturnNudge,
     pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
+    pub terminal_state_root: std::path::PathBuf,
+    pub terminal_source_path: String,
 }
 
 impl Runner {
@@ -312,6 +277,8 @@ impl Runner {
             execution,
             model_name,
             thread_id,
+            definition_ref,
+            definition_hash,
             hooks,
             outputs,
             return_nudge,
@@ -319,6 +286,8 @@ impl Runner {
             sampling,
             matched_profile,
             config_hash,
+            terminal_state_root,
+            terminal_source_path,
         } = config;
         let initial_messages = initial_messages(messages, system_prompt.as_deref());
 
@@ -341,6 +310,8 @@ impl Runner {
             execution,
             model_name,
             thread_id,
+            definition_ref,
+            definition_hash,
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
@@ -353,33 +324,60 @@ impl Runner {
                 .timeout(std::time::Duration::from_secs(600))
                 .build()
                 .expect("reqwest client builder"),
+            terminal_persistence: TerminalPersistence {
+                state_root: terminal_state_root,
+                source_path: terminal_source_path,
+            },
         }
     }
 
-    pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> Self {
+    fn persist_terminal_outputs(&self) -> anyhow::Result<()> {
+        let persistence = &self.terminal_persistence;
+        crate::knowledge::write_thread_transcript(
+            &persistence.state_root,
+            &self.thread_id,
+            &persistence.source_path,
+            &self.messages,
+        )?;
+        crate::knowledge::write_capabilities(
+            &persistence.state_root,
+            &self.thread_id,
+            &self.tools,
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub fn from_resume(resume: ResumeState, mut config: RunnerConfig) -> anyhow::Result<Self> {
         if let Some(ref usage) = resume.thread_usage {
+            let resumed_tokens = usage
+                .input_tokens
+                .checked_add(usage.output_tokens)
+                .ok_or_else(|| anyhow::anyhow!("resume usage token count overflow"))?;
+            let resumed_cost = RuntimeCost {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_usd: usage.spend_usd,
+                basis: None,
+            };
+            resumed_cost
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid resume usage: {error}"))?;
             config.harness.reseed(
                 usage.completed_turns,
-                usage.input_tokens + usage.output_tokens,
+                resumed_tokens,
                 usage.spend_usd,
                 usage.spawns_used,
             );
             config
                 .budget
-                .reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd);
+                .reseed(usage.input_tokens, usage.output_tokens, usage.spend_usd)
+                .map_err(|error| anyhow::anyhow!("invalid resume budget: {error}"))?;
         }
         config.messages = resume.messages;
         let mut runner = Self::new(config);
         runner.initial_turn = resume.turns_completed;
-        runner
-    }
-
-    pub fn messages(&self) -> &[ProviderMessage] {
-        &self.messages
-    }
-
-    pub fn tools(&self) -> &[ToolSchema] {
-        &self.tools
+        Ok(runner)
     }
 
     /// Drain operator inputs staged for this running thread and fold each as a
@@ -659,7 +657,7 @@ impl Runner {
                             // turn — it records a loud signal and keeps running.
                             match cost.source {
                                 PricingSource::Unpriced => {
-                                    if input_tok + output_tok > 0 {
+                                    if input_tok != 0 || output_tok != 0 {
                                         tracing::warn!(
                                             model = %self.model_name,
                                             provider_id = %self.provider_id,
@@ -713,11 +711,40 @@ impl Runner {
                                 PricingSource::PerModel => {}
                             }
 
+                            let turn_cost = RuntimeCost {
+                                input_tokens: input_tok,
+                                output_tokens: output_tok,
+                                total_usd: usd,
+                                basis: None,
+                            };
+                            let mut proposed_cost = self.budget.cost();
+                            if let Err(error) = proposed_cost.checked_accumulate(&turn_cost) {
+                                state = State::Errored {
+                                    error: format!(
+                                        "provider usage violates accounting bounds: {error}"
+                                    ),
+                                };
+                                continue;
+                            }
+                            if self
+                                .harness
+                                .tokens_used()
+                                .checked_add(input_tok)
+                                .and_then(|tokens| tokens.checked_add(output_tok))
+                                .is_none()
+                            {
+                                state = State::Errored {
+                                    error: "provider usage exceeds the directive token counter"
+                                        .to_string(),
+                                };
+                                continue;
+                            }
+
                             let proposed_usage = ryeos_state::ThreadUsage {
                                 completed_turns: self.harness.turns_used(),
-                                input_tokens: self.budget.cost().input_tokens + input_tok,
-                                output_tokens: self.budget.cost().output_tokens + output_tok,
-                                spend_usd: self.budget.cost().total_usd + usd,
+                                input_tokens: proposed_cost.input_tokens,
+                                output_tokens: proposed_cost.output_tokens,
+                                spend_usd: proposed_cost.total_usd,
                                 spawns_used: self.harness.spawns_used(),
                                 started_at: lillux::time::iso8601_now(),
                                 settled_at: lillux::time::iso8601_now(),
@@ -739,10 +766,14 @@ impl Runner {
 
                             if let Some(ref usage) = resp.usage {
                                 self.harness
-                                    .record_tokens(usage.input_tokens, usage.output_tokens);
-                                self.harness.record_spend(usd);
+                                    .record_tokens(usage.input_tokens, usage.output_tokens)
+                                    .expect("provider token usage was prevalidated");
+                                self.harness
+                                    .record_spend(usd)
+                                    .expect("provider spend was prevalidated");
                                 self.budget
-                                    .report(usage.input_tokens, usage.output_tokens, usd);
+                                    .report(usage.input_tokens, usage.output_tokens, usd)
+                                    .expect("provider budget usage was prevalidated");
                             }
                             self.messages.push(resp.message.clone());
                             let assistant_message = match serde_json::to_value(&resp.message) {
@@ -871,7 +902,10 @@ impl Runner {
                         &mut warnings,
                         "stream_opened",
                         self.callback
-                            .append_event("stream_opened", json!({"turn": turn}))
+                            .append_runtime_event(
+                                RuntimeEventType::StreamOpened,
+                                json!({"turn": turn}),
+                            )
                             .await,
                     );
 
@@ -1101,8 +1135,8 @@ impl Runner {
                                     &mut warnings,
                                     "tool_call_result(blocked)",
                                     self.callback
-                                        .append_event(
-                                            "tool_call_result",
+                                        .append_runtime_event(
+                                            RuntimeEventType::ToolCallResult,
                                             json!({
                                                 "tool": dispatch_result.canonical_ref,
                                                 "call_id": dispatch_result.call_id,
@@ -1140,6 +1174,7 @@ impl Runner {
                                                 facets: None,
                                                 launch_window: None,
                                             },
+                                            hook_dispatch: None,
                                         },
                                     )
                                     .await
@@ -1263,7 +1298,11 @@ impl Runner {
                     } else {
                         // All tools processed — fire after_step hook
                         State::FiringHooks {
-                            event: "after_step".to_string(),
+                            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                                definition_ref: self.definition_ref.clone(),
+                                definition_hash: self.definition_hash.clone(),
+                                turn,
+                            },
                             context: json!({"turn": turn}),
                             resume_to: Box::new(State::CheckingContinuation),
                         }
@@ -1339,17 +1378,30 @@ impl Runner {
                                     continue;
                                 }
 
+                                if let Err(e) = self.persist_terminal_outputs() {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "directive terminal persistence failed: {e:#}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+
                                 // Finalize thread. The persisted result mirrors
                                 // the live RuntimeResult.result here (the
                                 // `directive_return` sentinel); the structured
                                 // outputs travel in `outputs` + the published
                                 // artifact, so /execute and threads.get agree.
                                 let completion = TerminalCompletion {
-                                    status: "completed".to_string(),
+                                    status: ThreadTerminalStatus::Completed,
                                     outcome_code: Some("success".to_string()),
                                     result: Some(json!("directive_return")),
                                     error: None,
-                                    cost: serde_json::to_value(self.budget.cost()).ok(),
+                                    cost: Some(
+                                        serde_json::to_value(self.budget.cost()).expect(
+                                            "validated directive cost must serialize for terminal settlement",
+                                        ),
+                                    ),
                                     // The structured return lives in `outputs`, not
                                     // `result` — carry it so a follow parent can
                                     // consume `${result.outputs.*}` on resume.
@@ -1360,7 +1412,7 @@ impl Runner {
                                     guard.finalized = true;
                                     return Self::attach_warnings(RuntimeResult {
                                         success: false,
-                                        status: "errored".to_string(),
+                                        status: RuntimeResultStatus::Failed,
                                         thread_id: self.thread_id.clone(),
                                         result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
                                         outputs: json!({}),
@@ -1411,24 +1463,27 @@ impl Runner {
                 }
 
                 State::FiringHooks {
-                    event,
+                    occurrence,
                     context,
                     resume_to,
                 } => {
+                    let event = occurrence.event().to_string();
                     let callback = self.callback.clone();
                     let thread_id = self.thread_id.clone();
                     let project_path = self.callback.project_path().to_string();
 
                     let dispatcher: ryeos_runtime::hooks_eval::HookDispatcher =
-                        Box::new(move |action, proj| {
+                        Box::new(move |action, proj, hook_dispatch| {
                             let cb = callback.clone();
                             let tid = thread_id.clone();
                             Box::pin(async move {
-                                let payload: ryeos_runtime::callback::ActionPayload =
-                                    serde_json::from_value(action).map_err(|e| {
-                                        ryeos_runtime::callback::CallbackError::Transport(
-                                            anyhow::anyhow!("invalid hook action: {}", e),
-                                        )
+                                let payload = ryeos_runtime::callback::parse_hook_action(action)
+                                    .map_err(|message| {
+                                        ryeos_runtime::callback::CallbackError::ActionFailed {
+                                            code: "invalid_hook_action".to_string(),
+                                            message,
+                                            retryable: false,
+                                        }
                                     })?;
                                 let response = cb
                                     .dispatch_action(
@@ -1436,31 +1491,50 @@ impl Runner {
                                             thread_id: tid,
                                             project_path: proj,
                                             action: payload,
+                                            hook_dispatch: Some(hook_dispatch),
                                         },
                                     )
-                                    .await
-                                    .map_err(|e| {
-                                        ryeos_runtime::callback::CallbackError::Transport(
-                                            anyhow::anyhow!("{}", e),
-                                        )
-                                    })?;
+                                    .await?;
                                 // Hooks run on the leaf result only —
                                 // the parent-thread snapshot has no
                                 // bearing on hook control flow.
-                                normalize_hook_dispatch_result(response.result)
+                                normalize_hook_dispatch_result(response.result).map_err(|message| {
+                                    ryeos_runtime::callback::CallbackError::ActionFailed {
+                                        code: ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
+                                            .to_string(),
+                                        message: message.to_string(),
+                                        retryable: false,
+                                    }
+                                })
                             })
                         });
 
-                    match ryeos_runtime::hooks_eval::run_hooks(
-                        &event,
+                    let hook_run = ryeos_runtime::hooks_eval::run_hooks(
+                        occurrence,
                         &context,
                         &self.hooks,
                         &project_path,
                         &dispatcher,
                     )
-                    .await
-                    {
-                        Ok(hook_result) => {
+                    .await;
+                    let hook_cost = match &hook_run {
+                        Ok(result) => result.cost.as_ref(),
+                        Err(error) => error.cost.as_ref(),
+                    };
+                    if let Some(cost) = hook_cost {
+                        if let Err(error) = self.budget.accumulate(cost) {
+                            state = State::Errored {
+                                error: format!(
+                                    "hook event `{event}` cost violates accounting bounds: {error}"
+                                ),
+                            };
+                            continue;
+                        }
+                    }
+
+                    match hook_run {
+                        Ok(hook_run) => {
+                            let hook_result = hook_run.control;
                             // Hook events ("before_step", "after_step", …)
                             // are not in the daemon's event-vocabulary
                             // allow-list; map them to `cognition_reasoning`
@@ -1471,8 +1545,8 @@ impl Runner {
                                 &mut warnings,
                                 &format!("cognition_reasoning(hook={event})"),
                                 self.callback
-                                    .append_event(
-                                        "cognition_reasoning",
+                                    .append_runtime_event(
+                                        RuntimeEventType::CognitionReasoning,
                                         json!({
                                             "hook_event": event.clone(),
                                             "hook_result": hook_result.clone(),
@@ -1533,7 +1607,11 @@ impl Runner {
                         // resolved carry_turns policy when folding history.)
                         if self.continuation_config.enabled() {
                             State::FiringHooks {
-                                event: "continuation".to_string(),
+                                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
+                                    definition_ref: self.definition_ref.clone(),
+                                    definition_hash: self.definition_hash.clone(),
+                                    turn,
+                                },
                                 context: self.continuation_hook_context(live_context, threshold),
                                 resume_to: Box::new(State::Continued),
                             }
@@ -1608,19 +1686,27 @@ impl Runner {
                             declared_outputs.join(", ")
                         ));
                     }
+                    if let Err(e) = self.persist_terminal_outputs() {
+                        state = State::Errored {
+                            error: format!("directive terminal persistence failed: {e:#}"),
+                        };
+                        continue;
+                    }
                     let completion = TerminalCompletion {
-                        status: "completed".to_string(),
+                        status: ThreadTerminalStatus::Completed,
                         outcome_code: Some("success".to_string()),
                         result: Some(result.clone()),
                         error: None,
-                        cost: serde_json::to_value(self.budget.cost()).ok(),
+                        cost: Some(serde_json::to_value(self.budget.cost()).expect(
+                            "validated directive cost must serialize for terminal settlement",
+                        )),
                         outputs: json!({}),
                         warnings: warnings.clone(),
                     };
                     if let Err(e) = self.callback.finalize_thread(completion).await {
                         let runtime_result = RuntimeResult {
                             success: false,
-                            status: "errored".to_string(),
+                            status: RuntimeResultStatus::Failed,
                             thread_id: self.thread_id.clone(),
                             result: Some(json!(format!(
                                 "resume-critical callback finalize_thread failed: {e}"
@@ -1645,14 +1731,42 @@ impl Runner {
                     // Do NOT swallow: a failed handoff must not settle the thread
                     // `continued` with no recorded successor. Surface as terminal
                     // `failed`.
+                    if let Err(e) = self.persist_terminal_outputs() {
+                        state = State::Errored {
+                            error: format!("directive terminal persistence failed: {e:#}"),
+                        };
+                        continue;
+                    }
+                    let runtime_result = RuntimeResult {
+                        success: false,
+                        status: RuntimeResultStatus::Continued,
+                        thread_id: self.thread_id.clone(),
+                        result: None,
+                        outputs: json!({}),
+                        cost: Some(self.budget.cost()),
+                        warnings: Vec::new(),
+                    };
+                    let completion = TerminalCompletion {
+                        status: ThreadTerminalStatus::Continued,
+                        outcome_code: Some(ThreadTerminalStatus::Continued.as_str().to_string()),
+                        result: runtime_result.result.clone(),
+                        error: None,
+                        cost: runtime_result.cost.as_ref().map(|cost| {
+                            serde_json::to_value(cost).expect(
+                                "typed directive cost must serialize for continuation settlement",
+                            )
+                        }),
+                        outputs: runtime_result.outputs.clone(),
+                        warnings: warnings.clone(),
+                    };
                     if let Err(e) = self
                         .callback
-                        .request_continuation(Some(CONTINUATION_LOG_REASON))
+                        .request_continuation(Some(CONTINUATION_LOG_REASON), completion)
                         .await
                     {
                         let runtime_result = RuntimeResult {
                             success: false,
-                            status: "failed".to_string(),
+                            status: RuntimeResultStatus::Failed,
                             thread_id: self.thread_id.clone(),
                             result: Some(json!(format!("continuation handoff failed: {e}"))),
                             outputs: json!({}),
@@ -1663,31 +1777,30 @@ impl Runner {
                         return Self::attach_warnings(runtime_result, &mut warnings);
                     }
 
-                    let runtime_result = RuntimeResult {
-                        success: false,
-                        status: "continued".to_string(),
-                        thread_id: self.thread_id.clone(),
-                        result: None,
-                        outputs: json!({}),
-                        cost: Some(self.budget.cost()),
-                        warnings: Vec::new(),
-                    };
                     guard.finalized = true;
                     return Self::attach_warnings(runtime_result, &mut warnings);
                 }
 
                 State::Errored { error } => {
+                    let error = match self.persist_terminal_outputs() {
+                        Ok(()) => error,
+                        Err(persistence_error) => format!(
+                            "{error}; directive terminal persistence also failed: {persistence_error:#}"
+                        ),
+                    };
                     record_callback_warning(
                         &mut warnings,
                         "thread_failed(emit_error)",
                         self.callback.emit_error(&error).await,
                     );
                     let completion = TerminalCompletion {
-                        status: "failed".to_string(),
+                        status: ThreadTerminalStatus::Failed,
                         outcome_code: Some("failed".to_string()),
                         result: None,
                         error: Some(json!(error)),
-                        cost: serde_json::to_value(self.budget.cost()).ok(),
+                        cost: Some(serde_json::to_value(self.budget.cost()).expect(
+                            "validated directive cost must serialize for terminal settlement",
+                        )),
                         outputs: json!({}),
                         warnings: warnings.clone(),
                     };
@@ -1699,7 +1812,7 @@ impl Runner {
                     }
                     let runtime_result = RuntimeResult {
                         success: false,
-                        status: "errored".to_string(),
+                        status: RuntimeResultStatus::Failed,
                         thread_id: self.thread_id.clone(),
                         result: Some(json!(error)),
                         outputs: json!({}),
@@ -1711,9 +1824,15 @@ impl Runner {
                 }
 
                 State::Cancelled => {
+                    if let Err(e) = self.persist_terminal_outputs() {
+                        state = State::Errored {
+                            error: format!("directive terminal persistence failed: {e:#}"),
+                        };
+                        continue;
+                    }
                     let runtime_result = RuntimeResult {
                         success: false,
-                        status: "cancelled".to_string(),
+                        status: RuntimeResultStatus::Cancelled,
                         thread_id: self.thread_id.clone(),
                         result: Some(json!("cancelled by signal")),
                         outputs: json!({}),
@@ -1809,7 +1928,7 @@ impl Runner {
 
         RuntimeResult {
             success: true,
-            status: "completed".to_string(),
+            status: RuntimeResultStatus::Completed,
             thread_id: self.thread_id.clone(),
             result: Some(result),
             outputs: json!({}),
@@ -1884,10 +2003,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // Model not in the (empty) per-model table → provider-default rates.
@@ -1929,16 +2052,20 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         let result = runner.finalize(json!("Hello world"));
         assert!(result.success);
         assert_eq!(result.result.unwrap(), "Hello world");
-        assert_eq!(result.status, "completed");
+        assert_eq!(result.status, RuntimeResultStatus::Completed);
     }
 
     #[test]
@@ -1980,10 +2107,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         assert_eq!(runner.messages.len(), 2);
@@ -2029,10 +2160,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         assert!(runner.directive_outputs.is_some());
@@ -2055,7 +2190,7 @@ mod tests {
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(1.0);
-        budget.report(10, 5, 0.25);
+        budget.report(10, 5, 0.25).unwrap();
         let runner = Runner::new(RunnerConfig {
             messages: vec![ProviderMessage {
                 role: "assistant".to_string(),
@@ -2079,10 +2214,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         let context = runner.continuation_hook_context(123, 456);
@@ -2110,26 +2249,56 @@ mod tests {
             "status": "completed",
             "result": {"action": "abort"},
             "outputs": {},
-            "warnings": []
+            "warnings": [],
+            "cost": null
         }))
         .unwrap();
 
-        assert_eq!(result, json!({"action": "abort"}));
+        assert_eq!(result.value, json!({"action": "abort"}));
     }
 
     #[test]
     fn hook_dispatch_result_rejects_failed_runtime_envelope() {
-        let err = normalize_hook_dispatch_result(json!({
+        let output = normalize_hook_dispatch_result(json!({
             "success": false,
             "status": "failed",
-            "result": null,
-            "error": "boom",
+            "result": {"error": "boom"},
             "outputs": {},
-            "warnings": []
+            "warnings": [],
+            "cost": null
         }))
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("hook_child_failed"));
+        assert!(output.failure.unwrap().contains("hook_child_failed"));
+    }
+
+    #[test]
+    fn hook_dispatch_result_rejects_legacy_or_contradictory_runtime_status() {
+        for envelope in [
+            json!({
+                "success": false,
+                "status": "error",
+                "result": null,
+                "outputs": {},
+                "warnings": [],
+                "cost": null
+            }),
+            json!({
+                "success": true,
+                "status": "failed",
+                "result": null,
+                "outputs": {},
+                "warnings": [],
+                "cost": null
+            }),
+        ] {
+            match normalize_hook_dispatch_result(envelope) {
+                Ok(output) => assert!(output
+                    .failure
+                    .is_some_and(|failure| failure.contains("hook_child_failed"))),
+                Err(error) => assert!(error.contains("hook_child_failed")),
+            }
+        }
     }
 
     #[test]
@@ -2142,43 +2311,39 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(result, json!({"action": "abort"}));
+        assert_eq!(result.value, json!({"action": "abort"}));
     }
 
     #[test]
     fn hook_dispatch_result_rejects_failed_managed_envelope() {
-        let err = normalize_hook_dispatch_result(json!({
+        let output = normalize_hook_dispatch_result(json!({
             "outcome_code": "failed",
             "result": null,
             "error": "boom",
             "artifacts": []
         }))
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("hook_child_failed"));
+        assert!(output.failure.unwrap().contains("hook_child_failed"));
     }
 
     #[test]
     fn hook_dispatch_result_preserves_raw_tool_result() {
         let result = normalize_hook_dispatch_result(json!({"action": "abort"})).unwrap();
 
-        assert_eq!(result, json!({"action": "abort"}));
+        assert_eq!(result.value, json!({"action": "abort"}));
 
-        let result = normalize_hook_dispatch_result(json!({"success": true, "value": 42})).unwrap();
+        let error =
+            normalize_hook_dispatch_result(json!({"success": true, "value": 42})).unwrap_err();
+        assert!(error.contains("malformed native runtime envelope"));
 
-        assert_eq!(result, json!({"success": true, "value": 42}));
-
-        let result = normalize_hook_dispatch_result(json!({
+        let error = normalize_hook_dispatch_result(json!({
             "success": true,
             "status": "completed",
             "action": "abort"
         }))
-        .unwrap();
-
-        assert_eq!(
-            result,
-            json!({"success": true, "status": "completed", "action": "abort"})
-        );
+        .unwrap_err();
+        assert!(error.contains("malformed native runtime envelope"));
     }
 
     #[test]
@@ -2214,6 +2379,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2221,6 +2388,8 @@ mod tests {
                 temperature: Some(0.3),
                 seed: Some(42),
             }),
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         let s = runner.sampling.unwrap();
@@ -2273,10 +2442,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "claude-haiku-4-5".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // 1M input + 1M output → 0.80 + 4.00 = 4.80
@@ -2326,10 +2499,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "unknown-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // Falls back to provider defaults: 1M input + 1M output → 1.0 + 5.0 = 6.0
@@ -2375,10 +2552,14 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
             sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
         });
 
         // No pricing configured: nonzero tokens but $0 cost, flagged Unpriced so

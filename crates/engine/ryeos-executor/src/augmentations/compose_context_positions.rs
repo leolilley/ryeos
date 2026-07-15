@@ -213,6 +213,7 @@ pub async fn run(
         child_provenance,
         None,
         Some(runtime_item_ref_string.clone()),
+        verified_runtime.raw_content_digest.clone(),
         serde_json::Value::Null,
         0,
     );

@@ -33,18 +33,18 @@ Test directive that exercises the Zen provider with a Claude model — verifies 
 
 <process>
   <step name="write_marker">
-    Write a test marker file to {input:output_dir|outputs}/zen_anthropic.txt with content "zen_anthropic_start".
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/zen_anthropic.txt", "content": "zen_anthropic_start", "create_dirs": true})`
+    Write a test marker file to ${inputs.output_dir ?? "outputs"}/zen_anthropic.txt with content "zen_anthropic_start".
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/zen_anthropic.txt", "content": "zen_anthropic_start", "create_dirs": true})`
   </step>
 
   <step name="read_back">
     Read the file back to verify it was written correctly.
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "{input:output_dir|outputs}/zen_anthropic.txt"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "${inputs.output_dir ?? 'outputs'}/zen_anthropic.txt"})`
   </step>
 
   <step name="append_info">
     Append the model name and a completion marker to the file.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/zen_anthropic.txt", "content": "\nmodel: claude via zen anthropic profile\nstatus: complete", "mode": "append"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/zen_anthropic.txt", "content": "\nmodel: claude via zen anthropic profile\nstatus: complete", "mode": "append"})`
   </step>
 </process>
 

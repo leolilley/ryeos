@@ -848,6 +848,7 @@ metadata:
             resolved_from: "test".to_string(),
             shadowed: vec![],
             materialized_project_root: project_dir,
+            raw_content_digest: "test_raw_hash".to_string(),
             content_hash: "test_hash".to_string(),
             signature_header: None,
             source_format: ResolvedSourceFormat {

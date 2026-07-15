@@ -33,18 +33,18 @@ Test directive that exercises the Zen provider with a Gemini model — verifies 
 
 <process>
   <step name="write_marker">
-    Write a test marker file to {input:output_dir|outputs}/zen_gemini.txt with content "zen_gemini_start".
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/zen_gemini.txt", "content": "zen_gemini_start", "create_dirs": true})`
+    Write a test marker file to ${inputs.output_dir ?? "outputs"}/zen_gemini.txt with content "zen_gemini_start".
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/zen_gemini.txt", "content": "zen_gemini_start", "create_dirs": true})`
   </step>
 
   <step name="read_back">
     Read the file back to verify it was written correctly.
-    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "{input:output_dir|outputs}/zen_gemini.txt"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/read", parameters={"path": "${inputs.output_dir ?? 'outputs'}/zen_gemini.txt"})`
   </step>
 
   <step name="append_info">
     Append the model name and a completion marker to the file.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/zen_gemini.txt", "content": "\nmodel: gemini-3-flash via zen gemini profile\nstatus: complete", "mode": "append"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/zen_gemini.txt", "content": "\nmodel: gemini-3-flash via zen gemini profile\nstatus: complete", "mode": "append"})`
   </step>
 </process>
 
@@ -53,4 +53,3 @@ Test directive that exercises the Zen provider with a Gemini model — verifies 
   <criterion>File read-back matches written content</criterion>
   <criterion>Append operation succeeds</criterion>
 </success_criteria>
-

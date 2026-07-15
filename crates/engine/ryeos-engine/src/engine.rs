@@ -249,6 +249,16 @@ impl Engine {
                 ))
             })?;
 
+        // Pin the exact signature-stripped bytes consumed by runtimes. Hook
+        // occurrence identities use this digest, not the whole signed-file
+        // digest carried in `content_hash`.
+        let raw_content = lillux::signature::strip_signature_lines_with_envelope(
+            &content,
+            &source_format.signature.prefix,
+            source_format.signature.suffix.as_deref(),
+        );
+        let raw_content_digest = crate::item_resolution::content_hash(&raw_content);
+
         // Parse raw document via the **effective** parser dispatcher
         // — the boot dispatcher overlaid by this project's
         // `.ai/parsers/` if any. Then apply extraction rules from
@@ -300,6 +310,7 @@ impl Engine {
             resolved_from: result.winner_label,
             shadowed: result.shadowed,
             materialized_project_root: project_root,
+            raw_content_digest,
             content_hash: hash,
             signature_header,
             source_format,
@@ -896,6 +907,13 @@ formats:
         assert_eq!(sig.signer_fingerprint, "fp_test");
         assert_eq!(resolved.materialized_project_root, Some(project_dir));
         assert!(!resolved.content_hash.is_empty());
+        assert_eq!(
+            resolved.raw_content_digest,
+            crate::item_resolution::content_hash(
+                "# ryeos-tool:\n#   note: hello\nprint('hello')\n"
+            )
+        );
+        assert_ne!(resolved.raw_content_digest, resolved.content_hash);
     }
 
     fn signed_tool_content(

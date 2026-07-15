@@ -1,11 +1,14 @@
 use serde_json::{json, Value};
 
+use crate::evaluation::validate_runtime_shape;
 use crate::model::ErrorRecord;
 use ryeos_runtime::checkpoint::CheckpointWriter;
 
-use super::{follow_keys, Walker, GRAPH_CHECKPOINT_SCHEMA_VERSION};
+use super::{follow_keys, Walker, EXPRESSION_LANGUAGE, GRAPH_CHECKPOINT_SCHEMA_VERSION};
 
 struct CheckpointCursor<'a> {
+    definition_ref: &'a str,
+    definition_hash: &'a str,
     graph_run_id: &'a str,
     next_node: &'a str,
     next_step: u32,
@@ -19,6 +22,8 @@ struct CheckpointCursor<'a> {
 /// Build the versioned cursor payload persisted after an advancing step.
 fn checkpoint_payload(cursor: CheckpointCursor<'_>) -> Value {
     let CheckpointCursor {
+        definition_ref,
+        definition_hash,
         graph_run_id,
         next_node,
         next_step,
@@ -30,6 +35,9 @@ fn checkpoint_payload(cursor: CheckpointCursor<'_>) -> Value {
     } = cursor;
     json!({
         "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
+        "definition_ref": definition_ref,
+        "definition_hash": definition_hash,
+        "expression_language": EXPRESSION_LANGUAGE,
         "graph_run_id": graph_run_id,
         "current_node": next_node,
         "step_count": next_step,
@@ -63,7 +71,66 @@ fn follow_checkpoint_payload(
     payload
 }
 
+/// Enforce one aggregate rye-expr/1 envelope limit across state, accounting,
+/// suppressed errors, and any pending-follow snapshot before persistence. Each
+/// constituent is bounded as it is produced; this final borrowed pass catches
+/// a checkpoint whose individually valid parts are too large in combination.
+fn validate_checkpoint_payload(payload: &Value) -> anyhow::Result<()> {
+    validate_runtime_shape(payload, "graph checkpoint payload").map_err(|error| {
+        anyhow::anyhow!("graph checkpoint payload exceeded rye-expr/1 bounds: {error}")
+    })
+}
+
 impl Walker {
+    /// Fail checkpoint persistence deterministically after `successful_writes`
+    /// writes. The seam exists only in graph-runtime unit-test builds and is
+    /// deliberately below every checkpoint payload constructor so ordinary and
+    /// pending-follow writes exercise the same failure boundary.
+    #[cfg(test)]
+    pub(super) fn fail_checkpoint_writes_after(&self, successful_writes: usize) {
+        *self.checkpoint_writes_before_failure.lock().unwrap() = Some(successful_writes);
+    }
+
+    /// Crash deterministically after `successful_writes` additional atomic
+    /// checkpoint replacements and before the completed commit can advance.
+    /// A panic is intentional here: unlike a rejected write, this models an
+    /// abrupt process loss after durable authority has already moved.
+    #[cfg(test)]
+    pub(super) fn crash_after_checkpoint_writes(&self, successful_writes: usize) {
+        *self.checkpoint_writes_before_crash.lock().unwrap() = Some(successful_writes);
+    }
+
+    #[cfg(test)]
+    fn inject_checkpoint_write_failure(&self) -> anyhow::Result<()> {
+        let mut writes_before_failure = self.checkpoint_writes_before_failure.lock().unwrap();
+        let Some(remaining) = writes_before_failure.as_mut() else {
+            return Ok(());
+        };
+        if *remaining == 0 {
+            anyhow::bail!("injected checkpoint persistence failure");
+        }
+        *remaining -= 1;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn inject_post_checkpoint_crash(&self) {
+        let should_crash = {
+            let mut writes_before_crash = self.checkpoint_writes_before_crash.lock().unwrap();
+            let Some(remaining) = writes_before_crash.as_mut() else {
+                return;
+            };
+            if *remaining == 0 {
+                *writes_before_crash = None;
+                true
+            } else {
+                *remaining -= 1;
+                false
+            }
+        };
+        assert!(!should_crash, "injected crash after checkpoint persistence");
+    }
+
     /// Write a checkpoint marking a follow suspend. The cursor points at the
     /// follow node itself so re-entry can idempotently re-drive the handoff.
     pub(super) async fn write_follow_checkpoint(
@@ -75,15 +142,19 @@ impl Walker {
         suppressed_errors: &[ErrorRecord],
         iteration_snapshot: Option<&[Value]>,
     ) -> anyhow::Result<()> {
+        self.ensure_run_history_bounded()?;
         let Some(writer) = &self.checkpoint else {
             return Ok(());
         };
         let accounting = {
             let acc = self.accounting.lock().unwrap();
-            serde_json::to_value(&*acc).unwrap_or(Value::Null)
+            serde_json::to_value(&*acc)
+                .map_err(|error| anyhow::anyhow!("serialize graph accounting: {error}"))?
         };
-        writer.write(&follow_checkpoint_payload(
+        let payload = follow_checkpoint_payload(
             CheckpointCursor {
+                definition_ref: &self.graph.definition_ref,
+                definition_hash: &self.graph.definition_hash,
                 graph_run_id,
                 next_node: follow_node,
                 next_step: step,
@@ -94,7 +165,13 @@ impl Walker {
                 written_at: &lillux::time::iso8601_now(),
             },
             iteration_snapshot,
-        ))?;
+        );
+        validate_checkpoint_payload(&payload)?;
+        #[cfg(test)]
+        self.inject_checkpoint_write_failure()?;
+        writer.write(&payload)?;
+        #[cfg(test)]
+        self.inject_post_checkpoint_crash();
         Ok(())
     }
 
@@ -109,14 +186,18 @@ impl Walker {
         suppressed_errors: &[ErrorRecord],
         retry_attempt: u32,
     ) -> anyhow::Result<()> {
+        self.ensure_run_history_bounded()?;
         let Some(writer) = &self.checkpoint else {
             return Ok(());
         };
         let accounting = {
             let acc = self.accounting.lock().unwrap();
-            serde_json::to_value(&*acc).unwrap_or(Value::Null)
+            serde_json::to_value(&*acc)
+                .map_err(|error| anyhow::anyhow!("serialize graph accounting: {error}"))?
         };
-        writer.write(&checkpoint_payload(CheckpointCursor {
+        let payload = checkpoint_payload(CheckpointCursor {
+            definition_ref: &self.graph.definition_ref,
+            definition_hash: &self.graph.definition_hash,
             graph_run_id,
             next_node,
             next_step,
@@ -125,7 +206,13 @@ impl Walker {
             suppressed_errors,
             retry_attempt,
             written_at: &lillux::time::iso8601_now(),
-        }))?;
+        });
+        validate_checkpoint_payload(&payload)?;
+        #[cfg(test)]
+        self.inject_checkpoint_write_failure()?;
+        writer.write(&payload)?;
+        #[cfg(test)]
+        self.inject_post_checkpoint_crash();
 
         // Production-inert crash injection used by the graph recovery e2e.
         if !CheckpointWriter::is_resume()
@@ -154,17 +241,22 @@ mod tests {
 
         let state = json!({"answer": 42});
         let payload = checkpoint_payload(CheckpointCursor {
+            definition_ref: "graph:test/example",
+            definition_hash: "sha256:test-definition",
             graph_run_id: "run-1",
             next_node: "retrying",
             next_step: 4,
             state: &state,
-            accounting: json!({"total": null, "nodes": []}),
+            accounting: json!({"total": null, "nodes": [], "hooks": []}),
             suppressed_errors: &errors,
             retry_attempt: 2,
             written_at: "2026-01-02T03:04:05Z",
         });
 
         assert_eq!(payload["schema_version"], GRAPH_CHECKPOINT_SCHEMA_VERSION);
+        assert_eq!(payload["definition_ref"], "graph:test/example");
+        assert_eq!(payload["definition_hash"], "sha256:test-definition");
+        assert_eq!(payload["expression_language"], EXPRESSION_LANGUAGE);
         assert_eq!(payload["current_node"], "retrying");
         assert_eq!(payload["step_count"], 4);
         assert_eq!(payload["retry_attempt"], 2);
@@ -177,11 +269,13 @@ mod tests {
         let state = json!({});
         let payload = follow_checkpoint_payload(
             CheckpointCursor {
+                definition_ref: "graph:test/example",
+                definition_hash: "sha256:test-definition",
                 graph_run_id: "run-2",
                 next_node: "wait-for-child",
                 next_step: 7,
                 state: &state,
-                accounting: Value::Null,
+                accounting: json!({"total": null, "nodes": [], "hooks": []}),
                 suppressed_errors: &[],
                 retry_attempt: 0,
                 written_at: "2026-01-02T03:04:05Z",
@@ -202,5 +296,39 @@ mod tests {
         assert!(payload[follow_keys::PENDING_FOLLOW]
             .get("child_thread_id")
             .is_none());
+    }
+
+    #[test]
+    fn checkpoint_rejects_parts_that_exceed_the_combined_payload_budget() {
+        let chunk = "x".repeat(700 * 1024);
+        let state = json!({
+            "parts": [chunk.clone(), chunk.clone(), chunk.clone()],
+        });
+        let errors = (0..3)
+            .map(|step| ErrorRecord {
+                step,
+                node: "previous".to_string(),
+                error: chunk.clone(),
+            })
+            .collect::<Vec<_>>();
+        let error_value = serde_json::to_value(&errors).unwrap();
+        assert!(validate_runtime_shape(&state, "test state").is_ok());
+        assert!(validate_runtime_shape(&error_value, "test errors").is_ok());
+
+        let payload = checkpoint_payload(CheckpointCursor {
+            definition_ref: "graph:test/example",
+            definition_hash: "sha256:test-definition",
+            graph_run_id: "run-large",
+            next_node: "next",
+            next_step: 2,
+            state: &state,
+            accounting: json!({"total": null, "nodes": [], "hooks": []}),
+            suppressed_errors: &errors,
+            retry_attempt: 0,
+            written_at: "2026-01-02T03:04:05Z",
+        });
+
+        let error = validate_checkpoint_payload(&payload).unwrap_err();
+        assert!(error.to_string().contains("JSON byte limit"));
     }
 }

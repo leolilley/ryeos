@@ -304,6 +304,12 @@ pub enum DispatchError {
         warning_count: usize,
         details: ContractViolationDetails,
     },
+    /// The daemon cannot prove that a previously reserved hook action is safe
+    /// to issue again, or the durable identity/response record drifted. This is
+    /// always fatal and non-retryable: retrying could duplicate an external
+    /// side effect.
+    #[error("hook dispatch integrity failure: {detail}")]
+    HookDispatchIntegrity { detail: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -379,7 +385,9 @@ impl DispatchError {
                 StatusCode::BAD_GATEWAY
             }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
-            Self::Internal(_) | Self::TargetSiteForwardInternal { .. } => {
+            Self::HookDispatchIntegrity { .. }
+            | Self::Internal(_)
+            | Self::TargetSiteForwardInternal { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
@@ -430,6 +438,9 @@ impl DispatchError {
             Self::TargetSiteForwardConflict { .. } => "target_site_forward_conflict",
             Self::TargetSiteForwardBadGateway { .. } => "target_site_forward_bad_gateway",
             Self::TargetSiteForwardInternal { .. } => "target_site_forward_internal",
+            Self::HookDispatchIntegrity { .. } => {
+                ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
+            }
             Self::Internal(_) => "internal",
         }
     }
@@ -510,6 +521,19 @@ mod tests {
         assert_eq!(e.http_status(), StatusCode::CONFLICT);
         assert_eq!(e.code(), "conflict");
         assert!(e.to_string().contains("snap-track-feed"));
+    }
+
+    #[test]
+    fn hook_integrity_is_internal_and_never_retryable() {
+        let error = DispatchError::HookDispatchIntegrity {
+            detail: "pending outcome unknown".to_string(),
+        };
+        assert_eq!(error.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.code(),
+            ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
+        );
+        assert!(!error.retryable());
     }
 
     #[test]

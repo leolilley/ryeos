@@ -41,20 +41,20 @@ context:
 <process>
   <step name="validate">
     <instruction>
-      Validate that {input:environment} is one of: staging, production.
+      Validate that ${inputs.environment} is one of: staging, production.
     </instruction>
   </step>
 
   <step name="deploy">
     <instruction>
       Deploy the project:
-      `rye_execute(item_id="tool:my/project/deploy", parameters={"env": "{input:environment}"})`
+      `rye_execute(item_id="tool:my/project/deploy", parameters={"env": "${inputs.environment}"})`
     </instruction>
   </step>
 
   <step name="confirm">
     <render>
-    Deployed to {input:environment} successfully.
+    Deployed to ${inputs.environment} successfully.
     </render>
   </step>
 </process>
@@ -79,7 +79,13 @@ Rules:
 - Output `<render>` blocks verbatim — do not summarize or rephrase
 - Follow `<instruction>` blocks silently — do not narrate the thinking
 - Steps run in order unless a `condition` is specified
-- Use `{input:name}` for input interpolation, `{env:VAR}` for environment variables
+- Use rye-expr/1 `${inputs.name}` expressions for input interpolation. Use
+  `${inputs.name ?? "default"}` for a nullish fallback and `${json(inputs.value)}`
+  when structured data must be embedded in text. Directive bodies expose only
+  the `inputs` root, and each reference must name one exact input. Dynamic
+  indexes such as `inputs[key]` are rejected (literal `inputs["name"]` is
+  accepted) so RyeOS can append every unreferenced input exactly once. `$${`
+  emits a literal `${`.
 
 ## Frontmatter Fields
 

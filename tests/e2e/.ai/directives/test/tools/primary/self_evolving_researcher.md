@@ -35,29 +35,29 @@ Self-evolution and research directive. Searches for existing knowledge, loads re
   </inputs>
 
   <outputs>
-    <success>Self-evolving research complete — report written, knowledge entry created and signed, evolution logged. New knowledge: {input:research_topic}-learnings</success>
-    <failure>Research pipeline failed — check knowledge search results, verify {input:workspace_dir} is writable, and ensure .ai/knowledge/ directory exists</failure>
+    <success>Self-evolving research complete — report written, knowledge entry created and signed, evolution logged. New knowledge: ${inputs.research_topic}-learnings</success>
+    <failure>Research pipeline failed — check knowledge search results, verify ${inputs.workspace_dir} is writable, and ensure .ai/knowledge/ directory exists</failure>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="search_existing_knowledge">
-    Search for existing knowledge entries related to "{input:research_topic}".
+    Search for existing knowledge entries related to "${inputs.research_topic}".
   </step>
   <step name="load_reference_context">
     Load the `rye-architecture` knowledge entry for reference context about the system.
   </step>
   <step name="write_research_report">
-    Synthesize findings from existing knowledge and reference context into a research report. Write it to `{input:workspace_dir}/research_report.md`.
+    Synthesize findings from existing knowledge and reference context into a research report. Write it to `${inputs.workspace_dir}/research_report.md`.
   </step>
   <step name="create_knowledge_entry">
-    Create a new knowledge entry at `.ai/knowledge/{input:research_topic}-learnings.md` with YAML frontmatter and a body summarizing the research learnings.
+    Create a new knowledge entry at `.ai/knowledge/${inputs.research_topic}-learnings.md` with YAML frontmatter and a body summarizing the research learnings.
   </step>
   <step name="sign_knowledge">
-    Sign the newly created knowledge entry `{input:research_topic}-learnings`.
+    Sign the newly created knowledge entry `${inputs.research_topic}-learnings`.
   </step>
   <step name="write_evolution_log">
-    Write an evolution log to `{input:workspace_dir}/evolution_log.md` documenting the actions taken and knowledge created.
+    Write an evolution log to `${inputs.workspace_dir}/evolution_log.md` documenting the actions taken and knowledge created.
   </step>
 </process>

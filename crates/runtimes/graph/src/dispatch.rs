@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::envelope::RuntimeCost;
+use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 
 use crate::context::ExecutionContext;
+use crate::model::FanoutItemStatus;
 
 /// Outcome of dispatching a single graph action leaf, classified from
 /// the daemon execute envelope BEFORE the bare result is unwrapped.
@@ -16,7 +18,7 @@ use crate::context::ExecutionContext;
 /// leaf carries `result: null` with the diagnostic in `error`/`status`,
 /// so unconditionally peeling to the bare `result` would turn a failure
 /// into a silent `null` success that then poisons graph state via
-/// suppressed interpolation errors. Classification happens once, here,
+/// suppressed expression errors. Classification happens once, here,
 /// so a failing tool surfaces as a node error with an actionable
 /// diagnostic instead.
 #[derive(Debug)]
@@ -46,6 +48,14 @@ pub struct ActionFailure {
     /// Executed leaf failures default false; callback dispatch classification is
     /// carried by [`ActionDispatchError`] before an envelope exists.
     pub retryable: bool,
+    /// The native child thread that returned this failure, when dispatch already
+    /// created one. Preserved so failure paths publish the same lineage edge as
+    /// successful child dispatches.
+    pub child_thread_id: Option<String>,
+    /// The child returned an authoritative envelope whose structure, status,
+    /// or cost provenance is invalid. Such failures cannot be authored around
+    /// with `on_error`, because doing so could settle after losing accounting.
+    pub integrity: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +78,7 @@ impl From<anyhow::Error> for ActionDispatchError {
 /// cost reported by a native child runtime.
 #[derive(Debug)]
 pub struct ActionSuccess {
-    /// Bare, envelope-unwrapped result for `${result.*}` interpolation.
+    /// Bare, envelope-unwrapped result for `${result.*}` evaluation.
     ///
     /// For a native directive return carrying declared `outputs`, this is
     /// `{result: <inner>, outputs: <outputs>}` so a graph can reach the
@@ -138,7 +148,7 @@ pub async fn dispatch_action(
         .unwrap_or("inline");
 
     // Optional method selector. The node's `call: { method, args }` block
-    // (already `${…}`-interpolated by the walker) maps onto the daemon's
+    // (already rendered by the walker) maps onto the daemon's
     // method dispatch. Absent (or explicit `null`, for parity with how
     // `/execute` deserializes `Option<MethodCall>`) → the leaf takes the
     // kind's default method. A malformed `call` is a node authoring error,
@@ -153,7 +163,7 @@ pub async fn dispatch_action(
     };
 
     // Cohort/fleet facets ride the action Value (the walker sets them from the
-    // node's interpolated `facets:`); the daemon stamps them on a detached child.
+    // node's rendered `facets:`); the daemon stamps them on a detached child.
     let facets = action.get("facets").cloned();
 
     // Bounded-fanout window (the foreach runners set it for a `detach` node
@@ -180,6 +190,7 @@ pub async fn dispatch_action(
             facets,
             launch_window,
         },
+        hook_dispatch: None,
     };
 
     let response = client
@@ -210,7 +221,10 @@ pub async fn dispatch_action(
         .map(str::to_string);
 
     match classify_envelope(response.result) {
-        ActionOutcome::Failure(failure) => Ok(ActionOutcome::Failure(failure)),
+        ActionOutcome::Failure(mut failure) => {
+            failure.child_thread_id = child_thread_id;
+            Ok(ActionOutcome::Failure(failure))
+        }
         ActionOutcome::Success(mut success) => {
             success.child_thread_id = child_thread_id;
             // Inline continuation-chasing is retired. A dispatched child that
@@ -236,6 +250,8 @@ pub async fn dispatch_action(
                     ),
                     cost: success.cost,
                     retryable: false,
+                    child_thread_id: success.child_thread_id,
+                    integrity: false,
                 }));
             }
             Ok(ActionOutcome::Success(success))
@@ -267,75 +283,352 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
     let Some(obj) = value.as_object() else {
         return ActionOutcome::Success(ActionSuccess::bare(value));
     };
-    if !obj.contains_key("result") {
-        // No `result` key — not an envelope; bare leaf data.
-        return ActionOutcome::Success(ActionSuccess::bare(value));
-    }
 
-    // Native-runtime envelope: `{success, status, result, outputs|warnings}`.
-    let is_native = obj.contains_key("success")
-        && obj.contains_key("status")
-        && (obj.contains_key("outputs") || obj.contains_key("warnings"));
-    if is_native {
-        return classify_native_runtime_object(obj);
+    // Any native marker is authoritative. A partial native envelope must fail
+    // closed instead of falling through as successful arbitrary tool data.
+    if obj.contains_key("success") || obj.contains_key("status") {
+        return classify_native_runtime_envelope(value);
     }
 
     // Subprocess envelope: discriminated by `outcome_code`.
     if obj.contains_key("outcome_code") {
-        return if subprocess_succeeded(obj) {
-            ActionOutcome::Success(ActionSuccess::bare(inner_result(obj)))
-        } else {
-            // Subprocess leaves carry no stable cost field.
-            ActionOutcome::Failure(ActionFailure {
-                diagnostic: describe_subprocess_failure(obj),
-                cost: None,
-                retryable: false,
-            })
-        };
+        return classify_subprocess_envelope(value);
     }
 
     // Has `result` but no envelope markers — bare tool data.
     ActionOutcome::Success(ActionSuccess::bare(value))
 }
 
-/// Classify an envelope received through the daemon-managed follow contract.
-///
-/// Unlike an arbitrary tool result, a follow result is known to be a native
-/// runtime envelope. The daemon's cohort join projection retains the required
-/// `success`, `status`, and `result` fields but may omit empty `outputs` and
-/// `warnings`, so it must not use the conservative bare-value discriminator in
-/// [`classify_envelope`].
-pub(crate) fn classify_follow_envelope(value: Value) -> ActionOutcome {
-    let Some(obj) = value.as_object() else {
-        return ActionOutcome::Success(ActionSuccess::bare(value));
-    };
-    if obj.contains_key("success") && obj.contains_key("status") && obj.contains_key("result") {
-        return classify_native_runtime_object(obj);
-    }
-    classify_envelope(value)
+/// Strictly classified result received through the daemon-managed follow
+/// contract. The terminal status stays typed until a serde/wire boundary.
+#[derive(Debug)]
+pub(crate) struct ClassifiedFollowEnvelope {
+    pub(crate) outcome: ActionOutcome,
+    status: RuntimeResultStatus,
 }
 
-fn classify_native_runtime_object(obj: &serde_json::Map<String, Value>) -> ActionOutcome {
-    let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-    if ok {
+impl ClassifiedFollowEnvelope {
+    pub(crate) const fn fanout_status(&self) -> FanoutItemStatus {
+        if self.status.is_success() {
+            FanoutItemStatus::Completed
+        } else {
+            FanoutItemStatus::Failed
+        }
+    }
+}
+
+/// Strictly classified cohort result received through the daemon-managed
+/// follow contract. Item order is the checkpointed iteration order.
+pub(crate) struct ClassifiedFollowFanoutEnvelope {
+    pub(crate) items: Vec<ClassifiedFollowEnvelope>,
+    pub(crate) statuses: Vec<FanoutItemStatus>,
+}
+
+/// Exact daemon-managed native result consumed by live graph dispatch.
+///
+/// A native marker is authoritative: once `success` or `status` is present,
+/// structural drift is a failed child contract rather than arbitrary tool
+/// output. Every canonical field is required, including nullable `cost`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeResultEnvelope {
+    success: bool,
+    status: RuntimeResultStatus,
+    result: Value,
+    outputs: Value,
+    warnings: Vec<String>,
+    cost: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct RequiredNullableString(Option<String>);
+
+/// Exact daemon execute result consumed for subprocess leaves. The marker is
+/// authoritative and every nullable field must still be present on the wire.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubprocessResultEnvelope {
+    outcome_code: RequiredNullableString,
+    result: Value,
+    error: Value,
+    artifacts: Vec<Value>,
+}
+
+/// Exact wire shape written by `managed_runtime_envelope` and spliced into a
+/// follow resume checkpoint. Every field is required, including nullable
+/// `cost`; unknown fields and legacy status spellings are rejected by serde.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FollowResultEnvelope {
+    success: bool,
+    status: RuntimeResultStatus,
+    result: Value,
+    outputs: Value,
+    warnings: Vec<String>,
+    cost: Value,
+}
+
+/// Exact cohort wrapper written by the daemon's follow join. Every field is
+/// required and unknown fields are rejected before graph execution resumes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FollowFanoutResumeEnvelope {
+    fanout: bool,
+    items: Vec<Value>,
+    statuses: Vec<FanoutItemStatus>,
+    failed: usize,
+    expected: usize,
+}
+
+/// Parse and classify a canonical daemon-managed follow result.
+///
+/// Follow results are not arbitrary tool values: accepting a bare value or a
+/// partial native envelope would let corrupt checkpoint data silently become a
+/// successful child result. `continued` is an intermediate link in the child
+/// continuation chain and is never a terminal follow result. For every other
+/// closed status, `success` must agree exactly with the status outcome.
+pub(crate) fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
+    let envelope: FollowResultEnvelope = serde_json::from_value(value)
+        .map_err(|error| format!("malformed follow result envelope: {error}"))?;
+    let FollowResultEnvelope {
+        success,
+        status,
+        result,
+        outputs,
+        warnings: _warnings,
+        cost,
+    } = envelope;
+
+    if status == RuntimeResultStatus::Continued {
+        return Err(
+            "malformed follow result envelope: status `continued` is an intermediate child-chain handoff, not a terminal follow result"
+                .to_string(),
+        );
+    }
+    if success != status.is_success() {
+        return Err(format!(
+            "malformed follow result envelope: success={success} contradicts terminal status `{}`",
+            status.as_str()
+        ));
+    }
+    let cost = if cost.is_null() {
+        None
+    } else {
+        let cost: RuntimeCost = serde_json::from_value(cost)
+            .map_err(|error| format!("malformed follow result envelope cost: {error}"))?;
+        cost.validate()
+            .map_err(|error| format!("malformed follow result envelope cost: {error}"))?;
+        Some(cost)
+    };
+
+    let outcome = if status.is_success() {
+        let result = if has_meaningful_outputs(&outputs) {
+            json!({ "result": result, "outputs": outputs })
+        } else {
+            result
+        };
         ActionOutcome::Success(ActionSuccess {
-            result: native_success_value(obj),
-            cost: parse_native_cost(obj),
+            result,
+            cost,
+            child_thread_id: None,
+        })
+    } else {
+        let mut diagnostic = format!("child runtime failed (status: {})", status.as_str());
+        if let Some(detail) = native_result_failure_detail(&result) {
+            diagnostic.push_str(&format!("; {}", excerpt(&detail, 800)));
+        }
+        ActionOutcome::Failure(ActionFailure {
+            diagnostic,
+            cost,
+            retryable: false,
+            child_thread_id: None,
+            integrity: false,
+        })
+    };
+
+    Ok(ClassifiedFollowEnvelope { outcome, status })
+}
+
+/// Parse and classify the exact daemon-managed cohort result for a checkpointed
+/// follow fanout. Structural drift is checkpoint corruption, not an authored
+/// child failure, so callers must reject an error before applying `on_error`.
+pub(crate) fn classify_follow_fanout_envelope(
+    value: Value,
+    iteration_count: usize,
+) -> Result<ClassifiedFollowFanoutEnvelope, String> {
+    let envelope: FollowFanoutResumeEnvelope = serde_json::from_value(value)
+        .map_err(|error| format!("malformed follow fanout wrapper: {error}"))?;
+    let FollowFanoutResumeEnvelope {
+        fanout,
+        items,
+        statuses,
+        failed,
+        expected,
+    } = envelope;
+
+    if !fanout {
+        return Err("malformed follow fanout wrapper: `fanout` must be true".to_string());
+    }
+    if iteration_count == 0 {
+        return Err(
+            "malformed follow fanout wrapper: checkpointed cohort must contain at least one item"
+                .to_string(),
+        );
+    }
+    if expected != items.len()
+        || items.len() != iteration_count
+        || statuses.len() != items.len()
+    {
+        return Err(
+            "malformed follow fanout wrapper: inconsistent expected/items/statuses/snapshot cardinality"
+                .to_string(),
+        );
+    }
+    let declared_failed = statuses
+        .iter()
+        .filter(|status| **status == FanoutItemStatus::Failed)
+        .count();
+    if failed != declared_failed {
+        return Err(format!(
+            "malformed follow fanout wrapper: failed={failed}, but typed statuses contain {declared_failed} failed items"
+        ));
+    }
+
+    let mut aggregate_cost = RuntimeCost {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_usd: 0.0,
+        basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
+    };
+    let mut classified = Vec::with_capacity(items.len());
+    for (index, (item, declared_status)) in items.into_iter().zip(statuses.iter()).enumerate() {
+        let item = classify_follow_envelope(item)
+            .map_err(|error| format!("follow fanout item {index}: {error}"))?;
+        if item.fanout_status() != *declared_status {
+            return Err(format!(
+                "malformed follow fanout wrapper: item {index} status contradicts its terminal envelope outcome"
+            ));
+        }
+        let cost = match &item.outcome {
+            ActionOutcome::Success(success) => success.cost.as_ref(),
+            ActionOutcome::Failure(failure) => failure.cost.as_ref(),
+        };
+        if let Some(cost) = cost {
+            aggregate_cost.checked_accumulate(cost).map_err(|error| {
+                format!("malformed follow fanout wrapper: aggregate cost is invalid: {error}")
+            })?;
+        }
+        classified.push(item);
+    }
+
+    Ok(ClassifiedFollowFanoutEnvelope {
+        items: classified,
+        statuses,
+    })
+}
+
+fn classify_native_runtime_envelope(value: Value) -> ActionOutcome {
+    let envelope: NativeResultEnvelope = match serde_json::from_value(value) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return malformed_native_runtime_failure(
+                format!("malformed native runtime envelope: {error}"),
+                None,
+            );
+        }
+    };
+    let NativeResultEnvelope {
+        success,
+        status,
+        result,
+        outputs,
+        warnings: _warnings,
+        cost,
+    } = envelope;
+    let cost = match parse_native_cost(cost) {
+        Ok(cost) => cost,
+        Err(diagnostic) => {
+            return ActionOutcome::Failure(ActionFailure {
+                diagnostic,
+                cost: None,
+                retryable: false,
+                child_thread_id: None,
+                integrity: true,
+            })
+        }
+    };
+    if success != status.is_success() {
+        return malformed_native_runtime_failure(
+            format!(
+                "native runtime envelope success={success} contradicts terminal status `{}`",
+                status.as_str()
+            ),
+            cost,
+        );
+    }
+    if status.is_success() {
+        ActionOutcome::Success(ActionSuccess {
+            result: native_success_value(result, outputs),
+            cost,
             child_thread_id: None,
         })
     } else {
         // A failed native child (e.g. a directive that burned tokens then
         // errored) still reports `cost` — preserve it.
         ActionOutcome::Failure(ActionFailure {
-            diagnostic: describe_native_failure(obj),
-            cost: parse_native_cost(obj),
+            diagnostic: describe_native_failure(&result, status),
+            cost,
             retryable: false,
+            child_thread_id: None,
+            integrity: false,
         })
     }
 }
 
-fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {
-    obj.get("result").cloned().unwrap_or(Value::Null)
+fn malformed_native_runtime_failure(
+    diagnostic: String,
+    cost: Option<RuntimeCost>,
+) -> ActionOutcome {
+    ActionOutcome::Failure(ActionFailure {
+        diagnostic,
+        cost,
+        retryable: false,
+        child_thread_id: None,
+        integrity: true,
+    })
+}
+
+fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
+    let envelope: SubprocessResultEnvelope = match serde_json::from_value(value) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return ActionOutcome::Failure(ActionFailure {
+                diagnostic: format!("malformed subprocess result envelope: {error}"),
+                cost: None,
+                retryable: false,
+                child_thread_id: None,
+                integrity: true,
+            });
+        }
+    };
+    let SubprocessResultEnvelope {
+        outcome_code: RequiredNullableString(outcome_code),
+        result,
+        error,
+        artifacts: _artifacts,
+    } = envelope;
+    if error.is_null() {
+        ActionOutcome::Success(ActionSuccess::bare(result))
+    } else {
+        ActionOutcome::Failure(ActionFailure {
+            diagnostic: describe_subprocess_failure(outcome_code.as_deref(), &error),
+            cost: None,
+            retryable: false,
+            child_thread_id: None,
+            integrity: false,
+        })
+    }
 }
 
 /// Graph-visible success value for a native-runtime envelope.
@@ -346,11 +639,11 @@ fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {
 /// return, a sub-graph result, or a directive with no declared outputs —
 /// which emits `outputs: {}`), return the bare inner result so existing
 /// `${result.state}` / `${result.foo}` call sites keep working unchanged.
-fn native_success_value(obj: &serde_json::Map<String, Value>) -> Value {
-    let inner = inner_result(obj);
-    match obj.get("outputs").filter(|v| has_meaningful_outputs(v)) {
-        Some(outputs) => json!({ "result": inner, "outputs": outputs.clone() }),
-        None => inner,
+fn native_success_value(result: Value, outputs: Value) -> Value {
+    if has_meaningful_outputs(&outputs) {
+        json!({ "result": result, "outputs": outputs })
+    } else {
+        result
     }
 }
 
@@ -366,52 +659,32 @@ fn has_meaningful_outputs(v: &Value) -> bool {
     }
 }
 
-/// Parse the optional `cost` field of a native envelope into a typed
-/// `RuntimeCost`. A missing or null `cost` yields `None` — cost is never
-/// invented for a child that did not report it. A present-but-malformed
+/// Parse the required nullable `cost` field of a native envelope into a typed
+/// `RuntimeCost`. A null `cost` yields `None` — cost is never invented for a
+/// child that did not report it. A present-but-malformed
 /// `cost` (contract drift between the child runtime and the cost schema)
-/// is logged loudly rather than silently dropped, so under-accounting is
-/// visible to operators.
-fn parse_native_cost(obj: &serde_json::Map<String, Value>) -> Option<RuntimeCost> {
-    let raw = obj.get("cost").filter(|v| !v.is_null())?;
-    match serde_json::from_value(raw.clone()) {
-        Ok(cost) => Some(cost),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                cost = %raw,
-                "native child reported a malformed `cost`; dropping it from graph \
-                 accounting (cost-schema contract drift)"
-            );
-            None
-        }
+/// fails the leaf closed so a nominal success can never silently undercount.
+fn parse_native_cost(raw: Value) -> Result<Option<RuntimeCost>, String> {
+    if raw.is_null() {
+        return Ok(None);
     }
+    let cost: RuntimeCost = serde_json::from_value(raw)
+        .map_err(|error| format!("native runtime envelope has malformed cost: {error}"))?;
+    cost.validate()
+        .map_err(|error| format!("native runtime envelope has invalid cost: {error}"))?;
+    Ok(Some(cost))
 }
 
-/// A subprocess leaf failed iff the envelope carries a non-null `error`
-/// payload — the terminator populates it (with exit_code/stderr/stdout,
-/// or a timeout message) for any non-zero exit, timeout, or dispatch
-/// failure. A clean completion leaves `error` null AND nulls
-/// `outcome_code` (the daemon nulls `outcome_code` for a completed
-/// thread), so `error` — not `outcome_code` — is the success signal.
-fn subprocess_succeeded(obj: &serde_json::Map<String, Value>) -> bool {
-    obj.get("error").map(Value::is_null).unwrap_or(true)
-}
-
-fn describe_subprocess_failure(obj: &serde_json::Map<String, Value>) -> String {
-    let code = obj
-        .get("outcome_code")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let err = obj.get("error");
-    let exit_code = err.and_then(|e| e.get("exit_code")).and_then(Value::as_i64);
-    let stderr = err
-        .and_then(|e| e.get("stderr"))
+fn describe_subprocess_failure(outcome_code: Option<&str>, error: &Value) -> String {
+    let code = outcome_code.unwrap_or("unknown");
+    let exit_code = error.get("exit_code").and_then(Value::as_i64);
+    let stderr = error
+        .get("stderr")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let stdout = err
-        .and_then(|e| e.get("stdout"))
+    let stdout = error
+        .get("stdout")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -434,33 +707,22 @@ fn describe_subprocess_failure(obj: &serde_json::Map<String, Value>) -> String {
     msg
 }
 
-fn describe_native_failure(obj: &serde_json::Map<String, Value>) -> String {
-    let status = obj
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("failed");
-    let mut msg = format!("child runtime failed (status: {status})");
-    if let Some(detail) = native_failure_detail(obj) {
+fn describe_native_failure(result: &Value, status: RuntimeResultStatus) -> String {
+    let mut msg = format!("child runtime failed (status: {})", status.as_str());
+    if let Some(detail) = native_result_failure_detail(result) {
         msg.push_str(&format!("; {}", excerpt(&detail, 800)));
     }
     msg
 }
 
-/// Extract the most actionable failure detail from a native-runtime
-/// envelope. Child graph/directive runtimes return a structured result
-/// (e.g. `GraphResult { error, ... }`) under `result`, so a bare
-/// `status` is rarely enough — prefer the inner `error`, then a string
-/// result, then a compact JSON excerpt of the structured result.
-fn native_failure_detail(obj: &serde_json::Map<String, Value>) -> Option<String> {
+/// Extract a diagnostic from the required result payload of a canonical
+/// native envelope. The canonical contract has no top-level `error` field;
+/// failures carry their detail in `result`.
+fn native_result_failure_detail(result: &Value) -> Option<String> {
     let non_empty = |s: &str| -> Option<String> {
-        let t = s.trim();
-        (!t.is_empty()).then(|| t.to_string())
+        let trimmed = s.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
-
-    if let Some(s) = obj.get("error").and_then(Value::as_str).and_then(non_empty) {
-        return Some(s);
-    }
-    let result = obj.get("result")?;
     if let Some(s) = result.as_str().and_then(non_empty) {
         return Some(s);
     }
@@ -514,14 +776,29 @@ mod tests {
         CallbackClient::from_inner(inner, "T-test", "/project", "tat-test")
     }
 
+    fn make_mock_client_with_child(results: Vec<Value>, child_thread_id: &str) -> CallbackClient {
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(MockClient::with_child(results, child_thread_id));
+        CallbackClient::from_inner(inner, "T-test", "/project", "tat-test")
+    }
+
     struct MockClient {
         results: Mutex<Vec<Value>>,
+        child_thread_id: Option<String>,
     }
 
     impl MockClient {
         fn new(results: Vec<Value>) -> Self {
             Self {
                 results: Mutex::new(results),
+                child_thread_id: None,
+            }
+        }
+
+        fn with_child(results: Vec<Value>, child_thread_id: &str) -> Self {
+            Self {
+                results: Mutex::new(results),
+                child_thread_id: Some(child_thread_id.to_string()),
             }
         }
     }
@@ -537,7 +814,14 @@ mod tests {
             if results.is_empty() {
                 Ok(json!({"thread": {}, "result": {}}))
             } else {
-                Ok(json!({"thread": {}, "result": results.remove(0)}))
+                Ok(json!({
+                    "thread": self
+                        .child_thread_id
+                        .as_ref()
+                        .map(|id| json!({"thread_id": id}))
+                        .unwrap_or_else(|| json!({})),
+                    "result": results.remove(0),
+                }))
             }
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
@@ -562,6 +846,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
@@ -660,6 +945,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
@@ -878,6 +1164,27 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_native_dispatch_preserves_spawned_child_thread_id() {
+        let client = make_mock_client_with_child(
+            vec![json!({
+                "success": false,
+                "status": RuntimeResultStatus::Failed,
+                "result": {"error": "child failed"},
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            })],
+            "T-child-failed",
+        );
+        let action = json!({"item_id": "directive:test/child"});
+        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
+            .await
+            .expect("dispatch response");
+        let failure = expect_action_failure(outcome);
+        assert_eq!(failure.child_thread_id.as_deref(), Some("T-child-failed"));
+    }
+
     // ── classify_envelope ──────────────────────────────────────────────
 
     fn expect_success(outcome: ActionOutcome) -> Value {
@@ -906,6 +1213,21 @@ mod tests {
         expect_action_failure(classify_envelope(value)).diagnostic
     }
 
+    fn canonical_follow_envelope(
+        success: bool,
+        status: RuntimeResultStatus,
+        result: Value,
+    ) -> Value {
+        json!({
+            "success": success,
+            "status": status,
+            "result": result,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        })
+    }
+
     #[test]
     fn classify_subprocess_success_exposes_inner_result() {
         // A clean subprocess exit (`outcome_code: exit:0`) peels to the
@@ -928,7 +1250,8 @@ mod tests {
             "status": "completed",
             "result": {"state": {"x": 1}},
             "outputs": null,
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert_eq!(classify_success(envelope), json!({"state": {"x": 1}}));
     }
@@ -943,7 +1266,8 @@ mod tests {
             "status": "completed",
             "result": "directive_return",
             "outputs": {"recommendations": ["a", "b"], "abstractions": {"k": 1}},
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert_eq!(
             classify_success(envelope),
@@ -963,7 +1287,8 @@ mod tests {
             "status": "completed",
             "result": {"state": {"x": 1}},
             "outputs": null,
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert_eq!(classify_success(envelope), json!({"state": {"x": 1}}));
     }
@@ -988,13 +1313,59 @@ mod tests {
     }
 
     #[test]
+    fn classify_native_runtime_rejects_malformed_or_invalid_cost() {
+        for cost in [
+            json!({"input_tokens": 1, "total_usd": 0.01}),
+            json!({"input_tokens": 1, "output_tokens": 2, "total_usd": -0.01}),
+            json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": 0.01,
+                "basis": "estimated",
+            }),
+        ] {
+            let envelope = json!({
+                "success": true,
+                "status": "completed",
+                "result": "directive_return",
+                "outputs": {"x": 1},
+                "cost": cost,
+                "warnings": [],
+            });
+            let failure = expect_action_failure(classify_envelope(envelope));
+            assert!(failure.diagnostic.contains("cost"));
+            assert!(failure.cost.is_none());
+        }
+    }
+
+    #[test]
+    fn classify_native_markers_never_fall_through_as_bare_success() {
+        for malformed in [
+            json!({"success": false, "status": "failed", "result": null}),
+            json!({"success": true}),
+            json!({"status": "completed", "result": null}),
+            json!({
+                "success": true,
+                "status": "completed",
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+            }),
+        ] {
+            let failure = expect_action_failure(classify_envelope(malformed));
+            assert!(failure.diagnostic.contains("malformed native runtime envelope"));
+        }
+    }
+
+    #[test]
     fn classify_native_runtime_success_without_cost_is_none() {
         let envelope = json!({
             "success": true,
             "status": "completed",
             "result": {"state": {"x": 1}},
             "outputs": null,
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert!(expect_action_success(classify_envelope(envelope))
             .cost
@@ -1011,7 +1382,8 @@ mod tests {
             "status": "completed",
             "result": {"foo": 1},
             "outputs": {},
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert_eq!(classify_success(envelope), json!({"foo": 1}));
     }
@@ -1022,7 +1394,7 @@ mod tests {
         // `success:false` with non-null `cost` — accounting must keep it.
         let envelope = json!({
             "success": false,
-            "status": "error",
+            "status": "failed",
             "result": {"error": "model refused"},
             "outputs": null,
             "cost": {"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008},
@@ -1096,13 +1468,34 @@ mod tests {
     }
 
     #[test]
+    fn classify_subprocess_marker_rejects_partial_or_unknown_shapes() {
+        for malformed in [
+            json!({"outcome_code": "exit:0"}),
+            json!({
+                "outcome_code": null,
+                "result": null,
+                "error": null,
+                "artifacts": [],
+                "legacy": true,
+            }),
+        ] {
+            let diagnostic = classify_failure(malformed);
+            assert!(
+                diagnostic.contains("malformed subprocess result envelope"),
+                "{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
     fn classify_native_runtime_failure_surfaces_status() {
         let envelope = json!({
             "success": false,
             "status": "failed",
             "result": null,
             "outputs": null,
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert!(classify_failure(envelope).contains("failed"));
     }
@@ -1114,12 +1507,146 @@ mod tests {
         // rather than collapsing to just the status.
         let envelope = json!({
             "success": false,
-            "status": "error",
+            "status": "failed",
             "result": {"error": "child graph failed: boom", "status": "error"},
             "outputs": null,
-            "warnings": []
+            "warnings": [],
+            "cost": null,
         });
         assert!(classify_failure(envelope).contains("boom"));
+    }
+
+    #[test]
+    fn classify_native_runtime_rejects_unknown_or_contradictory_status() {
+        let unknown = json!({
+            "success": false,
+            "status": "error",
+            "result": {"error": "unknown status"},
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+        assert!(classify_failure(unknown).contains("unknown variant"));
+
+        let contradictory = json!({
+            "success": true,
+            "status": "failed",
+            "result": null,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+        assert!(classify_failure(contradictory).contains("contradicts terminal status"));
+    }
+
+    #[test]
+    fn malformed_native_cost_is_an_integrity_failure() {
+        let failure = expect_action_failure(classify_envelope(json!({
+            "success": true,
+            "status": "completed",
+            "result": null,
+            "outputs": null,
+            "warnings": [],
+            "cost": {
+                "input_tokens": i64::MAX as u64 + 1,
+                "output_tokens": 0,
+                "total_usd": 0.0
+            }
+        })));
+
+        assert!(failure.integrity);
+        assert!(failure.diagnostic.contains("invalid cost"));
+    }
+
+    #[test]
+    fn classify_follow_envelope_preserves_typed_terminal_outcome() {
+        let classified = classify_follow_envelope(canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            json!({"answer": 42}),
+        ))
+        .expect("canonical follow envelope");
+        assert_eq!(classified.fanout_status(), FanoutItemStatus::Completed);
+        assert_eq!(expect_success(classified.outcome), json!({"answer": 42}));
+    }
+
+    #[test]
+    fn classify_follow_envelope_rejects_bare_or_partial_values() {
+        for malformed in [
+            json!({"answer": 42}),
+            json!({
+                "success": true,
+                "status": RuntimeResultStatus::Completed,
+                "result": 42,
+            }),
+        ] {
+            let error = classify_follow_envelope(malformed).unwrap_err();
+            assert!(error.contains("malformed follow result envelope"), "{error}");
+        }
+    }
+
+    #[test]
+    fn classify_follow_envelope_rejects_unknown_status_and_fields() {
+        let unknown_status = json!({
+            "success": false,
+            "status": "error",
+            "result": null,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+        assert!(classify_follow_envelope(unknown_status)
+            .unwrap_err()
+            .contains("unknown variant"));
+
+        let mut unknown_field = canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            json!(42),
+        );
+        unknown_field["legacy_outcome"] = json!("success");
+        assert!(classify_follow_envelope(unknown_field)
+            .unwrap_err()
+            .contains("unknown field"));
+    }
+
+    #[test]
+    fn classify_follow_envelope_rejects_status_outcome_contradictions() {
+        for malformed in [
+            canonical_follow_envelope(true, RuntimeResultStatus::Failed, Value::Null),
+            canonical_follow_envelope(false, RuntimeResultStatus::Completed, Value::Null),
+        ] {
+            let error = classify_follow_envelope(malformed).unwrap_err();
+            assert!(error.contains("contradicts terminal status"), "{error}");
+        }
+    }
+
+    #[test]
+    fn classify_follow_envelope_rejects_intermediate_continued_status() {
+        let error = classify_follow_envelope(canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Continued,
+            Value::Null,
+        ))
+        .unwrap_err();
+        assert!(error.contains("intermediate child-chain handoff"), "{error}");
+    }
+
+    #[test]
+    fn classify_follow_envelope_rejects_invalid_cost() {
+        let mut envelope = canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            json!({"answer": 42}),
+        );
+        envelope["cost"] = json!({
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "total_usd": -0.01,
+        });
+
+        let error = classify_follow_envelope(envelope).unwrap_err();
+        assert!(error.contains("must be non-negative"), "{error}");
     }
 
     #[test]

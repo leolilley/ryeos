@@ -82,6 +82,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }

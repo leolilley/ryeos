@@ -35,17 +35,17 @@ Create a new knowledge entry file with YAML frontmatter, then sign it for valida
   </inputs>
 
   <outputs>
-    <success>Created and signed knowledge entry: {input:entry_id} at .ai/knowledge/{input:entry_id}.md</success>
-    <failure>Failed to create or sign knowledge entry: {input:entry_id}</failure>
+    <success>Created and signed knowledge entry: ${inputs.entry_id} at .ai/knowledge/${inputs.entry_id}.md</success>
+    <failure>Failed to create or sign knowledge entry: ${inputs.entry_id}</failure>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="write_entry">
-    Create the knowledge entry file at `.ai/knowledge/{input:entry_id}.md` with YAML frontmatter containing id, title, version, and the provided content as markdown body.
+    Create the knowledge entry file at `.ai/knowledge/${inputs.entry_id}.md` with YAML frontmatter containing id, title, version, and the provided content as markdown body.
   </step>
   <step name="sign_entry">
-    Sign the newly created knowledge entry `{input:entry_id}`.
+    Sign the newly created knowledge entry `${inputs.entry_id}`.
   </step>
 </process>

@@ -113,6 +113,12 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub resume_context: Option<ResumeContext>,
 
+    /// Immutable source identity for a continuation runtime seed. Present only
+    /// while/after a successor is created from a settled source and used by
+    /// startup reconciliation to reject thread-id collisions.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub continuation_source_thread_id: Option<String>,
+
     /// Complete sealed fresh-root request used only while a created child has
     /// not crossed its first-launch boundary. Recovery consumes this exact
     /// authority and never re-resolves the item source.
@@ -152,6 +158,7 @@ impl Default for RuntimeLaunchMetadata {
             native_resume: None,
             checkpoint_dir: None,
             resume_context: None,
+            continuation_source_thread_id: None,
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -303,6 +310,68 @@ impl ResumeContext {
                 .map(|pinned| pinned.snapshot_hash.as_str())
         })
     }
+
+    /// Canonical project identity persisted into authoritative thread
+    /// snapshots. This deliberately distinguishes every ProjectContext shape:
+    /// local paths retain their path attribution and optional immutable launch
+    /// pin, while remote/reference contexts must resolve to an immutable CAS
+    /// snapshot before a continuation can be committed.
+    pub(crate) fn authoritative_project_identity(
+        &self,
+    ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
+        match &self.project_context {
+            ProjectContext::None => {
+                if self.durable_project_snapshot_hash().is_some() {
+                    anyhow::bail!("project_context none contradicts a durable project snapshot");
+                }
+                Ok((None, None))
+            }
+            ProjectContext::LocalPath { path } => {
+                if self.original_pushed_head_ref.is_some() {
+                    anyhow::bail!(
+                        "local-path project context contradicts pushed-head project identity"
+                    );
+                }
+                Ok((Some(path.clone()), self.original_snapshot_hash.clone()))
+            }
+            ProjectContext::SnapshotHash { hash } => {
+                for pinned in [
+                    self.original_snapshot_hash.as_deref(),
+                    self.original_pushed_head_ref
+                        .as_ref()
+                        .map(|pushed| pushed.snapshot_hash.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if pinned != hash.as_str() {
+                        anyhow::bail!(
+                            "snapshot project context {hash} contradicts durable launch pin {pinned}"
+                        );
+                    }
+                }
+                Ok((None, Some(hash.clone())))
+            }
+            ProjectContext::ProjectRef { .. } => {
+                let original = self.original_snapshot_hash.as_deref();
+                let pushed = self
+                    .original_pushed_head_ref
+                    .as_ref()
+                    .map(|pushed| pushed.snapshot_hash.as_str());
+                if let (Some(original), Some(pushed)) = (original, pushed) {
+                    if original != pushed {
+                        anyhow::bail!(
+                            "project-ref continuation has contradictory immutable snapshot pins"
+                        );
+                    }
+                }
+                let pinned = original.or(pushed).ok_or_else(|| {
+                    anyhow::anyhow!("project-ref continuation has no immutable resolved snapshot pin")
+                })?;
+                Ok((None, Some(pinned.to_owned())))
+            }
+        }
+    }
 }
 
 impl RuntimeLaunchMetadata {
@@ -328,6 +397,7 @@ impl RuntimeLaunchMetadata {
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
+            continuation_source_thread_id: None,
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -343,6 +413,7 @@ impl RuntimeLaunchMetadata {
             && self.native_resume.is_none()
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
+            && self.continuation_source_thread_id.is_none()
             && self.sealed_root_request.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
@@ -366,6 +437,11 @@ impl RuntimeLaunchMetadata {
     /// `reconcile.rs` can re-spawn this thread after a daemon restart.
     pub fn with_resume_context(mut self, ctx: ResumeContext) -> Self {
         self.resume_context = Some(ctx);
+        self
+    }
+
+    pub fn with_continuation_source(mut self, source_thread_id: impl Into<String>) -> Self {
+        self.continuation_source_thread_id = Some(source_thread_id.into());
         self
     }
 
@@ -416,6 +492,27 @@ mod tests {
         }
     }
 
+    fn resume_context(project_context: ProjectContext) -> ResumeContext {
+        ResumeContext {
+            kind: "tool_run".to_string(),
+            item_ref: "tool:test/run".to_string(),
+            ref_bindings: BTreeMap::new(),
+            launch_mode: "detached".to_string(),
+            parameters: serde_json::json!({}),
+            project_context,
+            original_snapshot_hash: None,
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            requested_by: local_principal(),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            executor_ref: Some("native:test".to_string()),
+            runtime_ref: None,
+        }
+    }
+
     #[test]
     fn from_spec_no_native_async_yields_none() {
         let m = RuntimeLaunchMetadata::from_spec(&empty_spec());
@@ -455,6 +552,7 @@ mod tests {
             native_resume: None,
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
+            continuation_source_thread_id: None,
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -621,6 +719,60 @@ mod tests {
         assert_eq!(
             back_ctx.effective_caps,
             vec!["ryeos.execute.tool.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn authoritative_project_identity_none_is_explicitly_empty() {
+        let context = resume_context(ProjectContext::None);
+        assert_eq!(context.authoritative_project_identity().unwrap(), (None, None));
+
+        let mut contradictory = context;
+        contradictory.original_snapshot_hash = Some("a".repeat(64));
+        assert!(contradictory.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn authoritative_project_identity_local_path_carries_path_and_optional_pin() {
+        let mut context = resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        context.original_snapshot_hash = Some("b".repeat(64));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (
+                Some(PathBuf::from("/work/project")),
+                Some("b".repeat(64))
+            )
+        );
+    }
+
+    #[test]
+    fn authoritative_project_identity_snapshot_hash_is_the_pin() {
+        let hash = "c".repeat(64);
+        let context = resume_context(ProjectContext::SnapshotHash { hash: hash.clone() });
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some(hash))
+        );
+
+        let mut contradictory = context;
+        contradictory.original_snapshot_hash = Some("d".repeat(64));
+        assert!(contradictory.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn authoritative_project_identity_project_ref_requires_resolved_pin() {
+        let mut context = resume_context(ProjectContext::ProjectRef {
+            principal: "fp:test".to_string(),
+            ref_name: "projects/demo".to_string(),
+        });
+        assert!(context.authoritative_project_identity().is_err());
+
+        context.original_snapshot_hash = Some("e".repeat(64));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some("e".repeat(64)))
         );
     }
 }

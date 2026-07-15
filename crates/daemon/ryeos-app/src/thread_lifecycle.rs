@@ -26,8 +26,8 @@ use ryeos_engine::contracts::{
     DelegatedPrincipal, EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion,
     ExecutionHints, ExecutionPlan, FinalCost, ItemMetadata, ItemSpace, LaunchMode, PinnedVersion,
     PlanContext, Principal, ProjectContext, ResolvedItem, ResolvedSourceFormat, RuntimeEnvSource,
-    ShadowedCandidate, SignatureEnvelope, SignatureHeader, SignerFingerprint, TrustClass,
-    VerifiedItem,
+    ShadowedCandidate, SignatureEnvelope, SignatureHeader, SignerFingerprint,
+    ThreadTerminalStatus, TrustClass, VerifiedItem,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::history_policy::{
@@ -615,6 +615,40 @@ pub struct ThreadContinuationParams {
     /// autonomous by construction — it carries no reason/gate/mode.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Exact terminal payload the runtime will emit after this atomic handoff.
+    pub completion: ryeos_runtime::TerminalCompletion,
+}
+
+fn validate_continued_completion(completion: &ryeos_runtime::TerminalCompletion) -> Result<()> {
+    if completion.status != ThreadTerminalStatus::Continued {
+        bail!(
+            "continuation completion status must be `{}`, received `{}`",
+            ThreadTerminalStatus::Continued.as_str(),
+            completion.status.as_str()
+        );
+    }
+    if completion.error.is_some() {
+        bail!("continued completion must not carry a terminal error");
+    }
+    if let Some(outcome_code) = completion.outcome_code.as_deref() {
+        if outcome_code != ThreadTerminalStatus::Continued.as_str() {
+            bail!(
+                "continued completion outcome_code must be `{}`, received `{outcome_code}`",
+                ThreadTerminalStatus::Continued.as_str()
+            );
+        }
+    }
+
+    let runtime_cost = completion
+        .cost
+        .as_ref()
+        .map(|raw| serde_json::from_value::<ryeos_runtime::envelope::RuntimeCost>(raw.clone()))
+        .transpose()
+        .context("decode continued runtime cost")?;
+    if let Some(cost) = runtime_cost.as_ref() {
+        cost.validate().context("validate continued runtime cost")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -659,6 +693,9 @@ pub struct ResolvedExecutionRequest {
     pub ref_bindings: BTreeMap<String, String>,
     /// The engine's resolved item — carried through for verify/build_plan/execute.
     pub resolved_item: ResolvedItem,
+    /// Digest of the verified signature-stripped root bytes supplied to the
+    /// runtime. Callback capabilities bind hook identities to this exact value.
+    pub root_raw_content_digest: String,
     /// The PlanContext used during resolution — reused for verify/build_plan.
     pub plan_context: PlanContext,
     /// Immutable admission contract for a new chain root. It binds the exact
@@ -721,10 +758,12 @@ fn validate_exact_resolution_wire(value: &Value) -> std::result::Result<(), Stri
                 "requested_id",
                 "resolved_ref",
                 "source_path",
+                "source_space",
                 "trust_class",
                 "alias_resolution",
                 "added_by",
                 "raw_content",
+                "source_content_digest",
                 "raw_content_digest",
             ],
             label,
@@ -760,6 +799,7 @@ fn validate_exact_resolution_wire(value: &Value) -> std::result::Result<(), Stri
                 "from_source_path",
                 "to_ref",
                 "to_source_path",
+                "to_source_space",
                 "trust_class",
                 "added_by",
             ],
@@ -832,6 +872,7 @@ struct SealedResolvedItem {
     shadowed: Vec<SealedShadowedCandidate>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     materialized_project_root: Option<PathBuf>,
+    raw_content_digest: String,
     content_hash: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     signature_header: Option<SignatureHeader>,
@@ -857,6 +898,7 @@ impl From<&ResolvedItem> for SealedResolvedItem {
                 })
                 .collect(),
             materialized_project_root: resolved.materialized_project_root.clone(),
+            raw_content_digest: resolved.raw_content_digest.clone(),
             content_hash: resolved.content_hash.clone(),
             signature_header: resolved.signature_header.clone(),
             source_format: SealedSourceFormat {
@@ -905,6 +947,7 @@ impl SealedResolvedItem {
                 })
                 .collect(),
             materialized_project_root: self.materialized_project_root.clone(),
+            raw_content_digest: self.raw_content_digest.clone(),
             content_hash: self.content_hash.clone(),
             signature_header: self.signature_header.clone(),
             source_format: ResolvedSourceFormat {
@@ -1172,6 +1215,7 @@ impl SealedRootExecutionRequest {
                 resolved_from: "storage_test_fixture".to_string(),
                 shadowed: Vec::new(),
                 materialized_project_root: None,
+                raw_content_digest: content_hash.clone(),
                 content_hash: content_hash.clone(),
                 signature_header: None,
                 source_format: SealedSourceFormat {
@@ -1288,6 +1332,7 @@ impl SealedRootExecutionRequest {
             usage_subject_asserted_by: self.usage_subject_asserted_by.clone(),
             parameters: self.parameters.clone(),
             ref_bindings: self.ref_bindings.clone(),
+            root_raw_content_digest: resolved_item.raw_content_digest.clone(),
             resolved_item,
             plan_context,
             root_admission: Some(admission.clone()),
@@ -1375,6 +1420,7 @@ impl RootExecutionAdmission {
             usage_subject_asserted_by: self.usage_subject_asserted_by.clone(),
             parameters,
             ref_bindings: self.ref_bindings.clone(),
+            root_raw_content_digest: resolved.raw_content_digest.clone(),
             resolved_item: resolved.clone(),
             plan_context: self.plan_context.clone(),
             root_admission: Some(self.clone()),
@@ -2536,7 +2582,7 @@ impl ThreadLifecycleService {
     ) -> Result<ThreadDetail> {
         let reported_status = completion.status.as_str();
         let reported_outcome_code = completion.outcome_code.clone().or_else(|| {
-            Some(if reported_status == "completed" {
+            Some(if completion.status == ThreadTerminalStatus::Completed {
                 "success".to_string()
             } else {
                 reported_status.to_string()
@@ -2553,6 +2599,7 @@ impl ThreadLifecycleService {
                 .map(artifact_to_record)
                 .collect(),
             final_cost: completion.final_cost.clone(),
+            managed_envelope: managed_envelope.clone(),
         };
         let (persisted, effective) = if runtime_callback {
             self.state_store
@@ -2582,7 +2629,10 @@ impl ThreadLifecycleService {
         // scheduled path the only live signal operators see is the daemon's
         // tracing stream (deploy logs), so emit it there at ERROR level when
         // the run failed. Healthy runs stay silent — no stderr in `error`.
-        if matches!(terminal_status, "failed" | "killed") {
+        if matches!(
+            ThreadStatus::from_str_lossy(terminal_status),
+            Some(ThreadStatus::Failed | ThreadStatus::Killed)
+        ) {
             if let Some(stderr_tail) = effective
                 .error_json
                 .as_ref()
@@ -2629,10 +2679,11 @@ impl ThreadLifecycleService {
         // a thread that completes — with or without a question — takes the
         // operator follow-up path. So finalize does NOT spawn a successor here.
 
-        // A stop-coerced callback must not retain a managed envelope that says
-        // `completed`; fall back to the effective terminal fields instead.
+        // The StateStore strips a runtime envelope when durable stop intent
+        // changes its terminal meaning. Feed follow settlement from that same
+        // effective record rather than from the superseded process claim.
         let managed_envelope = (effective.status == reported_status)
-            .then_some(managed_envelope)
+            .then_some(effective.managed_envelope.clone())
             .flatten();
         self.record_follow_child_terminal(
             &finalized.chain_root_id,
@@ -2692,6 +2743,7 @@ impl ThreadLifecycleService {
             error_json: params.error.clone(),
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
+            managed_envelope: None,
         };
         match self
             .state_store
@@ -2701,7 +2753,7 @@ impl ThreadLifecycleService {
                 persisted,
                 effective,
             } => self
-                .finish_generic_finalization(params, reported_status, persisted, effective, None)
+                .finish_generic_finalization(params, reported_status, persisted, effective)
                 .map(FinalizeCreatedUnattachedOutcome::Finalized),
             StoreFinalizeCreatedUnattachedOutcome::AlreadyTerminal => self
                 .get_thread(&params.thread_id)?
@@ -2749,6 +2801,7 @@ impl ThreadLifecycleService {
             error_json: params.error.clone(),
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
+            managed_envelope: None,
         };
         match self
             .state_store
@@ -2758,7 +2811,7 @@ impl ThreadLifecycleService {
                 persisted,
                 effective,
             } => self
-                .finish_generic_finalization(params, reported_status, persisted, effective, None)
+                .finish_generic_finalization(params, reported_status, persisted, effective)
                 .map(FinalizeIfNonterminalOutcome::Finalized),
             StoreFinalizeIfNonterminalOutcome::AlreadyTerminal { status } => {
                 Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal { status })
@@ -2783,6 +2836,7 @@ impl ThreadLifecycleService {
             error_json: params.error.clone(),
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
+            managed_envelope: managed_envelope.clone(),
         };
         let (persisted, effective) = if execution_result {
             self.state_store
@@ -2791,13 +2845,7 @@ impl ThreadLifecycleService {
             self.state_store
                 .finalize_thread_effective(&params.thread_id, &requested)?
         };
-        self.finish_generic_finalization(
-            params,
-            reported_status,
-            persisted,
-            effective,
-            managed_envelope,
-        )
+        self.finish_generic_finalization(params, reported_status, persisted, effective)
     }
 
     fn finish_generic_finalization(
@@ -2806,7 +2854,6 @@ impl ThreadLifecycleService {
         reported_status: &str,
         persisted: Vec<PersistedEventRecord>,
         effective: FinalizeThreadRecord,
-        managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
         self.publish_records(&persisted);
         // Terminal: close the live-input entry after the terminal state write
@@ -2840,7 +2887,7 @@ impl ThreadLifecycleService {
             effective.error_json.as_ref(),
             effective.final_cost.as_ref(),
             (effective.status == reported_status)
-                .then_some(managed_envelope)
+                .then_some(effective.managed_envelope.clone())
                 .flatten(),
         );
 
@@ -3190,7 +3237,7 @@ impl ThreadLifecycleService {
         status: &str,
         upstream_thread_id: Option<&str>,
     ) -> Result<Option<FollowFact>> {
-        if status == "continued" {
+        if status == ThreadStatus::Continued.as_str() {
             if let Some(w) = self
                 .state_store
                 .get_follow_waiter_by_parent_thread(thread_id)?
@@ -3283,7 +3330,7 @@ impl ThreadLifecycleService {
             .into_iter()
             .map(|item| {
                 let execution = self.execution_facts(&item.kind);
-                let follow = if item.status == "continued" {
+                let follow = if item.status == ThreadStatus::Continued.as_str() {
                     by_parent
                         .get(item.thread_id.as_str())
                         .map(|w| FollowFact::suspended_parent_summary(w))
@@ -3384,6 +3431,13 @@ impl ThreadLifecycleService {
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
         self.state_store.get_thread_result(thread_id)
+    }
+
+    pub fn get_thread_terminal_authority(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<crate::state_store::ThreadTerminalAuthority>> {
+        self.state_store.get_thread_terminal_authority(thread_id)
     }
 
     pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
@@ -3488,7 +3542,9 @@ impl ThreadLifecycleService {
         successor: &NewThreadRecord,
         source_thread_id: &str,
         chain_root_id: &str,
+        completion: &ryeos_runtime::TerminalCompletion,
     ) -> Result<()> {
+        validate_continued_completion(completion)?;
         let persisted = self.state_store.create_follow_resume_successor(
             successor,
             source_thread_id,
@@ -3630,7 +3686,7 @@ impl ThreadLifecycleService {
                 .collect::<std::collections::BTreeSet<_>>();
             let mut suspended = std::collections::BTreeSet::new();
             for item in parents {
-                if item.status != "continued"
+                if item.status != ThreadStatus::Continued.as_str()
                     || !Self::thread_list_item_matches_filter(&item, filter, &enrichment.facets)
                 {
                     continue;
@@ -3816,6 +3872,7 @@ fn degraded_follow_envelope(
     child_error: Option<&Value>,
     final_cost: Option<&ryeos_engine::contracts::FinalCost>,
 ) -> Value {
+    let status = ryeos_runtime::envelope::RuntimeResultStatus::Failed;
     let raw_cost = final_cost.map(|c| {
         json!({
             "input_tokens": c.input_tokens,
@@ -3825,7 +3882,7 @@ fn degraded_follow_envelope(
     });
     json!({
         "success": false,
-        "status": "failed",
+        "status": status,
         "result": {
             "code": DEGRADED_FOLLOW_ENVELOPE_CODE,
             "message": "follow child finalized without a canonical runtime envelope; \
@@ -3985,6 +4042,7 @@ pub fn resolve_root_execution(
             )
         })?;
 
+    let root_raw_content_digest = resolved.raw_content_digest.clone();
     Ok(ResolvedExecutionRequest {
         kind: thread_kind,
         item_ref: item_ref.to_string(),
@@ -3999,6 +4057,7 @@ pub fn resolve_root_execution(
         parameters,
         ref_bindings,
         resolved_item: resolved,
+        root_raw_content_digest,
         plan_context: plan_ctx,
         root_admission,
     })

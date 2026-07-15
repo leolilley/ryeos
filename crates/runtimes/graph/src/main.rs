@@ -1,8 +1,12 @@
 mod cache;
+mod compiled_graph;
 mod context;
 mod dispatch;
 mod edges;
+mod evaluation;
 mod env_preflight;
+#[cfg(test)]
+mod expression_inventory_tests;
 mod foreach;
 mod hooks;
 mod knowledge;
@@ -19,7 +23,7 @@ use serde_json::{json, Value};
 
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
-use ryeos_runtime::envelope::{EnvelopeCallback, RuntimeResult};
+use ryeos_runtime::envelope::{EnvelopeCallback, RuntimeResult, RuntimeResultStatus};
 
 #[derive(Parser)]
 #[command(name = "graph-runtime", about = "Native graph walker for Rye OS")]
@@ -53,11 +57,14 @@ struct ResolvedLaunch {
     /// needs no source root of its own: the composed definition arrives in
     /// the envelope and children resolve daemon-side from token provenance.
     state_root: std::path::PathBuf,
+    project_root: std::path::PathBuf,
+    node_trusted_keys_dir: std::path::PathBuf,
     /// Exact graph bytes that the daemon resolved and verified. Runtimes must
     /// never reopen `source_path`: it is diagnostic provenance and the live
     /// file may change after verification.
     graph_raw_content: String,
     graph_source_label: String,
+    graph_resolved_ref: String,
     thread_id: String,
     graph_run_id: Option<String>,
     inputs: Value,
@@ -100,9 +107,22 @@ fn main() -> anyhow::Result<()> {
 
     let resolved = resolve_from_envelope(&stdin_data, &cli)?;
 
-    let graph = model::GraphDefinition::from_yaml(
+    let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+        resolved.project_root.clone(),
+        resolved.bundle_roots.clone(),
+        &resolved.node_trusted_keys_dir,
+    );
+    let hook_sources = ryeos_runtime::load_configured_hook_sources(&loader)?;
+    let target_digest = resolved
+        .target_digest
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("launch envelope omitted graph content digest"))?;
+    let graph = model::GraphDefinition::from_verified_yaml_with_hook_sources(
         &resolved.graph_raw_content,
         Some(&resolved.graph_source_label),
+        &resolved.graph_resolved_ref,
+        target_digest,
+        hook_sources,
     )?;
 
     tracing::info!(
@@ -121,10 +141,9 @@ fn main() -> anyhow::Result<()> {
 
     let checkpoint = CheckpointWriter::from_env();
 
-    // Resume precedence (D10):
-    // 1. RYEOS_RESUME=1 + local checkpoint → checkpoint wins
-    // 2. RYEOS_RESUME=1 + no local checkpoint → explicit fallback to replay
-    // 3. Both unavailable + resume requested → fail loud
+    // rye-expr/1 resume is local-checkpoint-only. The checkpoint pins the
+    // definition hash and language; event replay cannot prove either or
+    // reconstruct candidate state and is therefore not a resume source.
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let callback = match resolved.callback.as_ref() {
@@ -153,7 +172,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Register this process's pgid BEFORE any durable callback — the
-    // replay-events read below, and `execute()` (which can `finalize_thread`
+    // checkpoint read below, and `execute()` (which can `finalize_thread`
     // on an invalid graph) both happen after this. Without it the daemon
     // cannot tell a live graph from a crashed one on restart and would resume
     // a duplicate. Resume-critical: a graph that cannot register must not run.
@@ -175,9 +194,14 @@ fn main() -> anyhow::Result<()> {
             .get("valid")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let status = if valid {
+            RuntimeResultStatus::Completed
+        } else {
+            RuntimeResultStatus::Failed
+        };
         let runtime_result = RuntimeResult {
-            success: valid,
-            status: if valid { "valid" } else { "invalid" }.to_string(),
+            success: status.is_success(),
+            status,
             thread_id: resolved.thread_id.clone(),
             result: Some(report),
             outputs: Value::Null,
@@ -188,12 +212,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // V5.5 D10 resume precedence (the rule itself lives in
-    // `resume::decide_resume_source` — pure function, unit-tested):
-    //   1. RYEOS_RESUME=1 + local CheckpointWriter payload → checkpoint wins.
-    //   2. RYEOS_RESUME=1 + no local checkpoint → fall back to replay-events.
-    //   3. RYEOS_RESUME=1 + neither available → fail loud (NO silent cold-start).
-    //   4. RYEOS_RESUME unset → cold start (None).
+    // A resumed rye-expr/1 run requires its identity-bearing local checkpoint.
+    // No event-replay fallback exists after the clean language cutover.
     let resume_requested = CheckpointWriter::is_resume();
     let local_checkpoint: Option<Value> = if resume_requested {
         checkpoint
@@ -203,24 +223,9 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let replay_state: Option<resume::ResumeState> =
-        if resume_requested && local_checkpoint.is_none() {
-            // D12: replay resume keys on thread_id only, not graph_run_id.
-            // The launcher doesn't supply graph_run_id; thread is the actual
-            // partition; matched event payload reconstructs the run_id.
-            tracing::warn!(
-                thread_id = %resolved.thread_id,
-                "RYEOS_RESUME=1 but no local checkpoint; falling back to replay-events resume"
-            );
-            rt.block_on(resume::load_resume_state(&callback, &resolved.thread_id))?
-        } else {
-            None
-        };
-
     let resume_state: Option<resume::ResumeState> = match resume::decide_resume_source(
         resume_requested,
         local_checkpoint.is_some(),
-        replay_state.is_some(),
     ) {
         resume::ResumeSource::ColdStart => None,
         resume::ResumeSource::LocalCheckpoint => {
@@ -229,17 +234,15 @@ fn main() -> anyhow::Result<()> {
                 local_checkpoint
                     .as_ref()
                     .expect("LocalCheckpoint variant requires payload"),
+                &graph,
             )?)
-        }
-        resume::ResumeSource::ReplayFallback => {
-            Some(replay_state.expect("ReplayFallback variant requires replay state"))
         }
         resume::ResumeSource::NoSourceAvailable => {
             anyhow::bail!(
-                "RYEOS_RESUME=1 but no resume source is available for thread '{}': \
-                 local checkpoint absent and replay-events reconstruction found \
-                 no graph_step_started for this thread; \
-                 refusing silent cold-start (V5.5 D10)",
+                "{}: RYEOS_RESUME=1 but thread '{}' has no identity-bearing local \
+                 checkpoint; event replay cannot reconstruct rye-expr/1 state or \
+                 verify its signed definition; start a new graph run",
+                resume::RESTART_REQUIRED,
                 resolved.thread_id
             );
         }
@@ -262,43 +265,23 @@ fn main() -> anyhow::Result<()> {
         "hard_limits": resolved.hard_limits,
     });
 
-    // Inject resume state so walker.rs picks it up
+    // Inject the complete identity-bearing resume DTO. The walker parses this
+    // exact shape again and verifies the signed definition/language identity;
+    // do not project a weaker cursor-only object here.
     if let Some(ref rs) = resume_state {
-        let mut resume_json = json!({
-            "current_node": rs.current_node,
-            "step_count": rs.step_count,
-            "state": rs.state,
-            "accounting": rs.accounting,
-            "suppressed_errors": rs.suppressed_errors,
-            // Preserve the ORIGINAL run id across resume: a follow re-entry must
-            // re-drive spawn_follow_child with the same graph_run_id or it would
-            // compute a different follow_key and lose idempotency.
-            "graph_run_id": rs.graph_run_id,
-        });
-        // Follow resume: the pending-follow marker + the child's canonical envelope
-        // (when present) let the walker consume the result at the follow node
-        // instead of re-dispatching or re-suspending.
-        resume_json[crate::walker::follow_keys::PENDING_FOLLOW] = json!(rs.pending_follow);
-        resume_json[crate::walker::follow_keys::FOLLOW_RESULT] = json!(rs.follow_result);
-        // Per-step retry counter (checkpoint v2): the walker resumes the same
-        // node with the attempts already spent instead of restarting them.
-        resume_json["retry_attempt"] = json!(rs.retry_attempt.unwrap_or(0));
-        params["resume_state"] = resume_json;
+        params["resume_state"] = serde_json::to_value(rs)?;
     }
 
     if let Some(ref schema) = graph.config.config_schema {
         if let Err(err) = normalize_inputs_against_schema(&mut params, schema) {
             let runtime_result = make_error_runtime_result(
                 &resolved.thread_id,
-                "invalid_inputs",
                 &format!("input validation failed: {err}"),
             );
             println!("{}", serde_json::to_string(&runtime_result)?);
             std::process::exit(0);
         }
     }
-
-    let rt = tokio::runtime::Runtime::new()?;
 
     // Cooperative cancel: SIGTERM sets a flag the walker checks at each node
     // boundary, finalizing `cancelled` cleanly — mirroring the directive
@@ -331,9 +314,10 @@ fn main() -> anyhow::Result<()> {
     // `/execute` response, so HTTP callers see the typed graph
     // result (success/status/state/path) without re-parsing JSON
     // out of a string.
+    let status = runtime_status_for_graph(graph_result.status);
     let runtime_result = RuntimeResult {
-        success: graph_result.success,
-        status: graph_result.status.clone(),
+        success: status.is_success(),
+        status,
         thread_id: resolved.thread_id.clone(),
         result: Some(serde_json::to_value(&graph_result)?),
         outputs: serde_json::Value::Null,
@@ -361,6 +345,8 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
 
     Ok(ResolvedLaunch {
         state_root: envelope.roots.state_root().to_path_buf(),
+        project_root: envelope.roots.project_root.clone(),
+        node_trusted_keys_dir: envelope.roots.node_trusted_keys_dir.clone(),
         graph_raw_content: envelope.resolution.root.raw_content.clone(),
         graph_source_label: envelope
             .resolution
@@ -368,6 +354,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
             .source_path
             .to_string_lossy()
             .into_owned(),
+        graph_resolved_ref: envelope.resolution.root.resolved_ref.clone(),
         thread_id: envelope.thread_id.clone(),
         graph_run_id: cli.graph_run_id.clone(),
         inputs: envelope.request.inputs.clone(),
@@ -382,10 +369,24 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     })
 }
 
-fn make_error_runtime_result(thread_id: &str, status: &str, error: &str) -> RuntimeResult {
+fn runtime_status_for_graph(status: model::GraphRunStatus) -> RuntimeResultStatus {
+    match status {
+        model::GraphRunStatus::Valid
+        | model::GraphRunStatus::Completed
+        | model::GraphRunStatus::CompletedWithErrors => RuntimeResultStatus::Completed,
+        model::GraphRunStatus::Invalid
+        | model::GraphRunStatus::Error
+        | model::GraphRunStatus::MaxStepsExceeded => RuntimeResultStatus::Failed,
+        model::GraphRunStatus::Continued => RuntimeResultStatus::Continued,
+        model::GraphRunStatus::Cancelled => RuntimeResultStatus::Cancelled,
+        model::GraphRunStatus::Killed => RuntimeResultStatus::Killed,
+    }
+}
+
+fn make_error_runtime_result(thread_id: &str, error: &str) -> RuntimeResult {
     RuntimeResult {
         success: false,
-        status: status.to_string(),
+        status: RuntimeResultStatus::Failed,
         thread_id: thread_id.to_string(),
         result: Some(json!(error)),
         outputs: serde_json::Value::Null,
@@ -552,14 +553,41 @@ mod tests {
 
     #[test]
     fn make_error_runtime_result_shapes_correctly() {
-        let rr = make_error_runtime_result("T-1", "bad_input", "missing field");
+        let rr = make_error_runtime_result("T-1", "missing field");
         assert!(!rr.success);
-        assert_eq!(rr.status, "bad_input");
+        assert_eq!(rr.status, RuntimeResultStatus::Failed);
         assert_eq!(rr.thread_id, "T-1");
         // D1: result is `Option<Value>`; error string wraps as
         // `Value::String(...)`.
         assert_eq!(rr.result, Some(json!("missing field")));
         assert!(rr.warnings.is_empty());
+    }
+
+    #[test]
+    fn graph_outcomes_map_to_closed_runtime_terminal_statuses() {
+        use model::GraphRunStatus;
+
+        let cases = [
+            (GraphRunStatus::Valid, RuntimeResultStatus::Completed),
+            (GraphRunStatus::Completed, RuntimeResultStatus::Completed),
+            (
+                GraphRunStatus::CompletedWithErrors,
+                RuntimeResultStatus::Completed,
+            ),
+            (GraphRunStatus::Invalid, RuntimeResultStatus::Failed),
+            (GraphRunStatus::Error, RuntimeResultStatus::Failed),
+            (
+                GraphRunStatus::MaxStepsExceeded,
+                RuntimeResultStatus::Failed,
+            ),
+            (GraphRunStatus::Continued, RuntimeResultStatus::Continued),
+            (GraphRunStatus::Cancelled, RuntimeResultStatus::Cancelled),
+            (GraphRunStatus::Killed, RuntimeResultStatus::Killed),
+        ];
+
+        for (graph_status, runtime_status) in cases {
+            assert_eq!(runtime_status_for_graph(graph_status), runtime_status);
+        }
     }
 
     #[test]
@@ -611,7 +639,7 @@ mod tests {
         });
         let rr = RuntimeResult {
             success: true,
-            status: "completed".into(),
+            status: RuntimeResultStatus::Completed,
             thread_id: "T-test".into(),
             result: Some(graph_result_value.clone()),
             outputs: Value::Null,
@@ -621,7 +649,7 @@ mod tests {
         let json_str = serde_json::to_string(&rr).unwrap();
         let parsed: RuntimeResult = serde_json::from_str(&json_str).unwrap();
         assert!(parsed.success);
-        assert_eq!(parsed.status, "completed");
+        assert_eq!(parsed.status, RuntimeResultStatus::Completed);
         assert_eq!(parsed.result, Some(graph_result_value));
         assert!(parsed.result.is_some());
     }

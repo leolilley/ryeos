@@ -69,6 +69,17 @@ impl SchedulerContext for AppSchedulerContext {
                 requested_by: None,
                 params: None,
             })?;
+        // Scheduler timeouts use the same cooperative stop path as an operator
+        // command. The durable command remains the settlement record; SIGTERM
+        // wakes a runtime immediately if it is inside a bounded retry backoff.
+        let (_report, cancelled_roots) = ryeos_app::cascade::stop_thread_and_descendants(
+            &self.0,
+            thread_id,
+            ryeos_app::cascade::CascadeMode::Graceful,
+        )?;
+        for root in cancelled_roots {
+            ryeos_executor::execution::launch::kick_follow_resume_if_ready(&self.0, &root);
+        }
         Ok(())
     }
 

@@ -39,6 +39,10 @@ pub struct CallbackCapability {
     pub effective_bundle_id: Option<String>,
     /// Root item ref that minted this callback token, used for attribution.
     pub item_ref: Option<String>,
+    /// Verified raw-content digest of `item_ref`, captured at launch. Callback
+    /// hook identity must match this value; resolving live during a callback
+    /// would reintroduce a source-mutation race.
+    pub root_content_digest: String,
     /// Parent thread's resolved hard limits, serialized by the launcher. The
     /// daemon passes this through out-of-band on callback-dispatched child
     /// launches so runtimes cannot spoof parent budget inheritance.
@@ -88,6 +92,7 @@ impl CallbackCapabilityStore {
         ttl: Duration,
         effective_caps: Vec<String>,
         provenance: ExecutionProvenance,
+        root_content_digest: String,
     ) -> CallbackCapability {
         self.generate_with_context(
             thread_id,
@@ -97,13 +102,14 @@ impl CallbackCapabilityStore {
             provenance,
             None,
             None,
+            root_content_digest,
             Value::Null,
             0,
         )
     }
 
-    // One argument per capability field; eleven call sites across five
-    // crates bind them positionally — restructure with a compiler, not here.
+    // One argument per capability field; launch boundaries bind them
+    // positionally so every authority-bearing value is explicit at mint time.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_with_context(
         &self,
@@ -114,6 +120,7 @@ impl CallbackCapabilityStore {
         provenance: ExecutionProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
+        root_content_digest: String,
         hard_limits: Value,
         depth: u32,
     ) -> CallbackCapability {
@@ -139,6 +146,7 @@ impl CallbackCapabilityStore {
             provenance,
             effective_bundle_id,
             item_ref,
+            root_content_digest,
             hard_limits,
             depth,
         };
@@ -430,6 +438,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/project")),
+            "0".repeat(64),
         );
         assert!(cap.token.starts_with("cbt-"));
         assert!(cap.invocation_id.starts_with("inv-"));
@@ -452,6 +461,7 @@ mod tests {
             provenance(PathBuf::from("/p")),
             None,
             None,
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -474,6 +484,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         assert_eq!(cap.chain_root_id, "T-root");
     }
@@ -487,6 +498,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         store.set_chain_root(&cap.token, "T-root");
         let cap = store
@@ -515,6 +527,7 @@ mod tests {
             provenance(PathBuf::from("/project")),
             Some("bundle-123".to_string()),
             Some("directive:team/parent".to_string()),
+            "1".repeat(64),
             hard_limits.clone(),
             4,
         );
@@ -527,6 +540,7 @@ mod tests {
         assert_eq!(validated.depth, 4);
         assert_eq!(validated.effective_bundle_id.as_deref(), Some("bundle-123"));
         assert_eq!(validated.item_ref.as_deref(), Some("directive:team/parent"));
+        assert_eq!(validated.root_content_digest, "1".repeat(64));
     }
 
     #[test]
@@ -547,6 +561,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         store.invalidate(&cap.token);
         assert!(store
@@ -563,6 +578,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let cap2 = store.generate(
             "T-2",
@@ -570,6 +586,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         store.invalidate_for_thread("T-1");
         assert!(store
@@ -589,6 +606,7 @@ mod tests {
             Duration::from_secs(0),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         let err = store
@@ -606,6 +624,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let err = store
             .validate(&cap.token, "T-2", PathBuf::from("/p").as_path())
@@ -622,6 +641,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/project-a")),
+            "0".repeat(64),
         );
         let err = store
             .validate(&cap.token, "T-1", PathBuf::from("/project-b").as_path())
@@ -638,6 +658,7 @@ mod tests {
             Duration::from_secs(0),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         store.generate(
@@ -646,6 +667,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let pruned = store.prune_expired();
         assert_eq!(pruned, 1);
@@ -671,6 +693,7 @@ mod tests {
             Duration::from_secs(300),
             vec!["ryeos.*".to_string()],
             provenance,
+            "0".repeat(64),
         );
         let validated = store.validate(&cap.token, "T-test", tmp.path()).unwrap();
 
@@ -709,6 +732,7 @@ mod tests {
             ),
             effective_bundle_id: None,
             item_ref: None,
+            root_content_digest: "0".repeat(64),
             hard_limits: serde_json::Value::Null,
             depth: 0,
         };
@@ -726,6 +750,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let validated = store
             .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())

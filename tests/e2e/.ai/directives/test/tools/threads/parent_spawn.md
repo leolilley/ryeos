@@ -37,12 +37,12 @@ Parent directive that writes its own file, then spawns a child thread to write a
 <process>
   <step name="parent_write">
     Write the parent's message to parent_output.md:
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "parent_output.md", "content": "{input:parent_message}"})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "parent_output.md", "content": "${inputs.parent_message}"})`
   </step>
 
   <step name="spawn_child">
     Spawn a child thread running test/tools/file_system/child_write to write child_output.md:
-    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "test/tools/file_system/child_write", "inputs": {"message": "{input:child_message}", "file_path": "child_output.md"}})`
+    `rye_execute(item_type="tool", item_id="rye/agent/threads/thread_directive", parameters={"directive_name": "test/tools/file_system/child_write", "inputs": {"message": "${inputs.child_message}", "file_path": "child_output.md"}})`
   </step>
 
   <step name="verify_parent">

@@ -50,9 +50,9 @@ End-to-end test for knowledge context injection — verifies that the practices 
   </step>
 
   <step name="write_result">
-    Write the confirmation to {input:output_dir|outputs}/practices_injection_test.txt.
+    Write the confirmation to ${inputs.output_dir ?? "outputs"}/practices_injection_test.txt.
     Include: which practices were visible in your context, and whether all 8 were present.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/practices_injection_test.txt", "content": "<injection verification>", "create_dirs": true})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/practices_injection_test.txt", "content": "<injection verification>", "create_dirs": true})`
   </step>
 </process>
 

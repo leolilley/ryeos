@@ -33,6 +33,9 @@ Semantics:
 - `attempts` is the total count including the first dispatch, so `attempts: 3`
   is one initial call plus up to two retries. Exhaustion routes through the
   node's `on_error` (or the graph-level `on_error` policy) unchanged.
+- `backoff_ms` and `max_backoff_ms` are each capped at 300,000 milliseconds
+  (five minutes). Larger authored values are rejected during graph validation;
+  runtime delay calculation also applies the same defensive cap.
 - Every attempt consumes a walker step, so `max_steps` and `segment_steps`
   bound the total retry work — a retry loop can never run unbounded.
 - The attempt counter is checkpointed. A segment cut or a crash mid-retry
@@ -46,7 +49,7 @@ Semantics:
   failures (a flaky network fetch), not deterministic ones (a bad prompt).
 - Only successful dispatches cache; a retried-then-successful node caches
   normally, and a failure is never cached.
-- `retry` on a `follow: true` node is a validation error in v1. Retrying a
+- `retry` on a `follow: true` node is a validation error. Retrying a
   follow needs a fresh follow lifecycle per attempt; route a failed follow with
   `on_error` instead.
 - Cancellation during a backoff is immediate — cancelling the graph kills the
@@ -67,7 +70,7 @@ config:
   hooks:
     - id: announce_done
       event: graph_completed
-      condition: { path: status, op: eq, value: completed }
+      condition: 'status == "completed"'
       action: { item_id: tool:ops/notify, params: { text: "graph ${graph_id} done" } }
   nodes:
     ...
@@ -75,13 +78,19 @@ config:
 
 Fire points and the context each provides:
 
-- `graph_started` — before the walk begins (`graph_id`, `graph_run_id`, `state`,
-  `inputs`).
+- `graph_started` — once, before the logical graph run begins (`event`,
+  `graph_id`, `graph_run_id`, `state`, `inputs`). Continuation/resume segments
+  do not re-fire it.
 - `graph_step_completed` — after every node, including a failed node before its
-  `on_error` routing. The context carries `node`, `step`, `status` (`ok` /
-  `error`), an optional `error`, and `state`, so a hook can condition on a
-  node's outcome.
-- `graph_completed` — at the terminal (`status`, `steps`, `success`, `state`).
+  `on_error` routing. The context carries `event`, `graph_id`, `graph_run_id`,
+  `node`, `step`, typed `status` (`ok`, `error`, or `retry`), an optional
+  `error`, and `state`, so a hook can condition on a node's outcome. A retry
+  completion fires before the checkpointed re-attempt advances.
+- `graph_completed` — during terminal settlement (`event`, `graph_id`,
+  `graph_run_id`, candidate `status`, `settled: false`, `steps`, candidate
+  `success`, `state`, `inputs`). Hook cost is admitted before the authoritative
+  terminal status is emitted, so an accounting-integrity failure can still
+  change the settled result to `error`.
 
 Contract:
 
@@ -91,10 +100,16 @@ Contract:
   its `effective_caps` are enforced at the callback boundary, its cost accrues to
   the run, and it is visible in the braid. A hook can only invoke items the graph
   is authorized for.
-- A failing hook (its child errors, or its condition/interpolation fails) is
+- A failing hook (its child errors, or its condition/action evaluation fails) is
   recorded as a warning, not a graph failure — an observer never sinks the run.
-- Hooks are fire-and-forget relative to the checkpoint: no hook state is
-  persisted, and a resumed segment re-fires its hooks from the resume point
-  (a bounded duplicate, consistent with the rest of crash-resume semantics).
-- A hook whose `event` is none of the three fire points never runs; validation
-  warns so a typo surfaces at authoring time.
+- Hook cost is checked, attributed by lifecycle event, included in the graph
+  rollup, and persisted in advancing checkpoints. Accounting failures and
+  integrity-typed callback/child failures invalidate terminal authority and
+  fail the graph rather than allowing a contradictory or under-reported
+  successful settlement.
+- Advancing-step hooks may be re-fired after a crash before their checkpoint
+  fence completes, consistent with the node dispatch fence. Segment resumes do
+  not re-fire `graph_started`, and terminal hooks are not dispatched after run
+  accounting has already become invalid.
+- A hook whose `event` is none of the three fire points fails graph loading.
+  Unknown event names never survive into execution as inert configuration.

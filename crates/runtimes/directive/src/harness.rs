@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use serde::{Deserialize, Serialize};
 
-use ryeos_runtime::envelope::{EnvelopePolicy, HardLimits};
+use ryeos_runtime::envelope::{EnvelopePolicy, HardLimits, RuntimeCost, RuntimeCostError};
 
 /// Typed risk level — serde rejects unknown values so typos like
 /// `"HIGH"` fail at config load time instead of silently being ignored.
@@ -166,12 +166,32 @@ impl Harness {
         self.interrupts_used
     }
 
-    pub fn record_tokens(&mut self, input: u64, output: u64) {
-        self.tokens_used += input + output;
+    pub fn record_tokens(&mut self, input: u64, output: u64) -> Result<(), RuntimeCostError> {
+        let turn_tokens = input
+            .checked_add(output)
+            .ok_or(RuntimeCostError::InputTokensOverflow)?;
+        self.tokens_used = self
+            .tokens_used
+            .checked_add(turn_tokens)
+            .ok_or(RuntimeCostError::InputTokensOverflow)?;
+        Ok(())
     }
 
-    pub fn record_spend(&mut self, usd: f64) {
-        self.spend_used += usd;
+    pub fn record_spend(&mut self, usd: f64) -> Result<(), RuntimeCostError> {
+        let mut accumulated = RuntimeCost {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_usd: self.spend_used,
+            basis: None,
+        };
+        accumulated.checked_accumulate(&RuntimeCost {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_usd: usd,
+            basis: None,
+        })?;
+        self.spend_used = accumulated.total_usd;
+        Ok(())
     }
 
     pub fn record_spawn(&mut self) {
@@ -442,8 +462,8 @@ mod tests {
         let mut harness = make_harness(HardLimits::default(), vec![]);
         harness.record_turn();
         harness.record_turn();
-        harness.record_tokens(100, 50);
-        harness.record_spend(0.05);
+        harness.record_tokens(100, 50).unwrap();
+        harness.record_spend(0.05).unwrap();
         assert_eq!(harness.turns_used(), 2);
         assert_eq!(harness.tokens_used(), 150);
         assert!((harness.spend_used() - 0.05).abs() < f64::EPSILON);

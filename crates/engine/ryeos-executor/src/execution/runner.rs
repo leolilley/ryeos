@@ -1055,6 +1055,7 @@ fn build_protocol_launch_env(
     caller_scopes: Vec<String>,
     provenance: ExecutionProvenance,
     item_ref: &str,
+    root_content_digest: String,
     // Bundle identity for the token, derived once from the resolved canonical
     // ref by the caller via `effective_bundle_id_for_request` so it matches the
     // identity the runtime-cap minter used. `item_ref` stays the requested ref
@@ -1100,6 +1101,7 @@ fn build_protocol_launch_env(
                 provenance,
                 effective_bundle_id,
                 Some(item_ref.to_string()),
+                root_content_digest,
                 serde_json::Value::Null,
                 0,
             )
@@ -1361,6 +1363,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
     )
     .inspect_err(|_| {
@@ -1755,6 +1758,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
     )
     .inspect_err(|_| {
@@ -2613,6 +2617,7 @@ pub fn execution_params_from_resume_context(
         usage_subject: None,
         usage_subject_asserted_by: None,
         parameters: resume.parameters.clone(),
+        root_raw_content_digest: resolved_item.raw_content_digest.clone(),
         ref_bindings: resume.ref_bindings.clone(),
         resolved_item,
         plan_context: plan_ctx,
@@ -2837,6 +2842,7 @@ pub async fn run_existing_detached(
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
     )
     .inspect_err(|_| {

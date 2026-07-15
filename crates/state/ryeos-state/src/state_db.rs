@@ -14,7 +14,7 @@ use anyhow::Context;
 
 use crate::bundle_events::{
     self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage,
-    BundleEventRecord, BundleEventScanCursor, BundleEventScanPage,
+    BundleEventCursor, BundleEventRecord, BundleEventScanPage,
 };
 use crate::bundle_projection::BundleProjectionDb;
 use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
@@ -4201,9 +4201,10 @@ impl StateDb {
         bundle_id: &str,
         event_kind: &str,
         chain_id: &str,
-        cursor: Option<&str>,
+        cursor: Option<&BundleEventCursor>,
         limit: usize,
         max_serialized_bytes: usize,
+        signer: &dyn Signer,
     ) -> anyhow::Result<BundleEventChainPage> {
         let cas = self.pinned_cas()?;
         bundle_events::read_bundle_event_chain_page(
@@ -4216,6 +4217,7 @@ impl StateDb {
             cursor,
             limit,
             max_serialized_bytes,
+            signer,
         )
     }
 
@@ -4223,9 +4225,10 @@ impl StateDb {
         &self,
         bundle_id: &str,
         event_kind: &str,
-        cursor: Option<&BundleEventScanCursor>,
+        cursor: Option<&BundleEventCursor>,
         limit: usize,
         max_serialized_bytes: usize,
+        signer: &dyn Signer,
     ) -> anyhow::Result<BundleEventScanPage> {
         let cas = self.pinned_cas()?;
         bundle_events::scan_bundle_events_page(
@@ -4237,6 +4240,7 @@ impl StateDb {
             cursor,
             limit,
             max_serialized_bytes,
+            signer,
         )
     }
 

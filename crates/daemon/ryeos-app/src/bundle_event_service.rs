@@ -7,7 +7,7 @@ use ryeos_bundle::manifest::BundleEventOperation;
 use ryeos_bundle::runtime_authority::bundle_event_cap;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use ryeos_state::{
-    BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord, BundleEventScanCursor,
+    BundleEventAppendRequest, BundleEventAppendResult, BundleEventCursor, BundleEventRecord,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,7 +43,7 @@ pub struct BundleEventReadChainParams {
     pub event_kind: String,
     pub chain_id: String,
     #[serde(default)]
-    pub cursor: Option<String>,
+    pub cursor: Option<BundleEventCursor>,
     #[serde(default = "default_page_limit")]
     pub limit: usize,
 }
@@ -54,7 +54,7 @@ pub struct BundleEventScanParams {
     pub thread_id: String,
     pub event_kind: String,
     #[serde(default)]
-    pub cursor: Option<BundleEventScanCursor>,
+    pub cursor: Option<BundleEventCursor>,
     #[serde(default = "default_page_limit")]
     pub limit: usize,
 }
@@ -70,13 +70,13 @@ pub struct BundleEventAppendResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct BundleEventReadChainResponse {
     pub events: Vec<BundleEventRecord>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<BundleEventCursor>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BundleEventScanResponse {
     pub events: Vec<BundleEventRecord>,
-    pub next_cursor: Option<BundleEventScanCursor>,
+    pub next_cursor: Option<BundleEventCursor>,
 }
 
 const DEFAULT_PAGE_LIMIT: usize = 16;
@@ -138,7 +138,7 @@ impl BundleEventService {
             &effective_bundle_id,
             &params.event_kind,
             &params.chain_id,
-            params.cursor.as_deref(),
+            params.cursor.as_ref(),
             params.limit,
             MAX_PAGE_SERIALIZED_BYTES,
         )?;
@@ -278,6 +278,7 @@ mod tests {
             provenance: ExecutionProvenance::root_live_fs(PathBuf::from("/tmp/test"), engine),
             effective_bundle_id: effective_bundle_id.map(str::to_string),
             item_ref: Some("tool:example-bundle/send".into()),
+            root_content_digest: "0".repeat(64),
             hard_limits: serde_json::Value::Null,
             depth: 0,
         }

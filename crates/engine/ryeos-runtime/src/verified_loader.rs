@@ -228,6 +228,7 @@ impl TrustStore {
 pub struct VerifiedLoader {
     project_root: PathBuf,
     bundle_roots: Vec<PathBuf>,
+    node_trusted_keys_dir: PathBuf,
     trust_store: TrustStore,
 }
 
@@ -259,8 +260,17 @@ impl VerifiedLoader {
         Self {
             project_root,
             bundle_roots,
+            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
             trust_store,
         }
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub fn node_trusted_keys_dir(&self) -> &Path {
+        &self.node_trusted_keys_dir
     }
 
     pub fn trust_store(&self) -> &TrustStore {
@@ -499,6 +509,38 @@ impl VerifiedLoader {
         Ok(Some(value))
     }
 
+    /// Load one explicitly owned config file through the same verification and
+    /// typed-parse boundary as composed config loading. This is for configured
+    /// roots whose precedence is modeled by their consumer rather than by the
+    /// bundle/project config overlay (for example operator hook policy).
+    pub fn load_config_file_strict<T: DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Option<T>, ConfigLoadError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let verified =
+            self.load_verified("config", path)
+                .map_err(|source| ConfigLoadError::VerifyFailed {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        let raw_value: serde_yaml::Value =
+            serde_yaml::from_str(&verified.content).map_err(|source| {
+                ConfigLoadError::RawYamlParseFailed {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+        serde_yaml::from_value(raw_value)
+            .map(Some)
+            .map_err(|source| ConfigLoadError::TypedParseFailed {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
     /// Same as `load_config_strict` but also returns the set of source root
     /// labels (`"project"` / `"bundle"`) that contributed a file
     /// to the result, in resolution order (bundle → project; project wins).
@@ -532,6 +574,26 @@ impl VerifiedLoader {
         config_id: &str,
         strictness: LoadStrictness,
     ) -> std::result::Result<Option<(T, Vec<String>)>, ConfigLoadError> {
+        self.load_config_with_strictness_from_roots(config_id, strictness, true)
+    }
+
+    /// Load a privileged config exclusively from signed bundle roots. Project
+    /// overlays are deliberately excluded so they cannot claim a system-owned
+    /// provenance layer inside the config payload.
+    pub fn load_bundle_config_strict_signed<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<Option<T>, ConfigLoadError> {
+        self.load_config_with_strictness_from_roots(config_id, LoadStrictness::Required, false)
+            .map(|value| value.map(|(config, _)| config))
+    }
+
+    fn load_config_with_strictness_from_roots<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+        strictness: LoadStrictness,
+        include_project: bool,
+    ) -> std::result::Result<Option<(T, Vec<String>)>, ConfigLoadError> {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
@@ -547,9 +609,11 @@ impl VerifiedLoader {
             }
         }
 
-        let p = self.project_root.join(&item_path);
-        if p.exists() {
-            candidate_paths.push((p, "project"));
+        if include_project {
+            let p = self.project_root.join(&item_path);
+            if p.exists() {
+                candidate_paths.push((p, "project"));
+            }
         }
 
         if candidate_paths.is_empty() {

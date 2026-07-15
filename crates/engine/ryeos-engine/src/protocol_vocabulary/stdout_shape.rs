@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 use crate::launch_envelope_types::RuntimeResult;
+#[cfg(test)]
+use crate::launch_envelope_types::RuntimeResultStatus;
 use crate::method_wire::MethodCallResult;
 
 /// Maximum permitted size of a single streaming frame body.
@@ -290,7 +292,12 @@ pub fn read_all_frames<R: Read>(mut reader: R) -> Result<Vec<StreamingChunk>, Fr
         offset = body_offset + frame_len;
 
         if seen_terminal {
-            break;
+            let mut trailing = [0u8; 1];
+            match reader.read(&mut trailing) {
+                Ok(0) => break,
+                Ok(_) => return Err(FrameReadError::FrameAfterTerminal),
+                Err(source) => return Err(FrameReadError::IoLength { offset, source }),
+            }
         }
     }
 
@@ -341,7 +348,7 @@ mod tests {
     fn runtime_result_decoder_accepts_valid() {
         let rr = RuntimeResult {
             success: true,
-            status: "completed".into(),
+            status: RuntimeResultStatus::Completed,
             thread_id: "T-test".into(),
             result: None,
             outputs: serde_json::Value::Null,
@@ -363,6 +370,24 @@ mod tests {
     fn runtime_result_decoder_rejects_non_json() {
         let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, b"not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_result_decoder_rejects_success_status_contradiction() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "success": true,
+            "status": "failed",
+            "thread_id": "T-test",
+            "outputs": null,
+            "warnings": [],
+        }))
+        .unwrap();
+
+        let error = decode_stdout_terminal(StdoutShape::RuntimeResultV1, &bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("success"));
+        assert!(error.contains("contradicts `status` `failed`"));
     }
 
     #[test]
@@ -505,12 +530,27 @@ mod tests {
             exit_code: None,
             terminal: false,
         }));
-        // The reader stops after the terminal frame; trailing bytes are
-        // ignored. Callers that need to detect bytes-after-exit should
-        // check the underlying reader's remaining bytes themselves.
-        let chunks = read_all_frames(&mut &buf[..]).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].terminal);
+        assert!(matches!(
+            read_all_frames(&mut &buf[..]),
+            Err(FrameReadError::FrameAfterTerminal)
+        ));
+    }
+
+    #[test]
+    fn frame_reader_rejects_partial_bytes_after_terminal() {
+        let mut buf = write_frame(&StreamingChunk {
+            seq: 0,
+            kind: StreamingChunkKind::Exit,
+            data: None,
+            exit_code: Some(0),
+            terminal: true,
+        });
+        buf.push(0xff);
+
+        assert!(matches!(
+            read_all_frames(&mut &buf[..]),
+            Err(FrameReadError::FrameAfterTerminal)
+        ));
     }
 
     #[test]

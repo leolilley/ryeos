@@ -22,7 +22,7 @@ hooks:
       item_id: directive:ryeos/examples/summarize_continuation
       thread: inline
       params:
-        reason: ${event.limit}
+        reason: ${event.reason}
         live_messages: ${event.messages}
         usage: ${event.usage}
         budget_remaining: ${event.budget_remaining}

@@ -38,23 +38,23 @@ The parent directive hit a context-window continuation boundary.
 
 ## Boundary
 
-Reason: `{input:reason}`
+Reason: `${inputs.reason}`
 
 Usage:
 
-`{input:usage}`
+`${json(inputs.usage ?? null)}`
 
 Remaining budget:
 
-`{input:budget_remaining}`
+`${json(inputs.budget_remaining ?? null)}`
 
 Declared outputs:
 
-`{input:declared_outputs}`
+`${json(inputs.declared_outputs ?? null)}`
 
 Live provider-window messages:
 
-`{input:live_messages}`
+`${json(inputs.live_messages)}`
 
 ## Task
 
@@ -67,6 +67,7 @@ Return a concise continuation seed for the successor directive. Include:
 5. Critical facts, identifiers, file paths, URLs, tool results, or errors.
 6. The recommended next action.
 
-Keep the seed under `{input:max_summary_tokens}` tokens when that input is present.
+When `${exists(inputs.max_summary_tokens)}` is true, keep the seed under
+`${inputs.max_summary_tokens ?? 0}` tokens.
 
 Do not include generic advice. Preserve exact technical details the successor needs to continue without replaying the full context.

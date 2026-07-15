@@ -79,10 +79,12 @@ return the prior result instead of writing twice; `correlation_id` /
 }
 ```
 
-Returns a newest-first page from one chain. `cursor` is the opaque event hash
-returned as `next_cursor` by the previous page. `limit` defaults to 16 and may
-not exceed 16. Authorized under the `scan` verb (not a separate `read`): a
-create-or-append tool needs **both** `scan` and `append`.
+Returns a newest-first page from one chain. `cursor` is the signed cursor
+object returned as `next_cursor` by the previous page. It is bound to the
+bundle, event kind, chain, and verified chain head; the daemon rejects forged
+or stale cursors. `limit` defaults to 16 and may not exceed 16. Authorized
+under the `scan` verb (not a separate `read`): a create-or-append tool needs
+**both** `scan` and `append`.
 
 ### Scan
 
@@ -99,14 +101,22 @@ cursor has the shape returned by `next_cursor`:
 
 ```json
 {
+  "schema": 1,
+  "kind": "bundle_event_cursor",
+  "bundle_id": "example-bundle",
+  "event_kind": "example_event",
   "chain_id": "example_123",
-  "event_hash": "sha256..."
+  "head_hash": "sha256...",
+  "event_hash": "sha256...",
+  "signer": "node-fingerprint",
+  "signature": "base64..."
 }
 ```
 
 Chains are visited in lexical `chain_id` order and events within each chain are
-newest-first. `limit` defaults to 16 and may not exceed 16. Authorized under
-`scan`.
+newest-first. Clients must return the cursor unchanged; its signature and head
+anchor are authoritative. `limit` defaults to 16 and may not exceed 16.
+Authorized under `scan`.
 
 ## Pagination and page bounds
 
