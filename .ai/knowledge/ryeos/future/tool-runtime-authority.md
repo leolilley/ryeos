@@ -23,7 +23,7 @@ directive/graph item
   -> daemon-enforced runtime callbacks
 ```
 
-Direct tool execution now uses the signed `tool_callback_v1` protocol. That
+Direct tool execution now uses the signed `tool_callback` protocol. That
 descriptor explicitly requests the daemon socket, callback token, thread-auth,
 thread, and project bindings; callback-free protocols mint and expose none of
 them. The callback token still carries only daemon-derived `effective_caps`; an
@@ -62,7 +62,7 @@ backward-compatibility authority.
 
 ## Baseline thread-local callback surface
 
-`tool_callback_v1` selects callback transport and two server-side proofs. Some
+`tool_callback` selects callback transport and two server-side proofs. Some
 UDS methods are exact-thread or chain-local lifecycle operations rather than
 resource-capability operations: for example marking/finalizing the tool's own
 thread, appending its thread events, polling its own input, publishing an
@@ -130,6 +130,10 @@ A future managed tool runtime may standardize launch behavior, sandboxing, strea
 Any future per-tool sandbox profile must only narrow the immutable node-owned
 policy. It cannot enable a disabled node boundary, add mounts/network access,
 or override node limits.
+
+Profiles should express typed isolation requirements, not backend names or
+backend-specific flags. Backend selection remains deterministic node-owned data
+and must follow `ryeos/future/data-driven-execution-isolation-backends`.
 
 Per-tool profiles are not a substitute for hosted workload isolation. The
 current inner boundary deliberately does not provide CPU/memory/process cgroup

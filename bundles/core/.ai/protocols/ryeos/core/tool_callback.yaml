@@ -1,6 +1,6 @@
-# ryeos:signed:2026-07-14T10:12:30Z:6867f8100e97603387fc3d012d02fd9f037fe27c846c0c92040ef8dd6174f421:9eLRleKCpwRMaQGn3zB8u2yxy3N27NcI13+cc9uQs2qbhqFpoJxTAXe6Sfhth1vNE/NtXuwJUO1PFIAX3Zo2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T07:49:08Z:f6d862c8e8cbd814242305ddb81031911851494b8092301afdd687d1a4e47377:VZfhEQEwGDwgNwOhjWbd3/kwpOjPRWVymsSZP1nSyhoz7HV90GifIJJeCC3ne+tGfUxpMe/OVebOC42hA2dZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
-name: tool_callback_v1
+name: tool_callback
 category: ryeos/core
 abi_version: v1
 description: Tool subprocess with opaque terminal output and an explicitly declared daemon callback channel.
@@ -23,4 +23,4 @@ capabilities:
   allows_detached: true
 lifecycle:
   mode: detached_ok
-callback_channel: http_v1
+callback_channel: http

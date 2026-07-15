@@ -280,7 +280,7 @@ fn build_dimension_projection(
     let gc = load_gc_summary(state);
 
     Ok(RyeOsDimensionProjection {
-        schema_version: "ryeos.ui.dimension.v0",
+        schema_version: "ryeos.ui.dimension.v1",
         generated_at: lillux::time::iso8601_now(),
         session: SessionInfo {
             session_id: session.session_id.clone(),

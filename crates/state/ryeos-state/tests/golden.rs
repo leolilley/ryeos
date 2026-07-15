@@ -81,7 +81,7 @@ fn golden_thread_event_canonical_json() {
 fn golden_thread_snapshot_canonical_json() {
     let cases = [
         json!({
-            "schema": 2,
+            "schema": 1,
             "kind": "thread_snapshot",
             "thread_id": "T-root-001",
             "chain_root_id": "T-root-001",
@@ -123,7 +123,7 @@ fn golden_thread_snapshot_canonical_json() {
             "last_thread_seq": 1
         }),
         json!({
-            "schema": 2,
+            "schema": 1,
             "kind": "thread_snapshot",
             "thread_id": "T-snap-002",
             "chain_root_id": "T-root-001",

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:61cbd4a269893bca4c0d6749da90a72828f0414a39d484f975c5f45ddfb7f972:e7e/Mexut1SFaspdHlgRqnDOxRsly1TJNJjQX2oW9TN+OGDiPkrdyidbeo3qnMNQmjvwZcznnE0sr5/+Xz5nBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:18Z:712ef9a41805c1abfaeaedb76eae46b38ac6c683fad20303cd57c094a952e553:69C3Tdn/ludvnN6eFxXuZhzWuqwVY8kt3WTQaibpj8CSRqKxwJrqFWEd4mNJ29k0y8XO5ve9UFBVVgMkmS+sDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
@@ -13,7 +13,7 @@ protocol and may use `@subprocess` as the canonical subprocess executor alias.
 
 - Directory: `tools/`
 - Formats: Python, YAML, JavaScript/TypeScript, JSON
-- Protocol: `protocol:ryeos/core/tool_callback_v1`
+- Protocol: `protocol:ryeos/core/tool_callback`
 - Composer: identity
 - Runtime blocks: config, env_config, config_resolve, verify_deps, execution_params, native_async, native_resume
 

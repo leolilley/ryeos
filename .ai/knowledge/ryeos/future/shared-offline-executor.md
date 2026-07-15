@@ -24,7 +24,11 @@ Create a shared executor only when there is real pressure from more than one cal
 - Execution needs centralized tracing, lifecycle control, or cancellation.
 - The existing shared immutable sandbox boundary proves insufficient for a new
   offline executable shape; sandboxing alone is no longer a trigger because
-  current offline tool/service launches already use the RyeOS strict policy.
+  current offline tool/service launches already share the node policy path when
+  it is enabled. The default remains direct execution, and future backend
+  selection belongs to
+  `ryeos/future/data-driven-execution-isolation-backends` rather than this
+  executor.
 - Engine startup cost per CLI invocation becomes a measurable problem and needs a cached local execution service.
 
 ## Target shape

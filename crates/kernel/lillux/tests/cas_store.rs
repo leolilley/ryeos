@@ -10,7 +10,7 @@ use std::path::Path;
 
 #[cfg(unix)]
 use lillux::cas::atomic_write_batch_in_pinned_root;
-use lillux::cas::{atomic_write_batch, shard_path, valid_hash, CasStore};
+use lillux::cas::{atomic_write_batch, canonical_json, shard_path, valid_hash, CasStore};
 use lillux::sha256_hex;
 #[cfg(unix)]
 use lillux::PinnedDirectory;
@@ -50,6 +50,29 @@ fn valid_hash_edge_cases() {
     assert!(
         !valid_hash(&format!("{}g", "a".repeat(63))),
         "non-hex character is invalid"
+    );
+}
+
+#[test]
+fn canonical_json_contract_has_stable_bytes_and_hash() {
+    let value = serde_json::json!({
+        "\u{1f600}": "\u{e9}",
+        "\u{10000}": "supplementary",
+        "\u{e000}": "bmp",
+        "z": -0.0,
+        "large": 9_007_199_254_740_993_u64,
+        "fraction": 1.0,
+        "a": "\u{0001}\n\t\"\\",
+    });
+
+    let bytes = canonical_json(&value).expect("canonical encoding");
+    assert_eq!(
+        bytes,
+        r#"{"a":"\u0001\n\t\"\\","fraction":1.0,"large":9007199254740993,"z":-0.0,"\ue000":"bmp","\ud800\udc00":"supplementary","\ud83d\ude00":"\u00e9"}"#
+    );
+    assert_eq!(
+        sha256_hex(bytes.as_bytes()),
+        "ceef0b93428ef1491f105eff72899eb35a4ea1a210424196ad1b84f0e90c6386"
     );
 }
 
@@ -169,7 +192,7 @@ fn corrupt_existing_entry_is_an_error_and_is_never_replaced() {
 }
 
 #[test]
-fn object_reader_rejects_hash_valid_noncanonical_json() {
+fn canonical_json_reader_rejects_hash_valid_noncanonical_json() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());
     let bytes = br#"{"b":2,"a":1}"#;
@@ -178,7 +201,37 @@ fn object_reader_rejects_hash_valid_noncanonical_json() {
     fs::create_dir_all(path.parent().expect("object parent")).expect("create shard");
     fs::write(&path, bytes).expect("write noncanonical object");
 
-    assert!(store.get_object(&hash).is_err());
+    let error = store
+        .get_object(&hash)
+        .expect_err("hash-valid noncanonical bytes must fail closed");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("violate the RyeOS canonical JSON contract"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&sha256_hex(br#"{"a":1,"b":2}"#)),
+        "the diagnostic must identify the canonical content address: {message}"
+    );
+}
+
+#[test]
+fn canonical_json_reader_accepts_deployed_decimal_zero_encoding() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let bytes = br#"{"spend_usd":0.0}"#;
+    let hash = "15f250824176b3f9990583a856ff21a8588c4e1db5683d10a466a2941a727e93";
+    assert_eq!(sha256_hex(bytes), hash, "the deployed byte vector changed");
+
+    let path = shard_path(store.root(), "objects", hash, ".json");
+    fs::create_dir_all(path.parent().expect("object parent")).expect("create shard");
+    fs::write(&path, bytes).expect("write deployed object");
+
+    let value = store
+        .get_object(hash)
+        .expect("read deployed object")
+        .expect("deployed object exists");
+    assert_eq!(value["spend_usd"].as_f64(), Some(0.0));
 }
 
 #[cfg(unix)]

@@ -348,26 +348,14 @@ fn build_node_bundle_admission(
         anyhow::bail!("{message}");
     }
 
-    // Validate the complete preparer registry against a detached exact backend
-    // capture before publishing it into the daemon snapshot. If another fully
-    // validated admission wins publication concurrently, validate and bind
-    // this graph again against that winner before activation can proceed.
-    let (sandbox, launch_preparers) = if runtimes.requires_launch_preparer() {
-        let tentative = sandbox
-            .tentative_mandatory_bubblewrap_backend()
-            .context("failed to tentatively capture sandbox backend required by runtimes")?;
-        let tentative_preparers = bind_launch_preparers(&runtimes, &handler_registry, &tentative)?;
-        let (published, reconciled) = sandbox
-            .publish_mandatory_bubblewrap_backend(&tentative)
-            .context("failed to publish admitted launch-preparer sandbox backend")?;
-        let launch_preparers = if reconciled {
-            bind_launch_preparers(&runtimes, &handler_registry, &published)?
-        } else {
-            tentative_preparers
-        };
-        (Arc::new(published), launch_preparers)
+    // Enforced policy binds preparers to the backend captured while the
+    // immutable sandbox snapshot was loaded. Disabled policy binds the same
+    // verified handlers to the direct bounded runner without resolving or
+    // probing Bubblewrap.
+    let launch_preparers = if runtimes.requires_launch_preparer() {
+        bind_launch_preparers(&runtimes, &handler_registry, &sandbox)?
     } else {
-        (sandbox, LaunchPreparerRegistry::default())
+        LaunchPreparerRegistry::default()
     };
 
     tracing::info!(

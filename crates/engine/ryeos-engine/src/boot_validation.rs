@@ -1992,7 +1992,7 @@ composed_value_contract:
             abi_version: "v1".to_string(),
             description: None,
             stdin: crate::protocols::descriptor::ProtocolStdin {
-                shape: crate::protocol_vocabulary::StdinShape::LaunchEnvelopeV1,
+                shape: crate::protocol_vocabulary::StdinShape::LaunchEnvelope,
             },
             stdout: crate::protocols::descriptor::ProtocolStdout {
                 mode: StdoutMode::Terminal,

@@ -531,6 +531,21 @@ impl OperationalDb {
         let directory_lock = runtime_directory
             .lock_exclusive()
             .context("lock operational runtime-state directory")?;
+        Self::open_at_pinned_runtime_state_dir_with_lock(runtime_directory, directory_lock)
+    }
+
+    /// Open while sharing the caller's exclusive lock on the runtime-state
+    /// namespace. RuntimeDb and OperationalDb coexist in this directory, so a
+    /// production opener must pass clones of one guard rather than attempting
+    /// two independent exclusive flocks on the same inode.
+    pub(crate) fn open_at_pinned_runtime_state_dir_with_lock(
+        runtime_directory: &lillux::PinnedDirectory,
+        directory_lock: lillux::PinnedDirectoryLock,
+    ) -> Result<Self> {
+        ensure_directory_path_still_pinned(runtime_directory)?;
+        directory_lock
+            .ensure_protects(runtime_directory)
+            .context("verify operational runtime-state directory lock")?;
         let marker = inspect_initialized_marker(runtime_directory)?;
         let existing_database = runtime_directory
             .open_regular(OsStr::new(OPERATIONAL_DB_FILENAME), true)
@@ -584,9 +599,11 @@ impl OperationalDb {
 
     /// Open or initialize the stable operational database.
     ///
-    /// Existing files must already match the current exact schema. This is a
-    /// clean-cut format: no projection-generation import or legacy migration
-    /// is attempted.
+    /// Existing files must match the current exact schema. This is retained
+    /// source-of-truth state, so a future deployed predecessor must receive an
+    /// explicit atomic forward migration rather than being reset or archived.
+    /// Version 1 is the first deployed schema, so there is no predecessor to
+    /// migrate today.
     #[cfg(test)]
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let (directory, name) = pin_operational_parent(path, true)?;
@@ -2457,7 +2474,7 @@ mod tests {
     }
 
     #[test]
-    fn established_stale_schema_fails_without_migration_or_reset() {
+    fn unknown_operational_schema_fails_without_reset() {
         let tempdir = tempfile::tempdir().unwrap();
         let db = OperationalDb::open_at_runtime_state_dir(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();

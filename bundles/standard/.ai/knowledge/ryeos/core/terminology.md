@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:3174ecf0198184d78b692abc5b8aa1202ecda05e5ef654f8d593a332a53ea1d8:hcqGerafMtjFPdnQt3ikzGzaTgq92zxJa6FMsl1NuNkBsP6XVngkKo++yEbDYgzLU/aSjveGDScNyrqE2Zr7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:20Z:3b063382492e5656927a12567a2964e65cff11f4fd7db58ee953552d206648cf:0d51MyxjVD4Dy8EGjEqB8Kt6ac5q+OBen/UrnoRram55yHpEDlJ7f+AN6mxQm7VJwEWhdR0gTKQWEYGjiiGXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -54,7 +54,7 @@ Canonical refs follow the category namespace:
 tool:ryeos/core/sign
 handler:ryeos/core/extends-chain
 parser:ryeos/core/yaml/yaml
-protocol:ryeos/core/runtime_v1
+protocol:ryeos/core/runtime
 ```
 
 ## Kind Names
@@ -129,7 +129,7 @@ ryeos vault put / list / remove / rewrap
 | CLI aliases          | single letter   | `s` → sign, `f` → fetch           |
 | Canonical ref paths  | lowercase + `/` | `ryeos/core/verify`               |
 | Environment vars     | UPPER_SNAKE     | `RYEOS_APP_ROOT`                  |
-| Protocol names       | snake_case      | `tool_streaming_v1`, `runtime_v1` |
+| Protocol names       | snake_case      | `tool_streaming`, `runtime` |
 | Model tiers          | snake_case      | `code_max`, `vision_fast`         |
 | Category values      | slash-separated | `ryeos/core`, `engine/kinds/tool` |
 | Node sections        | flat lowercase  | `verbs`, `aliases`, `routes`      |

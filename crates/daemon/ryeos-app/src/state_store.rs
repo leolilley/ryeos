@@ -1671,6 +1671,9 @@ impl StateStore {
     ) -> Result<Self> {
         let runtime_state_directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
             .context("failed to establish no-follow runtime_state_dir")?;
+        let runtime_state_lock = runtime_state_directory
+            .lock_exclusive()
+            .context("lock live runtime-state namespace")?;
         let thread_runtime_authority =
             ThreadRuntimeAuthority::capture(&app_root, &runtime_state_directory, true)?;
         ryeos_state::CasMutationGuard::ensure_anchor(&runtime_state_dir)
@@ -1681,7 +1684,18 @@ impl StateStore {
         let projection_health = Arc::new(ThreadProjectionHealth::default());
         // Runtime state must be readable before projection recovery can decide
         // whether a headless Set's replaceable rows are safe to discard.
-        let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
+        let runtime_db_parent_path = runtime_db_path.parent().unwrap_or_else(|| Path::new("."));
+        let runtime_db_parent = lillux::PinnedDirectory::open_or_create(runtime_db_parent_path)
+            .context("pin runtime database namespace")?;
+        let runtime_db = if runtime_state_directory.is_same_directory(&runtime_db_parent)? {
+            runtime_db::RuntimeDb::open_with_namespace_authority(
+                &runtime_db_path,
+                runtime_db_parent,
+                runtime_state_lock.clone(),
+            )?
+        } else {
+            runtime_db::RuntimeDb::open(&runtime_db_path)?
+        };
         // Launch claims are owned exclusively by tasks in one daemon process.
         // Holding the process-wide state lock while opening a new RuntimeDb
         // proves every persisted claim belongs to the previous process. Clear
@@ -1698,19 +1712,27 @@ impl StateStore {
             );
         }
         let state_db = match recovery_observer {
-            Some(recovery_observer) => StateDb::open_with_recovery_observer_and_runtime_liveness(
-                &runtime_state_dir,
-                projection_health.clone(),
-                head_trust,
-                recovery_observer,
-                &runtime_db,
-            )?,
-            None => StateDb::open_with_projection_repair_sink_and_runtime_liveness(
-                &runtime_state_dir,
-                projection_health.clone(),
-                head_trust,
-                &runtime_db,
-            )?,
+            Some(recovery_observer) => {
+                StateDb::open_with_recovery_observer_runtime_liveness_and_namespace_authority(
+                    &runtime_state_dir,
+                    runtime_state_directory,
+                    runtime_state_lock,
+                    projection_health.clone(),
+                    head_trust,
+                    recovery_observer,
+                    &runtime_db,
+                )?
+            }
+            None => {
+                StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
+                    &runtime_state_dir,
+                    runtime_state_directory,
+                    runtime_state_lock,
+                    projection_health.clone(),
+                    head_trust,
+                    &runtime_db,
+                )?
+            }
         };
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
@@ -5811,6 +5833,7 @@ mod tests {
 
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
+        let runtime_state_dir = tmp.join(".ai/state");
         let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
             .expect("test node identity");
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
@@ -5821,8 +5844,8 @@ mod tests {
         );
         StateStore::new_with_head_trust(
             tmp.clone(),
-            tmp.join(".ai/state"),
-            tmp.join("runtime.sqlite3"),
+            runtime_state_dir.clone(),
+            runtime_state_dir.join("runtime.sqlite3"),
             signer,
             WriteBarrier::new(),
             Arc::new(head_trust),

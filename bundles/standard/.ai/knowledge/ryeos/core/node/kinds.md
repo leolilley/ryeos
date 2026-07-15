@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:0b369eedb5161ee65e01b13e9f7195ebf06a88bc325637ad581eebac8e82f9e6:6l5V/gjVblFM1UrRj8V9/4sna8+5M87a0/6Sso2yLE9/doEW/Agm85HuW7/tUCct53aMJlmT0kKngx/BVRvZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:18Z:33e9fdbb1c6d8563bd1968498c69ebf53d315849be3ca3a05e3e11d66ee3a908:flyhSHoJCzt4i/lZoAUdu0TjLv0i3JpSbq+Pr1GCf5fxJ+auM1hU3XOx7U+kDhPFgJantN5TPqMMg9ZSFJpZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]
@@ -38,7 +38,7 @@ JSON; explicit executor `input_data` may be arbitrary bytes.
 - **Directory:** `tools/`
 - **Formats:** `.py`, `.yaml`, `.js`, `.ts`, `.json`
 - **Composer:** `handler:ryeos/core/identity` (no composition)
-- **Execution:** Subprocess via `protocol:ryeos/core/tool_callback_v1`
+- **Execution:** Subprocess via `protocol:ryeos/core/tool_callback`
 
 Tools declare `executor_id: "@subprocess"` which resolves to
 `tool:ryeos/core/subprocess/execute`.
@@ -47,7 +47,7 @@ Tools declare `executor_id: "@subprocess"` which resolves to
 Same as `tool` but emits length-prefixed JSON frames on stdout for
 streaming output during execution.
 
-- **Execution:** Subprocess via `protocol:ryeos/core/tool_streaming_v1`
+- **Execution:** Subprocess via `protocol:ryeos/core/tool_streaming`
 
 ### `knowledge` — Context and Documentation
 Structured context items injected into LLM prompts. Knowledge can be
@@ -111,7 +111,7 @@ and graphs. Each runtime specifies which kind it serves.
 
 - **Directory:** `runtimes/`
 - **Formats:** `.yaml`
-- **Execution:** Subprocess via `protocol:ryeos/core/runtime_v1`
+- **Execution:** Subprocess via `protocol:ryeos/core/runtime`
 
 The runtime item selects a signed implementation binary. When that binary
 serves a method-bearing kind, invocation uses the served kind schema's

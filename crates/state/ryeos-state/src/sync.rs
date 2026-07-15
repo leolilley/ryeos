@@ -756,7 +756,7 @@ mod tests {
 
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",
@@ -996,7 +996,7 @@ mod tests {
 
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",
@@ -1103,7 +1103,7 @@ mod tests {
         // Build an imported closure with canonical hashes.
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-imported",
             "chain_root_id": "T-imported",
             "status": "created",

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:96cb82a4cc8b81479288aacbb9a27b861e14c224ba09060a4af7bf734940abb9:T2YniF15wriRNv0dxTuPUjaPwltaHyzwC1e+LvjW11ihjT5ZsAaWYIXM+sLhLg4BSChKO7W0ECMFEITHrNzNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:17Z:47f938565e4d3e987e70c7b297c517186381b62748f91fab5f25a8bda8e7984e:O6mbPsuU1fwYJwlil2iVeL2WtII+eLyqslx18bANHDZCQsRhjl/q2CSbfw9myYdwijX3Kj5wcnYplwP0UxKbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -42,7 +42,7 @@ protocol plus daemon-root, engine-plan, secret, and resume bindings. In
 particular, callback variables (`RYEOSD_SOCKET_PATH`,
 `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_AUTH_TOKEN`, `RYEOSD_THREAD_ID`, and
 `RYEOSD_PROJECT_PATH`) are declared by callback-capable protocols such as
-`runtime_v1` and the default tool protocol `tool_callback_v1`; callback-free
+`runtime` and the default tool protocol `tool_callback`; callback-free
 protocols receive none of that authority. `RYEOSD_PROJECT_PATH` is the callback
 authorization/state anchor: a deliberate state-root override when present,
 otherwise the effective project root. It may intentionally differ from the

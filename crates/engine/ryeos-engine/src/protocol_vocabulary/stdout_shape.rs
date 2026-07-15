@@ -25,15 +25,15 @@ pub enum StdoutShape {
 
     /// Daemon parses stdout as a single RuntimeResult JSON object at exit.
     /// Wire shape: `RuntimeResult` from `launch_envelope_types`.
-    RuntimeResultV1,
+    RuntimeResult,
 
     /// Daemon parses stdout as one method-runtime result object at exit.
-    MethodCallResultV1,
+    MethodCallResult,
 
     /// Daemon reads length-prefixed JSON frames during execution. Each
     /// frame is a StreamingChunk. The final frame's terminal: true bit
     /// ends the stream.
-    StreamingChunksV1,
+    StreamingChunks,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,13 +139,13 @@ pub fn decode_stdout_terminal(
 ) -> Result<DecodedStdout, EngineError> {
     match shape {
         StdoutShape::OpaqueBytes => Ok(DecodedStdout::Opaque(raw_bytes.to_vec())),
-        StdoutShape::RuntimeResultV1 => {
+        StdoutShape::RuntimeResult => {
             let parsed: RuntimeResult = serde_json::from_slice(raw_bytes).map_err(|e| {
                 EngineError::Internal(format!("failed to parse RuntimeResult from stdout: {e}"))
             })?;
             Ok(DecodedStdout::RuntimeResult(parsed))
         }
-        StdoutShape::MethodCallResultV1 => {
+        StdoutShape::MethodCallResult => {
             let parsed: MethodCallResult = serde_json::from_slice(raw_bytes).map_err(|e| {
                 EngineError::Internal(format!("failed to parse MethodCallResult from stdout: {e}"))
             })?;
@@ -156,8 +156,8 @@ pub fn decode_stdout_terminal(
             })?;
             Ok(DecodedStdout::MethodCallResult(parsed))
         }
-        StdoutShape::StreamingChunksV1 => Err(EngineError::Internal(
-            "StreamingChunksV1 cannot be decoded as terminal; use frame reader".into(),
+        StdoutShape::StreamingChunks => Err(EngineError::Internal(
+            "StreamingChunks cannot be decoded as terminal; use frame reader".into(),
         )),
     }
 }
@@ -169,14 +169,14 @@ pub fn decode_stdout_frame(
     frame_bytes: &[u8],
 ) -> Result<DecodedFrame, EngineError> {
     match shape {
-        StdoutShape::StreamingChunksV1 => {
+        StdoutShape::StreamingChunks => {
             let chunk: StreamingChunk = serde_json::from_slice(frame_bytes).map_err(|e| {
                 EngineError::Internal(format!("failed to parse StreamingChunk frame: {e}"))
             })?;
             Ok(DecodedFrame::Streaming(chunk))
         }
         _ => Err(EngineError::Internal(
-            "frame decode only valid for StreamingChunksV1".into(),
+            "frame decode only valid for StreamingChunks".into(),
         )),
     }
 }
@@ -318,9 +318,9 @@ mod tests {
     fn round_trip_all_variants() {
         for shape in [
             StdoutShape::OpaqueBytes,
-            StdoutShape::RuntimeResultV1,
-            StdoutShape::MethodCallResultV1,
-            StdoutShape::StreamingChunksV1,
+            StdoutShape::RuntimeResult,
+            StdoutShape::MethodCallResult,
+            StdoutShape::StreamingChunks,
         ] {
             let yaml = serde_yaml::to_string(&shape).unwrap();
             let parsed: StdoutShape = serde_yaml::from_str(&yaml).unwrap();
@@ -356,7 +356,7 @@ mod tests {
             warnings: vec![],
         };
         let bytes = serde_json::to_vec(&rr).unwrap();
-        let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, &bytes).unwrap();
+        let result = decode_stdout_terminal(StdoutShape::RuntimeResult, &bytes).unwrap();
         match result {
             DecodedStdout::RuntimeResult(parsed) => {
                 assert!(parsed.success);
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn runtime_result_decoder_rejects_non_json() {
-        let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, b"not json");
+        let result = decode_stdout_terminal(StdoutShape::RuntimeResult, b"not json");
         assert!(result.is_err());
     }
 
@@ -383,7 +383,7 @@ mod tests {
         }))
         .unwrap();
 
-        let error = decode_stdout_terminal(StdoutShape::RuntimeResultV1, &bytes)
+        let error = decode_stdout_terminal(StdoutShape::RuntimeResult, &bytes)
             .unwrap_err()
             .to_string();
         assert!(error.contains("success"));
@@ -401,7 +401,7 @@ mod tests {
             warnings: Vec::new(),
         };
         let bytes = serde_json::to_vec(&method_result).unwrap();
-        let decoded = decode_stdout_terminal(StdoutShape::MethodCallResultV1, &bytes).unwrap();
+        let decoded = decode_stdout_terminal(StdoutShape::MethodCallResult, &bytes).unwrap();
         match decoded {
             DecodedStdout::MethodCallResult(parsed) => {
                 assert!(parsed.success);
@@ -423,7 +423,7 @@ mod tests {
             warnings: Vec::new(),
         };
         let bytes = serde_json::to_vec(&method_result).unwrap();
-        assert!(decode_stdout_terminal(StdoutShape::MethodCallResultV1, &bytes).is_err());
+        assert!(decode_stdout_terminal(StdoutShape::MethodCallResult, &bytes).is_err());
     }
 
     fn write_frame(chunk: &StreamingChunk) -> Vec<u8> {

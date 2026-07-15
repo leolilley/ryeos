@@ -77,9 +77,10 @@ principal outside the node owner's trust boundary. Signed admission establishes
 who requested work and what object closure was admitted; it does not by itself
 make that code safe to co-locate with other principals.
 
-The current node-owned RyeOS strict sandbox is the inner execution boundary and
-the integration seam for this future work. A hostile-workload scheduler must
-add, per principal or job:
+The current optional Linux Bubblewrap boundary is one inner execution backend
+and the integration seam for this future work. It must first be expressed as a
+typed backend-neutral isolation plan rather than promoted into the whole hosted
+architecture. A hostile-workload scheduler must add, per principal or job:
 
 - CPU, memory, and process-count cgroup limits, accounting, and authoritative
   whole-workload teardown across descendant process groups and sessions;
@@ -101,6 +102,8 @@ explicit isolation class and worker/cgroup identity once this path is activated.
 That outer identity also closes the spawn-to-durable-attachment crash window:
 if a node dies after creating a process but before committing its exact birth
 tuple, the worker/cgroup remains an independently nameable teardown boundary.
+The backend, capability matching, and multi-platform contract is specified in
+`ryeos/future/data-driven-execution-isolation-backends`.
 
 ### CAS attribution and staging metadata
 

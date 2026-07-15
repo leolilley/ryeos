@@ -1,13 +1,13 @@
-# ryeos:signed:2026-06-07T05:18:55Z:dfaf804110d15a49dc8ea84238562fde8490eb54dd3d98764043f60983dd8a6e:numqNCnSpPfx7N4/3RFU5ihvXbNepHo4uUY5R8mTvMluKNGYihoUq/OI3bFm3fdgDxOkM5b6I+vAzq8wnEeIBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T07:49:08Z:ca11a783bfa11a235549846ce8a230d1c80f5096fbc117cc02876008c001edb3:oU7vzzlgpHiYYtSjGA9UnaPTpf9UGPZaIdLqaeZ0NpyHFDwqXa/Vdo2aSR9JObJDNeu8eqx4JNNN+oBHNg/ICQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
-name: tool_streaming_v1
+name: tool_streaming
 category: ryeos/core
 abi_version: v1
 description: Tool with streaming stdout chunks; daemon reads length-prefixed JSON frames during execution.
 stdin:
   shape: parameters_json
 stdout:
-  shape: streaming_chunks_v1
+  shape: streaming_chunks
   mode: streaming
 env_injections:
   - { name: RYE_THREAD_ID, source: thread_id }

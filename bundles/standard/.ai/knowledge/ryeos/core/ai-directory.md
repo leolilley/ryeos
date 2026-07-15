@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:fde5218bff2a792d871bf447be4cf3951aa2f4f2978f071c6ddeb5d14a64ee5d:cW6x0EfhdJdgfxBU0yhh9nKspkHwRlBkRbgPoheGmhaI6LvlGbFBZV3KE14wkBRf0+ZHI4uF7xj/5+2yi3B7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:16Z:2116282a65a162d937312b5c5884d71da1ec6961c885a93ad593710864ffa94e:UMt+VIV4qyOCGpbLTvJpJxZ3CtAN5qguT2CoIiek7Q5aDTVHYtme1ko5pQPR/CRsmxacaPTR9c8Jj+Kiv4zLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -37,9 +37,9 @@ machine, not the LLM workflow layer:
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
 ├── parsers/ryeos/core/                  # javascript, markdown/frontmatter,
 │                                         # python/tool-header, yaml/yaml
-├── protocols/ryeos/core/                # cli_exec, opaque, runtime_v1,
-│                                         # method_runtime_v1, tool_callback_v1,
-│                                         # tool_streaming_v1
+├── protocols/ryeos/core/                # cli_exec, opaque, runtime,
+│                                         # method_runtime, tool_callback,
+│                                         # tool_streaming
 ├── services/                            # bundle, fetch, verify, objects,
 │                                         # remote, vault, system, health, etc.
 └── tools/ryeos/core/                    # fetch/sign/verify, identity,

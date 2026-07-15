@@ -37,7 +37,7 @@ impl NodeConfigSection for BundleSection {
             serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
         if raw.kind != "node" {
             bail!(
-                "bundle '{}' declares kind {:?}, expected current ryeos.bundle-registration/v1 kind 'node'",
+                "bundle '{}' declares kind {:?}, expected kind 'node'",
                 ctx.id,
                 raw.kind
             );

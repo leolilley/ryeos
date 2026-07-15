@@ -308,7 +308,14 @@ pub fn verify_executor_item_source(
     })?;
     require_exact_keys(
         object,
-        &["kind", "item_ref", "content_blob_hash", "integrity", "mode"],
+        &[
+            "kind",
+            "item_ref",
+            "content_blob_hash",
+            "integrity",
+            "signature_info",
+            "mode",
+        ],
         |detail| ExecutorResolutionError::InvalidItemSource {
             item_ref: expected_item_ref.to_string(),
             detail,
@@ -342,6 +349,12 @@ pub fn verify_executor_item_source(
         return Err(ExecutorResolutionError::InvalidItemSource {
             item_ref: expected_item_ref.to_string(),
             detail: "integrity must exactly match content_blob_hash".to_string(),
+        });
+    }
+    if object.get("signature_info") != Some(&Value::Null) {
+        return Err(ExecutorResolutionError::InvalidItemSource {
+            item_ref: expected_item_ref.to_string(),
+            detail: "signature_info must be null; trust comes from the signed manifest".to_string(),
         });
     }
     let mode_u64 = object.get("mode").and_then(Value::as_u64).ok_or_else(|| {
@@ -615,6 +628,7 @@ mod tests {
             "item_ref": item_ref,
             "content_blob_hash": blob_hash,
             "integrity": format!("sha256:{blob_hash}"),
+            "signature_info": null,
             "mode": 0o755,
         });
         let hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&value).unwrap().as_bytes());

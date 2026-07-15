@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-08T00:42:14Z:01f86b2b09c22e8e5f0d6b9bb2809e4f6f713e50efb4941c654adf86025b68a2:6dK7ZmU+8OHiSnWGjnJ8IVXhYaF0GZp9xVBewHTkgFWCNZ62jeL7EBaSvQY5NFG0VZhkpft2iifzJ2XWodwDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T07:49:04Z:be42c05e86fe54a57e2158cb64d01705636d086ea20344b9e5e7b6c7be3ab78f:6IyrkBZ3is18fFwhehGrdd817CGg7yssYabFpXBn5+3h6ReRB3oI8TfHdkBTcqmVk06SJUFfJZrKSmP2PhBFAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/streaming_tool"
 version: "1.0.0"
 location:
@@ -9,7 +9,7 @@ resolution: []
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/tool_streaming_v1
+    protocol: protocol:ryeos/core/tool_streaming
   thread_profile:
     name: streaming_tool_run
     root_executable: true

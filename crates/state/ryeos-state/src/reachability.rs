@@ -349,7 +349,7 @@ mod tests {
         // Create a minimal thread_snapshot
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",
@@ -531,7 +531,7 @@ mod tests {
         // snapshot points to last event
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "running",
@@ -747,7 +747,7 @@ mod tests {
 
         let snap_v1 = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",
@@ -780,7 +780,7 @@ mod tests {
 
         let snap_v2 = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "running",
@@ -873,7 +873,7 @@ mod tests {
 
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 2,
+            "schema": 1,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",

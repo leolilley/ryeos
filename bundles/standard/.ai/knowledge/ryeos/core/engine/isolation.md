@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:da7c12223a16cb556b0b5f357df68d48ba5c6652bcef042cd1fbcd6ef5f4740f:tGvFVgcN773shZ/zh9So8Dp/tiw3X7BUeV50Y3w/Z2f68yd3eP3M4bV2PiH9W1kaHL6rui1IfgVcMdPhMUhSDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T08:13:18Z:1ba4b315cfcaa08736c4d7021f1b25d9617385ae26236c542758c744d0115539:3VorN+PXRW3WvDeSNBzB2jXTltS3zd/bVFM2PxgQHzFj/6UBENVxRh1UIZvqDZ3iTAT77i5A1QZxTEC9nzyBCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -23,6 +23,12 @@ node—not the item—owns Bubblewrap filesystem/network policy, environment
 filtering, and the Lillux open-file cap. Policy is resolved once at startup and
 shared across launch paths; edits require restart. Parser/composer handlers are
 trusted engine infrastructure and retain the hermetic handler boundary below.
+
+Bubblewrap is the one current Linux backend, not the engine's intended portable
+contract. Future backends should consume a typed, backend-neutral isolation plan
+and advertise exact capabilities; items may narrow node policy but may not
+select a backend, enable isolation, or request fallback. See
+`ryeos/future/data-driven-execution-isolation-backends` for that deferred path.
 
 See [Execution Sandbox](../node/execution-sandbox.md) for the complete node-owner
 schema, pickup behavior, diagnostics, and security limits.
@@ -97,8 +103,8 @@ protocol and lifecycle bindings, not a list granted to every subprocess:
 | `RYEOS_CHECKPOINT_DIR` | Per-thread checkpoint directory |
 | `RYEOS_RESUME` | Set to `1` on resume re-spawns |
 
-For example, `runtime_v1` and the default `tool_callback_v1` declare their
-`RYEOSD_*` callback bindings, while `opaque` and `tool_streaming_v1` declare only
+For example, `runtime` and the default `tool_callback` declare their
+`RYEOSD_*` callback bindings, while `opaque` and `tool_streaming` declare only
 callback-free `RYE_*` identity/project bindings. Callback-free launches receive
 no callback tokens or daemon-socket sandbox mount.
 

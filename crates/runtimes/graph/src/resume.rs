@@ -327,9 +327,9 @@ fn reject_checkpoint_nulls(value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Parse and verify a schema-v3 checkpoint against the exact graph definition
-/// resolved for this launch. No older shape or alternate expression marker is
-/// accepted.
+/// Parse and verify the current checkpoint schema against the exact graph
+/// definition resolved for this launch. No alternate shape or expression
+/// marker is accepted.
 pub fn from_checkpoint_value(value: &Value, definition: &GraphDefinition) -> Result<ResumeState> {
     crate::evaluation::validate_runtime_shape(value, "graph checkpoint")
         .map_err(restart_required)?;

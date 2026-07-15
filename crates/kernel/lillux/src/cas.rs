@@ -238,14 +238,17 @@ pub fn materialize_executable(target: &Path, data: &[u8], mode: u32) -> Result<(
     Ok(())
 }
 
+/// Failure to encode a value with the RyeOS canonical JSON contract.
+///
+/// The current `serde_json::Value` domain is fully encodable. The explicit
+/// result keeps failures at this persistence boundary visible if that domain
+/// is ever extended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalJsonError;
 
 impl std::fmt::Display for CanonicalJsonError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(
-            "JSON number is not exactly representable as a finite IEEE 754 binary64 value",
-        )
+        formatter.write_str("canonical JSON encoding failed")
     }
 }
 
@@ -266,90 +269,29 @@ fn write_string(s: &str, out: &mut String) {
                 use std::fmt::Write as _;
                 write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
             }
-            c => out.push(c),
+            c if c.is_ascii() => out.push(c),
+            c if (c as u32) <= 0xFFFF => {
+                use std::fmt::Write as _;
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
+            c => {
+                use std::fmt::Write as _;
+                let scalar = c as u32 - 0x10000;
+                write!(
+                    out,
+                    "\\u{:04x}\\u{:04x}",
+                    0xD800 + (scalar >> 10),
+                    0xDC00 + (scalar & 0x3FF)
+                )
+                .expect("writing to a String cannot fail");
+            }
         }
     }
     out.push('"');
 }
 
 fn write_number(number: &serde_json::Number, out: &mut String) -> Result<(), CanonicalJsonError> {
-    let value = if let Some(value) = number.as_i64() {
-        let binary64 = value as f64;
-        if binary64 < i64::MIN as f64 || binary64 >= -(i64::MIN as f64) || binary64 as i64 != value
-        {
-            return Err(CanonicalJsonError);
-        }
-        binary64
-    } else if let Some(value) = number.as_u64() {
-        let binary64 = value as f64;
-        if binary64 >= (u64::MAX as f64) + 1.0 || binary64 as u64 != value {
-            return Err(CanonicalJsonError);
-        }
-        binary64
-    } else {
-        number
-            .as_f64()
-            .filter(|value| value.is_finite())
-            .ok_or(CanonicalJsonError)?
-    };
-
-    if value == 0.0 {
-        out.push('0');
-        return Ok(());
-    }
-
-    let mut buffer = ryu::Buffer::new();
-    let shortest = buffer.format_finite(value);
-    let (sign, magnitude) = shortest
-        .strip_prefix('-')
-        .map_or(("", shortest), |magnitude| ("-", magnitude));
-    let (mantissa, exponent) =
-        magnitude
-            .split_once('e')
-            .map_or((magnitude, 0), |(mantissa, exponent)| {
-                (
-                    mantissa,
-                    exponent
-                        .parse::<i32>()
-                        .expect("ryu emits a valid decimal exponent"),
-                )
-            });
-    let integer_digits = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
-    let mut digits = mantissa.replace('.', "");
-    while digits.len() > 1 && digits.ends_with('0') {
-        digits.pop();
-    }
-    let decimal_point = integer_digits + exponent;
-
-    out.push_str(sign);
-    if decimal_point > 0 && decimal_point <= 21 {
-        let decimal_point = decimal_point as usize;
-        if decimal_point >= digits.len() {
-            out.push_str(&digits);
-            out.extend(std::iter::repeat('0').take(decimal_point - digits.len()));
-        } else {
-            out.push_str(&digits[..decimal_point]);
-            out.push('.');
-            out.push_str(&digits[decimal_point..]);
-        }
-    } else if decimal_point > -6 && decimal_point <= 0 {
-        out.push_str("0.");
-        out.extend(std::iter::repeat('0').take((-decimal_point) as usize));
-        out.push_str(&digits);
-    } else {
-        out.push(digits.as_bytes()[0] as char);
-        if digits.len() > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push('e');
-        let scientific_exponent = decimal_point - 1;
-        if scientific_exponent >= 0 {
-            out.push('+');
-        }
-        use std::fmt::Write as _;
-        write!(out, "{scientific_exponent}").expect("writing to a String cannot fail");
-    }
+    out.push_str(&number.to_string());
     Ok(())
 }
 
@@ -362,7 +304,7 @@ fn write_canonical_json(v: &serde_json::Value, out: &mut String) -> Result<(), C
         serde_json::Value::String(string) => write_string(string, out),
         serde_json::Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            keys.sort();
             out.push('{');
             for (index, key) in keys.into_iter().enumerate() {
                 if index != 0 {
@@ -388,6 +330,14 @@ fn write_canonical_json(v: &serde_json::Value, out: &mut String) -> Result<(), C
     Ok(())
 }
 
+/// Serialize a value using the sole canonical JSON encoding for RyeOS CAS
+/// objects.
+///
+/// These bytes are a persistence and signing protocol: object keys use
+/// decoded-string ordering, non-ASCII scalars use lowercase `\u` escapes, and
+/// numbers retain `serde_json::Number` rendering (including `0.0` versus `0`).
+/// This is deliberately not RFC 8785/JCS. Changing any rule changes content
+/// addresses and therefore requires a new, explicit content-address domain.
 pub fn canonical_json(v: &serde_json::Value) -> Result<String, CanonicalJsonError> {
     let mut canonical = String::new();
     write_canonical_json(v, &mut canonical)?;
@@ -484,7 +434,11 @@ impl CasStore {
         let canonical = canonical_json(&value)
             .with_context(|| format!("canonicalize CAS object {}", path.display()))?;
         if canonical.as_bytes() != data {
-            anyhow::bail!("CAS object is not canonically encoded: {}", path.display());
+            let canonical_hash = sha256_hex(canonical.as_bytes());
+            anyhow::bail!(
+                "CAS object bytes satisfy address {hash} but violate the RyeOS canonical JSON contract: {} (canonical bytes would address {canonical_hash})",
+                path.display()
+            );
         }
         Ok(Some(value))
     }

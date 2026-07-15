@@ -3944,7 +3944,7 @@ effective_trust:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
   thread_profile:
     name: runtime_run
     root_executable: true
@@ -4686,7 +4686,7 @@ effective_trust:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
   thread_profile:
     name: tool_run
     root_executable: true
@@ -5153,7 +5153,7 @@ requires:
             history_policy: None,
             method_dispatch: Some(MethodDispatchDecl {
                 via: MethodDispatchVia::RuntimeRegistry,
-                protocol: "protocol:ryeos/core/method_runtime_v1".to_string(),
+                protocol: "protocol:ryeos/core/method_runtime".to_string(),
                 default: default.map(|s| s.to_string()),
             }),
             methods,

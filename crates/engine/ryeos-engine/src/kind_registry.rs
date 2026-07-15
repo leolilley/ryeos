@@ -477,7 +477,7 @@ pub enum TerminatorDecl {
     /// referenced protocol descriptor.
     Subprocess {
         /// Canonical ref into ProtocolRegistry, e.g.
-        /// "protocol:ryeos/core/runtime_v1".
+        /// "protocol:ryeos/core/runtime".
         #[serde(rename = "protocol")]
         protocol_ref: String,
     },
@@ -3098,13 +3098,13 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::Subprocess {
-                protocol_ref: "protocol:ryeos/core/runtime_v1".into()
+                protocol_ref: "protocol:ryeos/core/runtime".into()
             })
         );
     }
@@ -3302,7 +3302,7 @@ execution:
     supports_continuation: false
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose:
@@ -3323,7 +3323,7 @@ execution:
             .method_dispatch
             .as_ref()
             .expect("method_dispatch present");
-        assert_eq!(md.protocol, "protocol:ryeos/core/method_runtime_v1");
+        assert_eq!(md.protocol, "protocol:ryeos/core/method_runtime");
         assert_eq!(md.default.as_deref(), Some("compose"));
         assert!(exec.terminator.is_none());
         assert!(exec.delegate.is_none());
@@ -3336,7 +3336,7 @@ execution:
 execution:
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose:
@@ -3380,7 +3380,7 @@ execution:
 execution:
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: query
   methods:
     compose: {}
@@ -3414,10 +3414,10 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose: {}
@@ -3438,7 +3438,7 @@ execution:
     via: runtime_registry
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose: {}
@@ -3464,7 +3464,7 @@ execution:
     supports_continuation: false
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose: {}
@@ -3482,7 +3482,7 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.methods.is_empty());
@@ -3585,7 +3585,7 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.launch_augmentations.is_empty());

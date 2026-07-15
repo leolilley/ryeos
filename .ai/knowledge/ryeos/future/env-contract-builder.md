@@ -29,7 +29,7 @@ composition step. Callback tokens, thread-auth tokens, and daemon socket access
 are produced only when the selected signed protocol declares the callback
 channel and/or corresponding typed sources.
 The default tool schema uses the explicit callback-capable
-`tool_callback_v1`; callback-free protocols mint no callback authority.
+`tool_callback`; callback-free protocols mint no callback authority.
 
 ## Established invariants
 

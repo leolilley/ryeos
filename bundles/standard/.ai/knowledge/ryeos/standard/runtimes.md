@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:94f706955fb5d8dddb461640ce4db33925b72d5254944646b90251849f7f9c7d:XkbCoLEUDALKItZPKE3v5bgJpw/ZZmYUB9h7Mpnybwgt57WdrMrWTyL4rsk4Ip2hrLnhgr20+o0GjbjKj0zjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:22Z:ad9f7aafac9e568e233b81f3231dce3d56fc22a0d8d3d6093113803c67ebedcc:Q+oRIhp0e2N9ItTynnfpuzW712s5zFo5C4ZZA8fJV5TWIq6zmXc6kmvxnlbiYcmNQc/4m4fePxOW+6Oe8mi/Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -12,8 +12,8 @@ description: >
 
 The standard bundle declares three runtime binaries, each serving a different
 kind of workflow. They are native Linux x86_64 executables. Directive and graph
-use the ordinary `runtime_v1` workflow wire; knowledge uses the signed
-`method_runtime_v1` wire selected by its kind schema.
+use the ordinary `runtime` workflow wire; knowledge uses the signed
+`method_runtime` wire selected by its kind schema.
 
 Authorized runtime subprocesses are wrapped by the node's immutable sandbox
 snapshot when policy is enforced; runtime/item metadata cannot enable or
@@ -82,13 +82,13 @@ from `RYEOS_CHECKPOINT_DIR` and its daemon-validated checkpoint mount.
 **Serves:** `knowledge` (default)
 **Binary:** `bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime`
 **Required caps:** `runtime.execute`
-**Protocol:** schema-selected `method_runtime_v1`
+**Protocol:** schema-selected `method_runtime`
 
 The knowledge runtime handles bounded knowledge composition operations. The
 runtime registry selects this implementation binary, while the signed
 `knowledge` kind schema selects the `MethodCallEnvelope`/`MethodCallResult`
 wire used for both declared methods and composition launch augmentation. It is
-not directly launchable through the unrelated `runtime_v1` protocol.
+not directly launchable through the unrelated `runtime` protocol.
 
 ### Operations
 - `compose` — assemble knowledge entries into a prompt context block
@@ -108,7 +108,7 @@ When the daemon dispatches a directive or graph execution:
 1. It looks up the item's kind
 2. The kind schema specifies `delegate: { via: runtime_registry }`
 3. The runtime registry finds a runtime that `serves` the kind
-4. The daemon spawns the runtime subprocess via `runtime_v1` protocol
+4. The daemon spawns the runtime subprocess via `runtime` protocol
 
 Method-bearing kinds use a parallel schema-driven path: the registry selects
 the runtime binary, and `execution.method_dispatch.protocol` selects the signed
@@ -122,6 +122,6 @@ the same kind can be registered but are not yet selected automatically.
 
 All runtime declarations use binary ABI version `v1`. The signed protocol
 selected for an invocation independently versions its wire:
-`runtime_v1` carries `LaunchEnvelope`/`RuntimeResult`, while
-`method_runtime_v1` carries `MethodCallEnvelope`/`MethodCallResult`. A breaking
+`runtime` carries `LaunchEnvelope`/`RuntimeResult`, while
+`method_runtime` carries `MethodCallEnvelope`/`MethodCallResult`. A breaking
 change requires a new applicable ABI/protocol version.

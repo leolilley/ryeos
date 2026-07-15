@@ -181,7 +181,7 @@ pub const MAX_COMMAND_REQUESTED_BY_BYTES: usize = 4 * 1024;
 pub const MAX_COMMAND_CLAIM_ITEMS: usize = 32;
 /// Exact serialized command-result budget, below the 10 MiB UDS frame limit.
 pub const MAX_COMMAND_CLAIM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const CONTINUATION_SEED_MARKER: &[u8] = b"continuation_seed_v1";
+const CONTINUATION_SEED_MARKER: &[u8] = b"continuation_seed";
 pub(crate) const CONTINUATION_SEED_RECONCILE_PAGE_SIZE: usize = 512;
 
 /// A live thread cannot accumulate unbounded terminalization work.
@@ -1104,6 +1104,380 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     }
 }
 
+fn runtime_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns)
+}
+
+fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
+    let mut statement = conn.prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    Ok(tables)
+}
+
+fn current_runtime_schema_object_sql(names: &[&str]) -> Result<BTreeMap<String, String>> {
+    let reference =
+        Connection::open_in_memory().context("open current runtime schema reference")?;
+    reference
+        .execute_batch(SCHEMA_SQL)
+        .context("build current runtime schema reference")?;
+    let mut objects = BTreeMap::new();
+    for name in names {
+        let sql = reference
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name=?1 AND sql IS NOT NULL",
+                [name],
+                |row| row.get::<_, String>(0),
+            )
+            .with_context(|| format!("read current runtime schema object `{name}`"))?;
+        objects.insert((*name).to_string(), sql);
+    }
+    Ok(objects)
+}
+
+fn normalize_migrated_launch_metadata(raw: &str) -> Result<String> {
+    let mut value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("stored launch metadata must be an object"))?;
+    let schema_version = object
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
+    if !matches!(schema_version, 1 | 2) {
+        bail!("unsupported stored launch metadata schema_version `{schema_version}`");
+    }
+    object.insert(
+        "schema_version".to_string(),
+        Value::from(LAUNCH_METADATA_SCHEMA_VERSION),
+    );
+    for field in [
+        "cancellation_mode",
+        "native_resume",
+        "checkpoint_dir",
+        "resume_context",
+        "continuation_source_thread_id",
+        "sealed_root_request",
+        "follow_parent_context",
+        "follow_launch_window",
+    ] {
+        object.entry(field.to_string()).or_insert(Value::Null);
+    }
+    if let Some(resume) = object
+        .get_mut("resume_context")
+        .and_then(Value::as_object_mut)
+    {
+        resume
+            .entry("ref_bindings".to_string())
+            .or_insert_with(|| Value::Object(Default::default()));
+        for field in [
+            "original_snapshot_hash",
+            "original_pushed_head_ref",
+            "state_root",
+            "executor_ref",
+            "runtime_ref",
+        ] {
+            resume.entry(field.to_string()).or_insert(Value::Null);
+        }
+        resume
+            .entry("execution_hints".to_string())
+            .or_insert_with(|| serde_json::json!({"values": {}}));
+        resume
+            .entry("effective_caps".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+    let decoded: RuntimeLaunchMetadata =
+        serde_json::from_value(value.clone()).context("validate migrated launch metadata")?;
+    if decoded.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
+        bail!(
+            "migrated launch metadata schema_version is {}, expected {}",
+            decoded.schema_version,
+            LAUNCH_METADATA_SCHEMA_VERSION
+        );
+    }
+    lillux::canonical_json(&value).context("canonicalize migrated launch metadata")
+}
+
+/// Forward-migrate the one deployed owned runtime schema into the exact current
+/// schema. The transaction either reaches the complete-schema assertion and
+/// commits, or rolls back every DDL/data change.
+fn migrate_owned_runtime_db(conn: &Connection, path: &Path) -> Result<()> {
+    let app_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("read runtime database application_id before migration")?;
+    if app_id != RUNTIME_APP_ID {
+        return sqlite_schema::assert_owned(conn, &runtime_schema_spec(), path);
+    }
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .context("verify runtime database integrity before migration")?;
+    if integrity != "ok" {
+        bail!(
+            "runtime database integrity check failed before migration for {}: {integrity}",
+            path.display()
+        );
+    }
+
+    let spec = runtime_schema_spec();
+    let expected_tables = spec
+        .tables
+        .iter()
+        .map(|table| table.name.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut allowed_predecessor_tables = expected_tables.clone();
+    allowed_predecessor_tables.remove("hook_dispatch_ledger");
+    let actual_tables = runtime_user_tables(conn)?;
+    if actual_tables != allowed_predecessor_tables {
+        bail!("runtime database is neither current nor the recognized owned predecessor schema");
+    }
+
+    let legacy_waiter_columns = [
+        "follow_key",
+        "parent_thread_id",
+        "parent_chain_root_id",
+        "parent_successor_thread_id",
+        "follow_node",
+        "graph_run_id",
+        "step_count",
+        "frontier_id",
+        "child_thread_id",
+        "child_chain_root_id",
+        "child_terminal_thread_id",
+        "child_terminal_status",
+        "terminal_envelope",
+        "phase",
+        "created_at_ms",
+        "updated_at_ms",
+        "fanout",
+        "expected_children",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let legacy_child_columns = [
+        "follow_key",
+        "item_index",
+        "item_ref",
+        "spec_hash",
+        "child_thread_id",
+        "child_chain_root_id",
+        "terminal_thread_id",
+        "terminal_status",
+        "terminal_envelope",
+        "created_at_ms",
+        "updated_at_ms",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let actual_waiter_columns = runtime_table_columns(conn, "follow_waiter")?;
+    let actual_child_columns = runtime_table_columns(conn, "follow_waiter_child")?;
+    let current_waiter_columns = spec
+        .tables
+        .iter()
+        .find(|table| table.name == "follow_waiter")
+        .expect("runtime schema has follow_waiter")
+        .columns
+        .iter()
+        .map(|column| column.name.to_string())
+        .collect::<Vec<_>>();
+    let current_child_columns = spec
+        .tables
+        .iter()
+        .find(|table| table.name == "follow_waiter_child")
+        .expect("runtime schema has follow_waiter_child")
+        .columns
+        .iter()
+        .map(|column| column.name.to_string())
+        .collect::<Vec<_>>();
+    let legacy_follow_schema = actual_waiter_columns == legacy_waiter_columns
+        && actual_child_columns == legacy_child_columns;
+    let current_follow_schema = actual_waiter_columns == current_waiter_columns
+        && actual_child_columns == current_child_columns;
+    if !legacy_follow_schema && !current_follow_schema {
+        bail!("runtime database has an unrecognized follow schema");
+    }
+    for table in spec.tables.iter().filter(|table| {
+        !matches!(
+            table.name,
+            "hook_dispatch_ledger" | "follow_waiter" | "follow_waiter_child"
+        )
+    }) {
+        let expected = table
+            .columns
+            .iter()
+            .map(|column| column.name.to_string())
+            .collect::<Vec<_>>();
+        if runtime_table_columns(conn, table.name)? != expected {
+            bail!(
+                "runtime database predecessor table `{}` has an unrecognized column shape",
+                table.name
+            );
+        }
+    }
+
+    // The predecessor did not persist the sealed root authority now required
+    // to resume a child safely. Only a `reserved` waiter with no parent
+    // successor is pre-commit: the parent suspension never committed, so the
+    // reservation may be rolled back. Any later phase is durable workflow
+    // state and must stop migration before mutation rather than be guessed at
+    // or discarded.
+    let rolled_back_legacy_follows = if legacy_follow_schema {
+        let committed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM follow_waiter
+             WHERE phase != 'reserved' OR parent_successor_thread_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        if committed != 0 {
+            bail!(
+                "runtime database contains {committed} committed legacy follow operation(s) that require explicit recovery"
+            );
+        }
+        conn.query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))?
+    } else {
+        0
+    };
+    tracing::info!(
+        database = %path.display(),
+        legacy_follow_schema,
+        incomplete_follow_reservations = rolled_back_legacy_follows,
+        "starting recognized runtime database schema migration"
+    );
+
+    let schema_sql = current_runtime_schema_object_sql(&[
+        "thread_runtime",
+        "idx_thread_runtime_chain_root",
+        "hook_dispatch_ledger",
+        "idx_hook_dispatch_ledger_chain_root",
+        "follow_waiter",
+        "idx_follow_waiter_successor",
+        "follow_waiter_child",
+        "idx_follow_waiter_child_chain2",
+        "launch_window",
+        "idx_launch_window_key",
+    ])?;
+    let tx = conn.unchecked_transaction()?;
+    if legacy_follow_schema {
+        tx.execute_batch(
+            "DROP INDEX idx_thread_runtime_chain_root;
+             DROP INDEX idx_follow_waiter_successor;
+             DROP INDEX idx_follow_waiter_child_chain;
+             DROP INDEX idx_follow_waiter_child_chain2;
+             DROP INDEX idx_launch_window_key;
+             ALTER TABLE thread_runtime RENAME TO __ryeos_old_thread_runtime;
+             ALTER TABLE follow_waiter RENAME TO __ryeos_old_follow_waiter;
+             ALTER TABLE follow_waiter_child RENAME TO __ryeos_old_follow_waiter_child;
+             ALTER TABLE launch_window RENAME TO __ryeos_old_launch_window;",
+        )?;
+    }
+    let rebuilt_objects = if legacy_follow_schema {
+        &[
+            "thread_runtime",
+            "idx_thread_runtime_chain_root",
+            "follow_waiter",
+            "idx_follow_waiter_successor",
+            "follow_waiter_child",
+            "idx_follow_waiter_child_chain2",
+            "launch_window",
+            "idx_launch_window_key",
+        ][..]
+    } else {
+        &[][..]
+    };
+    for name in rebuilt_objects.iter().copied().chain([
+        "hook_dispatch_ledger",
+        "idx_hook_dispatch_ledger_chain_root",
+    ]) {
+        tx.execute_batch(
+            schema_sql
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("missing current schema SQL for `{name}`"))?,
+        )?;
+    }
+    if legacy_follow_schema {
+        tx.execute_batch(
+            "INSERT INTO thread_runtime (
+                 thread_id,chain_root_id,pid,pgid,metadata,launch_metadata,
+                 resume_attempts,process_identity,stop_requested_at_ms,stop_intent
+             )
+             SELECT thread_id,chain_root_id,pid,pgid,metadata,launch_metadata,
+                    resume_attempts,process_identity,stop_requested_at_ms,stop_intent
+               FROM __ryeos_old_thread_runtime;
+
+             -- A launch window owned by an aborted pre-commit reservation is
+             -- part of that reservation's write-set. Preserve all unrelated
+             -- windows and all runtime/history/link rows so ordinary startup
+             -- reconciliation and retention still see the child identities.
+             INSERT INTO launch_window (
+                 child_chain_root_id,window_key,width,created_at_ms,launched_at_ms,cancelled_at_ms
+             )
+             SELECT window.child_chain_root_id,window.window_key,window.width,
+                    window.created_at_ms,window.launched_at_ms,window.cancelled_at_ms
+               FROM __ryeos_old_launch_window AS window
+              WHERE NOT EXISTS (
+                  SELECT 1 FROM __ryeos_old_follow_waiter_child AS child
+                   WHERE child.child_chain_root_id = window.child_chain_root_id
+              );
+
+             DROP TABLE __ryeos_old_follow_waiter_child;
+             DROP TABLE __ryeos_old_follow_waiter;
+             DROP TABLE __ryeos_old_launch_window;
+             DROP TABLE __ryeos_old_thread_runtime;",
+        )?;
+    }
+
+    let metadata_rows = {
+        let mut statement = tx.prepare(
+            "SELECT thread_id,launch_metadata FROM thread_runtime
+             WHERE launch_metadata IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let migrated_launch_metadata_rows = metadata_rows.len();
+    tracing::info!(
+        database = %path.display(),
+        rows = migrated_launch_metadata_rows,
+        "normalizing persisted runtime launch metadata during schema migration"
+    );
+    for (thread_id, raw) in metadata_rows {
+        let migrated = normalize_migrated_launch_metadata(&raw)
+            .with_context(|| format!("migrate launch metadata for thread `{thread_id}`"))?;
+        tx.execute(
+            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
+            params![thread_id, migrated],
+        )?;
+    }
+    assert_current_runtime_schema(&tx, path)?;
+    tx.commit()?;
+    tracing::info!(
+        database = %path.display(),
+        launch_metadata_rows = migrated_launch_metadata_rows,
+        rolled_back_follow_reservations = rolled_back_legacy_follows,
+        "runtime database schema migration committed"
+    );
+    if rolled_back_legacy_follows != 0 {
+        tracing::warn!(
+            rolled_back = rolled_back_legacy_follows,
+            "rolled back incomplete pre-commit follow reservations during runtime schema migration"
+        );
+    }
+    Ok(())
+}
+
 pub struct RuntimeDb {
     conn: Connection,
     _directory: Option<lillux::PinnedDirectory>,
@@ -1511,13 +1885,17 @@ impl RuntimeDb {
         Self::open_bound(path, false)
     }
 
+    /// Open the live runtime store beneath the daemon's already pinned and
+    /// exclusively locked runtime-state namespace.
+    pub(crate) fn open_with_namespace_authority(
+        path: &Path,
+        directory: lillux::PinnedDirectory,
+        directory_lock: lillux::PinnedDirectoryLock,
+    ) -> Result<Self> {
+        Self::open_bound_in_directory(path, true, directory, directory_lock)
+    }
+
     fn open_bound(path: &Path, allow_create: bool) -> Result<Self> {
-        let name = path
-            .file_name()
-            .ok_or_else(|| {
-                anyhow::anyhow!("runtime database path has no filename: {}", path.display())
-            })?
-            .to_os_string();
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let directory = if allow_create {
             lillux::PinnedDirectory::open_or_create(parent)
@@ -1533,6 +1911,33 @@ impl RuntimeDb {
         let directory_lock = directory
             .lock_exclusive()
             .context("lock runtime database parent")?;
+        Self::open_bound_in_directory(path, allow_create, directory, directory_lock)
+    }
+
+    fn open_bound_in_directory(
+        path: &Path,
+        allow_create: bool,
+        directory: lillux::PinnedDirectory,
+        directory_lock: lillux::PinnedDirectoryLock,
+    ) -> Result<Self> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                anyhow::anyhow!("runtime database path has no filename: {}", path.display())
+            })?
+            .to_os_string();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if directory.path() != parent {
+            bail!(
+                "runtime database namespace authority path mismatch: selected={}, requested={}",
+                directory.path().display(),
+                parent.display()
+            );
+        }
+        ensure_runtime_directory_binding(&directory)?;
+        directory_lock
+            .ensure_protects(&directory)
+            .context("verify runtime database namespace lock")?;
         inspect_runtime_sidecars(&directory, &name)?;
 
         let existing = directory.open_regular(&name, true).with_context(|| {
@@ -1584,6 +1989,8 @@ impl RuntimeDb {
 
         if created {
             sqlite_schema::init_owned(&conn, &runtime_schema_spec(), SCHEMA_SQL, path)?;
+        } else if allow_create && assert_current_runtime_schema(&conn, path).is_err() {
+            migrate_owned_runtime_db(&conn, path)?;
         }
         assert_current_runtime_schema(&conn, path)?;
         let integrity: String = conn
@@ -2391,9 +2798,8 @@ impl RuntimeDb {
                         bail!(
                             "launch_metadata schema_version mismatch for thread {thread_id}: \
                              persisted={}; expected={}; payload_len={}. \
-                             Refusing to operate on stale schema. \
-                             Recovery: mv <db_file> <db_file>.foreign.$(date +%s); \
-                             then restart the daemon (auto-init will recreate missing state).",
+                             Refusing to operate on stale schema. Preserve runtime state and \
+                             use the supported runtime database migration or recovery path.",
                             m.schema_version,
                             LAUNCH_METADATA_SCHEMA_VERSION,
                             s.len(),
@@ -2408,8 +2814,8 @@ impl RuntimeDb {
                     bail!(
                         "failed to decode launch_metadata for thread {thread_id}: {err:#} \
                          (payload_len={}). Corrupt or foreign row. \
-                         Recovery: mv <db_file> <db_file>.foreign.$(date +%s); \
-                         then restart the daemon (auto-init will recreate missing state).",
+                         Preserve runtime state and use the supported runtime database \
+                         migration or recovery path.",
                         s.len(),
                     );
                 }
@@ -4063,6 +4469,111 @@ mod tests {
         (tmp, db)
     }
 
+    fn rewrite_as_recognized_runtime_predecessor(
+        db: &RuntimeDb,
+        phase: &str,
+        parent_successor_thread_id: Option<&str>,
+    ) {
+        db.conn
+            .execute_batch(
+                "DROP INDEX idx_hook_dispatch_ledger_chain_root;
+                 DROP TABLE hook_dispatch_ledger;
+                 DROP INDEX idx_follow_waiter_successor;
+                 DROP INDEX idx_follow_waiter_child_chain2;
+                 DROP TABLE follow_waiter_child;
+                 DROP TABLE follow_waiter;
+
+                 CREATE TABLE follow_waiter (
+                     follow_key TEXT PRIMARY KEY,
+                     parent_thread_id TEXT NOT NULL,
+                     parent_chain_root_id TEXT NOT NULL,
+                     parent_successor_thread_id TEXT,
+                     follow_node TEXT NOT NULL,
+                     graph_run_id TEXT NOT NULL,
+                     step_count INTEGER NOT NULL,
+                     frontier_id TEXT,
+                     child_thread_id TEXT,
+                     child_chain_root_id TEXT,
+                     child_terminal_thread_id TEXT,
+                     child_terminal_status TEXT,
+                     terminal_envelope TEXT,
+                     phase TEXT NOT NULL CHECK (phase IN ('reserved', 'waiting', 'ready', 'resuming')),
+                     created_at_ms INTEGER NOT NULL,
+                     updated_at_ms INTEGER NOT NULL,
+                     fanout INTEGER NOT NULL DEFAULT 0,
+                     expected_children INTEGER NOT NULL DEFAULT 1
+                 );
+                 CREATE UNIQUE INDEX idx_follow_waiter_successor
+                     ON follow_waiter(parent_successor_thread_id);
+                 CREATE UNIQUE INDEX idx_follow_waiter_child_chain
+                     ON follow_waiter(child_chain_root_id);
+
+                 CREATE TABLE follow_waiter_child (
+                     follow_key TEXT NOT NULL,
+                     item_index INTEGER NOT NULL,
+                     item_ref TEXT NOT NULL,
+                     spec_hash TEXT NOT NULL,
+                     child_thread_id TEXT NOT NULL,
+                     child_chain_root_id TEXT NOT NULL,
+                     terminal_thread_id TEXT,
+                     terminal_status TEXT,
+                     terminal_envelope TEXT,
+                     created_at_ms INTEGER NOT NULL,
+                     updated_at_ms INTEGER NOT NULL,
+                     PRIMARY KEY (follow_key, item_index)
+                 );
+                 CREATE UNIQUE INDEX idx_follow_waiter_child_chain2
+                     ON follow_waiter_child(child_chain_root_id);",
+            )
+            .unwrap();
+
+        db.conn
+            .execute(
+                "INSERT INTO thread_runtime
+                    (thread_id,chain_root_id,launch_metadata)
+                 VALUES ('T-legacy-child','T-legacy-child',?1)",
+                [serde_json::json!({"schema_version": 2}).to_string()],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO follow_waiter
+                    (follow_key,parent_thread_id,parent_chain_root_id,
+                     parent_successor_thread_id,follow_node,graph_run_id,step_count,
+                     child_thread_id,child_chain_root_id,phase,created_at_ms,updated_at_ms)
+                 VALUES ('follow-old','T-parent','T-parent',?1,'fan','run-old',3,
+                         'T-legacy-child','T-legacy-child',?2,10,11)",
+                params![parent_successor_thread_id, phase],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO follow_waiter_child
+                    (follow_key,item_index,item_ref,spec_hash,child_thread_id,
+                     child_chain_root_id,created_at_ms,updated_at_ms)
+                 VALUES ('follow-old',0,'tool:test/old','spec-old','T-legacy-child',
+                         'T-legacy-child',10,11)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO thread_child_link
+                    (child_thread_id,parent_thread_id,relation,created_at_ms)
+                 VALUES ('T-legacy-child','T-parent','follow',10)",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO launch_window
+                    (child_chain_root_id,window_key,width,created_at_ms)
+                 VALUES ('T-legacy-child','follow:old',1,10)",
+                [],
+            )
+            .unwrap();
+    }
+
     fn hook_seed() -> NewHookDispatch {
         NewHookDispatch {
             dispatch_key: "a".repeat(64),
@@ -4767,10 +5278,10 @@ mod tests {
         assert!(db.launch_window_cancelled_members().unwrap().is_empty());
     }
 
-    /// Established runtime state is exact-format authority. A stale owned
-    /// database fails without mutation; there is no startup migration branch.
+    /// Unknown owned state must still fail without mutation. Migration is
+    /// limited to explicitly recognized deployed predecessor schemas.
     #[test]
-    fn open_rejects_old_owned_db_without_mutating_it() {
+    fn open_rejects_unrecognized_owned_db_without_mutating_it() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
 
@@ -4820,7 +5331,12 @@ mod tests {
             .unwrap();
         }
 
-        assert!(RuntimeDb::open(&path).is_err());
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("owned stale runtime database must be rejected");
+        assert!(error
+            .to_string()
+            .contains("recognized owned predecessor schema"));
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let added: i64 = conn
             .query_row(
@@ -4830,6 +5346,87 @@ mod tests {
             )
             .unwrap();
         assert_eq!(added, 0);
+    }
+
+    #[test]
+    fn open_migrates_recognized_runtime_predecessor_without_archiving_state() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        rewrite_as_recognized_runtime_predecessor(&db, "reserved", None);
+        drop(db);
+
+        let migrated = RuntimeDb::open(&path).unwrap();
+        let info = migrated
+            .get_runtime_info("T-legacy-child")
+            .unwrap()
+            .expect("runtime row must survive migration");
+        let metadata = info
+            .launch_metadata
+            .expect("stored launch metadata must survive migration");
+        assert_eq!(metadata.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
+        assert!(metadata.resume_context.is_none());
+        let child_links: i64 = migrated
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM thread_child_link WHERE child_thread_id='T-legacy-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(child_links, 1);
+        let incomplete_follows: i64 = migrated
+            .conn
+            .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(incomplete_follows, 0);
+        let incomplete_windows: i64 = migrated
+            .conn
+            .query_row("SELECT COUNT(*) FROM launch_window", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(incomplete_windows, 0);
+        let hook_table: i64 = migrated
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='hook_dispatch_ledger'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hook_table, 1);
+        assert!(
+            path.is_file(),
+            "migration must retain the original database"
+        );
+    }
+
+    #[test]
+    fn committed_legacy_follow_blocks_migration_without_mutation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        rewrite_as_recognized_runtime_predecessor(&db, "waiting", Some("T-successor"));
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("committed legacy follow requires explicit recovery");
+        assert!(error.to_string().contains("committed legacy follow"));
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let follows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(follows, 1);
+        let hook_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='hook_dispatch_ledger'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hook_table, 0);
     }
 
     #[test]

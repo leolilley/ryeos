@@ -5,7 +5,7 @@ name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
 version: "0.5.0"
-description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around the implemented node-owned process sandbox.
+description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around the optional Linux process boundary and future typed backends.
 tags:
   - hosted-node
   - federation
@@ -17,14 +17,16 @@ tags:
 
 ## Status
 
-The node-owned RyeOS strict process sandbox is implemented as optional
-groundwork. It gives RyeOS one immutable, node-owned launch boundary where
+The node-owned RyeOS Bubblewrap process boundary is implemented as optional
+Linux groundwork and remains disabled by default. When enabled, it gives RyeOS
+one immutable, node-owned launch boundary where
 verified code identity, descriptor-pinned filesystem authority, environment,
 network posture, bounded stdout/stderr retention, target-process-group
 supervision, and enforceable per-process limits meet. That is the right
-foundation for hosted execution because later isolation can wrap or further
-narrow one explicit boundary instead of finding and replacing scattered spawn
-paths.
+foundation for extracting a backend-neutral isolation plan because later
+isolation can wrap or further narrow one explicit boundary instead of finding
+and replacing scattered spawn paths. It is not itself the portable or hosted
+backend architecture.
 
 It is not yet a hostile multi-tenant boundary. The current policy is node-wide,
 not principal-specific; CPU, memory, and process-count cgroup quotas are
@@ -48,12 +50,12 @@ treating them as one backlog item.
 
 ## The four boundaries
 
-1. **Hosted-principal process isolation.** The local node now has the optional,
-   node-wide RyeOS strict Bubblewrap boundary for tool/runtime launches. That is
-   useful node-level defense in depth, but it is not a multi-tenant contract:
-   profiles are not principal-specific and there is no hostile-tenant kernel
-   boundary. Hosting still requires a deployment-shaped isolation decision,
-   per-principal workspace authority, and attestation.
+1. **Hosted-principal process isolation.** The local node now has an optional,
+   node-wide Bubblewrap process-confinement boundary for tool/runtime launches.
+   That is useful node-level defense in depth, but it is not a multi-tenant
+   contract: profiles are not principal-specific and there is no hostile-tenant
+   kernel boundary. Hosting still requires a deployment-shaped isolation
+   decision, per-principal workspace authority, and attestation.
 
 2. **MCP network authentication.** Local MCP integration trusts the local
    socket boundary. Networked MCP needs real peer authentication and an
@@ -72,13 +74,13 @@ treating them as one backlog item.
 
 ## Target hostile-workload stack
 
-Hosted execution should layer controls rather than attempt to turn one
-Bubblewrap policy into the whole tenancy model:
+Hosted execution should resolve a typed isolation requirement and layer controls
+rather than attempt to turn one Bubblewrap policy into the whole tenancy model:
 
 ```text
 signed request + node admission
   -> principal/job execution authority
-  -> RyeOS strict inner sandbox
+  -> selected RyeOS inner confinement backend
        exact entry bytes, fd-pinned mounts, narrow env/network/filesystem,
        bounded stdout/stderr, and target/wrapper process-group supervision
   -> per-principal or per-job cgroup v2
@@ -91,9 +93,10 @@ signed request + node admission
   -> principal-scoped storage, secrets, network policy, audit, and GC
 ```
 
-The outer worker owns the kernel-level containment decision. RyeOS strict owns
-the inner application boundary: which verified executable is allowed to run and
-which resources are presented to it. Cgroups own exhaustion, accounting, and
+The outer worker owns the kernel-level containment decision. The selected inner
+backend owns only the application-boundary capabilities it proves: which
+verified executable is allowed to run and which resources are presented to it.
+Cgroups own exhaustion, accounting, and
 authoritative whole-workload teardown even when descendants create new process
 groups or sessions. The current node launch supervisor owns bounded stdout and
 stderr retention because guest memory limits do not cover daemon-owned buffers;
@@ -102,8 +105,16 @@ work.
 Principal storage, secret, and network layers own cross-tenant data authority.
 None of those layers should be inferred from an item-authored sandbox profile.
 
-The current sandbox intentionally makes this later work additive. Its immutable
-startup snapshot can become an input to worker provisioning; its launch context
+Backend selection and capability matching should follow
+`ryeos/future/data-driven-execution-isolation-backends`. In particular, a
+hostile-workload requirement cannot fall back to direct execution or be marked
+satisfied by a process-confinement backend. The selected backend kind,
+capabilities, worker identity, and inspection/attestation evidence belong in
+the durable job record.
+
+The current shared launch-policy path intentionally makes this later work
+additive. Its immutable startup snapshot can become an input to worker
+provisioning; its launch context
 already carries execution provenance; its runtime-wide `apply` stage is the
 single handoff where a cgroup or outer-worker assignment can be required; and
 future per-tool or per-principal profiles can intersect with the node policy only

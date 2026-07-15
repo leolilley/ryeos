@@ -315,22 +315,47 @@ refresh_installed_bundle_payload() {
 }
 
 pid_from_status() {
-    awk '/^pid:/ { print $2; exit }'
+    awk '
+        /^pid:/ { print $2; exit }
+        /daemon \(pid [0-9]+\)/ {
+            line=$0
+            sub(/^.*daemon \(pid /, "", line)
+            sub(/\).*$/, "", line)
+            print line
+            exit
+        }
+    '
+}
+
+status_has_live_daemon() {
+    grep -Eq '^(running|starting — daemon|live daemon control is unusable|failed — daemon)'
+}
+
+verified_local_ryeosd_pid() {
+    local pid="$1" expected_uid actual_uid comm
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [[ -r "/proc/$pid/comm" ]] || return 1
+    read -r comm < "/proc/$pid/comm" || return 1
+    [[ "$comm" == "ryeosd" ]] || return 1
+    expected_uid="$(id -u "$invoking_user")"
+    actual_uid="$(stat -c %u "/proc/$pid" 2>/dev/null)" || return 1
+    [[ "$actual_uid" == "$expected_uid" ]]
 }
 
 stop_daemon_for_install() {
     local status_out pid final_status
 
     status_out="$(ryeos_status_quick)"
-    if ! grep -qx "running" <<<"$status_out"; then
+    if ! status_has_live_daemon <<<"$status_out"; then
         return 1
     fi
 
-    echo "[install-local-direct] stopping running daemon before replacing binaries"
+    echo "[install-local-direct] stopping live daemon before replacing binaries"
     if ! ryeos_user 30 stop --force >/dev/null; then
         echo "[install-local-direct] ryeos stop timed out or failed; falling back to direct process kill" >&2
         pid="$(pid_from_status <<<"$status_out")"
-        if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if verified_local_ryeosd_pid "$pid"; then
             kill "$pid" 2>/dev/null || true
             for _ in {1..30}; do
                 kill -0 "$pid" 2>/dev/null || break
@@ -339,12 +364,14 @@ stop_daemon_for_install() {
             if kill -0 "$pid" 2>/dev/null; then
                 kill -9 "$pid" 2>/dev/null || true
             fi
+        else
+            die "refusing direct stop because lifecycle PID '${pid:-missing}' is not a verified ryeosd owned by $invoking_user"
         fi
     fi
 
     final_status="$(ryeos_status_quick)"
-    if grep -qx "running" <<<"$final_status"; then
-        die "failed to stop running daemon before install"
+    if status_has_live_daemon <<<"$final_status"; then
+        die "failed to stop live daemon before install"
     fi
 
     return 0
@@ -436,8 +463,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Source installs do not have a package manager to pull optional runtime tools.
-# Check the exact executable the node policy names; a different `bwrap` found
-# through PATH does not prove that the daemon's captured backend is compatible.
+# Enforced policy checks the exact configured executable; disabled policy does
+# not resolve or probe a sandbox backend.
 bwrap_compatible() {
     local executable="$1"
     local output major minor help option
@@ -483,22 +510,25 @@ if [[ -f "$sandbox_policy" ]]; then
     [[ -z "$configured_mode" ]] || sandbox_mode="$configured_mode"
 fi
 
-if ! bwrap_compatible "$sandbox_backend"; then
-    echo "[install-local-direct] warning: node sandbox backend '$sandbox_backend' is missing or incompatible" >&2
-    echo "[install-local-direct] RyeOS enforcement requires Bubblewrap 0.11.0+ with exact help tokens: --bind-fd --ro-bind-fd --argv0" >&2
-    if [[ "$sandbox_backend" == "/usr/bin/bwrap" ]]; then
-        echo "[install-local-direct] install a current bubblewrap package that provides /usr/bin/bwrap (Arch: sudo pacman -S bubblewrap), or keep mode: disabled" >&2
-    else
-        echo "[install-local-direct] install a compatible binary at the configured path, change '$sandbox_policy' to executable: /usr/bin/bwrap after installing it there, or keep mode: disabled" >&2
-    fi
-    if [[ "$sandbox_mode" == "enforce" ]]; then
-        die "sandbox policy is enforced, so installation cannot continue with an incompatible configured backend"
-    fi
-    if [[ "$sandbox_mode" != "disabled" ]]; then
-        die "sandbox policy mode '$sandbox_mode' is not a valid disabled opt-out; repair '$sandbox_policy' before continuing"
-    fi
-    echo "[install-local-direct] continuing because the node sandbox policy is disabled" >&2
-fi
+case "$sandbox_mode" in
+    disabled)
+        ;;
+    enforce)
+        if ! bwrap_compatible "$sandbox_backend"; then
+            echo "[install-local-direct] node sandbox backend '$sandbox_backend' is missing or incompatible" >&2
+            echo "[install-local-direct] RyeOS enforcement requires Bubblewrap 0.11.0+ with exact help tokens: --bind-fd --ro-bind-fd --argv0" >&2
+            if [[ "$sandbox_backend" == "/usr/bin/bwrap" ]]; then
+                echo "[install-local-direct] install a current bubblewrap package that provides /usr/bin/bwrap (Arch: sudo pacman -S bubblewrap)" >&2
+            else
+                echo "[install-local-direct] install a compatible binary at the configured path or change '$sandbox_policy' to executable: /usr/bin/bwrap after installing it there" >&2
+            fi
+            die "sandbox policy is enforced, so installation cannot continue with an incompatible configured backend"
+        fi
+        ;;
+    *)
+        die "sandbox policy mode '$sandbox_mode' is invalid; repair '$sandbox_policy' before continuing"
+        ;;
+esac
 
 cd "$repo_root"
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:e21e7d28c21b0eb7dca89fabf7df16317dc5c81cba77151d0876127a83a72b50:O4jcwwSgZBMKvuLGZAHDzMrHeVWdrDOQ6aTp4ckoZGcVwAZvc7AIj2HiJIFUmeg6a9z/XgdiWqV0Wxh8susuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:21Z:2d0efce9cd91444af07d37f571458c716258ff65029b67f5ffb677cda98d5f12:aAvvAtt3rpITfCwJt2PASIoFcDPwWNxvY87iVBogYjxlFoTcElPh9EcTthi+B9FSvAnLkMPpiiffin5RlOvcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
@@ -124,7 +124,7 @@ to report progress incrementally.
 
 ## Environment Variables
 
-The default `tool_callback_v1` and callback-free streaming protocol both
+The default `tool_callback` and callback-free streaming protocol both
 declare the basic tool variables:
 
 | Variable              | Description                        |
@@ -132,8 +132,8 @@ declare the basic tool variables:
 | `RYE_THREAD_ID`       | Current thread ID                  |
 | `RYE_PROJECT_PATH`    | Absolute path to project root      |
 
-`tool_callback_v1` additionally declares these callback bindings (the managed
-`runtime_v1` protocol uses the same callback names):
+`tool_callback` additionally declares these callback bindings (the managed
+`runtime` protocol uses the same callback names):
 
 | Variable                    | Description                        |
 |-----------------------------|------------------------------------|
@@ -148,7 +148,7 @@ requests callback credentials so manifest-backed bundle-event, vault, and item-
 authoring operations work; empty effective capabilities deny capability-gated
 resource operations unless verified authority grants them. Exact-thread and
 chain-local lifecycle methods retain their documented access class. A schema selecting callback-free
-`opaque`, `tool_streaming_v1`, or `cli_exec` receives no undeclared `RYEOSD_*`
+`opaque`, `tool_streaming`, or `cli_exec` receives no undeclared `RYEOSD_*`
 credentials and no daemon-socket access inside an enforced sandbox.
 
 ## Dependency Scanning

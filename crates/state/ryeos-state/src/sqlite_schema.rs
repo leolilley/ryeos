@@ -16,17 +16,10 @@
 //! Both functions are idempotent — `init_owned` stamps `application_id`
 //! and runs DDL; `assert_owned` verifies the stamp and full schema.
 //!
-//! # Operator recovery for foreign-schema bail
-//!
-//! When `assert_owned` or `is_empty_or_owned` bail with "this file was
-//! not created by this daemon", the offending db file must be archived
-//! before re-init. Follow these steps:
-//!
-//! 1. Stop the daemon (it failed to start).
-//! 2. Identify the offending file from the error message.
-//! 3. Archive by renaming:
-//!    `mv <db_file> <db_file>.foreign.$(date +%s)`
-//! 4. Restart the daemon (auto-init will recreate missing state).
+//! Ownership checks never rename, archive, reset, or replace an existing
+//! database. A mismatch fails before mutation. Recovery is store-specific:
+//! retained source-of-truth stores require an explicit migration or repair,
+//! while replaceable projections use their explicit rebuild path.
 
 use std::path::Path;
 
@@ -91,9 +84,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
     if app_id != spec.application_id {
         bail!(
             "database application_id is {app_id}, expected {}; \
-             this file ({}) was not created by this daemon. \
-             Recovery: mv <file> <file>.foreign.$(date +%s); \
-             then restart the daemon (auto-init will recreate missing state).",
+             this file ({}) was not created by this daemon. Refusing to modify it; \
+             preserve the file and use the owning store's explicit migration or recovery procedure.",
             spec.application_id,
             path_display,
         );
@@ -127,9 +119,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         if !expected_table_names.contains(actual.as_str()) {
             bail!(
                 "unexpected user table '{actual}' in database ({}); \
-                 this file was not created by this daemon. \
-                 Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart the daemon (auto-init will recreate missing state).",
+                 this file was not created by this daemon. Refusing to modify it; \
+                 preserve the file and use the owning store's explicit migration or recovery procedure.",
                 path_display,
             );
         }
@@ -154,9 +145,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         if col_rows.len() != expected_cols.len() {
             bail!(
                 "table '{}' has {} columns, expected {}; \
-                 this file ({}) was not created by this daemon. \
-                 Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart the daemon (auto-init will recreate missing state).",
+                 this file ({}) was not created by this daemon. Refusing to modify it; \
+                 preserve the file and use the owning store's explicit migration or recovery procedure.",
                 table.name,
                 col_rows.len(),
                 expected_cols.len(),
@@ -171,9 +161,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             if actual_name != expected.name {
                 bail!(
                     "table '{}' column {}: name '{}' != expected '{}'; \
-                 this file ({}) was not created by this daemon. \
-                 Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart the daemon (auto-init will recreate missing state).",
+                 this file ({}) was not created by this daemon. Refusing to modify it; \
+                 preserve the file and use the owning store's explicit migration or recovery procedure.",
                     table.name,
                     i,
                     actual_name,
@@ -185,9 +174,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             if actual_type.to_uppercase() != expected.col_type.to_uppercase() {
                 bail!(
                     "table '{}' column '{}': type '{}' != expected '{}'; \
-                     this file ({}) was not created by this daemon. \
-                     Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart the daemon (auto-init will recreate missing state).",
+                     this file ({}) was not created by this daemon. Refusing to modify it; \
+                     preserve the file and use the owning store's explicit migration or recovery procedure.",
                     table.name,
                     actual_name,
                     actual_type,
@@ -198,9 +186,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             if (*pk_flag > 0) != expected.pk {
                 bail!(
                     "table '{}' column '{}': pk={} != expected={}; \
-                     this file ({}) was not created by this daemon. \
-                     Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart the daemon (auto-init will recreate missing state).",
+                     this file ({}) was not created by this daemon. Refusing to modify it; \
+                     preserve the file and use the owning store's explicit migration or recovery procedure.",
                     table.name,
                     actual_name,
                     *pk_flag > 0,
@@ -214,9 +201,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             if (*pk_flag == 0) && ((*notnull_flag != 0) != expected.not_null) {
                 bail!(
                     "table '{}' column '{}': notnull={} != expected={}; \
-                     this file ({}) was not created by this daemon. \
-                     Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart the daemon (auto-init will recreate missing state).",
+                     this file ({}) was not created by this daemon. Refusing to modify it; \
+                     preserve the file and use the owning store's explicit migration or recovery procedure.",
                     table.name,
                     actual_name,
                     *notnull_flag != 0,
@@ -258,9 +244,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         if matching.1 != idx.table {
             bail!(
                 "index '{}' is on table '{}' but expected table '{}'; \
-                 this file ({}) was not created by this daemon. \
-                 Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart the daemon (auto-init will recreate missing state).",
+                 this file ({}) was not created by this daemon. Refusing to modify it; \
+                 preserve the file and use the owning store's explicit migration or recovery procedure.",
                 idx.name,
                 matching.1,
                 idx.table,
@@ -293,9 +278,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
                 if *unique_flag != idx.unique {
                     bail!(
                         "index '{}' on table '{}': unique={} != expected={}; \
-                         this file ({}) was not created by this daemon. \
-                         Recovery: mv <file> <file>.foreign.$(date +%s); \
-                         then restart the daemon (auto-init will recreate missing state).",
+                         this file ({}) was not created by this daemon. Refusing to modify it; \
+                         preserve the file and use the owning store's explicit migration or recovery procedure.",
                         idx.name,
                         idx.table,
                         unique_flag,
@@ -318,9 +302,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         if index_info_rows.len() != idx.columns.len() {
             bail!(
                 "index '{}' on table '{}': expected columns {:?}, got {:?}; \
-                 this file ({}) was not created by this daemon. \
-                 Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart the daemon (auto-init will recreate missing state).",
+                 this file ({}) was not created by this daemon. Refusing to modify it; \
+                 preserve the file and use the owning store's explicit migration or recovery procedure.",
                 idx.name,
                 idx.table,
                 idx.columns,
@@ -332,9 +315,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
             if actual_col != idx.columns[i] {
                 bail!(
                     "index '{}' on table '{}': column[{}] is '{}' but expected '{}'; \
-                     this file ({}) was not created by this daemon. \
-                     Recovery: mv <file> <file>.foreign.$(date +%s); \
-                     then restart the daemon (auto-init will recreate missing state).",
+                     this file ({}) was not created by this daemon. Refusing to modify it; \
+                     preserve the file and use the owning store's explicit migration or recovery procedure.",
                     idx.name,
                     idx.table,
                     i,
@@ -353,9 +335,8 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
         if !expected_idx_names.contains(actual_name.as_str()) {
             bail!(
                 "unexpected user index '{actual_name}' on table '{actual_table}'; \
-                 this file ({}) was not created by this daemon. \
-                 Recovery: mv <file> <file>.foreign.$(date +%s); \
-                 then restart the daemon (auto-init will recreate missing state).",
+                 this file ({}) was not created by this daemon. Refusing to modify it; \
+                 preserve the file and use the owning store's explicit migration or recovery procedure.",
                 path_display,
             );
         }
@@ -440,9 +421,9 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
     if table_count > 0 {
         bail!(
             "init_owned called on a non-empty database ({} user tables); \
-             use assert_owned first if the file may already exist. \
-             Recovery: mv {path_display} {path_display}.foreign.$(date +%s); \
-             then restart the daemon (auto-init will recreate missing state).",
+             use assert_owned first if the file may already exist. Refusing to modify \
+             {path_display}; preserve it and use the owning store's explicit migration \
+             or recovery procedure.",
             table_count,
         );
     }
@@ -536,14 +517,13 @@ pub fn is_empty_or_owned(conn: &Connection, expected_app_id: i32) -> Result<bool
         }
         bail!(
             "database has no application_id stamp but contains {table_count} user tables; \
-             foreign schema detected. Recovery: mv <file> <file>.foreign.$(date +%s); \
-             then restart the daemon (auto-init will recreate missing state)."
+             foreign schema detected. Refusing to modify it; preserve the file and use \
+             the owning store's explicit migration or recovery procedure."
         );
     }
     bail!(
         "database application_id is {app_id}, expected {expected_app_id}; \
-         this file was not created by this daemon. \
-         Recovery: mv <file> <file>.foreign.$(date +%s); \
-         then restart the daemon (auto-init will recreate missing state)."
+         this file was not created by this daemon. Refusing to modify it; preserve \
+         the file and use the owning store's explicit migration or recovery procedure."
     );
 }

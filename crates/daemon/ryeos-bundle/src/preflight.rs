@@ -1717,7 +1717,7 @@ name: fixed-parser
 kind: handler
 serves: parser
 binary_ref: {bin_rel}
-abi_version: "v3"
+abi_version: "v1"
 required_caps: []
 description: "fixed parser handler for preflight tests"
 "#
@@ -1735,6 +1735,7 @@ description: "fixed parser handler for preflight tests"
                 "item_ref": item_ref,
                 "content_blob_hash": blob_hash,
                 "integrity": format!("sha256:{blob_hash}"),
+                "signature_info": null,
                 "mode": 0o755,
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();

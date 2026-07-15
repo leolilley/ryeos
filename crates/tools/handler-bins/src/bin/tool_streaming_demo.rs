@@ -3,7 +3,7 @@
 //! Reads `parameters_json` on stdin (ignored), then writes 7
 //! length-prefixed JSON frames to stdout: 5 stdout chunks, 1 stderr
 //! chunk, and a terminal exit frame. This exercises the
-//! `tool_streaming_v1` protocol end-to-end including the Stderr kind.
+//! `tool_streaming` protocol end-to-end including the Stderr kind.
 
 use std::io::{Read, Write};
 
@@ -43,7 +43,7 @@ fn emit_frame(chunk: &StreamingChunk) {
 }
 
 fn main() {
-    // Drain stdin (tool_streaming_v1 sends parameters_json).
+    // Drain stdin (tool_streaming sends parameters_json).
     let mut stdin = String::new();
     std::io::stdin().read_to_string(&mut stdin).unwrap();
 
@@ -59,7 +59,7 @@ fn main() {
     }
 
     // 1 stderr chunk so the demo exercises every non-terminal frame
-    // kind in the `tool_streaming_v1` protocol.
+    // kind in the `tool_streaming` protocol.
     emit_frame(&StreamingChunk {
         seq: 5,
         kind: StreamingChunkKind::Stderr,

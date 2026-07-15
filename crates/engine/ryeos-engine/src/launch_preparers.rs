@@ -3,9 +3,10 @@
 //!
 //! Launch preparers receive verified execution identities and may return
 //! symbolic secret requirements, so they do not share the general
-//! parser/composer runner. This module always uses the node-declared absolute
-//! Bubblewrap backend with a fixed, networkless, host-filesystem-denying
-//! profile and bounded streaming I/O.
+//! parser/composer runner. Enforced node policy uses the captured Bubblewrap
+//! backend with a fixed, networkless, host-filesystem-denying profile. Disabled
+//! policy executes the hash-pinned handler directly. Both paths retain the same
+//! strict protocol, resource, timeout, and bounded-I/O controls.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -163,21 +164,29 @@ impl LaunchPreparerRegistry {
     }
 }
 
-/// Fixed-isolation process runner shared by boot-time config validation and
+/// Policy-selected process runner shared by boot-time config validation and
 /// live launch preparation.
 #[derive(Debug, Clone)]
 pub struct LaunchPreparerRunner {
-    bubblewrap: Arc<std::fs::File>,
+    execution: LaunchPreparerExecution,
+}
+
+#[derive(Debug, Clone)]
+enum LaunchPreparerExecution {
+    Direct,
+    Bubblewrap(Arc<std::fs::File>),
 }
 
 impl LaunchPreparerRunner {
-    /// Capture the backend from the daemon's immutable node-sandbox snapshot.
-    /// All widenable policy fields remain deliberately ignored because launch
-    /// preparation always uses its own fixed profile.
+    /// Select execution from the daemon's immutable node-sandbox snapshot.
+    /// Disabled policy never resolves or probes Bubblewrap.
     pub fn from_sandbox_runtime(sandbox: &SandboxRuntime) -> Result<Self, EngineError> {
-        Ok(Self {
-            bubblewrap: sandbox.capture_mandatory_bubblewrap_backend()?,
-        })
+        let execution = if sandbox.is_enforced() {
+            LaunchPreparerExecution::Bubblewrap(sandbox.captured_bubblewrap_backend()?)
+        } else {
+            LaunchPreparerExecution::Direct
+        };
+        Ok(Self { execution })
     }
 
     pub(crate) fn run_launch_preparer_subprocess(
@@ -236,22 +245,58 @@ impl LaunchPreparerRunner {
                 detail: format!("invalid launch-preparer request JSON: {error}"),
             })?;
 
-        let invocation = fixed_bubblewrap_args(&binary_path, &binary_hash).map_err(|error| {
-            EngineError::LaunchPreparerUnavailable {
-                handler: canonical_ref.clone(),
-                detail: error.to_string(),
-            }
-        })?;
         #[cfg(unix)]
-        let bubblewrap_command = {
-            use std::os::fd::AsRawFd as _;
-            format!("/proc/self/fd/{}", self.bubblewrap.as_raw_fd())
+        let (program, args, inherited_files, launcher_fd, spawn_mode) = match &self.execution {
+            LaunchPreparerExecution::Direct => {
+                let (handler, _) = pin_runtime_file(
+                    "verified launch-preparer binary",
+                    &binary_path,
+                    Some(&binary_hash),
+                    true,
+                )
+                .map_err(|error| EngineError::LaunchPreparerUnavailable {
+                    handler: canonical_ref.clone(),
+                    detail: error.to_string(),
+                })?;
+                (
+                    format!("/proc/self/fd/{}", runtime_file_fd(&handler.file)),
+                    Vec::new(),
+                    vec![handler.file],
+                    None,
+                    "direct",
+                )
+            }
+            LaunchPreparerExecution::Bubblewrap(bubblewrap) => {
+                use std::os::fd::AsRawFd as _;
+
+                let invocation =
+                    fixed_bubblewrap_args(&binary_path, &binary_hash).map_err(|error| {
+                        EngineError::LaunchPreparerUnavailable {
+                            handler: canonical_ref.clone(),
+                            detail: error.to_string(),
+                        }
+                    })?;
+                (
+                    format!("/proc/self/fd/{}", bubblewrap.as_raw_fd()),
+                    invocation.args,
+                    invocation.inherited_files,
+                    Some(bubblewrap.as_raw_fd()),
+                    "Bubblewrap-isolated",
+                )
+            }
         };
         #[cfg(not(unix))]
-        let bubblewrap_command = String::new();
-        let mut command = Command::new(bubblewrap_command);
+        let (program, args, inherited_files, launcher_fd, spawn_mode) = (
+            String::new(),
+            Vec::<String>::new(),
+            Vec::<Arc<std::fs::File>>::new(),
+            None::<i32>,
+            "unsupported",
+        );
+
+        let mut command = Command::new(program);
         command
-            .args(&invocation.args)
+            .args(&args)
             .current_dir("/tmp")
             .env_clear()
             .stdin(Stdio::piped())
@@ -262,15 +307,13 @@ impl LaunchPreparerRunner {
             use std::os::fd::AsRawFd as _;
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
-            let inherited_fds = invocation
-                .inherited_files
+            let inherited_fds = inherited_files
                 .iter()
                 .map(|file| file.as_raw_fd())
                 .collect::<Vec<_>>();
             unsafe {
-                let bubblewrap_fd = self.bubblewrap.as_raw_fd();
                 command.pre_exec(move || {
-                    for fd in std::iter::once(&bubblewrap_fd).chain(inherited_fds.iter()) {
+                    for fd in launcher_fd.iter().chain(inherited_fds.iter()) {
                         let flags = libc::fcntl(*fd, libc::F_GETFD);
                         if flags == -1
                             || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
@@ -284,19 +327,19 @@ impl LaunchPreparerRunner {
         }
         #[cfg(not(unix))]
         {
+            let _ = (&inherited_files, launcher_fd);
             return Err(EngineError::LaunchPreparerUnavailable {
                 handler: canonical_ref,
                 detail: "launch preparers require a Unix process-group boundary".to_owned(),
             });
         }
-
         let started_at = Instant::now();
         let mut child =
             command
                 .spawn()
                 .map_err(|error| EngineError::LaunchPreparerUnavailable {
                     handler: canonical_ref.clone(),
-                    detail: format!("spawn fixed Bubblewrap profile: {error}"),
+                    detail: format!("spawn {spawn_mode} launch preparer: {error}"),
                 })?;
         let process_group = child.id() as i32;
         let Some(stdin) = child.stdin.take() else {
@@ -444,6 +487,19 @@ impl LaunchPreparerRunner {
             });
         }
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_policy_selects_direct_execution_without_backend_capture() {
+        let sandbox = SandboxRuntime::default();
+        let runner = LaunchPreparerRunner::from_sandbox_runtime(&sandbox).unwrap();
+        assert!(matches!(runner.execution, LaunchPreparerExecution::Direct));
+        assert!(sandbox.captured_bubblewrap_backend().is_err());
     }
 }
 

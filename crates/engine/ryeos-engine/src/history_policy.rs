@@ -321,9 +321,16 @@ fn read_optional_regular_file_no_follow(path: &std::path::Path) -> anyhow::Resul
             )
         };
         if descriptor < 0 {
-            // Missing or substituted parent components are malformed config
-            // roots, not an optional absent policy leaf.
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                // The policy is optional in every resolution root. Most
+                // bundles do not carry config/execution, so an absent parent
+                // is the same optional miss as an absent execution.yaml leaf.
+                return Ok(None);
+            }
+            // A symlink, non-directory component, or inaccessible parent is
+            // not an optional miss and must remain fail-closed.
+            return Err(error.into());
         }
         directory = unsafe { File::from_raw_fd(descriptor) };
     }
@@ -1141,5 +1148,24 @@ mod tests {
         std::fs::write(real.join("policy.yaml"), b"history: {}\n").unwrap();
         symlink(&real, &linked).unwrap();
         assert!(read_optional_regular_file_no_follow(&linked.join("policy.yaml")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_history_policy_reader_treats_a_missing_leaf_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("config/execution/execution.yaml");
+        std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
+
+        assert_eq!(read_optional_regular_file_no_follow(&policy).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_history_policy_reader_treats_missing_optional_parents_as_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("config/execution/execution.yaml");
+
+        assert_eq!(read_optional_regular_file_no_follow(&policy).unwrap(), None);
     }
 }

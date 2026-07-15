@@ -106,7 +106,7 @@ pub fn load_installed_bundle_records_with_trust(
 
         if body.kind != "node" {
             bail!(
-                "node bundle registration {} declares kind {:?}, expected the current ryeos.bundle-registration/v1 kind 'node'",
+                "node bundle registration {} declares kind {:?}, expected kind 'node'",
                 path.display(),
                 body.kind
             );
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_registration_without_current_v1_kind() {
+    fn rejects_registration_without_kind() {
         let layout = Layout::new();
         let bundle = layout.write_bundle("core");
         let dir = layout.system.join(".ai/node/bundles");

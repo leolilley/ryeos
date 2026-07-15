@@ -625,7 +625,7 @@ fn compute_cache_key(
     hints: &ExecutionHints,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"ryeos:plan:v2:");
+    hasher.update(b"ryeos:plan:v1:");
     hasher.update(canonical_ref.as_bytes());
     hasher.update(b":");
     hasher.update(content_hash.as_bytes());

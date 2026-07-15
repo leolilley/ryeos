@@ -80,7 +80,7 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     )
     .await
     .expect("RyeOS UI dimension should succeed");
-    assert_eq!(dimension["schema_version"], "ryeos.ui.dimension.v0");
+    assert_eq!(dimension["schema_version"], "ryeos.ui.dimension.v1");
 
     let inspection = (ryeos_ui::handlers::ui_items::ITEM_INSPECT_DESCRIPTOR.handler)(
         json!({

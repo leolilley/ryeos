@@ -9,4 +9,4 @@ pub use registry::{HandlerError, HandlerRegistry, VerifiedHandler};
 
 /// Protocol ABI version this engine speaks for handler binaries.
 /// Distinct from SUPPORTED_RUNTIME_ABI_VERSION.
-pub const SUPPORTED_HANDLER_ABI_VERSION: &str = "v3";
+pub const SUPPORTED_HANDLER_ABI_VERSION: &str = "v1";

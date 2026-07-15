@@ -46,8 +46,8 @@ struct ProjectSnapshotWire {
 }
 
 impl ProjectSnapshot {
-    /// Schema version for project snapshots.
-    pub const SCHEMA: u32 = 4;
+    /// The single current schema for project snapshots.
+    pub const SCHEMA: u32 = 1;
 
     /// Serialize to a CAS JSON object.
     pub fn to_value(&self) -> Value {
@@ -67,7 +67,7 @@ impl ProjectSnapshot {
     /// Deserialize from a CAS JSON value.
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         let wire: ProjectSnapshotWire = serde_json::from_value(value.clone())
-            .context("failed to deserialize project_snapshot schema 4")?;
+            .context("failed to deserialize current project_snapshot schema")?;
         if wire.kind != "project_snapshot" {
             anyhow::bail!(
                 "project_snapshot kind mismatch: expected project_snapshot, got {}",
@@ -169,7 +169,7 @@ mod tests {
     fn rejects_non_current_or_incomplete_wire_objects() {
         let value = json!({
             "kind": "project_snapshot",
-            "schema": 3,
+            "schema": 2,
             "project_manifest_hash": "ab".repeat(32),
             "parent_hashes": [],
             "created_at": "2026-04-23T00:00:00Z",

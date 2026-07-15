@@ -7,8 +7,8 @@ use crate::subprocess_spec::SubprocessBuildRequest;
 ///
 /// The builder (protocols/builder.rs) consumes this enum to decide what
 /// bytes to place on the child's stdin. Vocabulary-level `build_stdin`
-/// handles the `ParametersJson` case; `Opaque`, `LaunchEnvelopeV1`, and
-/// `MethodCallEnvelopeV1` are handled by their owning builders (see builder.rs
+/// handles the `ParametersJson` case; `Opaque`, `LaunchEnvelope`, and
+/// `MethodCallEnvelope` are handled by their owning builders (see builder.rs
 /// for details).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -28,11 +28,11 @@ pub enum StdinShape {
     /// does NOT handle this case — it returns an error if called with
     /// this shape, because envelope construction requires daemon-level
     /// context that the vocabulary module does not have.
-    LaunchEnvelopeV1,
+    LaunchEnvelope,
 
     /// MethodCallEnvelope v1 (method-dispatch path). Construction requires
     /// daemon-resolved method, payload, callback, and runtime-config context.
-    MethodCallEnvelopeV1,
+    MethodCallEnvelope,
 }
 
 /// Build stdin bytes for a shape that the vocabulary layer can handle.
@@ -51,12 +51,12 @@ pub fn build_stdin(
             // Opaque stdin: no data. The builder produces empty bytes.
             Ok(Vec::new())
         }
-        StdinShape::LaunchEnvelopeV1 => Err(EngineError::Internal(
-            "build_stdin cannot produce LaunchEnvelopeV1; use the launch-envelope protocol builder"
+        StdinShape::LaunchEnvelope => Err(EngineError::Internal(
+            "build_stdin cannot produce LaunchEnvelope; use the launch-envelope protocol builder"
                 .into(),
         )),
-        StdinShape::MethodCallEnvelopeV1 => Err(EngineError::Internal(
-            "build_stdin cannot produce MethodCallEnvelopeV1; use the method-call protocol builder"
+        StdinShape::MethodCallEnvelope => Err(EngineError::Internal(
+            "build_stdin cannot produce MethodCallEnvelope; use the method-call protocol builder"
                 .into(),
         )),
     }
@@ -92,8 +92,8 @@ mod tests {
         for (name, shape) in [
             ("parameters_json", StdinShape::ParametersJson),
             ("opaque", StdinShape::Opaque),
-            ("launch_envelope_v1", StdinShape::LaunchEnvelopeV1),
-            ("method_call_envelope_v1", StdinShape::MethodCallEnvelopeV1),
+            ("launch_envelope", StdinShape::LaunchEnvelope),
+            ("method_call_envelope", StdinShape::MethodCallEnvelope),
         ] {
             let yaml = serde_yaml::to_string(&shape).unwrap();
             let parsed: StdinShape = serde_yaml::from_str(&yaml).unwrap();
@@ -124,17 +124,17 @@ mod tests {
     }
 
     #[test]
-    fn launch_envelope_v1_builder_errors() {
+    fn launch_envelope_builder_errors() {
         let req = make_request(serde_json::json!({}));
-        let result = build_stdin(StdinShape::LaunchEnvelopeV1, &req);
+        let result = build_stdin(StdinShape::LaunchEnvelope, &req);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("protocol builder"));
     }
 
     #[test]
-    fn method_call_envelope_v1_builder_errors() {
+    fn method_call_envelope_builder_errors() {
         let req = make_request(serde_json::json!({}));
-        let result = build_stdin(StdinShape::MethodCallEnvelopeV1, &req);
+        let result = build_stdin(StdinShape::MethodCallEnvelope, &req);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("protocol builder"));
     }

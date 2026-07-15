@@ -59,10 +59,9 @@ use transitions::resolve_next_on_error;
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
 /// change to the written fields; the resume parser rejects an unknown version.
 ///
-/// v3 pins the signed graph definition and expression language. Checkpoints
-/// from before the rye-expr/1 cut cannot be interpreted safely and are never
-/// migrated or guessed at resume time.
-pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 3;
+/// The current schema pins the signed graph definition and expression
+/// language. Other shapes are rejected; there are no legacy migrations.
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub(crate) const EXPRESSION_LANGUAGE: &str = "rye-expr/1";
 
 /// Follow-resume field keys for the checkpoint / resume-state payload. Shared by

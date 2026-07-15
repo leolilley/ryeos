@@ -53,15 +53,15 @@ pub(super) fn classify_managed_protocol(
     };
 
     if protocol.descriptor.callback_channel != CallbackChannel::None {
-        if protocol.descriptor.stdin.shape != StdinShape::LaunchEnvelopeV1
-            || protocol.descriptor.stdout.shape != StdoutShape::RuntimeResultV1
+        if protocol.descriptor.stdin.shape != StdinShape::LaunchEnvelope
+            || protocol.descriptor.stdout.shape != StdoutShape::RuntimeResult
             || protocol.descriptor.stdout.mode != StdoutMode::Terminal
             || protocol.descriptor.lifecycle.mode != LifecycleMode::Managed
         {
             return Err(DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
                 detail: format!(
-                    "managed callback protocol '{}' has unsupported wire contract: expected launch_envelope_v1 stdin, terminal runtime_result_v1 stdout, and managed lifecycle; got {:?} stdin, {:?}/{:?} stdout, and {:?} lifecycle",
+                    "managed callback protocol '{}' has unsupported wire contract: expected launch_envelope stdin, terminal runtime_result stdout, and managed lifecycle; got {:?} stdin, {:?}/{:?} stdout, and {:?} lifecycle",
                     protocol.canonical_ref,
                     protocol.descriptor.stdin.shape,
                     protocol.descriptor.stdout.shape,
@@ -72,7 +72,7 @@ pub(super) fn classify_managed_protocol(
         }
         return Ok(ManagedProtocolRoute::CallbackRuntime);
     }
-    if protocol.descriptor.stdin.shape == StdinShape::LaunchEnvelopeV1 {
+    if protocol.descriptor.stdin.shape == StdinShape::LaunchEnvelope {
         return Err(DispatchError::SchemaMisconfigured {
             kind: kind.to_string(),
             detail: format!(
@@ -101,7 +101,7 @@ pub(super) fn classify_managed_protocol(
         protocol.descriptor.stdout.mode,
         protocol.descriptor.stdout.shape,
     ) {
-        (StdoutMode::Streaming, StdoutShape::StreamingChunksV1) => {
+        (StdoutMode::Streaming, StdoutShape::StreamingChunks) => {
             Ok(ManagedProtocolRoute::FramedStreaming)
         }
         (mode, shape) => Err(DispatchError::SchemaMisconfigured {

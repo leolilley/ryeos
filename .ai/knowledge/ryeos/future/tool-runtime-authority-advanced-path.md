@@ -7,7 +7,7 @@ Deferred. The current implementation intentionally provides only the narrow
 first slice: direct tool executions may receive exact self-bundle callback
 capabilities derived from signed generated bundle manifests.
 
-The signed `tool_callback_v1` descriptor makes callback transport explicit;
+The signed `tool_callback` descriptor makes callback transport explicit;
 authority remains separately derived and deny-by-default. This advanced path is
 for the broader question: what should a first-class tool runtime authority model
 look like once tools need more than current self-bundle authority?
@@ -53,6 +53,11 @@ A managed tool runtime can standardize process behavior, but it should not be th
 Likewise, any future per-tool sandbox profile is an intersecting restriction
 beneath the immutable node policy, never item-authored authority to enable or
 broaden mounts, network, environment, or limits.
+
+The profile should name typed requirements rather than an OS backend. The node
+selects and proves the backend using the contract in
+`ryeos/future/data-driven-execution-isolation-backends`; an unavailable required
+boundary fails closed instead of falling back to direct execution.
 
 That profile remains an inner application-policy layer. It must not be used as
 the claim that hostile multi-tenancy is complete: CPU, memory, and process-count

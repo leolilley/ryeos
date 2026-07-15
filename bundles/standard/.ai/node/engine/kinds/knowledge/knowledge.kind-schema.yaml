@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T10:12:30Z:1ca54b5bf302f75df833fb1eb13438e41ce84b19337651f049cb7b61b07a2d71:evgL268NWCnR2ca1TK6/hcG6WSkcmz8AYC+7ZT+SI6zhsiLkRO4MEP8AAdw7iYrJC7I5c8qFkpkyvZ2IKGKGCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T07:49:15Z:7f4f4ac08ffced53ea7b0e1f803f9f4057d1142a209d87762a6e2ae03b9155c4:TvQIaTJRPgOojTk0Q55jD6RF8ffh8of8ONxHQXIivy8CmZlwyu5hLEy+FUcgcfROUiL2l9mMpBGUur7sO0dfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -25,7 +25,7 @@ execution:
   # is cleanly rejected as undeclared.
   method_dispatch:
     via: runtime_registry
-    protocol: protocol:ryeos/core/method_runtime_v1
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose:

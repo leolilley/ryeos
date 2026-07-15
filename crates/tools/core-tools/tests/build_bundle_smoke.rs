@@ -114,9 +114,10 @@ fn bundle_sidecar_exists_and_parsable() {
     );
     assert!(value.get("mode").is_some(), "missing mode");
     assert_eq!(value["mode"], 493, "mode should be 0o755");
-    assert!(
-        value.get("signature_info").is_none(),
-        "unsigned ItemSource must not carry a claimed signer fingerprint"
+    assert_eq!(
+        value.get("signature_info"),
+        Some(&serde_json::Value::Null),
+        "unsigned ItemSource must carry an explicit null, never a claimed signer fingerprint"
     );
 }
 

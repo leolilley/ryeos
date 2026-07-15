@@ -1,13 +1,13 @@
-# ryeos:signed:2026-07-14T10:12:30Z:88c6e97d98b2b792758661746a4cba586c8693d587c70f816878ab24f48883e4:7czG4gVD250zINu02OLqSy5GfA75qLKNyRmYVdoALp+W8Kuvkwlvv8RArK28zYAy5p66oeZ5uxVs8wUz613NDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T07:49:08Z:1eb5488fd5ea3ed7f1cda4a16818889b71c6596ff6c30d87b77cb73c2f61dad9:qH7Y7lBJvzRUsDlNID5SeY1rwyfkb0qrDCgAziJoleMFeW4DYxRlslJ0SQDCVEtF+zxT3hLMXzuXCrLMhspMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
-name: runtime_v1
+name: runtime
 category: ryeos/core
 abi_version: v1
 description: Native runtime spawn. LaunchEnvelope on stdin, RuntimeResult on stdout, callback channel.
 stdin:
-  shape: launch_envelope_v1
+  shape: launch_envelope
 stdout:
-  shape: runtime_result_v1
+  shape: runtime_result
   mode: terminal
 env_injections:
   - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
@@ -21,4 +21,4 @@ capabilities:
   allows_detached: false
 lifecycle:
   mode: managed
-callback_channel: http_v1
+callback_channel: http

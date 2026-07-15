@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T23:18:43Z:e77ceab63ac74285cb292f30a4c2117a776287607391635ef1014cea8f65a72c:TT325xfHbQoRAMpYG6wqpqaSb2TGMsh43NaczQXnIrZo86biC7agMpOzuRR274JOGyedlsO9SCI/B9hyCHwHDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T09:41:30Z:f2c628f2f3677d37b30d090dcf49e9797482c1df9508a93e8fb1aecca7468041:PBvNqd5NA+MEfzxZDTLbxgUG8Dc+Sxu7QVDmAV4gUWctWUOhkX+KYkQGqNyccuvz4vPBwfxvDtY1W7dqEa0uAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -48,6 +48,28 @@ serialized to canonical JSON and SHA-256 hashed before storage.
 
 Every object — events, snapshots, manifests, chain state — is an
 immutable JSON blob in CAS. The hash is the identity.
+
+#### Canonical JSON Contract
+
+RyeOS has one canonical encoding for CAS JSON. It is part of durable object
+identity and signing, not a replaceable serializer setting:
+
+- arrays retain their input order and objects contain no insignificant
+  whitespace;
+- object keys are ordered lexicographically by their decoded Unicode scalar
+  values, before escaping;
+- quotes, backslashes, and control characters use JSON escapes; every other
+  non-ASCII scalar uses lowercase `\uXXXX`, with a UTF-16 surrogate pair for a
+  supplementary scalar;
+- numbers retain `serde_json::Number` rendering, including distinctions such
+  as `0`, `0.0`, and `-0.0`;
+- the content address is lowercase SHA-256 over those exact UTF-8 bytes.
+
+Readers verify both the addressed byte hash and exact canonical encoding.
+They do not repair, rewrite, or reinterpret an object in place. This contract
+is deliberately not RFC 8785/JCS. A future encoding cannot silently replace
+it: doing so would require an explicit new content-address domain and a
+separately designed authority-preserving graph transition.
 
 ### Signed Refs
 
@@ -101,12 +123,19 @@ On open, the system performs a four-step exhaustive check:
 4. **Index verification** — all expected indexes exist with correct
    uniqueness, columns, and tables; no unexpected indexes
 
-If any check fails, the error includes a recovery recipe:
-`mv <file> <file>.foreign.$(date +%s)`.
+Ownership failure never renames, archives, resets, or replaces the file. The
+database class determines recovery:
 
-An empty file (new database) triggers `init_owned()` which runs the DDL
-and stamps the application ID. This means the projection is self-healing
-on first startup and fail-loud on foreign files.
+- retained source-of-truth stores (`runtime.sqlite3` and
+  `operational.sqlite3`) accept only explicitly recognized predecessor schemas
+  and migrate them atomically in place; unknown shapes fail before mutation;
+- rebuildable stores (`projection.<instance-id>.sqlite3` and
+  `scheduler.sqlite3`) evolve through their explicit reset-and-rebuild paths
+  from durable source material.
+
+An empty file (new database) triggers `init_owned()`, which runs the DDL and
+stamps the application ID. A non-empty unstamped or foreign file fails closed
+and remains untouched.
 
 ## Event Durability Tiers
 

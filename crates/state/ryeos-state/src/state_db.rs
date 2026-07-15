@@ -110,6 +110,11 @@ pub trait RuntimeLivenessInspector {
     fn chain_has_live_recovery_state(&self, chain_root_id: &str) -> anyhow::Result<bool>;
 }
 
+struct RuntimeStateNamespaceAuthority {
+    directory: lillux::PinnedDirectory,
+    lock: lillux::PinnedDirectoryLock,
+}
+
 #[derive(Debug, Default)]
 struct PendingProjectionRepairs {
     requests: Mutex<Vec<ProjectionRepairRequest>>,
@@ -1501,6 +1506,7 @@ impl StateDb {
             trust_store,
             None,
             None,
+            None,
         )
     }
 
@@ -1514,6 +1520,7 @@ impl StateDb {
             runtime_state_dir,
             projection_repair_sink,
             trust_store,
+            None,
             None,
             None,
         )
@@ -1531,6 +1538,7 @@ impl StateDb {
             trust_store,
             Some(observer),
             None,
+            None,
         )
     }
 
@@ -1546,6 +1554,7 @@ impl StateDb {
             trust_store,
             None,
             Some(runtime_liveness),
+            None,
         )
     }
 
@@ -1562,6 +1571,54 @@ impl StateDb {
             trust_store,
             Some(observer),
             Some(runtime_liveness),
+            None,
+        )
+    }
+
+    /// Open production state beneath an already pinned and exclusively locked
+    /// runtime-state namespace. This lets the daemon share one root lock with
+    /// RuntimeDb instead of deadlocking on a second independent flock.
+    pub fn open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
+        runtime_state_dir: &Path,
+        runtime_state_directory: lillux::PinnedDirectory,
+        runtime_state_lock: lillux::PinnedDirectoryLock,
+        projection_repair_sink: Arc<dyn ProjectionRepairSink>,
+        trust_store: Arc<TrustStore>,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_options(
+            runtime_state_dir,
+            projection_repair_sink,
+            trust_store,
+            None,
+            Some(runtime_liveness),
+            Some(RuntimeStateNamespaceAuthority {
+                directory: runtime_state_directory,
+                lock: runtime_state_lock,
+            }),
+        )
+    }
+
+    /// Observer-bearing form of the shared production namespace opener.
+    pub fn open_with_recovery_observer_runtime_liveness_and_namespace_authority(
+        runtime_state_dir: &Path,
+        runtime_state_directory: lillux::PinnedDirectory,
+        runtime_state_lock: lillux::PinnedDirectoryLock,
+        projection_repair_sink: Arc<dyn ProjectionRepairSink>,
+        trust_store: Arc<TrustStore>,
+        observer: Arc<dyn ProjectionRecoveryObserver>,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+    ) -> anyhow::Result<Self> {
+        Self::open_with_options(
+            runtime_state_dir,
+            projection_repair_sink,
+            trust_store,
+            Some(observer),
+            Some(runtime_liveness),
+            Some(RuntimeStateNamespaceAuthority {
+                directory: runtime_state_directory,
+                lock: runtime_state_lock,
+            }),
         )
     }
 
@@ -1691,9 +1748,29 @@ impl StateDb {
         trust_store: Arc<TrustStore>,
         observer: Option<Arc<dyn ProjectionRecoveryObserver>>,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
+        namespace_authority: Option<RuntimeStateNamespaceAuthority>,
     ) -> anyhow::Result<Self> {
-        let runtime_state_directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
-            .context("establish no-follow runtime state root")?;
+        let (runtime_state_directory, runtime_state_lock) = match namespace_authority {
+            Some(authority) => {
+                if authority.directory.path() != runtime_state_dir {
+                    anyhow::bail!(
+                        "runtime-state namespace authority path mismatch: selected={}, requested={}",
+                        authority.directory.path().display(),
+                        runtime_state_dir.display()
+                    );
+                }
+                authority
+                    .lock
+                    .ensure_protects(&authority.directory)
+                    .context("verify runtime-state namespace authority")?;
+                (authority.directory, Some(authority.lock))
+            }
+            None => (
+                lillux::PinnedDirectory::open_or_create(runtime_state_dir)
+                    .context("establish no-follow runtime state root")?,
+                None,
+            ),
+        };
         let cas_root = runtime_state_dir.join("objects");
         let refs_root = runtime_state_dir.join("refs");
         let locators_root = runtime_state_dir.join("locators");
@@ -1719,8 +1796,14 @@ impl StateDb {
 
         // Operational rows are source-of-truth state and live in a fixed store
         // that is independent of replaceable projection generations.
-        let operational = OperationalDb::open_at_pinned_runtime_state_dir(&runtime_state_directory)
-            .context("open stable operational state")?;
+        let operational = match runtime_state_lock {
+            Some(lock) => OperationalDb::open_at_pinned_runtime_state_dir_with_lock(
+                &runtime_state_directory,
+                lock,
+            ),
+            None => OperationalDb::open_at_pinned_runtime_state_dir(&runtime_state_directory),
+        }
+        .context("open stable operational state")?;
 
         let projection = open_recovered_projection(
             runtime_state_dir,

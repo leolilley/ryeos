@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:11db03b0b69139e0afa499a45d36c3c7de1b6be6103553b26b44e8629ff13180:+tuKVJxoEb/qK+6gIJdDkaATJV7sQ1ps0Q1Nuek2gJRWMXGHKpkKcR6hzeWSWWP3uUlEBFAaLYmTh8ZXJd2WDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:19Z:9d8336c3e12436c838c9228d0cf1f5cbcdf8d9c0e68a94f9616dd243e152bccb:kjacWFQ5gPJ7mH0AoKSdSyOBbmsWQL5aEzEfaGY+3zlQ8PAPMDJzwTTEToRFUG3fOg6JoqFeQcbyD0bmTCZyAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]
@@ -40,8 +40,8 @@ project root; it can intentionally differ from source-oriented
 The verified terminator protocol is the sole callback-environment authority.
 Its signed `env_injections` select values from the closed protocol vocabulary;
 the launcher produces those values and carries them through final environment
-composition as typed protocol bindings. `runtime_v1`, `method_runtime_v1`, and
-`tool_callback_v1` declare the daemon callback names they need:
+composition as typed protocol bindings. `runtime`, `method_runtime`, and
+`tool_callback` declare the daemon callback names they need:
 
 - `RYEOSD_SOCKET_PATH`
 - `RYEOSD_CALLBACK_TOKEN`
@@ -53,9 +53,9 @@ composition as typed protocol bindings. `runtime_v1`, `method_runtime_v1`, and
 Callback capability authority is minted only when the verified descriptor's
 callback channel/injections require it. Thread-auth authority is minted only
 when the protocol asks for the `thread_auth_token` source. The default `tool`
-schema selects `tool_callback_v1` so signed manifest-backed bundle-event, vault,
+schema selects `tool_callback` so signed manifest-backed bundle-event, vault,
 and item-authoring callbacks remain available. Callback-free protocols such as
-`opaque`, `tool_streaming_v1`, and `cli_exec` receive neither credential and do
+`opaque`, `tool_streaming`, and `cli_exec` receive neither credential and do
 not expose the daemon socket inside an enforced sandbox.
 
 Directive and graph runtimes fail closed when their required callback env vars

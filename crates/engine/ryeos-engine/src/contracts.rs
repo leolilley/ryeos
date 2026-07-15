@@ -2632,7 +2632,7 @@ mod kind_contract_regressions {
             "serves": "ryeos/core/python",
             "binary_ref": "bin/x",
             "abi_version": "v1",
-            "schema": { "envelope": "launch_envelope_v1", "result": "runtime_result_v1" }
+            "schema": { "envelope": "launch_envelope", "result": "runtime_result" }
         });
         let report = validate(&runtime_shape(), &value);
         assert!(report.is_ok(), "runtime with schema should pass: {report}");

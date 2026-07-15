@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
 
-/// Clean-cut current thread-snapshot format. Version 2 requires every chain
-/// root to carry a concrete captured history policy; there is no v1 fallback.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// The single current thread-snapshot format. Every chain root carries a
+/// concrete captured history policy; unsupported shapes fail closed.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,7 +143,7 @@ pub(crate) fn validate_canonical_hash(label: &str, value: &str) -> anyhow::Resul
 
 /// Deserialize a nullable field while still requiring its key to be present.
 /// Serde otherwise treats a missing `Option<T>` as `None`, which would make
-/// schema-v2 objects silently accept incomplete older wire shapes.
+/// current-schema objects silently accept incomplete wire shapes.
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -562,7 +562,7 @@ impl std::fmt::Display for ThreadStatus {
 /// Matches the JSON schema from ARCHITECTURE.md §3:
 /// ```json
 /// {
-///   "schema": 2,
+///   "schema": 1,
 ///   "kind": "thread_snapshot",
 ///   "thread_id": "T-root",
 ///   "chain_root_id": "T-root",
@@ -1151,7 +1151,7 @@ mod tests {
             .remove("item_signer_fingerprint");
         assert!(
             serde_json::from_value::<CapturedThreadHistoryPolicy>(missing_signer).is_err(),
-            "nullable signer must remain an explicit v2 wire field"
+            "nullable signer must remain an explicit current wire field"
         );
 
         for malformed in [
@@ -1310,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v2_requires_current_nullable_wire_fields() {
+    fn current_schema_requires_nullable_wire_fields() {
         for field in [
             "upstream_thread_id",
             "requested_by",

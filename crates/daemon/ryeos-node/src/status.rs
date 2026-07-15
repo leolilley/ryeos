@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,11 @@ use crate::init_check::{init_state, InitDiagnostics, InitState};
 use crate::lifecycle_wire::{LifecycleResponse, LifecycleWireState, StartupSnapshot};
 use crate::metadata::DaemonMetadata;
 use crate::LocalLifecycleEnv;
+
+/// The daemon records its running marker immediately before publishing the
+/// startup control listener. Beyond this grace period, a live marker without a
+/// reachable listener is a wedged/unresponsive daemon, not ordinary startup.
+const MARKER_ONLY_BOOTSTRAP_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LifecycleStatus {
@@ -30,10 +36,10 @@ pub enum LifecycleStatus {
         metadata: DaemonMetadata,
         diagnostics: StaleDiagnostics,
     },
-    /// A control probe reached a live socket but could not obtain a usable
-    /// current lifecycle response (timeout, malformed/incompatible wire, or
-    /// wrong app identity). Distinct from `Stale` (refused/missing socket)
-    /// because starting a replacement daemon could double-run.
+    /// Live daemon ownership is established, but no usable lifecycle response
+    /// is available (timeout, malformed/incompatible wire, wrong app identity,
+    /// or a marker-only bootstrap that exceeded its publication grace).
+    /// Distinct from `Stale` because starting a replacement could double-run.
     Unresponsive {
         metadata: DaemonMetadata,
         diagnostics: StaleDiagnostics,
@@ -192,29 +198,44 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
 
     // No UDS responded. Before classifying from (possibly stale) daemon.json,
     // consult the boot marker: the daemon records it before listener
-    // publication. A live marker pid with a missing/refused socket is a daemon
-    // in that narrow bootstrap window — reporting it "stopped" would
-    // prescribe `ryeos start` at a live daemon. Any live or ownership-uncertain
-    // control path excludes marker fallback; Unresponsive below carries the
-    // fail-closed remediation.
+    // publication. A fresh live marker with a missing/refused socket is a
+    // daemon in that narrow bootstrap window; an older one is Unresponsive.
+    // Reporting either "stopped" would prescribe `ryeos start` at a live
+    // daemon. Any live or ownership-uncertain control path excludes marker
+    // fallback; Unresponsive below carries the fail-closed remediation.
     if unusable_control_paths.is_empty() {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at }) =
             crate::lifecycle_marker::read(&state_dir)
         {
             if crate::lifecycle_marker::process_alive_as_ryeosd(pid) {
-                let startup = StartupSnapshot::bootstrapping(started_at.clone());
+                let marker_age = crate::lifecycle_marker::age(&state_dir).unwrap_or_default();
+                let mut startup = StartupSnapshot::bootstrapping(started_at.clone());
+                startup.elapsed_ms = marker_age.as_millis().try_into().unwrap_or(u64::MAX);
+                startup.updated_at = lillux::time::iso8601_now();
+                let metadata = DaemonMetadata {
+                    pid: Some(pid),
+                    bind: Some(config.bind.to_string()),
+                    uds_path: Some(config.uds_path.clone()),
+                    started_at: Some(started_at),
+                    version: None,
+                    revision: None,
+                    build_date: None,
+                    app_root: config.app_root.clone(),
+                };
+                if marker_age > MARKER_ONLY_BOOTSTRAP_GRACE {
+                    return Ok(LifecycleStatus::Unresponsive {
+                        metadata,
+                        diagnostics: StaleDiagnostics {
+                            message: format!(
+                                "live ryeosd pid {pid} has not published usable lifecycle control after {}ms",
+                                startup.elapsed_ms
+                            ),
+                        },
+                    });
+                }
                 return Ok(LifecycleStatus::Starting {
-                    metadata: DaemonMetadata {
-                        pid: Some(pid),
-                        bind: Some(config.bind.to_string()),
-                        uds_path: Some(config.uds_path.clone()),
-                        started_at: Some(started_at),
-                        version: None,
-                        revision: None,
-                        build_date: None,
-                        app_root: config.app_root.clone(),
-                    },
+                    metadata,
                     startup,
                     control_available: false,
                 });
@@ -386,6 +407,55 @@ mod tests {
             panic!("live boot marker without socket should be Starting");
         };
         assert_eq!(metadata.pid, Some(daemon.id()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn old_live_boot_marker_without_control_socket_is_unresponsive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let fake_ryeosd = tmp.path().join("ryeosd");
+        std::fs::copy("/bin/sh", &fake_ryeosd).unwrap();
+        let mut daemon = std::process::Command::new(&fake_ryeosd)
+            .args(["-c", "sleep 30; exit 0"])
+            .spawn()
+            .unwrap();
+        let marker = state_dir.join("lifecycle.json");
+        std::fs::write(
+            &marker,
+            format!(
+                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
+                daemon.id()
+            ),
+        )
+        .unwrap();
+        let old = std::time::SystemTime::now()
+            .checked_sub(MARKER_ONLY_BOOTSTRAP_GRACE + Duration::from_secs(1))
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let status = status(&env).await;
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        let LifecycleStatus::Unresponsive {
+            metadata,
+            diagnostics,
+        } = status.unwrap()
+        else {
+            panic!("old live marker without control must be Unresponsive");
+        };
+        assert_eq!(metadata.pid, Some(daemon.id()));
+        assert!(diagnostics.message.contains("has not published"));
     }
 
     // The recycled-pid discrimination needs /proc to inspect the comm.

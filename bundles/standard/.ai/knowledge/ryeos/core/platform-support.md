@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:e4d1b43bbf2ff391a9b3c6662b75acd8383352bb30f63cab5afbf3c0fcf72fe4:OeK94lm85laGVUuvXLRZ6cIHwvAjhDqeFTcOv2cLc7X1sH1nCggPStsVE5/OOWItUqzKvXepxQaJcSFkLQnzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T08:13:20Z:b4c133fe585295912eb4f898cd9d45ad23d162464f18b68e8af1fe4d35076da6:SaOxGnHa2M5wBS91JYGC6dQM1bDVNDCRRTbS1TuTycL7LDjW8CyE9vsz/8ERTwgfS7ZI5Bmdc8BlaBzSGRfSCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
@@ -53,3 +53,12 @@ exact private capture. See [Execution Sandbox](node/execution-sandbox.md).
 Production support is declared only when the full path exists: signed bundle
 artifacts, durable installation, release packaging, CI coverage, and a tested
 enforced-sandbox profile where that capability is claimed.
+
+Future non-Linux isolation must not imitate Bubblewrap flags or map unlike host
+primitives to one broad `sandboxed` claim. RyeOS should match typed isolation
+requirements against node-owned backend capabilities and report exactly which
+boundary was realized. The deferred design lives in
+`ryeos/future/data-driven-execution-isolation-backends`. Until a platform has a
+packaged adapter, backend integration tests, and the rest of the node's
+durability requirements, it remains unsupported rather than silently falling
+back to direct execution.

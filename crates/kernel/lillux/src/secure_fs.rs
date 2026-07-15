@@ -7,6 +7,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -256,8 +257,13 @@ pub struct PinnedRegularFile {
 
 /// RAII advisory lock for a pinned directory inode. Directory-scoped writers
 /// use this without introducing lock-anchor files into closed namespaces.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PinnedDirectoryLock {
+    inner: Arc<PinnedDirectoryLockInner>,
+}
+
+#[derive(Debug)]
+struct PinnedDirectoryLockInner {
     file: File,
 }
 
@@ -327,11 +333,38 @@ impl Drop for PreparedAtomicCreate {
     }
 }
 
-impl Drop for PinnedDirectoryLock {
+impl Drop for PinnedDirectoryLockInner {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
             libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+impl PinnedDirectoryLock {
+    /// Prove that this guard protects the exact directory inode selected by
+    /// `directory`. Cloned guards share one underlying flock and release it
+    /// only after the last guard is dropped.
+    pub fn ensure_protects(&self, directory: &PinnedDirectory) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = directory;
+            anyhow::bail!("pinned directory lock identity is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let locked = self.inner.file.metadata()?;
+            let selected = directory.directory.metadata()?;
+            if locked.dev() != selected.dev() || locked.ino() != selected.ino() {
+                anyhow::bail!(
+                    "pinned directory lock does not protect {}",
+                    directory.path.display()
+                );
+            }
+            Ok(())
         }
     }
 }
@@ -431,7 +464,9 @@ impl PinnedDirectory {
                 return Err(std::io::Error::last_os_error())
                     .with_context(|| format!("lock pinned directory {}", self.path.display()));
             }
-            Ok(PinnedDirectoryLock { file })
+            Ok(PinnedDirectoryLock {
+                inner: Arc::new(PinnedDirectoryLockInner { file }),
+            })
         }
     }
 
@@ -1340,6 +1375,58 @@ mod tests {
             .remove_if_same(OsStr::new("schedule.yaml"), &expected)
             .is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cloned_directory_lock_releases_only_after_last_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let contender = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let guard = directory.lock_exclusive().unwrap();
+        let retained = guard.clone();
+        retained.ensure_protects(&directory).unwrap();
+        drop(guard);
+
+        assert_eq!(
+            unsafe {
+                libc::flock(
+                    contender.directory.as_raw_fd(),
+                    libc::LOCK_EX | libc::LOCK_NB,
+                )
+            },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(retained);
+        assert_eq!(
+            unsafe {
+                libc::flock(
+                    contender.directory.as_raw_fd(),
+                    libc::LOCK_EX | libc::LOCK_NB,
+                )
+            },
+            0
+        );
+        unsafe {
+            libc::flock(contender.directory.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_lock_rejects_a_different_inode() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first = PinnedDirectory::open(first.path()).unwrap().unwrap();
+        let second = PinnedDirectory::open(second.path()).unwrap().unwrap();
+        let guard = first.lock_exclusive().unwrap();
+
+        assert!(guard.ensure_protects(&second).is_err());
     }
 
     #[cfg(unix)]

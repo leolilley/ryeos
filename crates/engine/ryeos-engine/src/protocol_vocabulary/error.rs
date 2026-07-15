@@ -28,8 +28,8 @@ pub enum VocabularyError {
         expected: bool,
         actual: bool,
     },
-    #[error("callback_channel=http_v1 requires both callback_socket_path and callback_token env injection sources")]
-    HttpV1IncompleteCallbackTransport,
+    #[error("callback_channel=http requires both callback_socket_path and callback_token env injection sources")]
+    HttpIncompleteCallbackTransport,
     #[error("env injection `{name}` has a callback source but callback_channel is none")]
     CallbackInjectionWithoutChannel { name: String },
 }

@@ -691,7 +691,7 @@ impl ProjectionDb {
                 bail!(
                     "projection database application_id is {app_id}, expected {}; \
                      user_tables={user_tables}; this file ({}) was not created by RyeOS. \
-                     Recovery: mv <file> <file>.foreign.$(date +%s); then restart.",
+                     Refusing to modify it; use the explicit projection rebuild path.",
                     spec.application_id,
                     path.display(),
                 );

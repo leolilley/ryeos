@@ -12,7 +12,7 @@
 //!    `EnvInjection` in the descriptor. The builder cannot manufacture
 //!    env keys.
 //! 2. The launch envelope is serialized exactly once, only when the
-//!    descriptor declares `stdin.shape: launch_envelope_v1`.
+//!    descriptor declares `stdin.shape: launch_envelope`.
 //! 3. Callback bookkeeping (token registration, callback URL fabrication)
 //!    happens BEFORE the builder is called, in the launcher. The builder
 //!    takes the resulting `CallbackBindings` and surfaces them via
@@ -87,7 +87,7 @@ pub struct BuildRequest<'a> {
     pub callback: Option<&'a CallbackBindings>,
 
     /// The fully-built launch envelope when the protocol's
-    /// `stdin.shape` is `launch_envelope_v1`. `None` when the protocol
+    /// `stdin.shape` is `launch_envelope`. `None` when the protocol
     /// is opaque or parameters-json stdin.
     pub launch_envelope: Option<&'a LaunchEnvelope>,
 
@@ -117,7 +117,7 @@ pub enum BuildError {
     #[error("descriptor `{0}` requires a method-call envelope on its owning dispatch path")]
     MethodEnvelopeRequired(String),
 
-    #[error("descriptor `{0}` does not declare method_call_envelope_v1 stdin")]
+    #[error("descriptor `{0}` does not declare method_call_envelope stdin")]
     WrongMethodStdinShape(String),
 
     #[error("descriptor `{descriptor}` rejected its method-call envelope: {reason}")]
@@ -228,13 +228,13 @@ pub fn build_subprocess_spec(
 
     // 2. Build stdin bytes from the descriptor's stdin shape.
     let stdin_data = match descriptor.stdin.shape {
-        StdinShape::LaunchEnvelopeV1 => match request.launch_envelope {
+        StdinShape::LaunchEnvelope => match request.launch_envelope {
             Some(envelope) => serde_json::to_vec(envelope).map_err(|e| {
-                BuildError::StdinSerialize(format!("launch_envelope_v1 serialize failed: {e}"))
+                BuildError::StdinSerialize(format!("launch_envelope serialize failed: {e}"))
             })?,
             None => return Err(BuildError::EnvelopeRequired(descriptor_id)),
         },
-        StdinShape::MethodCallEnvelopeV1 => {
+        StdinShape::MethodCallEnvelope => {
             if request.launch_envelope.is_some() {
                 return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
             }
@@ -286,7 +286,7 @@ pub fn build_method_call_stdin(
     envelope: &MethodCallEnvelope,
 ) -> Result<Vec<u8>, BuildError> {
     let descriptor_id = format!("{}:{}", descriptor.category, descriptor.name);
-    if descriptor.stdin.shape != StdinShape::MethodCallEnvelopeV1 {
+    if descriptor.stdin.shape != StdinShape::MethodCallEnvelope {
         return Err(BuildError::WrongMethodStdinShape(descriptor_id));
     }
     envelope
@@ -296,7 +296,7 @@ pub fn build_method_call_stdin(
             reason,
         })?;
     serde_json::to_vec(envelope).map_err(|error| {
-        BuildError::StdinSerialize(format!("method_call_envelope_v1 serialize failed: {error}"))
+        BuildError::StdinSerialize(format!("method_call_envelope serialize failed: {error}"))
     })
 }
 
@@ -309,19 +309,19 @@ mod tests {
     use crate::protocols::descriptor::{ProtocolLifecycle, ProtocolStdin, ProtocolStdout};
     use std::path::PathBuf;
 
-    /// Helper to create a minimal runtime_v1-like descriptor.
-    fn runtime_v1_descriptor() -> ProtocolDescriptor {
+    /// Helper to create a minimal runtime-like descriptor.
+    fn runtime_descriptor() -> ProtocolDescriptor {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
-            name: "runtime_v1".to_string(),
+            name: "runtime".to_string(),
             category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: Some("test descriptor".to_string()),
             stdin: ProtocolStdin {
-                shape: StdinShape::LaunchEnvelopeV1,
+                shape: StdinShape::LaunchEnvelope,
             },
             stdout: ProtocolStdout {
-                shape: StdoutShape::RuntimeResultV1,
+                shape: StdoutShape::RuntimeResult,
                 mode: crate::protocol_vocabulary::StdoutMode::Terminal,
             },
             env_injections: vec![
@@ -350,7 +350,7 @@ mod tests {
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
-            callback_channel: CallbackChannel::HttpV1,
+            callback_channel: CallbackChannel::Http,
         }
     }
 
@@ -497,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn launch_envelope_v1_without_envelope_fails_loud() {
-        let desc = runtime_v1_descriptor();
+    fn launch_envelope_without_envelope_fails_loud() {
+        let desc = runtime_descriptor();
         let (item_ref, cb, args, _envelope) = make_test_fixtures();
         let req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
         let result = build_subprocess_spec(&desc, &req);
@@ -529,8 +529,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_v1_descriptor_produces_expected_spec() {
-        let desc = runtime_v1_descriptor();
+    fn runtime_descriptor_produces_expected_spec() {
+        let desc = runtime_descriptor();
         let (item_ref, cb, args, envelope) = make_test_fixtures();
         let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
         req.launch_envelope = Some(&envelope);
@@ -554,8 +554,8 @@ mod tests {
         assert_eq!(env_map["RYEOSD_PROJECT_PATH"], "/project-state");
 
         // Assert callback_channel and stdout_shape propagated.
-        assert_eq!(spec.callback_channel, CallbackChannel::HttpV1);
-        assert_eq!(spec.stdout_shape, StdoutShape::RuntimeResultV1);
+        assert_eq!(spec.callback_channel, CallbackChannel::Http);
+        assert_eq!(spec.stdout_shape, StdoutShape::RuntimeResult);
 
         // Assert stdin parses back as the launch envelope.
         let parsed: LaunchEnvelope =
@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn no_callback_bindings_when_injection_needs_it_fails() {
-        let desc = runtime_v1_descriptor();
+        let desc = runtime_descriptor();
         let (item_ref, _cb, args, envelope) = make_test_fixtures();
         let cb = make_callback_bindings();
         let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);

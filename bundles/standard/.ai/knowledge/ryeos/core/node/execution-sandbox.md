@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:908aed43ce468c28fdc54280de976d12b8cddf9398a5a416613855db4493aa8d:fxGgAMbw1jam9pIm98/IxBKEWei4eHPi/u/RuDkBgAl5/YgP4v7lF00+ICgjS6ArpumxBUFVpCeqdNqVvO7cBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T08:13:19Z:ecb3e521d34401c89f9ed043c10b5e93b348176a6aee346b4a16f96e9e5e7874:16gBYMRFQU74FOG1MGFHjjBDnIeBpTHTClaVLgV20/i7ZSDQKHhFcNRRoEbE5CP8hkW9T016utIRvJpi2DhIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, sandbox, bubblewrap, security, subprocess, node-policy]
@@ -15,6 +15,14 @@ policy on Linux. The only policy source is
 `<app-root>/.ai/node/sandbox.yaml`. `ryeos init` creates it once; later edits
 belong to the node owner. Items, bundles, requests, and environment variables
 cannot activate the sandbox or weaken its controls.
+
+This is the current Linux implementation, not a portable sandbox abstraction.
+Its policy is structured, but backend inspection, capture, filesystem setup,
+and launch compilation are Bubblewrap-specific. A later multi-platform design
+must resolve typed isolation requirements against node-owned backend descriptors
+and fail closed when a platform cannot provide the required capabilities. That
+deferred architecture is recorded in
+`ryeos/future/data-driven-execution-isolation-backends`.
 
 The engine also keeps node trust separate from project/request trust. The
 `node_trust_store` is loaded only from persistent node configuration and is the
@@ -334,3 +342,9 @@ bundles, remote project execution, and future workload tiers. It does not yet
 provide CPU, memory, or process-count isolation; production multi-tenant hosting
 still needs cgroup quotas plus a VM, microVM, or dedicated outer worker for
 hostile code.
+
+Do not generalize this policy by adding more backend-specific fields to the
+current schema. When another operating system or isolation backend is actually
+needed, extract the backend-neutral plan and typed capability model described in
+`ryeos/future/data-driven-execution-isolation-backends`, then keep Bubblewrap as
+one Linux adapter.

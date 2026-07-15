@@ -75,15 +75,15 @@ pub fn validate_method_runtime_protocol(descriptor: &ProtocolDescriptor) -> Resu
         injection.source == EnvInjectionSource::ThreadAuthToken
             && injection.name == "RYEOSD_THREAD_AUTH_TOKEN"
     });
-    if descriptor.callback_channel != CallbackChannel::HttpV1
-        || descriptor.stdin.shape != StdinShape::MethodCallEnvelopeV1
-        || descriptor.stdout.shape != StdoutShape::MethodCallResultV1
+    if descriptor.callback_channel != CallbackChannel::Http
+        || descriptor.stdin.shape != StdinShape::MethodCallEnvelope
+        || descriptor.stdout.shape != StdoutShape::MethodCallResult
         || descriptor.stdout.mode != StdoutMode::Terminal
         || descriptor.lifecycle.mode != LifecycleMode::Managed
         || !injects_thread_auth
     {
         return Err(format!(
-            "must declare http_v1 callbacks, method_call_envelope_v1 stdin, terminal method_call_result_v1 stdout, managed lifecycle, and RYEOSD_THREAD_AUTH_TOKEN from the thread_auth_token source; got callback={:?}, stdin={:?}, stdout={:?}/{:?}, lifecycle={:?}, canonical_thread_auth_binding={injects_thread_auth}",
+            "must declare http callbacks, method_call_envelope stdin, terminal method_call_result stdout, managed lifecycle, and RYEOSD_THREAD_AUTH_TOKEN from the thread_auth_token source; got callback={:?}, stdin={:?}, stdout={:?}/{:?}, lifecycle={:?}, canonical_thread_auth_binding={injects_thread_auth}",
             descriptor.callback_channel,
             descriptor.stdin.shape,
             descriptor.stdout.shape,
@@ -101,15 +101,15 @@ mod tests {
     fn method_protocol() -> ProtocolDescriptor {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
-            name: "method_runtime_v1".to_string(),
+            name: "method_runtime".to_string(),
             category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: None,
             stdin: ProtocolStdin {
-                shape: StdinShape::MethodCallEnvelopeV1,
+                shape: StdinShape::MethodCallEnvelope,
             },
             stdout: ProtocolStdout {
-                shape: StdoutShape::MethodCallResultV1,
+                shape: StdoutShape::MethodCallResult,
                 mode: StdoutMode::Terminal,
             },
             env_injections: vec![EnvInjection {
@@ -124,7 +124,7 @@ mod tests {
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
-            callback_channel: CallbackChannel::HttpV1,
+            callback_channel: CallbackChannel::Http,
         }
     }
 

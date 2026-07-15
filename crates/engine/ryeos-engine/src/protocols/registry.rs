@@ -359,11 +359,12 @@ fn validate_protocol_descriptor(
 
     // 8. callback channel ↔ callback-source injection symmetry
     match desc.callback_channel {
-        CallbackChannel::HttpV1 => {
+        CallbackChannel::Http => {
             if !has_callback_socket_injection || !has_callback_token_injection {
                 return Err(ProtocolError::Vocabulary {
                     name: desc.name.clone(),
-                    source: crate::protocol_vocabulary::VocabularyError::HttpV1IncompleteCallbackTransport,
+                    source:
+                        crate::protocol_vocabulary::VocabularyError::HttpIncompleteCallbackTransport,
                 });
             }
         }
@@ -412,16 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn http_v1_requires_socket_and_token_sources() {
+    fn http_requires_socket_and_token_sources() {
         for env_injections in [
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n",
             "  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         ] {
-            let desc = descriptor("http_v1", env_injections);
+            let desc = descriptor("http", env_injections);
             assert!(matches!(
                 validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc),
                 Err(ProtocolError::Vocabulary {
-                    source: crate::protocol_vocabulary::VocabularyError::HttpV1IncompleteCallbackTransport,
+                    source:
+                        crate::protocol_vocabulary::VocabularyError::HttpIncompleteCallbackTransport,
                     ..
                 })
             ));
