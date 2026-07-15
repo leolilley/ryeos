@@ -51,7 +51,7 @@ fn load_live_bundle_roots(state: &AppState) -> Result<Vec<PathBuf>, ProjectSourc
     let daemon_engine = &state.engine;
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root: state.config.app_root.as_path(),
-        trust_store: &daemon_engine.trust_store,
+        trust_store: &daemon_engine.node_trust_store,
     };
     let records = loader.load_bundle_section().map_err(|e| {
         ProjectSourceError::Other(format!(
@@ -246,10 +246,27 @@ pub fn resolve_pinned_snapshot_context(
     // ── 1. Always materialise the project checkout (request-owned) ──
     let manifest_hash = &snapshot.project_manifest_hash;
     let runtime_cache = state.config.runtime_root().cache();
-    let exec_dir = runtime_cache.join("executions").join(checkout_id);
+    let execution_root = runtime_cache.join("executions");
+    std::fs::create_dir_all(&execution_root)
+        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+    }
+    let exec_dir = execution_root.join(checkout_id);
+    std::fs::create_dir(&exec_dir)
+        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+    let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&exec_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+    }
     let materialization_cache =
         crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
-    let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
     crate::execution::checkout_project(
         &cas_root,
         manifest_hash,
@@ -277,6 +294,7 @@ pub fn resolve_pinned_snapshot_context(
                 &bundle_roots,
                 Some(exec_dir.as_path()),
                 None,
+                Arc::clone(&state.sandbox),
             )
             .map_err(|e| {
                 ProjectSourceError::CheckoutFailed(format!("per-request engine build failed: {e}"))

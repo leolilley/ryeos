@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use lillux::cas::{sha256_hex, CasStore};
+use lillux::crypto::Verifier as _;
 use ryeos_state::ignore::IgnoreMatcher;
 use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
 use ryeos_state::project_sync::ProjectSyncScope;
-use ryeos_state::refs::{self, ProjectHeadLock};
+use ryeos_state::refs::{self, ProjectHeadLock, TrustStore as StateTrustStore};
 use ryeos_state::signer::Signer;
 use serde::{Deserialize, Serialize};
 
@@ -165,10 +167,18 @@ pub fn run_status(params: SnapshotStatusParams) -> Result<SnapshotStatusReport> 
         (params.time_budget_ms > 0).then(|| started + Duration::from_millis(params.time_budget_ms));
 
     let ctx = SnapshotContext::for_project(&params.project_path)?;
-    let head_hash =
-        refs::read_project_head_ref(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
-    let deployed_hash =
-        refs::read_deployed_project_ref(&ctx.refs_root, &ctx.project_hash)?.map(|r| r.target_hash);
+    let head_hash = refs::read_verified_project_head_ref(
+        &ctx.refs_root,
+        &ctx.principal_key,
+        &ctx.project_hash,
+        &ctx.ref_trust_store,
+    )?;
+    let deployed_hash = refs::read_verified_deployed_project_ref(
+        &ctx.refs_root,
+        &ctx.project_hash,
+        &ctx.ref_trust_store,
+    )?
+    .map(|r| r.target_hash);
 
     let head_manifest = head_hash
         .as_deref()
@@ -255,8 +265,12 @@ pub fn run_status(params: SnapshotStatusParams) -> Result<SnapshotStatusReport> 
 
 pub fn run_log(params: SnapshotLogParams) -> Result<SnapshotLogReport> {
     let ctx = SnapshotContext::for_project(&params.project_path)?;
-    let head_hash =
-        refs::read_project_head_ref(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
+    let head_hash = refs::read_verified_project_head_ref(
+        &ctx.refs_root,
+        &ctx.principal_key,
+        &ctx.project_hash,
+        &ctx.ref_trust_store,
+    )?;
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
     let mut current = head_hash.clone();
@@ -290,8 +304,12 @@ pub fn run_log(params: SnapshotLogParams) -> Result<SnapshotLogReport> {
 
 pub fn run_create(params: SnapshotCreateParams) -> Result<SnapshotCreateReport> {
     let ctx = SnapshotContext::for_project(&params.project_path)?;
-    let initial_head =
-        refs::read_project_head_ref(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
+    let initial_head = refs::read_verified_project_head_ref(
+        &ctx.refs_root,
+        &ctx.principal_key,
+        &ctx.project_hash,
+        &ctx.ref_trust_store,
+    )?;
     let current_snapshot = initial_head
         .as_deref()
         .map(|hash| load_snapshot(&ctx.cas, hash))
@@ -338,9 +356,20 @@ pub fn run_create(params: SnapshotCreateParams) -> Result<SnapshotCreateReport> 
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
 
     let node_signer = NodeFileSigner::load(&ctx.app_root)?;
+    let trusted_node_key = ctx
+        .ref_trust_store
+        .get(node_signer.fingerprint())
+        .ok_or_else(|| anyhow!("node signing key is not the pinned node ref authority"))?;
+    if trusted_node_key != &node_signer.verifying_key() {
+        bail!("node signing key does not match the pinned node ref authority");
+    }
     let _lock = ProjectHeadLock::acquire(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
-    let locked_head =
-        refs::read_project_head_ref(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
+    let locked_head = refs::read_verified_project_head_ref(
+        &ctx.refs_root,
+        &ctx.principal_key,
+        &ctx.project_hash,
+        &ctx.ref_trust_store,
+    )?;
     if locked_head != initial_head {
         bail!(
             "project head changed while creating snapshot; expected {:?}, got {:?}. Rerun `ryeos snapshot create`.",
@@ -348,22 +377,28 @@ pub fn run_create(params: SnapshotCreateParams) -> Result<SnapshotCreateReport> 
             locked_head
         );
     }
-    match initial_head.as_deref() {
-        Some(current) => refs::advance_project_head_ref(
+    let head_outcome = match initial_head.as_deref() {
+        Some(current) => refs::advance_verified_project_head_ref(
             &ctx.refs_root,
             &ctx.principal_key,
             &ctx.project_hash,
             &snapshot_hash,
             current,
+            &ctx.ref_trust_store,
             &node_signer,
-        )?,
+        ),
         None => refs::write_project_head_ref(
             &ctx.refs_root,
             &ctx.principal_key,
             &ctx.project_hash,
             &snapshot_hash,
             &node_signer,
-        )?,
+        ),
+    };
+    if let refs::RefWriteOutcome::DurabilityUncertain(error) =
+        refs::classify_ref_write(head_outcome, "publishing project snapshot head")?
+    {
+        tracing::warn!(%error, "project snapshot head committed with uncertain durability");
     }
 
     Ok(SnapshotCreateReport {
@@ -390,12 +425,21 @@ pub fn run_show(params: SnapshotShowParams) -> Result<SnapshotShowReport> {
     let manifest = load_manifest(&cas, &snapshot.project_manifest_hash)?;
 
     let (is_principal_head, is_deployed) = if let Some(project_path) = params.project_path {
+        let ref_trust_store = load_node_ref_trust_store(&app_root)?;
         let canonical = canonical_project_path(&project_path)?;
         let project_hash = refs::deployed_project_key(&canonical.display().to_string());
         let principal_key = operator_principal_key()?;
-        let principal_head =
-            refs::read_project_head_ref(&refs_root, &principal_key, &project_hash)?;
-        let deployed = refs::read_deployed_project_ref(&refs_root, &project_hash)?;
+        let principal_head = refs::read_verified_project_head_ref(
+            &refs_root,
+            &principal_key,
+            &project_hash,
+            &ref_trust_store,
+        )?;
+        let deployed = refs::read_verified_deployed_project_ref(
+            &refs_root,
+            &project_hash,
+            &ref_trust_store,
+        )?;
         (
             Some(principal_head.as_deref() == Some(params.snapshot_hash.as_str())),
             Some(
@@ -459,6 +503,7 @@ struct SnapshotContext {
     principal_key: String,
     cas: CasStore,
     refs_root: PathBuf,
+    ref_trust_store: StateTrustStore,
     ignore: IgnoreMatcher,
 }
 
@@ -471,6 +516,7 @@ impl SnapshotContext {
         let runtime_state_dir = runtime_state_dir(&app_root);
         let cas = CasStore::new(runtime_state_dir.join("objects"));
         let refs_root = runtime_state_dir.join("refs");
+        let ref_trust_store = load_node_ref_trust_store(&app_root)?;
         fs::create_dir_all(cas.root()).context("create CAS root")?;
         fs::create_dir_all(&refs_root).context("create refs root")?;
         let ignore = load_ignore(&app_root);
@@ -481,6 +527,7 @@ impl SnapshotContext {
             principal_key,
             cas,
             refs_root,
+            ref_trust_store,
             ignore,
         })
     }
@@ -517,6 +564,10 @@ impl Signer for NodeFileSigner {
     fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+        self.signing_key.verifying_key()
+    }
 }
 
 fn app_root() -> Result<PathBuf> {
@@ -532,6 +583,108 @@ fn runtime_state_dir(app_root: &Path) -> PathBuf {
     app_root.join(ryeos_engine::AI_DIR).join("state")
 }
 
+/// Load the node's public verification authority for node-owned mutable refs.
+///
+/// The public identity selects the local node from the operator trust tier; it
+/// is not itself treated as an unanchored trust source. The returned state
+/// trust store deliberately contains only that node key, so another trusted
+/// item publisher cannot become an authority for project or deployed refs.
+fn load_node_ref_trust_store(app_root: &Path) -> Result<StateTrustStore> {
+    let runtime_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let operator_trust = ryeos_engine::trust::TrustStore::load(None, &runtime_root.config())
+        .context("load operator trust store for node-owned state refs")?;
+    let identity_path = runtime_root
+        .node()
+        .join("identity")
+        .join("public-identity.json");
+    let identity = ryeos_app::identity::NodeIdentity::load_public_identity(&identity_path)?;
+    if identity.kind != "identity/v1" {
+        bail!(
+            "unsupported node public identity kind `{}` at {}",
+            identity.kind,
+            identity_path.display()
+        );
+    }
+    let fingerprint = identity
+        .principal_id
+        .strip_prefix("fp:")
+        .ok_or_else(|| {
+            anyhow!(
+                "node public identity principal_id must start with `fp:` at {}",
+                identity_path.display()
+            )
+        })?
+        .to_string();
+    if identity.signature.signer != identity.principal_id {
+        bail!(
+            "node public identity signer mismatch at {}: expected {}, got {}",
+            identity_path.display(),
+            identity.principal_id,
+            identity.signature.signer
+        );
+    }
+
+    let encoded_key = identity.signing_key.strip_prefix("ed25519:").ok_or_else(|| {
+        anyhow!(
+            "node public identity signing_key must start with `ed25519:` at {}",
+            identity_path.display()
+        )
+    })?;
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded_key)
+        .context("decode node public identity signing key")?;
+    let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| {
+        anyhow!(
+            "node public identity signing key must contain exactly 32 bytes at {}",
+            identity_path.display()
+        )
+    })?;
+    let identity_key = lillux::crypto::VerifyingKey::from_bytes(&key_bytes)
+        .context("parse node public identity signing key")?;
+    let actual_fingerprint = lillux::crypto::fingerprint(&identity_key);
+    if actual_fingerprint != fingerprint {
+        bail!(
+            "node public identity fingerprint mismatch at {}: declared {}, computed {}",
+            identity_path.display(),
+            fingerprint,
+            actual_fingerprint
+        );
+    }
+
+    let trusted = operator_trust.get(&fingerprint).ok_or_else(|| {
+        anyhow!(
+            "node public identity {} is not pinned in the operator trust store",
+            identity.principal_id
+        )
+    })?;
+    if trusted.verifying_key != identity_key {
+        bail!(
+            "node public identity key does not match the operator trust pin for {}",
+            identity.principal_id
+        );
+    }
+
+    let unsigned = serde_json::json!({
+        "kind": identity.kind,
+        "principal_id": identity.principal_id,
+        "signing_key": identity.signing_key,
+        "created_at": identity.created_at,
+    });
+    let payload = serde_json::to_vec(&unsigned).context("encode node public identity payload")?;
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&identity.signature.sig)
+        .context("decode node public identity signature")?;
+    let signature = lillux::crypto::Signature::from_slice(&signature_bytes)
+        .context("parse node public identity signature")?;
+    identity_key
+        .verify(&payload, &signature)
+        .context("verify node public identity signature")?;
+
+    let mut state_trust = StateTrustStore::new();
+    state_trust.insert(fingerprint, identity_key);
+    Ok(state_trust)
+}
+
 fn canonical_project_path(path: &Path) -> Result<PathBuf> {
     let canonical = path
         .canonicalize()
@@ -543,6 +696,9 @@ fn canonical_project_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn operator_principal_key() -> Result<String> {
+    // This private key is used only to select the local operator's
+    // principal-scoped project namespace. Ref signature authority is loaded
+    // independently from the node's pinned public identity above.
     let key_path = ryeos_engine::roots::runtime_root()
         .map_err(|e| anyhow!("resolve app root: {e}"))?
         .operator_signing_key_path();

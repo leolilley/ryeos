@@ -15,6 +15,7 @@ impl Walker {
             guard,
             inputs,
             execution,
+            cache: _,
         } = input;
         let FollowSuspendOutcome { item_id, params } = outcome;
         let item_id = item_id.as_str();
@@ -151,6 +152,7 @@ impl Walker {
             guard,
             inputs,
             execution,
+            cache: _,
         } = input;
         let FollowFanoutSuspendOutcome {
             children,
@@ -272,6 +274,7 @@ impl Walker {
             guard,
             inputs,
             execution,
+            cache: _,
         } = input;
         let FollowFanoutDoneOutcome {
             results,
@@ -369,7 +372,7 @@ impl Walker {
         )
         .await;
         self.fire_graph_hooks(
-            RuntimeEventType::GraphStepCompleted,
+            self.graph_step_completed_hook_occurrence(graph_run_id, step, current),
             self.step_hook_context(
                 graph_run_id,
                 current,

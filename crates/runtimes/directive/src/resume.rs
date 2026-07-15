@@ -821,6 +821,15 @@ mod tests {
         assert!(state.has_thread_usage_event);
     }
 
+    #[tokio::test]
+    async fn zero_carry_still_preserves_cumulative_turn_coordinate() {
+        let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
+        let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
+        let state = load_resume_state(&callback, "T2", 0).await.unwrap();
+        assert!(state.messages.is_empty());
+        assert_eq!(state.turns_completed, 2);
+    }
+
     #[test]
     fn trim_to_recent_turns_keeps_last_n_assistant_turns_with_context() {
         let messages = vec![

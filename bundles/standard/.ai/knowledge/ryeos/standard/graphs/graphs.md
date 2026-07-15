@@ -57,7 +57,8 @@ Each node has:
 - **`assign`** — mapping evaluated from the pre-assignment state and `result`
 - **`next`** — unconditional target or ordered conditional branches
 - **`on_error`** — a recovery target, overriding top-level `fail`/`continue`
-- **`cache_result`** — opt-in result caching for ordinary action nodes
+- **`cache_result`** — opt-in, execution-local result caching for repeated
+  ordinary action nodes; entries never persist across runs or resumes
 
 ### Actions
 
@@ -208,10 +209,11 @@ Each event exposes an exact root schema; unknown hook events and references to
 roots outside that event fail graph loading.
 Hooks are **observers**: a hook action is a real dispatch (its `effective_caps`
 are enforced, its cost accrues to the run, it shows in the braid) but it cannot
-redirect the walk — routing stays the walker's job, and a failing hook is
-recorded as a warning, never a graph failure. Node-level resilience is the node
-`retry:` block, not a hook action. See `retry-and-hooks.md` for the full
-contract.
+redirect the walk — routing stays the walker's job. Ordinary condition/action
+evaluation or child-dispatch failures are warnings; accounting or integrity
+failures invalidate terminal authority and fail closed. Node-level resilience
+is the node `retry:` block, not a hook action. See `retry-and-hooks.md` for the
+full contract.
 
 ## State Persistence
 

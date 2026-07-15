@@ -817,6 +817,37 @@ fn evaluator_enforces_each_data_dependent_limit() {
 }
 
 #[test]
+fn equality_rejects_oversized_object_keys() {
+    let context = json!({
+        "state": {
+            "left": {"long_key": 1},
+            "right": {"long_key": 1}
+        }
+    });
+    let limits = EvaluationLimits {
+        max_scalar_bytes: 3,
+        ..EvaluationLimits::default()
+    };
+    let error = evaluate(&expression("state.left == state.right"), &context, &limits).unwrap_err();
+    assert_eq!(error.phase(), ErrorPhase::Limit);
+}
+
+#[test]
+fn result_inspection_enforces_container_element_limit_independently() {
+    let context = json!({});
+    let limits = EvaluationLimits {
+        max_container_elements: 1,
+        max_result_nodes: 100,
+        ..EvaluationLimits::default()
+    };
+    let mut session = EvaluationSession::new(&context, &limits);
+    let error = session
+        .validate_value(&json!([1, 2]), "external result")
+        .unwrap_err();
+    assert_eq!(error.phase(), ErrorPhase::Limit);
+}
+
+#[test]
 fn borrowed_root_lookup_does_not_clone_unselected_subtrees() {
     let context = json!({
         "state": {

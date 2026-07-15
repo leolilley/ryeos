@@ -35,11 +35,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let inner = state.config.runtime_state_dir();
     let cas_root = inner.join("objects");
     let refs_root = inner.join("refs");
-    let projection_path = inner.join("projection.sqlite3");
+    let state_store = state.state_store.clone();
 
     let report = tokio::task::spawn_blocking(move || -> Result<RebuildReport> {
-        let projection = ryeos_state::ProjectionDb::open(&projection_path)?;
-        let report = ryeos_state::rebuild::rebuild_projection(&projection, &cas_root, &refs_root)?;
+        let report = state_store.rebuild_thread_projection()?;
         let mut out = RebuildReport {
             chains_rebuilt: report.chains_rebuilt,
             threads_restored: report.threads_restored,
@@ -48,7 +47,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             reachable_blobs: None,
         };
         if req.verify && report.chains_rebuilt > 0 {
-            let reachable = ryeos_state::reachability::collect_reachable(&cas_root, &refs_root)?;
+            let reachable = state_store.with_state_db(|db| {
+                ryeos_state::reachability::collect_reachable(
+                    &cas_root,
+                    &refs_root,
+                    db.trust_store(),
+                )
+            })?;
             out.reachable_objects = Some(reachable.object_hashes.len());
             out.reachable_blobs = Some(reachable.blob_hashes.len());
         }

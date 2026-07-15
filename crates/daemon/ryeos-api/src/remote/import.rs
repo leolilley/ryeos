@@ -513,6 +513,10 @@ mod tests {
         fn fingerprint(&self) -> &str {
             &self.fingerprint
         }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
+        }
     }
 
     fn signed_attestation(

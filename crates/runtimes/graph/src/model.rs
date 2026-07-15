@@ -8,10 +8,14 @@ use ryeos_runtime::events::RuntimeEventType;
 
 /// Default total node-transition budget for one graph run.
 pub(crate) const DEFAULT_GRAPH_MAX_STEPS: u32 = 100;
-/// Hard authoring ceiling for a graph's cumulative node-transition budget.
-pub(crate) const MAX_GRAPH_STEPS: u32 = 10_000;
-/// Hard authoring ceiling for one machine-continuation segment.
-pub(crate) const MAX_GRAPH_SEGMENT_STEPS: u32 = 10_000;
+/// One graph step publishes one durable node receipt. Keep the authored hard
+/// ceiling below the per-thread artifact collection ceiling, leaving room for
+/// terminal transcript/output artifacts as well.
+pub const MAX_GRAPH_STEPS: u32 = 500;
+/// A continuation segment cannot exceed the graph's cumulative transition
+/// ceiling. Keeping one limit avoids admitting a segment shape the full run
+/// can never execute.
+pub(crate) const MAX_GRAPH_SEGMENT_STEPS: u32 = MAX_GRAPH_STEPS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -357,11 +361,52 @@ impl GraphDefinition {
     pub fn from_yaml_with_hook_sources(
         raw: &str,
         file_path: Option<&str>,
-        mut hook_sources: ryeos_runtime::HookSources,
+        hook_sources: ryeos_runtime::HookSources,
     ) -> anyhow::Result<Self> {
-        let cleaned = lillux::signature::strip_signature_lines(raw);
-        let definition_hash = lillux::cas::sha256_hex(cleaned.as_bytes());
-        let mut file: GraphFile = serde_yaml::from_str(&cleaned)?;
+        Self::from_yaml_with_identity(raw, file_path, hook_sources, None)
+    }
+
+    /// Build the runtime definition from the exact bytes and canonical item
+    /// identity carried by a verified launch envelope.
+    pub fn from_verified_yaml_with_hook_sources(
+        raw: &str,
+        file_path: Option<&str>,
+        resolved_ref: &str,
+        expected_digest: &str,
+        hook_sources: ryeos_runtime::HookSources,
+    ) -> anyhow::Result<Self> {
+        Self::from_yaml_with_identity(
+            raw,
+            file_path,
+            hook_sources,
+            Some((resolved_ref, expected_digest)),
+        )
+    }
+
+    fn from_yaml_with_identity(
+        raw: &str,
+        file_path: Option<&str>,
+        mut hook_sources: ryeos_runtime::HookSources,
+        verified_identity: Option<(&str, &str)>,
+    ) -> anyhow::Result<Self> {
+        // Verified launch envelopes already carry the exact, envelope-aware
+        // signature-stripped bytes whose digest was checked by the engine.
+        // Never run the generic line stripper over them again: authored YAML
+        // scalar content may legitimately contain `ryeos:signed:`.
+        let definition_content: std::borrow::Cow<'_, str> = if verified_identity.is_some() {
+            std::borrow::Cow::Borrowed(raw)
+        } else {
+            std::borrow::Cow::Owned(lillux::signature::strip_signature_lines(raw))
+        };
+        let definition_hash = lillux::cas::sha256_hex(definition_content.as_bytes());
+        if let Some((_, expected_digest)) = verified_identity {
+            if definition_hash != expected_digest {
+                anyhow::bail!(
+                    "verified graph content digest mismatch: envelope={expected_digest}, runtime={definition_hash}"
+                );
+            }
+        }
+        let mut file: GraphFile = serde_yaml::from_str(definition_content.as_ref())?;
         let runtime_capability_requirements = match file.requires {
             Some(requires) => {
                 let caps = requires.capabilities;
@@ -377,7 +422,17 @@ impl GraphDefinition {
             .unwrap_or_default();
         hook_sources.authored = std::mem::take(&mut file.config.hooks);
         let compiled = crate::compiled_graph::CompiledGraph::compile(&file.config, hook_sources)?;
-        let graph_id = if let Some(fp) = file_path {
+        let (graph_id, definition_ref) = if let Some((resolved_ref, _)) = verified_identity {
+            let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(resolved_ref)
+                .map_err(|error| anyhow::anyhow!("invalid resolved graph ref `{resolved_ref}`: {error}"))?;
+            if canonical.kind != "graph" {
+                anyhow::bail!(
+                    "resolved graph definition must have kind `graph`, got `{}`",
+                    canonical.kind
+                );
+            }
+            (canonical.bare_id, resolved_ref.to_string())
+        } else if let Some(fp) = file_path {
             let stem = std::path::Path::new(fp)
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -388,18 +443,22 @@ impl GraphDefinition {
             // an absolute-looking second segment replaces the base path
             // entirely (writing to /flow/... and getting EACCES).
             if file.category.is_empty() {
-                stem.to_string()
+                (stem.to_string(), format!("graph:{stem}"))
             } else {
-                format!("{}/{}", file.category, stem)
+                let graph_id = format!("{}/{}", file.category, stem);
+                let definition_ref = format!("graph:{graph_id}");
+                (graph_id, definition_ref)
             }
         } else if file.category.is_empty() {
-            "unknown".to_string()
+            ("unknown".to_string(), "graph:unknown".to_string())
         } else {
-            file.category
+            let graph_id = file.category;
+            let definition_ref = format!("graph:{graph_id}");
+            (graph_id, definition_ref)
         };
         Ok(Self {
             version: file.version,
-            definition_ref: format!("graph:{graph_id}"),
+            definition_ref,
             definition_hash,
             graph_id,
             file_path: file_path.map(String::from),
@@ -821,6 +880,71 @@ config:
             def.definition_hash,
             lillux::cas::sha256_hex(cleaned.as_bytes())
         );
+    }
+
+    #[test]
+    fn verified_definition_uses_envelope_ref_and_digest() {
+        let yaml = r#"
+version: "1.0.0"
+category: self_asserted
+config:
+  start: a
+"#;
+        let digest = lillux::cas::sha256_hex(yaml.as_bytes());
+        let definition = GraphDefinition::from_verified_yaml_with_hook_sources(
+            yaml,
+            Some("/diagnostic/wrong-name.yaml"),
+            "graph:canonical/identity",
+            &digest,
+            ryeos_runtime::HookSources::default(),
+        )
+        .unwrap();
+
+        assert_eq!(definition.graph_id, "canonical/identity");
+        assert_eq!(definition.definition_ref, "graph:canonical/identity");
+        assert_eq!(definition.definition_hash, digest);
+    }
+
+    #[test]
+    fn verified_definition_preserves_authored_signature_marker_text() {
+        let yaml = r#"
+version: "1.0.0"
+category: self_asserted
+description: "literal ryeos:signed: marker"
+config:
+  start: a
+"#;
+        let digest = lillux::cas::sha256_hex(yaml.as_bytes());
+        let definition = GraphDefinition::from_verified_yaml_with_hook_sources(
+            yaml,
+            Some("/diagnostic/wrong-name.yaml"),
+            "graph:canonical/identity",
+            &digest,
+            ryeos_runtime::HookSources::default(),
+        )
+        .unwrap();
+
+        assert_eq!(definition.definition_hash, digest);
+    }
+
+    #[test]
+    fn verified_definition_rejects_digest_mismatch() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+"#;
+        let error = GraphDefinition::from_verified_yaml_with_hook_sources(
+            yaml,
+            Some("test.yaml"),
+            "graph:test/item",
+            &"0".repeat(64),
+            ryeos_runtime::HookSources::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("content digest mismatch"));
     }
 
     #[test]

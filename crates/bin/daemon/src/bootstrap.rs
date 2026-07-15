@@ -591,6 +591,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// Returns `(engine, node_config_snapshot)`.
 pub fn load_node_config_two_phase(
     config: &Config,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<(Arc<Engine>, Arc<NodeConfigSnapshot>)> {
     let app_root = &config.app_root;
 
@@ -609,6 +610,12 @@ pub fn load_node_config_two_phase(
         .load_bundle_section()
         .context("Phase 1: failed to load bundle section from node config")?;
 
+    // Signed registration syntax alone is not enough to boot safely. Require
+    // every installed manifest and the complete dependency/provider graph to
+    // validate before any registry is constructed from these roots.
+    ryeos_app::engine_init::validate_installed_bundle_plan(app_root, &bundle_records)
+        .context("Phase 1: installed bundle graph admission failed")?;
+
     let effective_bundle_roots: Vec<PathBuf> =
         bundle_records.iter().map(|b| b.path.clone()).collect();
 
@@ -623,6 +630,7 @@ pub fn load_node_config_two_phase(
     let engine = Arc::new(crate::engine_init::build_engine(
         config,
         &effective_bundle_roots,
+        sandbox,
     )?);
 
     // ── Phase 2: full node-config scan ──
@@ -681,7 +689,6 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
             require_auth: false,
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         }
     }
@@ -988,7 +995,6 @@ mod tests {
                 .join("auth")
                 .join("authorized_keys"),
             require_auth: false,
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
 

@@ -44,10 +44,6 @@ pub struct Config {
     pub operator_signing_key_path: PathBuf,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
-    /// Opt-in process sandbox activation. Backend details remain in the
-    /// node-owned `sandbox.yaml` policy and are ignored while disabled.
-    #[serde(default)]
-    pub sandbox_enabled: bool,
     /// Comma-separated list of host-env var names that tool subprocesses
     /// may reference via `${VAR}` in their `env_config.env` values.
     /// This is distinct from `required_secrets`: declared secrets can
@@ -84,7 +80,6 @@ struct PartialConfig {
     operator_signing_key_path: Option<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
-    sandbox_enabled: Option<bool>,
     tool_env_passthrough: Option<Vec<String>>,
 }
 
@@ -222,10 +217,6 @@ impl Config {
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
                 .unwrap_or_else(|| resolved_runtime_root.authorized_keys_dir()),
-            sandbox_enabled: file_cfg
-                .as_ref()
-                .and_then(|cfg| cfg.sandbox_enabled)
-                .unwrap_or_default(),
             // tool_env_passthrough: config file list is the base.
             // RYEOS_TOOL_ENV_PASSTHROUGH env var (comma-separated)
             // overrides if set — mirrors Docker usage where the env
@@ -272,7 +263,6 @@ impl Config {
             operator_signing_key_path: runtime_root.operator_signing_key_path(),
             require_auth: false,
             authorized_keys_dir: runtime_root.authorized_keys_dir(),
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         })
     }
@@ -307,28 +297,5 @@ mod tests {
         assert!(!cfg.app_root.exists());
         assert!(!cfg.db_path.parent().unwrap().exists());
         assert!(!cfg.uds_path.parent().unwrap().exists());
-    }
-
-    #[test]
-    fn sandbox_is_flat_opt_in_and_defaults_off() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app_root = tmp.path().join("state");
-
-        let defaults = Config::load(&ConfigSources {
-            app_root: Some(app_root.clone()),
-            ..ConfigSources::default()
-        })
-        .unwrap();
-        assert!(!defaults.sandbox_enabled);
-
-        let config_path = tmp.path().join("config.yaml");
-        std::fs::write(&config_path, "sandbox_enabled: true\n").unwrap();
-        let enabled = Config::load(&ConfigSources {
-            config_file: Some(config_path),
-            app_root: Some(app_root),
-            ..ConfigSources::default()
-        })
-        .unwrap();
-        assert!(enabled.sandbox_enabled);
     }
 }

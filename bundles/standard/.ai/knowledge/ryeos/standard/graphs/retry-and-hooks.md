@@ -103,8 +103,10 @@ Contract:
 - A failing hook (its child errors, or its condition/action evaluation fails) is
   recorded as a warning, not a graph failure — an observer never sinks the run.
 - Hook cost is checked, attributed by lifecycle event, included in the graph
-  rollup, and persisted in advancing checkpoints. A hook-cost integrity failure
-  fails the graph rather than allowing an under-reported successful settlement.
+  rollup, and persisted in advancing checkpoints. Accounting failures and
+  integrity-typed callback/child failures invalidate terminal authority and
+  fail the graph rather than allowing a contradictory or under-reported
+  successful settlement.
 - Advancing-step hooks may be re-fired after a crash before their checkpoint
   fence completes, consistent with the node dispatch fence. Segment resumes do
   not re-fire `graph_started`, and terminal hooks are not dispatched after run

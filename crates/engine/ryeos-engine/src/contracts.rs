@@ -2905,6 +2905,10 @@ pub struct ResolvedItem {
     /// Lower-priority candidates that were shadowed by the winner
     pub shadowed: Vec<ShadowedCandidate>,
     pub materialized_project_root: Option<PathBuf>,
+    /// SHA-256 of the signature-stripped bytes that runtimes parse. Unlike
+    /// `content_hash`, this excludes the signature envelope and therefore
+    /// matches `LaunchEnvelope.resolution.root.raw_content_digest`.
+    pub raw_content_digest: String,
     pub content_hash: String,
     pub signature_header: Option<SignatureHeader>,
     pub source_format: ResolvedSourceFormat,

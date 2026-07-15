@@ -66,7 +66,20 @@ fn state_store_write_path_emits_state_spans() {
             .mark_thread_running("T-trace-1", None)
             .expect("mark_thread_running");
         store
-            .attach_thread_process("T-trace-1", 111, 222, &RuntimeLaunchMetadata::default())
+            .attach_thread_process(
+                "T-trace-1",
+                111,
+                222,
+                &ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 111,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 222,
+                    group_leader_start_time_ticks: 20,
+                },
+                &RuntimeLaunchMetadata::default(),
+            )
             .expect("attach_thread_process");
         store
             .finalize_thread(

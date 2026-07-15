@@ -4,19 +4,32 @@ use serde_json::json;
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::state::AppState;
 
+#[cfg(test)]
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
+    dispatch_with_peer(request, state, None).await
+}
+
+/// Dispatch one request with transport-authenticated connection facts.
+///
+/// Unit-level callers use [`dispatch`] and therefore have no peer pidfd; only
+/// an accepted Unix stream can supply one. Runtime process attachment fails
+/// closed when this fact is absent.
+pub(super) async fn dispatch_with_peer(
+    request: RpcRequest,
+    state: &AppState,
+    peer: Option<&super::AuthenticatedUnixPeer>,
+) -> RpcResponse {
     match request.method.as_str() {
         // Daemon health is intentionally lightweight and ungated.
         "system.health" => system_health(request.request_id, state),
 
         // Local lifecycle control has no public HTTP surface.
         "lifecycle.status" => lifecycle_status(request.request_id, state),
-        "lifecycle.shutdown" => lifecycle_shutdown(request.request_id),
 
         // Runtime callbacks retain their token-gated service dispatcher.
         other if other.starts_with("runtime.") => rpc_result(
             request.request_id,
-            super::dispatch_runtime_method(other, &request.params, state).await,
+            super::dispatch_runtime_method(other, &request.params, state, peer).await,
         ),
 
         other => unknown_method(request.request_id, other),
@@ -55,11 +68,6 @@ fn lifecycle_status(request_id: u64, state: &AppState) -> RpcResponse {
             "thread_projection": state.state_store.projection_health_snapshot(),
         }),
     )
-}
-
-fn lifecycle_shutdown(request_id: u64) -> RpcResponse {
-    crate::request_shutdown();
-    RpcResponse::ok(request_id, json!({ "accepted": true }))
 }
 
 fn unknown_method(request_id: u64, method: &str) -> RpcResponse {

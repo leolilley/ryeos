@@ -4,14 +4,13 @@
 //! If projection.sqlite3 is deleted or corrupted, everything can be
 //! recovered by walking CAS from signed heads.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::Value;
-
 use crate::projection::{project_event, project_thread_snapshot, ProjectionDb};
-use crate::{ThreadEvent, ThreadSnapshot};
+use crate::objects::{ChainThreadEntry, EventDurability};
+use crate::{ChainState, ThreadEvent, ThreadSnapshot};
 
 #[cfg(not(test))]
 const REBUILD_TX_CHAIN_BATCH: usize = 200;
@@ -75,11 +74,15 @@ impl RebuildProgress {
 ///
 /// Walks every signed chain head and projects all thread snapshots
 /// and durable events into the projection database.
-#[tracing::instrument(name = "state:rebuild", skip(projection, cas_root, refs_root))]
+#[tracing::instrument(
+    name = "state:rebuild",
+    skip(projection, cas_root, refs_root, trust_store)
+)]
 pub fn rebuild_projection(
     projection: &ProjectionDb,
     cas_root: &Path,
     refs_root: &Path,
+    trust_store: &crate::refs::TrustStore,
 ) -> Result<RebuildReport> {
     let mut report = RebuildReport::default();
     let mut progress = RebuildProgress::new();
@@ -114,17 +117,14 @@ pub fn rebuild_projection(
             continue;
         }
 
-        // Read signed head → chain_state hash
-        let ref_content = std::fs::read_to_string(&head_path)?;
-        let ref_value: Value = serde_json::from_str(&ref_content)?;
-        let chain_state_hash = ref_value
-            .get("target_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if chain_state_hash.is_empty() {
-            continue;
-        }
+        let verified_head = crate::chain::load_verified_chain_head(
+            cas_root,
+            refs_root,
+            &chain_root_id,
+            trust_store,
+        )
+        .with_context(|| format!("verifying authoritative head for chain {chain_root_id}"))?;
+        let chain_state_hash = verified_head.chain_state_hash.as_str();
 
         batch.ensure_started()?;
 
@@ -133,9 +133,11 @@ pub fn rebuild_projection(
 
         // Update projection_meta to point to the head
         // Read the head chain_state to get updated_at
-        if let Some(meta) = head_projection_meta(cas_root, &chain_root_id, chain_state_hash) {
-            projection.update_projection_meta(&meta)?;
-        }
+        projection.update_projection_meta(&crate::projection::ProjectionMeta {
+            chain_root_id: chain_root_id.clone(),
+            indexed_chain_state_hash: chain_state_hash.to_owned(),
+            updated_at: verified_head.chain_state.updated_at.clone(),
+        })?;
 
         report.chains_rebuilt += 1;
         report.threads_restored += chain_report.threads;
@@ -156,11 +158,15 @@ pub fn rebuild_projection(
 
 /// Incremental catch-up: find chains where projection is behind CAS
 /// and project the delta.
-#[tracing::instrument(name = "state:catch_up", skip(projection, cas_root, refs_root))]
+#[tracing::instrument(
+    name = "state:catch_up",
+    skip(projection, cas_root, refs_root, trust_store)
+)]
 pub fn catch_up_projection(
     projection: &ProjectionDb,
     cas_root: &Path,
     refs_root: &Path,
+    trust_store: &crate::refs::TrustStore,
 ) -> Result<CatchUpReport> {
     let mut report = CatchUpReport::default();
     let mut progress = RebuildProgress::new();
@@ -181,22 +187,14 @@ pub fn catch_up_projection(
 
         report.chains_checked += 1;
 
-        // Read current head
-        let ref_content = match std::fs::read_to_string(&head_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let ref_value: Value = match serde_json::from_str(&ref_content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let head_hash = ref_value
-            .get("target_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if head_hash.is_empty() {
-            continue;
-        }
+        let verified_head = crate::chain::load_verified_chain_head(
+            cas_root,
+            refs_root,
+            &chain_root_id,
+            trust_store,
+        )
+        .with_context(|| format!("verifying authoritative head for chain {chain_root_id}"))?;
+        let head_hash = verified_head.chain_state_hash.as_str();
 
         // Check projection_meta
         let current_meta = projection.get_projection_meta(&chain_root_id)?;
@@ -227,9 +225,11 @@ pub fn catch_up_projection(
         };
 
         // Update projection_meta
-        if let Some(new_meta) = head_projection_meta(cas_root, &chain_root_id, head_hash) {
-            projection.update_projection_meta(&new_meta)?;
-        }
+        projection.update_projection_meta(&crate::projection::ProjectionMeta {
+            chain_root_id: chain_root_id.clone(),
+            indexed_chain_state_hash: head_hash.to_owned(),
+            updated_at: verified_head.chain_state.updated_at.clone(),
+        })?;
 
         report.chains_updated += 1;
         report.threads_restored += chain_report.threads;
@@ -263,22 +263,6 @@ fn chain_ref_entries(refs_root: &Path) -> Result<Vec<std::fs::DirEntry>> {
     }
     entries.sort_by_key(|entry| entry.file_name());
     Ok(entries)
-}
-
-fn head_projection_meta(
-    cas_root: &Path,
-    chain_root_id: &str,
-    chain_state_hash: &str,
-) -> Option<crate::projection::ProjectionMeta> {
-    let head_path_buf = lillux::shard_path(cas_root, "objects", chain_state_hash, ".json");
-    let cs_json = std::fs::read_to_string(&head_path_buf).ok()?;
-    let cs_value = serde_json::from_str::<Value>(&cs_json).ok()?;
-    let updated_at = cs_value.get("updated_at").and_then(|v| v.as_str())?;
-    Some(crate::projection::ProjectionMeta {
-        chain_root_id: chain_root_id.to_string(),
-        indexed_chain_state_hash: chain_state_hash.to_string(),
-        updated_at: updated_at.to_string(),
-    })
 }
 
 struct ProjectionBatch<'a> {
@@ -351,107 +335,16 @@ fn rebuild_chain(
     chain_root_id: &str,
     head_hash: &str,
 ) -> Result<ChainReport> {
-    let mut report = ChainReport {
-        threads: 0,
-        events: 0,
-    };
-
-    // Walk chain state history head → oldest
-    let mut state_hashes = Vec::new();
-    let mut current_hash = head_hash.to_string();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    while !visited.contains(&current_hash) {
-        visited.insert(current_hash.clone());
-        state_hashes.push(current_hash.clone());
-
-        let cs_path = lillux::shard_path(cas_root, "objects", &current_hash, ".json");
-        let cs_json = match std::fs::read_to_string(&cs_path) {
-            Ok(j) => j,
-            Err(_) => break,
-        };
-        let cs_value: Value = match serde_json::from_str(&cs_json) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-
-        current_hash = cs_value
-            .get("prev_chain_state_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if current_hash.is_empty() {
-            break;
-        }
-    }
-
-    // Reverse: oldest → newest so we project in chronological order
-    state_hashes.reverse();
-
-    // Collect all event hashes to project (avoid projecting same event twice)
-    let mut events_to_project: HashSet<String> = HashSet::new();
-
-    // Walk chain states in order, project thread snapshots and collect events
-    for state_hash in &state_hashes {
-        let cs_path = lillux::shard_path(cas_root, "objects", state_hash, ".json");
-        let cs_json = match std::fs::read_to_string(&cs_path) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-        let cs_value: Value = match serde_json::from_str(&cs_json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // Project thread snapshots from this chain_state
-        if let Some(threads) = cs_value.get("threads").and_then(|v| v.as_object()) {
-            for (_thread_id, entry) in threads {
-                if let Some(snap_hash) = entry.get("snapshot_hash").and_then(|v| v.as_str()) {
-                    if let Ok(snapshot) = load_thread_snapshot(cas_root, snap_hash) {
-                        // Only project the latest snapshot for each thread
-                        // (earlier chain states will have older snapshots that get overwritten)
-                        project_thread_snapshot(projection, &snapshot, chain_root_id)?;
-                        report.threads = report.threads.max(1); // will be counted properly below
-                    }
-                }
-                // Collect last_event_hash as a hint for event walk
-                if let Some(event_hash) = entry.get("last_event_hash").and_then(|v| v.as_str()) {
-                    if !event_hash.is_empty() {
-                        events_to_project.insert(event_hash.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // For events, walk from each thread's last_event_hash toward earlier links
-    // via prev_chain_event_hash to get all events in the chain.
-    // But we need the chain-level events, so we walk from chain_state's last_event_hash.
-    if let Some(last_state_hash) = state_hashes.last() {
-        let cs_path = lillux::shard_path(cas_root, "objects", last_state_hash, ".json");
-        if let Ok(cs_json) = std::fs::read_to_string(&cs_path) {
-            if let Ok(cs_value) = serde_json::from_str::<Value>(&cs_json) {
-                // Walk all events from last_event_hash
-                if let Some(last_event) = cs_value.get("last_event_hash").and_then(|v| v.as_str()) {
-                    let event_count = walk_and_project_events(projection, cas_root, last_event)?;
-                    report.events += event_count;
-                }
-            }
-        }
-    }
-
-    // Count unique threads
-    let conn = projection.connection();
-    let count: usize = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT thread_id) FROM threads WHERE chain_root_id = ?",
-            rusqlite::params![chain_root_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    report.threads = count;
-
-    Ok(report)
+    let history = load_chain_history(cas_root, chain_root_id, head_hash)?;
+    let head = &history
+        .first()
+        .expect("verified chain history always contains its head")
+        .1;
+    let events = verify_event_history(cas_root, head)?;
+    verify_chain_history_objects(cas_root, &history, &events)?;
+    let threads = project_authoritative_snapshots(projection, cas_root, head, &events)?;
+    let events = project_verified_events(projection, &events, None)?;
+    Ok(ChainReport { threads, events })
 }
 
 /// Rebuild only the delta from `from_hash` to `to_hash` for a chain.
@@ -462,212 +355,432 @@ fn rebuild_chain_delta(
     from_hash: &str,
     to_hash: &str,
 ) -> Result<ChainReport> {
-    // Collect chain state hashes from `to_hash` toward earlier links until we reach `from_hash`
-    let mut state_hashes = Vec::new();
-    let mut current_hash = to_hash.to_string();
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut found_from = false;
-
-    while !visited.contains(&current_hash) {
-        if current_hash == from_hash {
-            found_from = true;
-            break;
-        }
-        visited.insert(current_hash.clone());
-        state_hashes.push(current_hash.clone());
-
-        let cs_path = lillux::shard_path(cas_root, "objects", &current_hash, ".json");
-        let cs_json = match std::fs::read_to_string(&cs_path) {
-            Ok(j) => j,
-            Err(_) => break,
-        };
-        let cs_value: Value = match serde_json::from_str(&cs_json) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-
-        current_hash = cs_value
-            .get("prev_chain_state_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if current_hash.is_empty() {
-            break;
-        }
-    }
-
-    if !found_from {
-        // Couldn't find from_hash in chain — fall back to full rebuild
+    let history = load_chain_history(cas_root, chain_root_id, to_hash)?;
+    let head = &history
+        .first()
+        .expect("verified chain history always contains its head")
+        .1;
+    let Some((_, from_state)) = history.iter().find(|(hash, _)| hash == from_hash) else {
         return rebuild_chain(projection, cas_root, chain_root_id, to_hash);
-    }
-
-    // Reverse to get chronological order of new states
-    state_hashes.reverse();
-
-    let mut report = ChainReport {
-        threads: 0,
-        events: 0,
     };
 
-    // Project thread snapshots from new chain states. Walk NEWEST state
-    // first: with the per-thread dedup below, the first snapshot projected
-    // per thread must be its latest — walking oldest-first here regresses a
-    // row to the delta's earliest state (a thread that went
-    // running → completed inside one delta reads back `running`, and the
-    // startup reconciler then finalizes a finished thread as failed).
-    let mut seen_threads: HashSet<String> = HashSet::new();
-    for state_hash in state_hashes.iter().rev() {
-        let cs_path = lillux::shard_path(cas_root, "objects", state_hash, ".json");
-        let cs_json = match std::fs::read_to_string(&cs_path) {
-            Ok(j) => j,
-            Err(_) => continue,
-        };
-        let cs_value: Value = match serde_json::from_str(&cs_json) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if let Some(threads) = cs_value.get("threads").and_then(|v| v.as_object()) {
-            for (thread_id, entry) in threads {
-                if seen_threads.contains(thread_id) {
-                    continue;
-                }
-                if let Some(snap_hash) = entry.get("snapshot_hash").and_then(|v| v.as_str()) {
-                    if let Ok(snapshot) = load_thread_snapshot(cas_root, snap_hash) {
-                        project_thread_snapshot(projection, &snapshot, chain_root_id)?;
-                        seen_threads.insert(thread_id.clone());
-                        report.threads += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    // Project new events
-    if let Some(last_state_hash) = state_hashes.last() {
-        let cs_path = lillux::shard_path(cas_root, "objects", last_state_hash, ".json");
-        if let Ok(cs_json) = std::fs::read_to_string(&cs_path) {
-            if let Ok(cs_value) = serde_json::from_str::<Value>(&cs_json) {
-                // Get the previous state's last_event_hash to know where to start
-                let from_cs_path = lillux::shard_path(cas_root, "objects", from_hash, ".json");
-                let prev_last_event = std::fs::read_to_string(&from_cs_path)
-                    .ok()
-                    .and_then(|j| serde_json::from_str::<Value>(&j).ok())
-                    .and_then(|v| {
-                        v.get("last_event_hash")
-                            .and_then(|e| e.as_str())
-                            .map(String::from)
-                    });
-
-                if let Some(last_event) = cs_value.get("last_event_hash").and_then(|v| v.as_str()) {
-                    report.events = walk_and_project_events_from(
-                        projection,
-                        cas_root,
-                        last_event,
-                        prev_last_event.as_deref(),
-                    )?;
-                }
-            }
-        }
-    }
-
-    Ok(report)
+    let events = verify_event_history(cas_root, head)?;
+    verify_chain_history_objects(cas_root, &history, &events)?;
+    let threads = project_authoritative_snapshots(projection, cas_root, head, &events)?;
+    let events = project_verified_events(projection, &events, Some(from_state))?;
+    Ok(ChainReport { threads, events })
 }
 
-/// Load a thread snapshot from CAS.
-fn load_thread_snapshot(cas_root: &Path, hash: &str) -> Result<ThreadSnapshot> {
+fn load_chain_state(cas_root: &Path, hash: &str, chain_root_id: &str) -> Result<ChainState> {
+    let path = lillux::shard_path(cas_root, "objects", hash, ".json");
+    let json = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read chain_state {hash} from CAS"))?;
+    let state: ChainState = serde_json::from_str(&json)
+        .with_context(|| format!("failed to parse chain_state {hash}"))?;
+    state
+        .validate()
+        .with_context(|| format!("invalid chain_state {hash}"))?;
+    let actual_hash = crate::objects::chain_state::hash_chain_state(&state);
+    if actual_hash != hash {
+        anyhow::bail!("chain_state CAS hash mismatch: named {hash}, object hashes to {actual_hash}");
+    }
+    if state.chain_root_id != chain_root_id {
+        anyhow::bail!(
+            "chain_state identity mismatch: expected {chain_root_id}, got {}",
+            state.chain_root_id
+        );
+    }
+    Ok(state)
+}
+
+fn load_chain_history(
+    cas_root: &Path,
+    chain_root_id: &str,
+    head_hash: &str,
+) -> Result<Vec<(String, ChainState)>> {
+    let mut history = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_hash = head_hash.to_string();
+    loop {
+        if !visited.insert(current_hash.clone()) {
+            anyhow::bail!("cycle in chain_state history at {current_hash}");
+        }
+        let state = load_chain_state(cas_root, &current_hash, chain_root_id)?;
+        if let Some((newer_hash, newer)) = history.last() {
+            if state.last_chain_seq > newer.last_chain_seq {
+                anyhow::bail!(
+                    "chain_state sequence regressed from older {current_hash} ({}) to newer \
+                     {newer_hash} ({})",
+                    state.last_chain_seq,
+                    newer.last_chain_seq
+                );
+            }
+        }
+        let previous = state.prev_chain_state_hash.clone();
+        history.push((current_hash, state));
+        match previous {
+            Some(hash) => current_hash = hash,
+            None => break,
+        }
+    }
+    Ok(history)
+}
+
+fn load_thread_snapshot(
+    cas_root: &Path,
+    chain: &ChainState,
+    thread_id: &str,
+    entry: &ChainThreadEntry,
+    event_index: &HashMap<String, ThreadEvent>,
+) -> Result<ThreadSnapshot> {
+    let hash = &entry.snapshot_hash;
     let path = lillux::shard_path(cas_root, "objects", hash, ".json");
     let json = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read thread_snapshot {hash} from CAS"))?;
     let snapshot: ThreadSnapshot = serde_json::from_str(&json)
         .with_context(|| format!("failed to parse thread_snapshot {hash}"))?;
+    snapshot
+        .validate()
+        .with_context(|| format!("invalid thread_snapshot {hash}"))?;
+    let actual_hash = lillux::sha256_hex(lillux::canonical_json(&snapshot.to_value()).as_bytes());
+    if actual_hash != *hash {
+        anyhow::bail!("thread_snapshot CAS hash mismatch: named {hash}, object hashes to {actual_hash}");
+    }
+    if snapshot.thread_id != thread_id || snapshot.chain_root_id != chain.chain_root_id {
+        anyhow::bail!(
+            "thread_snapshot identity mismatch for {thread_id}: snapshot thread={}, chain={}",
+            snapshot.thread_id,
+            snapshot.chain_root_id
+        );
+    }
+    if snapshot.status != entry.status {
+        anyhow::bail!(
+            "thread_snapshot status mismatch for {thread_id}: entry={}, snapshot={}",
+            entry.status,
+            snapshot.status
+        );
+    }
+    if snapshot.last_thread_seq > entry.last_thread_seq {
+        anyhow::bail!(
+            "thread_snapshot last_thread_seq exceeds chain entry for {thread_id}: entry={}, snapshot={}",
+            entry.last_thread_seq,
+            snapshot.last_thread_seq
+        );
+    }
+    if snapshot.last_chain_seq > chain.last_chain_seq {
+        anyhow::bail!(
+            "thread_snapshot last_chain_seq {} exceeds chain head {} for {thread_id}",
+            snapshot.last_chain_seq,
+            chain.last_chain_seq
+        );
+    }
+    match snapshot.last_event_hash.as_deref() {
+        None if snapshot.last_thread_seq == 0 && snapshot.last_chain_seq == 0 => {}
+        None => anyhow::bail!(
+            "thread_snapshot without an event has non-zero cursors for {thread_id}"
+        ),
+        Some(event_hash) => {
+            let event = event_index.get(event_hash).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thread_snapshot event {event_hash} is not reachable from chain head"
+                )
+            })?;
+            if event.thread_id != thread_id
+                || event.thread_seq != snapshot.last_thread_seq
+                || event.chain_seq != snapshot.last_chain_seq
+            {
+                anyhow::bail!(
+                    "thread_snapshot cursor does not identify its declared thread event for {thread_id}"
+                );
+            }
+        }
+    }
+    if snapshot.last_thread_seq == entry.last_thread_seq
+        && snapshot.last_event_hash != entry.last_event_hash
+    {
+        anyhow::bail!(
+            "current thread_snapshot event cursor does not match chain entry for {thread_id}"
+        );
+    }
     Ok(snapshot)
 }
 
-/// Walk event chain toward earlier links from last_event_hash, projecting all durable events.
-/// Returns count of events projected.
-fn walk_and_project_events(
+fn project_authoritative_snapshots(
     projection: &ProjectionDb,
     cas_root: &Path,
-    last_event_hash: &str,
+    head: &ChainState,
+    events: &[VerifiedEvent],
 ) -> Result<usize> {
-    walk_and_project_events_from(projection, cas_root, last_event_hash, None)
+    let event_index = event_index(events);
+    for (thread_id, entry) in &head.threads {
+        let snapshot = load_thread_snapshot(cas_root, head, thread_id, entry, &event_index)?;
+        project_thread_snapshot(projection, &snapshot, &head.chain_root_id)?;
+    }
+    Ok(head.threads.len())
 }
 
-/// Walk event chain toward earlier links from last_event_hash, optionally stopping at stop_after_hash.
-/// Projects all durable events encountered. Returns count of events projected.
-fn walk_and_project_events_from(
-    projection: &ProjectionDb,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadCursor {
+    hash: Option<String>,
+    seq: u64,
+}
+
+fn thread_cursors(state: &ChainState) -> HashMap<String, ThreadCursor> {
+    state
+        .threads
+        .iter()
+        .map(|(thread_id, entry)| {
+            (
+                thread_id.clone(),
+                ThreadCursor {
+                    hash: entry.last_event_hash.clone(),
+                    seq: entry.last_thread_seq,
+                },
+            )
+        })
+        .collect()
+}
+
+fn load_thread_event(cas_root: &Path, hash: &str, chain_root_id: &str) -> Result<ThreadEvent> {
+    let path = lillux::shard_path(cas_root, "objects", hash, ".json");
+    let json = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read thread_event {hash} from CAS"))?;
+    let event: ThreadEvent = serde_json::from_str(&json)
+        .with_context(|| format!("failed to parse thread_event {hash}"))?;
+    event
+        .validate()
+        .with_context(|| format!("invalid thread_event {hash}"))?;
+    let actual_hash = crate::objects::thread_event::hash_event(&event);
+    if actual_hash != hash {
+        anyhow::bail!("thread_event CAS hash mismatch: named {hash}, object hashes to {actual_hash}");
+    }
+    if event.chain_root_id != chain_root_id {
+        anyhow::bail!(
+            "thread_event chain mismatch: expected {chain_root_id}, got {}",
+            event.chain_root_id
+        );
+    }
+    if !event.durability.is_cas_stored() {
+        anyhow::bail!("ephemeral thread_event {hash} is reachable from an authoritative head");
+    }
+    Ok(event)
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedEvent {
+    hash: String,
+    event: ThreadEvent,
+}
+
+fn event_index(events: &[VerifiedEvent]) -> HashMap<String, ThreadEvent> {
+    events
+        .iter()
+        .map(|verified| (verified.hash.clone(), verified.event.clone()))
+        .collect()
+}
+
+/// Verify the complete event closure reachable from an authoritative chain
+/// head. Events are returned newest first.
+fn verify_event_history(
     cas_root: &Path,
-    last_event_hash: &str,
-    stop_after_hash: Option<&str>,
-) -> Result<usize> {
-    let mut count = 0;
-    let mut current_hash = last_event_hash.to_string();
-    let mut visited: HashSet<String> = HashSet::new();
-
-    while !current_hash.is_empty() && !visited.contains(&current_hash) {
-        visited.insert(current_hash.clone());
-
-        let path = lillux::shard_path(cas_root, "objects", &current_hash, ".json");
-        let json = match std::fs::read_to_string(&path) {
-            Ok(j) => j,
-            Err(_) => break,
-        };
-        let value: Value = match serde_json::from_str(&json) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-
-        // Only project durable events
-        let durability = value
-            .get("durability")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if durability == "durable" {
-            if let Ok(event) = serde_json::from_value::<ThreadEvent>(value.clone()) {
-                project_event(projection, &event)?;
-                count += 1;
-            }
-        }
-
-        if stop_after_hash == Some(current_hash.as_str()) {
-            break;
-        }
-
-        // Follow prev_chain_event_hash
-        current_hash = value
-            .get("prev_chain_event_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+    head: &ChainState,
+) -> Result<Vec<VerifiedEvent>> {
+    match (&head.last_event_hash, head.last_chain_seq) {
+        (None, 0) => {}
+        (Some(_), seq) if seq > 0 => {}
+        _ => anyhow::bail!("chain head event hash/sequence cursors are contradictory"),
     }
 
+    let mut current_hash = head.last_event_hash.clone();
+    let mut expected_chain_seq = head.last_chain_seq;
+    let mut cursors = thread_cursors(head);
+    let mut visited = HashSet::new();
+    let mut events = Vec::new();
+
+    while let Some(hash) = current_hash {
+        if !visited.insert(hash.clone()) {
+            anyhow::bail!("cycle in thread_event chain at {hash}");
+        }
+        let event = load_thread_event(cas_root, &hash, &head.chain_root_id)?;
+        if event.chain_seq != expected_chain_seq || expected_chain_seq == 0 {
+            anyhow::bail!(
+                "thread_event chain sequence mismatch at {hash}: expected {expected_chain_seq}, got {}",
+                event.chain_seq
+            );
+        }
+        let cursor = cursors.get_mut(&event.thread_id).ok_or_else(|| {
+            anyhow::anyhow!("thread_event {hash} names absent thread {}", event.thread_id)
+        })?;
+        if cursor.hash.as_deref() != Some(hash.as_str()) || cursor.seq != event.thread_seq {
+            anyhow::bail!("thread_event per-thread cursor mismatch at {hash}");
+        }
+        cursor.hash = event.prev_thread_event_hash.clone();
+        cursor.seq = cursor.seq.checked_sub(1).ok_or_else(|| {
+            anyhow::anyhow!("thread_event thread sequence underflow at {hash}")
+        })?;
+        current_hash = event.prev_chain_event_hash.clone();
+        expected_chain_seq -= 1;
+        events.push(VerifiedEvent { hash, event });
+    }
+
+    if expected_chain_seq != 0
+        || cursors
+            .values()
+            .any(|cursor| cursor.hash.is_some() || cursor.seq != 0)
+    {
+        anyhow::bail!("event walk ended before all authoritative cursors reached genesis");
+    }
+    Ok(events)
+}
+
+fn verify_chain_history_objects(
+    cas_root: &Path,
+    history: &[(String, ChainState)],
+    events: &[VerifiedEvent],
+) -> Result<()> {
+    let event_index = event_index(events);
+    for (state_hash, state) in history {
+        verify_chain_state_cursors(state_hash, state, &event_index)?;
+        for (thread_id, entry) in &state.threads {
+            load_thread_snapshot(cas_root, state, thread_id, entry, &event_index).with_context(
+                || {
+                    format!(
+                        "verifying snapshot {} reachable from chain_state {state_hash}",
+                        entry.snapshot_hash
+                    )
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_chain_state_cursors(
+    state_hash: &str,
+    state: &ChainState,
+    events: &HashMap<String, ThreadEvent>,
+) -> Result<()> {
+    match state.last_event_hash.as_deref() {
+        None if state.last_chain_seq == 0 => {}
+        None => anyhow::bail!(
+            "chain_state {state_hash} has no last event but non-zero chain sequence"
+        ),
+        Some(hash) => {
+            let event = events.get(hash).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "chain_state {state_hash} event cursor {hash} is not reachable from head"
+                )
+            })?;
+            if event.chain_seq != state.last_chain_seq {
+                anyhow::bail!(
+                    "chain_state {state_hash} event cursor sequence mismatch: expected {}, got {}",
+                    state.last_chain_seq,
+                    event.chain_seq
+                );
+            }
+        }
+    }
+
+    for (thread_id, entry) in &state.threads {
+        match entry.last_event_hash.as_deref() {
+            None if entry.last_thread_seq == 0 => {}
+            None => anyhow::bail!(
+                "chain_state {state_hash} thread {thread_id} has no last event but non-zero sequence"
+            ),
+            Some(hash) => {
+                let event = events.get(hash).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "chain_state {state_hash} thread cursor {hash} is not reachable from head"
+                    )
+                })?;
+                if event.thread_id != *thread_id
+                    || event.thread_seq != entry.last_thread_seq
+                    || event.chain_seq > state.last_chain_seq
+                {
+                    anyhow::bail!(
+                        "chain_state {state_hash} thread cursor does not identify its declared event for {thread_id}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Project only events after the already-indexed state. The full event history
+/// has already been verified, so a missing incremental boundary is a hard
+/// error rather than a reason to mark the projection current.
+fn project_verified_events(
+    projection: &ProjectionDb,
+    events: &[VerifiedEvent],
+    stop: Option<&ChainState>,
+) -> Result<usize> {
+    let boundary = stop.and_then(|state| state.last_event_hash.as_deref());
+    let take = match boundary {
+        Some(hash) => events
+            .iter()
+            .position(|event| event.hash == hash)
+            .ok_or_else(|| {
+                anyhow::anyhow!("indexed event boundary {hash} is not reachable from authoritative head")
+            })?,
+        None => events.len(),
+    };
+
+    let mut count = 0;
+    for verified in events[..take].iter().rev() {
+        if verified.event.durability == EventDurability::Durable {
+            project_event(projection, &verified.event)?;
+            count += 1;
+        }
+    }
     Ok(count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signer::TestSigner;
+    use crate::Signer;
     use ryeos_tracing::test as trace_test;
+    use serde_json::Value;
 
-    fn make_hash(suffix: &str) -> String {
-        format!(
-            "{:064}",
-            suffix
-                .as_bytes()
-                .iter()
-                .fold(0u64, |a, &b| a.wrapping_add(b as u64))
+    fn rebuild_projection(
+        projection: &ProjectionDb,
+        cas_root: &Path,
+        refs_root: &Path,
+    ) -> Result<RebuildReport> {
+        let signer = TestSigner::default();
+        super::rebuild_projection(
+            projection,
+            cas_root,
+            refs_root,
+            &crate::signer::trust_store_for_signer(&signer),
         )
     }
 
-    fn write_object(cas_root: &Path, hash: &str, value: &Value) {
-        let path = lillux::shard_path(cas_root, "objects", hash, ".json");
+    fn catch_up_projection(
+        projection: &ProjectionDb,
+        cas_root: &Path,
+        refs_root: &Path,
+    ) -> Result<CatchUpReport> {
+        let signer = TestSigner::default();
+        super::catch_up_projection(
+            projection,
+            cas_root,
+            refs_root,
+            &crate::signer::trust_store_for_signer(&signer),
+        )
+    }
+
+    fn write_object(cas_root: &Path, value: &Value) -> String {
+        let canonical = lillux::canonical_json(value);
+        let hash = lillux::sha256_hex(canonical.as_bytes());
+        let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let canonical = lillux::canonical_json(value);
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
+        hash
     }
 
     fn write_signed_head(refs_root: &Path, chain_root_id: &str, target_hash: &str) {
@@ -675,15 +788,14 @@ mod tests {
             .join("generic/chains")
             .join(chain_root_id)
             .join("head");
-        std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1, "kind": "signed_ref",
-            "ref_path": format!("chains/{}/head", chain_root_id),
-            "target_hash": target_hash,
-            "updated_at": "2026-04-22T00:00:00Z",
-            "signer": "test", "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        let signer = TestSigner::default();
+        let signed_ref = crate::SignedRef::new(
+            format!("chains/{chain_root_id}/head"),
+            target_hash.to_owned(),
+            "2026-04-22T00:00:00Z".to_owned(),
+            signer.fingerprint().to_owned(),
+        );
+        crate::refs::write_signed_ref(&head_path, signed_ref, &signer).unwrap();
     }
 
     fn make_chain_state(
@@ -748,6 +860,12 @@ mod tests {
         })
     }
 
+    fn set_snapshot_cursor(snapshot: &mut Value, event_hash: &str, chain_seq: u64, thread_seq: u64) {
+        snapshot["last_event_hash"] = Value::String(event_hash.to_owned());
+        snapshot["last_chain_seq"] = Value::from(chain_seq);
+        snapshot["last_thread_seq"] = Value::from(thread_seq);
+    }
+
     fn make_event_json(
         chain_root_id: &str,
         thread_id: &str,
@@ -780,12 +898,11 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
 
-        let snap_hash = make_hash("snap");
-        let event_hash = make_hash("evt");
-        let cs_hash = make_hash("cs");
-
-        let snap = make_snapshot_json("T-root", "T-root", "running");
         let event = make_event_json("T-root", "T-root", 1, 1, None, "thread_created");
+        let event_hash = write_object(&cas_root, &event);
+        let mut snap = make_snapshot_json("T-root", "T-root", "running");
+        set_snapshot_cursor(&mut snap, &event_hash, 1, 1);
+        let snap_hash = write_object(&cas_root, &snap);
         let cs = make_chain_state(
             "T-root",
             None,
@@ -793,10 +910,7 @@ mod tests {
             Some(&event_hash),
             1,
         );
-
-        write_object(&cas_root, &snap_hash, &snap);
-        write_object(&cas_root, &event_hash, &event);
-        write_object(&cas_root, &cs_hash, &cs);
+        let cs_hash = write_object(&cas_root, &cs);
         write_signed_head(&refs_root, "T-root", &cs_hash);
 
         let proj_path = tmp.path().join("projection.db");
@@ -838,9 +952,8 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
 
         for chain_id in ["T-a", "T-b"] {
-            let snap_hash = make_hash(&format!("snap-{chain_id}"));
-            let cs_hash = make_hash(&format!("cs-{chain_id}"));
             let snap = make_snapshot_json(chain_id, chain_id, "created");
+            let snap_hash = write_object(&cas_root, &snap);
             let cs = make_chain_state(
                 chain_id,
                 None,
@@ -848,8 +961,7 @@ mod tests {
                 None,
                 0,
             );
-            write_object(&cas_root, &snap_hash, &snap);
-            write_object(&cas_root, &cs_hash, &cs);
+            let cs_hash = write_object(&cas_root, &cs);
             write_signed_head(&refs_root, chain_id, &cs_hash);
         }
 
@@ -868,15 +980,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
 
-        let snap1_hash = make_hash("snap1");
-        let snap2_hash = make_hash("snap2");
-        let cs1_hash = make_hash("cs1");
-        let cs2_hash = make_hash("cs2");
-        let event_hash = make_hash("evt");
-
         let snap1 = make_snapshot_json("T-root", "T-root", "created");
-        let snap2 = make_snapshot_json("T-root", "T-root", "running");
+        let snap1_hash = write_object(&cas_root, &snap1);
         let event = make_event_json("T-root", "T-root", 1, 1, None, "thread_started");
+        let event_hash = write_object(&cas_root, &event);
+        let mut snap2 = make_snapshot_json("T-root", "T-root", "running");
+        set_snapshot_cursor(&mut snap2, &event_hash, 1, 1);
+        let snap2_hash = write_object(&cas_root, &snap2);
 
         let cs1 = make_chain_state(
             "T-root",
@@ -885,6 +995,7 @@ mod tests {
             None,
             0,
         );
+        let cs1_hash = write_object(&cas_root, &cs1);
 
         let cs2 = make_chain_state(
             "T-root",
@@ -893,12 +1004,7 @@ mod tests {
             Some(&event_hash),
             1,
         );
-
-        write_object(&cas_root, &snap1_hash, &snap1);
-        write_object(&cas_root, &snap2_hash, &snap2);
-        write_object(&cas_root, &event_hash, &event);
-        write_object(&cas_root, &cs1_hash, &cs1);
-        write_object(&cas_root, &cs2_hash, &cs2);
+        let cs2_hash = write_object(&cas_root, &cs2);
         write_signed_head(&refs_root, "T-root", &cs2_hash);
 
         let proj_path = tmp.path().join("projection.db");
@@ -930,9 +1036,8 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
 
-        let snap_hash = make_hash("snap");
-        let cs_hash = make_hash("cs");
         let snap = make_snapshot_json("T-root", "T-root", "created");
+        let snap_hash = write_object(&cas_root, &snap);
         let cs = make_chain_state(
             "T-root",
             None,
@@ -940,9 +1045,7 @@ mod tests {
             None,
             0,
         );
-
-        write_object(&cas_root, &snap_hash, &snap);
-        write_object(&cas_root, &cs_hash, &cs);
+        let cs_hash = write_object(&cas_root, &cs);
         write_signed_head(&refs_root, "T-root", &cs_hash);
 
         let proj_path = tmp.path().join("projection.db");
@@ -951,7 +1054,7 @@ mod tests {
         // Set projection_meta to match current head
         let meta = crate::projection::ProjectionMeta {
             chain_root_id: "T-root".to_string(),
-            indexed_chain_state_hash: cs_hash.clone(),
+            indexed_chain_state_hash: cs_hash,
             updated_at: "2026-04-22T00:00:00Z".to_string(),
         };
         proj.update_projection_meta(&meta).unwrap();
@@ -969,15 +1072,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
 
-        let snap1_hash = make_hash("snap1");
-        let snap2_hash = make_hash("snap2");
-        let cs1_hash = make_hash("cs1");
-        let cs2_hash = make_hash("cs2");
-        let event_hash = make_hash("evt");
-
         let snap1 = make_snapshot_json("T-root", "T-root", "created");
-        let snap2 = make_snapshot_json("T-root", "T-root", "running");
+        let snap1_hash = write_object(&cas_root, &snap1);
         let event = make_event_json("T-root", "T-root", 1, 1, None, "thread_started");
+        let event_hash = write_object(&cas_root, &event);
+        let mut snap2 = make_snapshot_json("T-root", "T-root", "running");
+        set_snapshot_cursor(&mut snap2, &event_hash, 1, 1);
+        let snap2_hash = write_object(&cas_root, &snap2);
 
         let cs1 = make_chain_state(
             "T-root",
@@ -986,6 +1087,7 @@ mod tests {
             None,
             0,
         );
+        let cs1_hash = write_object(&cas_root, &cs1);
         let cs2 = make_chain_state(
             "T-root",
             Some(&cs1_hash),
@@ -993,12 +1095,7 @@ mod tests {
             Some(&event_hash),
             1,
         );
-
-        write_object(&cas_root, &snap1_hash, &snap1);
-        write_object(&cas_root, &snap2_hash, &snap2);
-        write_object(&cas_root, &event_hash, &event);
-        write_object(&cas_root, &cs1_hash, &cs1);
-        write_object(&cas_root, &cs2_hash, &cs2);
+        let cs2_hash = write_object(&cas_root, &cs2);
         write_signed_head(&refs_root, "T-root", &cs2_hash);
 
         let proj_path = tmp.path().join("projection.db");
@@ -1042,16 +1139,12 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
 
-        let snap1_hash = make_hash("m-snap1");
-        let snap2_hash = make_hash("m-snap2");
-        let snap3_hash = make_hash("m-snap3");
-        let cs1_hash = make_hash("m-cs1");
-        let cs2_hash = make_hash("m-cs2");
-        let cs3_hash = make_hash("m-cs3");
-
         let snap1 = make_snapshot_json("T-multi", "T-multi", "created");
         let snap2 = make_snapshot_json("T-multi", "T-multi", "running");
         let snap3 = make_snapshot_json("T-multi", "T-multi", "completed");
+        let snap1_hash = write_object(&cas_root, &snap1);
+        let snap2_hash = write_object(&cas_root, &snap2);
+        let snap3_hash = write_object(&cas_root, &snap3);
 
         let cs1 = make_chain_state(
             "T-multi",
@@ -1060,27 +1153,23 @@ mod tests {
             None,
             0,
         );
+        let cs1_hash = write_object(&cas_root, &cs1);
         let cs2 = make_chain_state(
             "T-multi",
             Some(&cs1_hash),
             vec![("T-multi", &snap2_hash, None, 0, "running")],
             None,
-            1,
+            0,
         );
+        let cs2_hash = write_object(&cas_root, &cs2);
         let cs3 = make_chain_state(
             "T-multi",
             Some(&cs2_hash),
             vec![("T-multi", &snap3_hash, None, 0, "completed")],
             None,
-            2,
+            0,
         );
-
-        write_object(&cas_root, &snap1_hash, &snap1);
-        write_object(&cas_root, &snap2_hash, &snap2);
-        write_object(&cas_root, &snap3_hash, &snap3);
-        write_object(&cas_root, &cs1_hash, &cs1);
-        write_object(&cas_root, &cs2_hash, &cs2);
-        write_object(&cas_root, &cs3_hash, &cs3);
+        let cs3_hash = write_object(&cas_root, &cs3);
         write_signed_head(&refs_root, "T-multi", &cs3_hash);
 
         let proj_path = tmp.path().join("projection.db");
@@ -1118,9 +1207,8 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
 
         for chain_id in ["T-a", "T-b", "T-c"] {
-            let snap_hash = make_hash(&format!("batch-snap-{chain_id}"));
-            let cs_hash = make_hash(&format!("batch-cs-{chain_id}"));
             let snap = make_snapshot_json(chain_id, chain_id, "created");
+            let snap_hash = write_object(&cas_root, &snap);
             let cs = make_chain_state(
                 chain_id,
                 None,
@@ -1128,9 +1216,7 @@ mod tests {
                 None,
                 0,
             );
-
-            write_object(&cas_root, &snap_hash, &snap);
-            write_object(&cas_root, &cs_hash, &cs);
+            let cs_hash = write_object(&cas_root, &cs);
             write_signed_head(&refs_root, chain_id, &cs_hash);
         }
 
@@ -1162,9 +1248,8 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
 
         for chain_id in ["T-a", "T-b"] {
-            let snap_hash = make_hash(&format!("rollback-snap-{chain_id}"));
-            let cs_hash = make_hash(&format!("rollback-cs-{chain_id}"));
             let snap = make_snapshot_json(chain_id, chain_id, "created");
+            let snap_hash = write_object(&cas_root, &snap);
             let cs = make_chain_state(
                 chain_id,
                 None,
@@ -1172,16 +1257,12 @@ mod tests {
                 None,
                 0,
             );
-
-            write_object(&cas_root, &snap_hash, &snap);
-            write_object(&cas_root, &cs_hash, &cs);
+            let cs_hash = write_object(&cas_root, &cs);
             write_signed_head(&refs_root, chain_id, &cs_hash);
         }
 
-        let bad_snap_hash = make_hash("rollback-snap-T-c");
-        let bad_event_hash = make_hash("rollback-event-T-c");
-        let bad_cs_hash = make_hash("rollback-cs-T-c");
         let bad_snap = make_snapshot_json("T-c", "T-c", "created");
+        let bad_snap_hash = write_object(&cas_root, &bad_snap);
         let bad_event = make_event_json(
             "T-c",
             "T-c",
@@ -1190,6 +1271,7 @@ mod tests {
             Some("not-a-valid-hash"),
             "thread_started",
         );
+        let bad_event_hash = write_object(&cas_root, &bad_event);
         let bad_cs = make_chain_state(
             "T-c",
             None,
@@ -1197,9 +1279,7 @@ mod tests {
             Some(&bad_event_hash),
             1,
         );
-        write_object(&cas_root, &bad_snap_hash, &bad_snap);
-        write_object(&cas_root, &bad_event_hash, &bad_event);
-        write_object(&cas_root, &bad_cs_hash, &bad_cs);
+        let bad_cs_hash = write_object(&cas_root, &bad_cs);
         write_signed_head(&refs_root, "T-c", &bad_cs_hash);
 
         let proj_path = tmp.path().join("projection.db");

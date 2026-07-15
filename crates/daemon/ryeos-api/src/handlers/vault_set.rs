@@ -35,7 +35,7 @@ pub async fn handle(
             // Vault validation errors (key name, blocked names) are user
             // errors → 400. Anything else is 500.
             let msg = format!("{e:#}");
-            if msg.starts_with("vault: key name") {
+            if msg.starts_with("vault: key name") || msg.starts_with("vault: secret value") {
                 HandlerError::BadRequest(msg)
             } else {
                 HandlerError::Internal(msg)

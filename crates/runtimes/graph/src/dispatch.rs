@@ -180,6 +180,7 @@ pub async fn dispatch_action(
             facets,
             launch_window,
         },
+        hook_dispatch: None,
     };
 
     let response = client

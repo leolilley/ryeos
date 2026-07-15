@@ -1,65 +1,65 @@
-use std::io::Read;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+struct CacheEntries {
+    values: HashMap<String, Value>,
+    budget: ryeos_runtime::RuntimeJsonObjectBudget,
+}
+
+/// One execution's private node-result cache.
+///
+/// Cache entries are replay authority: a hit skips dispatch and therefore
+/// skips billing. Keeping them in the graph process makes that authority
+/// ephemeral and non-forgeable by project or host filesystem writes. A fresh
+/// cache is created for every `Walker::execute`, so graph, tool, and overlay
+/// changes can never inherit a prior run's result.
 pub struct NodeCache {
-    pub cache_dir: PathBuf,
+    entries: Mutex<CacheEntries>,
 }
 
 impl NodeCache {
-    pub fn new(graph_id: &str) -> Self {
-        let root = std::env::var("RYEOS_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir().join("ryeos-graph-cache"));
-        Self::under_root(root, graph_id)
-    }
-
-    fn under_root(root: PathBuf, graph_id: &str) -> Self {
-        // A signed graph category is identity data, not a filesystem path.
-        // Hash the full logical id into one stable component so absolute paths,
-        // separators and `..` can never escape the configured cache root.
-        let graph_component = lillux::cas::sha256_hex(graph_id.as_bytes());
-        let dir = root.join(graph_component);
-        Self { cache_dir: dir }
+    pub fn new(_graph_id: &str) -> Self {
+        Self {
+            entries: Mutex::new(CacheEntries {
+                values: HashMap::new(),
+                budget: ryeos_runtime::RuntimeJsonObjectBudget::from_object(
+                    &Map::new(),
+                    "graph node cache",
+                )
+                .expect("empty graph node cache must fit rye-expr/1 limits"),
+            }),
+        }
     }
 
     pub fn lookup(&self, key: &str) -> Option<Value> {
-        let path = self.cache_dir.join(format!("{key}.json"));
-        let limit = ryeos_runtime::EvaluationLimits::default().max_result_bytes;
-        let file = std::fs::File::open(&path).ok()?;
-        let mut content = String::new();
-        if let Err(error) = file
-            .take(limit.saturating_add(1) as u64)
-            .read_to_string(&mut content)
-        {
-            tracing::warn!(
-                "cache file could not be read as bounded UTF-8 (key={key}): {error}"
-            );
-            return None;
+        match self.entries.lock() {
+            Ok(entries) => entries.values.get(key).cloned(),
+            Err(error) => {
+                tracing::error!(%error, "graph node cache lock poisoned");
+                None
+            }
         }
-        if content.len() > limit {
-            tracing::warn!(
-                "cache file exceeds rye-expr/1 result byte limit (key={key}, limit={limit})"
-            );
-            return None;
-        }
-        serde_json::from_str(&content)
-            .map_err(|e| {
-                tracing::warn!("cache file contains invalid JSON (key={key}): {e}");
-            })
-            .ok()
     }
 
     pub fn store(&self, key: &str, value: &Value) {
-        if let Err(e) = std::fs::create_dir_all(&self.cache_dir) {
-            tracing::debug!(error = %e, "failed to create cache dir");
+        if let Err(error) =
+            crate::evaluation::validate_runtime_value(value, "graph node cache value")
+        {
+            tracing::warn!(%error, "refusing to cache an out-of-bounds graph node result");
             return;
         }
-        let path = self.cache_dir.join(format!("{key}.json"));
-        if let Ok(content) = serde_json::to_string(value) {
-            if let Err(e) = std::fs::write(&path, content) {
-                tracing::warn!("cache write failed for {key}: {e}");
+        match self.entries.lock() {
+            Ok(mut entries) => {
+                if let Err(error) = entries.budget.replace(key, value) {
+                    tracing::warn!(%error, "refusing to exceed aggregate graph node cache bounds");
+                    return;
+                }
+                entries.values.insert(key.to_string(), value.clone());
+            }
+            Err(error) => {
+                tracing::error!(%error, "graph node cache lock poisoned");
             }
         }
     }
@@ -72,48 +72,49 @@ mod tests {
 
     #[test]
     fn cache_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = NodeCache {
-            cache_dir: tmp.path().join("test-graph"),
-        };
+        let cache = NodeCache::new("test-graph");
         let key = "abc123";
-        let val = json!({"stdout": "hello"});
-        cache.store(key, &val);
-        let retrieved = cache.lookup(key).unwrap();
-        assert_eq!(retrieved, val);
+        let value = json!({"stdout": "hello"});
+
+        cache.store(key, &value);
+
+        assert_eq!(cache.lookup(key), Some(value));
     }
 
     #[test]
     fn cache_miss_returns_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = NodeCache {
-            cache_dir: tmp.path().join("test-graph"),
-        };
+        let cache = NodeCache::new("test-graph");
         assert!(cache.lookup("nonexistent").is_none());
     }
 
     #[test]
-    fn oversized_cache_entry_is_a_bounded_miss() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = NodeCache {
-            cache_dir: tmp.path().join("test-graph"),
-        };
-        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+    fn cache_is_execution_local() {
+        let first = NodeCache::new("same-graph");
+        let second = NodeCache::new("same-graph");
+        first.store("key", &json!({"value": 1}));
+
+        assert_eq!(first.lookup("key"), Some(json!({"value": 1})));
+        assert!(second.lookup("key").is_none());
+    }
+
+    #[test]
+    fn oversized_cache_value_is_not_retained() {
+        let cache = NodeCache::new("test-graph");
         let limit = ryeos_runtime::EvaluationLimits::default().max_result_bytes;
-        std::fs::write(
-            cache.cache_dir.join("oversized.json"),
-            vec![b' '; limit + 1],
-        )
-        .unwrap();
+        cache.store("oversized", &Value::String("x".repeat(limit + 1)));
 
         assert!(cache.lookup("oversized").is_none());
     }
 
     #[test]
-    fn graph_id_is_an_opaque_cache_namespace_not_a_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = NodeCache::under_root(tmp.path().to_path_buf(), "../../outside/graph");
-        assert_eq!(cache.cache_dir.parent(), Some(tmp.path()));
-        assert_ne!(cache.cache_dir, tmp.path().join("../../outside/graph"));
+    fn aggregate_cache_size_is_bounded() {
+        let cache = NodeCache::new("test-graph");
+        let value = Value::String("x".repeat(700 * 1024));
+        for index in 0..8 {
+            cache.store(&format!("key-{index}"), &value);
+        }
+
+        assert!(cache.lookup("key-0").is_some());
+        assert!(cache.lookup("key-7").is_none());
     }
 }

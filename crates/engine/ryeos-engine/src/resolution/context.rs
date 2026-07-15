@@ -37,6 +37,7 @@ pub(crate) struct LoadedItem {
     pub source_path: PathBuf,
     pub trust_class: TrustClass,
     pub raw_content: String,
+    pub source_content_digest: String,
     pub raw_content_digest: String,
     /// Engine-side parsed metadata document (e.g. extracted markdown/xml
     /// fields). Used by steps to read `extends`/`references` etc.; not
@@ -66,6 +67,7 @@ impl LoadedItem {
             alias_resolution,
             added_by,
             raw_content: self.raw_content,
+            source_content_digest: self.source_content_digest,
             raw_content_digest: self.raw_content_digest,
         }
     }
@@ -149,6 +151,7 @@ impl<'a> ResolutionContext<'a> {
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: root_loaded.raw_content.clone(),
+            source_content_digest: root_loaded.source_content_digest.clone(),
             raw_content_digest: root_loaded.raw_content_digest.clone(),
         };
         Self {
@@ -335,6 +338,7 @@ pub(crate) fn load_item_at(
         source_path: raw.source_path,
         trust_class: raw.trust_class,
         raw_content: raw.raw_content,
+        source_content_digest: raw.source_content_digest,
         raw_content_digest: raw.raw_content_digest,
         parsed,
     })
@@ -357,6 +361,8 @@ pub(crate) struct RawLoadedItem {
     pub content: String,
     /// Signature-stripped bytes shipped to runtimes.
     pub raw_content: String,
+    /// SHA-256 of `content`, including the signature envelope.
+    pub source_content_digest: String,
     pub raw_content_digest: String,
 }
 
@@ -425,6 +431,8 @@ pub(crate) fn load_item_raw(
         None => TrustClass::Unsigned,
     };
 
+    let source_content_digest = crate::item_resolution::content_hash(&content);
+
     // Strip the signature line so the envelope ships clean bytes —
     // runtimes don't need (or trust) the daemon-stripped signature.
     // Envelope-aware: only strip lines matching THIS kind's signature
@@ -445,6 +453,7 @@ pub(crate) fn load_item_raw(
         trust_class,
         content,
         raw_content,
+        source_content_digest,
         raw_content_digest,
     })
 }

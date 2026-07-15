@@ -23,7 +23,6 @@ pub mod provider_snapshot;
 pub mod resolver;
 pub mod scalar_or_vec;
 pub mod template;
-pub mod transcript;
 pub mod verified_loader;
 
 pub use arg_binder::bind_argv;
@@ -47,9 +46,7 @@ pub use command::{
     InvocationInputContract, InvocationInputField, InvocationInputType, MatchedCommand,
 };
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
-pub use daemon_rpc::{
-    resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
-};
+pub use daemon_rpc::{resolve_daemon_socket_path, DaemonRpcClient, RpcError};
 pub use events::{RuntimeEventType, StorageClass};
 pub use expression::{
     compile_and_render, compile_condition_for, compile_expression, compile_expression_for,
@@ -67,11 +64,8 @@ pub use hooks_loader::{
     HookCompilationError, HookContextSchema, HookDefinition, HookLayer, HookSources,
 };
 pub use lillux::crypto::SigningKey;
-pub use paths::{
-    safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,
-};
+pub use paths::AI_DIR;
 pub use progress::{ProgressEvent, StatusEvent};
 pub use provider_snapshot::ResolvedProviderSnapshot;
 pub use resolver::{resolve_command, ResolveError, ResolvedCommand};
 pub use ryeos_engine::contracts::ThreadTerminalStatus;
-pub use transcript::{KnowledgeRenderOptions, Transcript};

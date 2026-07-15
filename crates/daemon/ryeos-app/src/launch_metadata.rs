@@ -39,10 +39,9 @@ pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 /// working dir is an ephemeral CAS checkout and fold-back skips
 /// `state/` and dotfile paths.
 ///
-/// `ryeos_runtime::thread_state_dir` is the project-relative path
-/// used by tool subprocesses for transcripts/knowledge (which DO
-/// fold back into CAS). This helper is the daemon-side counterpart
-/// for state that must NOT fold back.
+/// Runtime-specific transcript writers own any project-relative output that
+/// should fold back into CAS. This helper is only for daemon state that must
+/// remain outside that fold-back boundary.
 ///
 /// `RuntimeLaunchMetadata` and the resume-attempts counter both live
 /// in `runtime_db.thread_runtime` — the daemon's runtime ledger,
@@ -105,6 +104,12 @@ pub struct RuntimeLaunchMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_context: Option<ResumeContext>,
 
+    /// Immutable source identity for a continuation runtime seed. Present only
+    /// while/after a successor is created from a settled source and used by
+    /// startup reconciliation to reject thread-id collisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_source_thread_id: Option<String>,
+
     /// Validated parent execution seed used when a detached follow child is
     /// admitted later, after the live callback context is gone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +143,7 @@ impl Default for RuntimeLaunchMetadata {
             native_resume: None,
             checkpoint_dir: None,
             resume_context: None,
+            continuation_source_thread_id: None,
             follow_parent_context: None,
             follow_launch_window: None,
         }
@@ -278,6 +284,80 @@ impl ResumeContext {
             EffectivePrincipal::Delegated(d) => Some(d.caller_fingerprint.clone()),
         }
     }
+
+    /// Snapshot that can reconstruct this project as a fresh, non-lineage
+    /// workspace. A locally pinned snapshot wins; a pushed-root snapshot is an
+    /// equivalent immutable source when a borrowed child must not inherit the
+    /// parent's pushed-head ownership semantics.
+    pub fn durable_project_snapshot_hash(&self) -> Option<&str> {
+        self.original_snapshot_hash.as_deref().or_else(|| {
+            self.original_pushed_head_ref
+                .as_ref()
+                .map(|pinned| pinned.snapshot_hash.as_str())
+        })
+    }
+
+    /// Canonical project identity persisted into authoritative thread
+    /// snapshots. This deliberately distinguishes every ProjectContext shape:
+    /// local paths retain their path attribution and optional immutable launch
+    /// pin, while remote/reference contexts must resolve to an immutable CAS
+    /// snapshot before a continuation can be committed.
+    pub(crate) fn authoritative_project_identity(
+        &self,
+    ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
+        match &self.project_context {
+            ProjectContext::None => {
+                if self.durable_project_snapshot_hash().is_some() {
+                    anyhow::bail!("project_context none contradicts a durable project snapshot");
+                }
+                Ok((None, None))
+            }
+            ProjectContext::LocalPath { path } => {
+                if self.original_pushed_head_ref.is_some() {
+                    anyhow::bail!(
+                        "local-path project context contradicts pushed-head project identity"
+                    );
+                }
+                Ok((Some(path.clone()), self.original_snapshot_hash.clone()))
+            }
+            ProjectContext::SnapshotHash { hash } => {
+                for pinned in [
+                    self.original_snapshot_hash.as_deref(),
+                    self.original_pushed_head_ref
+                        .as_ref()
+                        .map(|pushed| pushed.snapshot_hash.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if pinned != hash.as_str() {
+                        anyhow::bail!(
+                            "snapshot project context {hash} contradicts durable launch pin {pinned}"
+                        );
+                    }
+                }
+                Ok((None, Some(hash.clone())))
+            }
+            ProjectContext::ProjectRef { .. } => {
+                let original = self.original_snapshot_hash.as_deref();
+                let pushed = self
+                    .original_pushed_head_ref
+                    .as_ref()
+                    .map(|pushed| pushed.snapshot_hash.as_str());
+                if let (Some(original), Some(pushed)) = (original, pushed) {
+                    if original != pushed {
+                        anyhow::bail!(
+                            "project-ref continuation has contradictory immutable snapshot pins"
+                        );
+                    }
+                }
+                let pinned = original.or(pushed).ok_or_else(|| {
+                    anyhow::anyhow!("project-ref continuation has no immutable resolved snapshot pin")
+                })?;
+                Ok((None, Some(pinned.to_owned())))
+            }
+        }
+    }
 }
 
 impl RuntimeLaunchMetadata {
@@ -303,6 +383,7 @@ impl RuntimeLaunchMetadata {
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
+            continuation_source_thread_id: None,
             follow_parent_context: None,
             follow_launch_window: None,
         }
@@ -317,6 +398,7 @@ impl RuntimeLaunchMetadata {
             && self.native_resume.is_none()
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
+            && self.continuation_source_thread_id.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
     }
@@ -342,6 +424,11 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    pub fn with_continuation_source(mut self, source_thread_id: impl Into<String>) -> Self {
+        self.continuation_source_thread_id = Some(source_thread_id.into());
+        self
+    }
+
     /// True iff the spec declared `native_resume`. NOTE: this is a
     /// pure factual check on the persisted spec — actual reconciler
     /// eligibility additionally requires `resume_context.is_some()`,
@@ -360,6 +447,7 @@ mod tests {
     fn empty_spec() -> PlanSubprocessSpec {
         PlanSubprocessSpec {
             cmd: "/bin/true".to_string(),
+            verified_command: None,
             args: Vec::new(),
             cwd: None,
             env: HashMap::new(),
@@ -380,6 +468,26 @@ mod tests {
     fn local_path_ctx() -> ProjectContext {
         ProjectContext::LocalPath {
             path: PathBuf::from("/tmp/proj"),
+        }
+    }
+
+    fn resume_context(project_context: ProjectContext) -> ResumeContext {
+        ResumeContext {
+            kind: "tool_run".to_string(),
+            item_ref: "tool:test/run".to_string(),
+            launch_mode: "detached".to_string(),
+            parameters: serde_json::json!({}),
+            project_context,
+            original_snapshot_hash: None,
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            requested_by: local_principal(),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            executor_ref: Some("native:test".to_string()),
+            runtime_ref: None,
         }
     }
 
@@ -422,6 +530,7 @@ mod tests {
             native_resume: None,
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
+            continuation_source_thread_id: None,
             follow_parent_context: None,
             follow_launch_window: None,
         };
@@ -586,6 +695,60 @@ mod tests {
         assert_eq!(
             back_ctx.effective_caps,
             vec!["ryeos.execute.tool.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn authoritative_project_identity_none_is_explicitly_empty() {
+        let context = resume_context(ProjectContext::None);
+        assert_eq!(context.authoritative_project_identity().unwrap(), (None, None));
+
+        let mut contradictory = context;
+        contradictory.original_snapshot_hash = Some("a".repeat(64));
+        assert!(contradictory.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn authoritative_project_identity_local_path_carries_path_and_optional_pin() {
+        let mut context = resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        context.original_snapshot_hash = Some("b".repeat(64));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (
+                Some(PathBuf::from("/work/project")),
+                Some("b".repeat(64))
+            )
+        );
+    }
+
+    #[test]
+    fn authoritative_project_identity_snapshot_hash_is_the_pin() {
+        let hash = "c".repeat(64);
+        let context = resume_context(ProjectContext::SnapshotHash { hash: hash.clone() });
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some(hash))
+        );
+
+        let mut contradictory = context;
+        contradictory.original_snapshot_hash = Some("d".repeat(64));
+        assert!(contradictory.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn authoritative_project_identity_project_ref_requires_resolved_pin() {
+        let mut context = resume_context(ProjectContext::ProjectRef {
+            principal: "fp:test".to_string(),
+            ref_name: "projects/demo".to_string(),
+        });
+        assert!(context.authoritative_project_identity().is_err());
+
+        context.original_snapshot_hash = Some("e".repeat(64));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some("e".repeat(64)))
         );
     }
 }

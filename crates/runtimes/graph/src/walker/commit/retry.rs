@@ -15,6 +15,7 @@ impl Walker {
             guard,
             inputs,
             execution,
+            cache: _,
         } = input;
         let RetryScheduledOutcome {
             item_id,
@@ -85,7 +86,7 @@ impl Walker {
         )
         .await;
         self.fire_graph_hooks(
-            RuntimeEventType::GraphStepCompleted,
+            self.graph_step_completed_hook_occurrence(graph_run_id, step, current),
             self.step_hook_context(
                 graph_run_id,
                 current,

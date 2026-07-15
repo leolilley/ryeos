@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:9258c148b3622f90fce35a645e9043091bd5edff106302d65505adea24042142:z0ElZ4vmdjR0RDlXMAFMnNq2b35Ih/jt/ZwMQF/vmsiTbQBUw0VPQrq3UFungB7cpnlTkZdmY4oF5e0pUybfDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:a3c4dcc81917899f97fda7e31db093e199391a751a5946eb4f9b4567f05d59e7:gMO6zLxJzFd3EuT142WqJpUc+LuYT2TdxwaGTOxsIVGFnZJ8lLbFlaD/xUL0J8jPxnLcf3Fk/HvbZ/qlaDXBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "revoke-session"
@@ -9,7 +9,7 @@ description: "Revoke one session token."
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "revoke-session"
   input_data: "{params_json}"
   timeout_secs: 15

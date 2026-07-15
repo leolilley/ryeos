@@ -19,6 +19,7 @@ mod resume;
 mod runner;
 
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
+use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 
 /// Compile the directive-owned stimulus field and derive its exact input-key
@@ -209,7 +210,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
         envelope.roots.bundle_roots.clone(),
-        &envelope.roots.operator_trusted_keys_dir,
+        &envelope.roots.node_trusted_keys_dir,
     );
 
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
@@ -326,7 +327,10 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         }
 
         if let Err(e) = callback
-            .append_event("thread_continued", json!({"previous_thread_id": resume_id}))
+            .append_runtime_event(
+                RuntimeEventType::ThreadContinued,
+                json!({"previous_thread_id": resume_id}),
+            )
             .await
         {
             tracing::warn!(
@@ -377,6 +381,8 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 execution,
                 model_name,
                 thread_id: envelope.thread_id.clone(),
+                definition_ref: envelope.resolution.root.resolved_ref.clone(),
+                definition_hash: envelope.resolution.root.raw_content_digest.clone(),
                 hooks,
                 outputs: bootstrap_output.config.outputs,
                 return_nudge: bootstrap_output.config.return_nudge,
@@ -465,6 +471,8 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             execution,
             model_name,
             thread_id: envelope.thread_id.clone(),
+            definition_ref: envelope.resolution.root.resolved_ref.clone(),
+            definition_hash: envelope.resolution.root.raw_content_digest.clone(),
             hooks,
             outputs: bootstrap_output.config.outputs,
             return_nudge: bootstrap_output.config.return_nudge,

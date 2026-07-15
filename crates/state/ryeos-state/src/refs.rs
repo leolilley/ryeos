@@ -119,7 +119,7 @@ pub fn write_signed_ref(
     path: &Path,
     mut signed_ref: SignedRef,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
+) -> lillux::AtomicMutationResult<()> {
     // Compute signature over the ref without the signature field
     let unsigned = signed_ref.without_signature();
     let canonical = lillux::canonical_json(&unsigned);
@@ -127,7 +127,9 @@ pub fn write_signed_ref(
     signed_ref.signature = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
 
     // Validate the ref
-    signed_ref.validate()?;
+    signed_ref
+        .validate()
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
 
     // Serialize to canonical JSON
     let value = signed_ref.to_value();
@@ -135,13 +137,13 @@ pub fn write_signed_ref(
 
     // Create parent directories
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).context("failed to create parent directories")?;
+        fs::create_dir_all(parent)
+            .context("failed to create parent directories")
+            .map_err(lillux::AtomicMutationError::BeforeCommit)?;
     }
 
     // Atomic write
-    lillux::atomic_write(path, canonical.as_bytes()).context("failed to write signed ref")?;
-
-    Ok(())
+    lillux::atomic_write(path, canonical.as_bytes())
 }
 
 /// Read a signed ref and verify its signature against a trust store.
@@ -204,6 +206,31 @@ pub fn verify_signed_ref(
 /// Trust store — map of fingerprint → public key.
 pub type TrustStore = std::collections::HashMap<String, lillux::crypto::VerifyingKey>;
 
+/// Outcome of publishing a mutable signed ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefWriteOutcome {
+    Durable,
+    DurabilityUncertain(String),
+}
+
+/// Preserve the atomic mutation phase while translating a ref publication to
+/// the state layer's ordinary error surface. A durability-barrier failure is a
+/// committed outcome and must never trigger rollback of the state it names.
+pub fn classify_ref_write(
+    result: lillux::AtomicMutationResult<()>,
+    operation: &'static str,
+) -> anyhow::Result<RefWriteOutcome> {
+    match result {
+        Ok(()) => Ok(RefWriteOutcome::Durable),
+        Err(lillux::AtomicMutationError::BeforeCommit(error)) => Err(error.context(operation)),
+        Err(lillux::AtomicMutationError::DurabilityUncertain(error)) => {
+            Ok(RefWriteOutcome::DurabilityUncertain(format!(
+                "{operation}: {error:#}"
+            )))
+        }
+    }
+}
+
 fn is_canonical_hash(hash: &str) -> bool {
     lillux::valid_hash(hash) && !hash.bytes().any(|b| b.is_ascii_uppercase())
 }
@@ -235,7 +262,7 @@ pub fn write_project_head_ref(
     project_hash: &str,
     project_snapshot_hash: &str,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
+) -> lillux::AtomicMutationResult<()> {
     let ref_path = format!("projects/{}/{}", principal_key, project_hash);
     let signed_ref = SignedRef::new(
         ref_path.clone(),
@@ -250,10 +277,11 @@ pub fn write_project_head_ref(
 /// Read a principal-scoped project head ref. Returns the target hash
 /// (project snapshot hash), or `None` if no HEAD exists for this
 /// principal + project combination.
-pub fn read_project_head_ref(
+pub fn read_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
     project_hash: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<String>> {
     let head_path = refs_root
         .join(format!("projects/{}", principal_key))
@@ -262,7 +290,14 @@ pub fn read_project_head_ref(
     if !head_path.exists() {
         return Ok(None);
     }
-    let signed_ref = read_signed_ref(&head_path)?;
+    let signed_ref = read_verified_ref(&head_path, trust_store)?;
+    let expected_ref_path = format!("projects/{principal_key}/{project_hash}");
+    if signed_ref.ref_path != expected_ref_path {
+        anyhow::bail!(
+            "project head ref_path mismatch: expected {expected_ref_path}, got {}",
+            signed_ref.ref_path
+        );
+    }
     Ok(Some(signed_ref.target_hash))
 }
 
@@ -341,31 +376,33 @@ impl Drop for ProjectHeadLock {
 /// This is the project equivalent of advancing a chain head. Use it in
 /// the fold-back path to prevent lost updates when multiple executions
 /// race on the same project.
-pub fn advance_project_head_ref(
+pub fn advance_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
     project_hash: &str,
     new_snapshot_hash: &str,
     expected_current_hash: &str,
+    trust_store: &TrustStore,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
-    let current =
-        read_project_head_ref(refs_root, principal_key, project_hash)?.ok_or_else(|| {
-            anyhow!(
+) -> lillux::AtomicMutationResult<()> {
+    let current = read_verified_project_head_ref(refs_root, principal_key, project_hash, trust_store)
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?
+        .ok_or_else(|| {
+            lillux::AtomicMutationError::BeforeCommit(anyhow!(
                 "no project head ref for principal/project {}/{}",
                 principal_key,
                 project_hash
-            )
+            ))
         })?;
 
     if current != expected_current_hash {
-        anyhow::bail!(
+        return Err(lillux::AtomicMutationError::BeforeCommit(anyhow!(
             "project head conflict for principal/project {}/{}: expected {}, got {}",
             principal_key,
             project_hash,
             expected_current_hash,
             current
-        );
+        )));
     }
 
     write_project_head_ref(
@@ -373,6 +410,26 @@ pub fn advance_project_head_ref(
         principal_key,
         project_hash,
         new_snapshot_hash,
+        signer,
+    )
+}
+
+pub fn advance_project_head_ref(
+    refs_root: &Path,
+    principal_key: &str,
+    project_hash: &str,
+    new_snapshot_hash: &str,
+    expected_current_hash: &str,
+    signer: &dyn Signer,
+) -> lillux::AtomicMutationResult<()> {
+    let trust_store = crate::signer::trust_store_for_signer(signer);
+    advance_verified_project_head_ref(
+        refs_root,
+        principal_key,
+        project_hash,
+        new_snapshot_hash,
+        expected_current_hash,
+        &trust_store,
         signer,
     )
 }
@@ -428,11 +485,14 @@ pub fn write_generic_head_ref(
     name: &str,
     target_hash: &str,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
+) -> lillux::AtomicMutationResult<()> {
     if !is_canonical_hash(target_hash) {
-        anyhow::bail!("invalid generic head target hash: {target_hash}");
+        return Err(lillux::AtomicMutationError::BeforeCommit(anyhow!(
+            "invalid generic head target hash: {target_hash}"
+        )));
     }
-    let ref_path = generic_head_ref_path(namespace, name)?;
+    let ref_path = generic_head_ref_path(namespace, name)
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
     let signed_ref = SignedRef::new(
         ref_path.clone(),
         target_hash.to_string(),
@@ -444,16 +504,17 @@ pub fn write_generic_head_ref(
 }
 
 /// Read a namespace-neutral signed head.
-pub fn read_generic_head_ref(
+pub fn read_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,
     name: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<SignedRef>> {
     let head_path = generic_head_file_path(refs_root, namespace, name)?;
     if !head_path.exists() {
         return Ok(None);
     }
-    let signed_ref = read_signed_ref(&head_path)?;
+    let signed_ref = read_verified_ref(&head_path, trust_store)?;
     let expected_ref_path = generic_head_ref_path(namespace, name)?;
     if signed_ref.ref_path != expected_ref_path {
         anyhow::bail!(
@@ -483,35 +544,33 @@ pub fn remove_generic_head_ref(
 /// Advance a namespace-neutral signed head with compare-and-swap semantics.
 ///
 /// `expected_current_hash = None` means the head must not exist yet.
-pub fn advance_generic_head_ref(
+pub fn advance_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,
     name: &str,
     new_target_hash: &str,
     expected_current_hash: Option<&str>,
+    trust_store: &TrustStore,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
-    let current = read_generic_head_ref(refs_root, namespace, name)?;
+) -> lillux::AtomicMutationResult<()> {
+    let current = read_verified_generic_head_ref(refs_root, namespace, name, trust_store)
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
     match (current.as_ref(), expected_current_hash) {
         (None, None) => {}
-        (Some(_), None) => anyhow::bail!(
+        (Some(_), None) => return Err(lillux::AtomicMutationError::BeforeCommit(anyhow!(
             "generic head conflict for {}/{}: expected no current head",
-            namespace,
-            name
-        ),
-        (None, Some(expected)) => anyhow::bail!(
+            namespace, name
+        ))),
+        (None, Some(expected)) => return Err(lillux::AtomicMutationError::BeforeCommit(anyhow!(
             "generic head conflict for {}/{}: expected {}, got no current head",
-            namespace,
-            name,
-            expected
-        ),
+            namespace, name, expected
+        ))),
         (Some(current), Some(expected)) if current.target_hash == expected => {}
-        (Some(current), Some(expected)) => anyhow::bail!(
-            "generic head conflict for {}/{}: expected {}, got {}",
-            namespace,
-            name,
-            expected,
-            current.target_hash
+        (Some(current), Some(expected)) => return Err(
+            lillux::AtomicMutationError::BeforeCommit(anyhow!(
+                "generic head conflict for {}/{}: expected {}, got {}",
+                namespace, name, expected, current.target_hash
+            )),
         ),
     }
 
@@ -519,9 +578,10 @@ pub fn advance_generic_head_ref(
 }
 
 /// List namespace-neutral signed heads beneath `refs/generic/<prefix>`.
-pub fn list_generic_head_refs(
+pub fn list_verified_generic_head_refs(
     refs_root: &Path,
     prefix: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Vec<GenericHeadRef>> {
     if !prefix.is_empty() {
         validate_relative_ref_component_path("head prefix", prefix)?;
@@ -536,7 +596,7 @@ pub fn list_generic_head_refs(
     }
 
     let mut found = Vec::new();
-    collect_generic_head_refs(refs_root, &root, &mut found)?;
+    collect_generic_head_refs(refs_root, &root, trust_store, &mut found)?;
     found.sort_by(|a, b| a.ref_path.cmp(&b.ref_path));
     Ok(found)
 }
@@ -544,6 +604,7 @@ pub fn list_generic_head_refs(
 fn collect_generic_head_refs(
     refs_root: &Path,
     dir: &Path,
+    trust_store: &TrustStore,
     found: &mut Vec<GenericHeadRef>,
 ) -> anyhow::Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
@@ -553,13 +614,13 @@ fn collect_generic_head_refs(
             .file_type()
             .context("failed to inspect generic ref directory entry")?;
         if file_type.is_dir() {
-            collect_generic_head_refs(refs_root, &path, found)?;
+            collect_generic_head_refs(refs_root, &path, trust_store, found)?;
             continue;
         }
         if !file_type.is_file() || entry.file_name() != "head" {
             continue;
         }
-        let signed_ref = read_signed_ref(&path)
+        let signed_ref = read_verified_ref(&path, trust_store)
             .with_context(|| format!("failed to read generic head {}", path.display()))?;
         let rel = path
             .strip_prefix(refs_root.join("generic"))
@@ -603,7 +664,7 @@ pub fn write_deployed_project_ref(
     project_hash: &str,
     project_snapshot_hash: &str,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
+) -> lillux::AtomicMutationResult<()> {
     let ref_path = format!("deployed/projects/{}", project_hash);
     let signed_ref = SignedRef::new(
         ref_path.clone(),
@@ -616,9 +677,10 @@ pub fn write_deployed_project_ref(
 }
 
 /// Read the node-level deployed ref for a live project path.
-pub fn read_deployed_project_ref(
+pub fn read_verified_deployed_project_ref(
     refs_root: &Path,
     project_hash: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<SignedRef>> {
     let head_path = refs_root
         .join("deployed/projects")
@@ -627,36 +689,69 @@ pub fn read_deployed_project_ref(
     if !head_path.exists() {
         return Ok(None);
     }
-    Ok(Some(read_signed_ref(&head_path)?))
+    let signed_ref = read_verified_ref(&head_path, trust_store)?;
+    let expected_ref_path = format!("deployed/projects/{project_hash}");
+    if signed_ref.ref_path != expected_ref_path {
+        anyhow::bail!(
+            "deployed project ref_path mismatch: expected {expected_ref_path}, got {}",
+            signed_ref.ref_path
+        );
+    }
+    Ok(Some(signed_ref))
 }
 
 /// Advance the node-level deployed ref with compare-and-swap.
+pub fn advance_verified_deployed_project_ref(
+    refs_root: &Path,
+    project_hash: &str,
+    new_snapshot_hash: &str,
+    expected_current_hash: &str,
+    trust_store: &TrustStore,
+    signer: &dyn Signer,
+) -> lillux::AtomicMutationResult<()> {
+    let current = read_verified_deployed_project_ref(refs_root, project_hash, trust_store)
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?
+        .ok_or_else(|| {
+            lillux::AtomicMutationError::BeforeCommit(anyhow!(
+                "no deployed project ref for project {}",
+                project_hash
+            ))
+        })?;
+
+    if current.target_hash != expected_current_hash {
+        return Err(lillux::AtomicMutationError::BeforeCommit(anyhow!(
+            "deployed project conflict for project {}: expected {}, got {}",
+            project_hash,
+            expected_current_hash,
+            current.target_hash
+        )));
+    }
+
+    write_deployed_project_ref(refs_root, project_hash, new_snapshot_hash, signer)
+}
+
 pub fn advance_deployed_project_ref(
     refs_root: &Path,
     project_hash: &str,
     new_snapshot_hash: &str,
     expected_current_hash: &str,
     signer: &dyn Signer,
-) -> anyhow::Result<()> {
-    let current = read_deployed_project_ref(refs_root, project_hash)?
-        .ok_or_else(|| anyhow!("no deployed project ref for project {}", project_hash))?;
-
-    if current.target_hash != expected_current_hash {
-        anyhow::bail!(
-            "deployed project conflict for project {}: expected {}, got {}",
-            project_hash,
-            expected_current_hash,
-            current.target_hash
-        );
-    }
-
-    write_deployed_project_ref(refs_root, project_hash, new_snapshot_hash, signer)
+) -> lillux::AtomicMutationResult<()> {
+    let trust_store = crate::signer::trust_store_for_signer(signer);
+    advance_verified_deployed_project_ref(
+        refs_root,
+        project_hash,
+        new_snapshot_hash,
+        expected_current_hash,
+        &trust_store,
+        signer,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signer::TestSigner;
+    use crate::signer::{trust_store_for_signer, TestSigner};
 
     fn make_signed_ref() -> SignedRef {
         SignedRef::new(
@@ -773,42 +868,51 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let refs_root = tempdir.path().join("refs");
         let signer = TestSigner::default();
+        let trust_store = trust_store_for_signer(&signer);
         let first = "11".repeat(32);
         let second = "22".repeat(32);
 
-        advance_generic_head_ref(
+        advance_verified_generic_head_ref(
             &refs_root,
             "admissions/policy-a",
             "subject-a",
             &first,
             None,
+            &trust_store,
             &signer,
         )
         .unwrap();
 
-        let read = read_generic_head_ref(&refs_root, "admissions/policy-a", "subject-a")
-            .unwrap()
-            .unwrap();
+        let read = read_verified_generic_head_ref(
+            &refs_root,
+            "admissions/policy-a",
+            "subject-a",
+            &trust_store,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(read.ref_path, "admissions/policy-a/subject-a/head");
         assert_eq!(read.target_hash, first);
 
-        let conflict = advance_generic_head_ref(
+        let conflict = advance_verified_generic_head_ref(
             &refs_root,
             "admissions/policy-a",
             "subject-a",
             &second,
             Some(&"33".repeat(32)),
+            &trust_store,
             &signer,
         )
         .unwrap_err();
         assert!(conflict.to_string().contains("generic head conflict"));
 
-        advance_generic_head_ref(
+        advance_verified_generic_head_ref(
             &refs_root,
             "admissions/policy-a",
             "subject-a",
             &second,
             Some(&first),
+            &trust_store,
             &signer,
         )
         .unwrap();
@@ -822,13 +926,14 @@ mod tests {
         )
         .unwrap();
 
-        let admissions = list_generic_head_refs(&refs_root, "admissions").unwrap();
+        let admissions =
+            list_verified_generic_head_refs(&refs_root, "admissions", &trust_store).unwrap();
         assert_eq!(admissions.len(), 1);
         assert_eq!(admissions[0].namespace, "admissions");
         assert_eq!(admissions[0].name, "policy-a/subject-a");
         assert_eq!(admissions[0].target_hash, second);
 
-        let all = list_generic_head_refs(&refs_root, "").unwrap();
+        let all = list_verified_generic_head_refs(&refs_root, "", &trust_store).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].ref_path, "admissions/policy-a/subject-a/head");
         assert_eq!(all[1].ref_path, "collections/accepted/root-b/head");
@@ -839,13 +944,14 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let refs_root = tempdir.path().join("refs");
         let signer = TestSigner::default();
+        let trust_store = trust_store_for_signer(&signer);
         let target = "11".repeat(32);
 
         assert!(write_generic_head_ref(&refs_root, "../escape", "name", &target, &signer).is_err());
         assert!(
             write_generic_head_ref(&refs_root, "namespace", "../escape", &target, &signer).is_err()
         );
-        assert!(list_generic_head_refs(&refs_root, "../escape").is_err());
+        assert!(list_verified_generic_head_refs(&refs_root, "../escape", &trust_store).is_err());
     }
 
     #[test]

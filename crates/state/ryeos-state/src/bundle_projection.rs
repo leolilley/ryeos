@@ -345,7 +345,17 @@ fn validate_projection_name(value: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
-    use crate::signer::TestSigner;
+    use crate::signer::{trust_store_for_signer, TestSigner};
+
+    fn append_test_bundle_event(
+        cas_root: &Path,
+        refs_root: &Path,
+        request: BundleEventAppendRequest,
+        signer: &TestSigner,
+    ) -> anyhow::Result<crate::BundleEventAppendResult> {
+        let trust_store = trust_store_for_signer(signer);
+        append_bundle_event(cas_root, refs_root, request, signer, &trust_store)
+    }
 
     fn append_request(chain_id: &str, event_type: &str) -> BundleEventAppendRequest {
         BundleEventAppendRequest {
@@ -373,7 +383,7 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
 
-        let first = append_bundle_event(
+        let first = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -382,13 +392,15 @@ mod tests {
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        append_test_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
 
+        let trust_store = trust_store_for_signer(&signer);
         let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
+            &trust_store,
         )
         .unwrap();
         let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
@@ -457,7 +469,7 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended = append_bundle_event(
+        let appended = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -496,7 +508,7 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
 
-        let first = append_bundle_event(
+        let first = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -505,12 +517,14 @@ mod tests {
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        append_test_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        let trust_store = trust_store_for_signer(&signer);
         let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
+            &trust_store,
         )
         .unwrap();
 

@@ -57,6 +57,70 @@ pub struct DispatchActionRequest {
     pub thread_id: String,
     pub project_path: String,
     pub action: ActionPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_dispatch: Option<HookDispatchIdentity>,
+}
+
+/// Stable logical occurrence of one runtime-hook event.
+///
+/// The daemon namespaces this caller-supplied coordinate under authoritative
+/// chain and execution identity before using it for idempotency. Keeping the
+/// finite event vocabulary typed prevents an arbitrary string from silently
+/// creating a second ledger namespace for the same lifecycle boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookDispatchOccurrence {
+    GraphStarted {
+        graph_run_id: String,
+        definition_ref: String,
+        definition_hash: String,
+    },
+    GraphStepCompleted {
+        graph_run_id: String,
+        definition_ref: String,
+        definition_hash: String,
+        step: u32,
+        node: String,
+    },
+    GraphCompleted {
+        graph_run_id: String,
+        definition_ref: String,
+        definition_hash: String,
+        steps: u32,
+    },
+    DirectiveAfterStep {
+        definition_ref: String,
+        definition_hash: String,
+        turn: u32,
+    },
+    DirectiveContinuation {
+        definition_ref: String,
+        definition_hash: String,
+        turn: u32,
+    },
+}
+
+impl HookDispatchOccurrence {
+    pub const fn event(&self) -> &'static str {
+        match self {
+            Self::GraphStarted { .. } => "graph_started",
+            Self::GraphStepCompleted { .. } => "graph_step_completed",
+            Self::GraphCompleted { .. } => "graph_completed",
+            Self::DirectiveAfterStep { .. } => "after_step",
+            Self::DirectiveContinuation { .. } => "continuation",
+        }
+    }
+}
+
+/// Exact hook-dispatch identity attached by the shared evaluator after it has
+/// selected a compiled hook and validated the event context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookDispatchIdentity {
+    pub occurrence: HookDispatchOccurrence,
+    pub hook_id: String,
+    pub layer: crate::hooks_loader::HookLayer,
+    pub context_hash: String,
 }
 
 /// A graph node's request to launch a detached follow CHILD and suspend the
@@ -110,17 +174,13 @@ pub struct FollowChildSpec {
 ///
 /// `cost` is carried as raw JSON so the runtime callback wire does not couple
 /// to a cross-crate cost type; the daemon maps it into its own cost record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalCompletion {
     pub status: crate::ThreadTerminalStatus,
-    #[serde(default)]
     pub outcome_code: Option<String>,
-    #[serde(default)]
     pub result: Option<Value>,
-    #[serde(default)]
     pub error: Option<Value>,
-    #[serde(default)]
     pub cost: Option<Value>,
     /// The runtime's `RuntimeResult.outputs` — its structured return value,
     /// distinct from the terminal `result` (which some runtimes set to a sentinel
@@ -129,6 +189,40 @@ pub struct TerminalCompletion {
     pub outputs: Value,
     /// The runtime's `RuntimeResult.warnings` accumulated before finalize.
     pub warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct RequiredNullable<T>(Option<T>);
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalCompletionWire {
+    status: crate::ThreadTerminalStatus,
+    outcome_code: RequiredNullable<String>,
+    result: RequiredNullable<Value>,
+    error: RequiredNullable<Value>,
+    cost: RequiredNullable<Value>,
+    outputs: Value,
+    warnings: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for TerminalCompletion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TerminalCompletionWire::deserialize(deserializer)?;
+        Ok(Self {
+            status: wire.status,
+            outcome_code: wire.outcome_code.0,
+            result: wire.result.0,
+            error: wire.error.0,
+            cost: wire.cost.0,
+            outputs: wire.outputs,
+            warnings: wire.warnings,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,6 +592,65 @@ mod tests {
     }
 
     #[test]
+    fn hook_dispatch_occurrence_uses_closed_tagged_wire() {
+        let occurrence = HookDispatchOccurrence::GraphStepCompleted {
+            graph_run_id: "graph-run-1".to_string(),
+            definition_ref: "graph:test/workflow".to_string(),
+            definition_hash: "definition-hash".to_string(),
+            step: 9,
+            node: "work".to_string(),
+        };
+        let wire = serde_json::to_value(&occurrence).unwrap();
+        assert_eq!(wire["kind"], "graph_step_completed");
+        assert_eq!(wire["graph_run_id"], "graph-run-1");
+        assert_eq!(wire["step"], 9);
+        assert_eq!(occurrence.event(), "graph_step_completed");
+
+        assert!(serde_json::from_value::<HookDispatchOccurrence>(json!({
+            "kind": "graph_step_finished",
+            "graph_run_id": "graph-run-1",
+            "step": 9,
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<HookDispatchOccurrence>(json!({
+            "kind": "directive_after_step",
+            "turn": 2,
+            "legacy_event": "after_step",
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn dispatch_action_hook_identity_round_trips_exactly() {
+        let request = DispatchActionRequest {
+            thread_id: "T-hook".to_string(),
+            project_path: "/project".to_string(),
+            action: ActionPayload {
+                item_id: "tool:test/hook".to_string(),
+                params: json!({"audit": true}),
+                thread: "inline".to_string(),
+                call: None,
+                facets: None,
+                launch_window: None,
+            },
+            hook_dispatch: Some(HookDispatchIdentity {
+                occurrence: HookDispatchOccurrence::DirectiveContinuation {
+                    definition_ref: "directive:test/runner".to_string(),
+                    definition_hash: "definition-hash".to_string(),
+                    turn: 3,
+                },
+                hook_id: "continuation-audit".to_string(),
+                layer: crate::hooks_loader::HookLayer::Operator,
+                context_hash: "context-digest".to_string(),
+            }),
+        };
+
+        let wire = serde_json::to_value(&request).unwrap();
+        let round_trip: DispatchActionRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(round_trip.hook_dispatch, request.hook_dispatch);
+    }
+
+    #[test]
     fn terminal_completion_serializes_outputs_and_warnings() {
         // The UDS client serializes the WHOLE completion (anti-drift), so the wire
         // must carry outputs + warnings — a hand-listed param set previously
@@ -517,8 +670,33 @@ mod tests {
     }
 
     #[test]
-    fn terminal_completion_requires_outputs_and_warnings() {
-        let wire = json!({ "status": "completed" });
-        assert!(serde_json::from_value::<TerminalCompletion>(wire).is_err());
+    fn terminal_completion_requires_every_exact_wire_key() {
+        let complete = json!({
+            "status": "completed",
+            "outcome_code": null,
+            "result": null,
+            "error": null,
+            "cost": null,
+            "outputs": null,
+            "warnings": [],
+        });
+        assert!(serde_json::from_value::<TerminalCompletion>(complete.clone()).is_ok());
+
+        for key in [
+            "status",
+            "outcome_code",
+            "result",
+            "error",
+            "cost",
+            "outputs",
+            "warnings",
+        ] {
+            let mut incomplete = complete.clone();
+            incomplete.as_object_mut().unwrap().remove(key);
+            assert!(
+                serde_json::from_value::<TerminalCompletion>(incomplete).is_err(),
+                "omitting `{key}` must violate the terminal completion wire contract"
+            );
+        }
     }
 }

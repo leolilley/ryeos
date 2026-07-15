@@ -54,8 +54,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let (cas, refs_root) = state.cas_and_refs()?;
 
     let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint);
-    let pushed_head =
-        ryeos_state::refs::read_project_head_ref(&refs_root, principal_key, &project_hash)?;
+    let pushed_head = state.state_store.with_state_db(|db| {
+        ryeos_state::refs::read_verified_project_head_ref(
+            &refs_root,
+            principal_key,
+            &project_hash,
+            db.trust_store(),
+        )
+    })?;
     if pushed_head.as_deref() != Some(req.snapshot_hash.as_str()) {
         anyhow::bail!(
             "project.apply-snapshot refused: caller's staged HEAD for project '{}' is {:?}, not requested snapshot {}",
@@ -94,7 +100,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         Some(state.ignore_matcher.as_ref()),
     )?;
 
-    let current_ref = ryeos_state::refs::read_deployed_project_ref(&refs_root, &project_hash)?;
+    let current_ref = state.state_store.with_state_db(|db| {
+        ryeos_state::refs::read_verified_deployed_project_ref(
+            &refs_root,
+            &project_hash,
+            db.trust_store(),
+        )
+    })?;
     let previous_deployed_hash = current_ref.as_ref().map(|r| r.target_hash.clone());
     if !req.force {
         if let Some(expected) = req.expected_deployed_hash.as_deref() {
@@ -160,13 +172,16 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
         let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
         let ref_result = if let Some(ref current) = previous_deployed_hash {
-            ryeos_state::refs::advance_deployed_project_ref(
-                &refs_root,
-                &project_hash,
-                &req.snapshot_hash,
-                current,
-                &signer,
-            )
+            state.state_store.with_state_db(|db| {
+                Ok(ryeos_state::refs::advance_verified_deployed_project_ref(
+                    &refs_root,
+                    &project_hash,
+                    &req.snapshot_hash,
+                    current,
+                    db.trust_store(),
+                    &signer,
+                ))
+            })?
         } else {
             ryeos_state::refs::write_deployed_project_ref(
                 &refs_root,
@@ -175,10 +190,19 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &signer,
             )
         };
-        if let Err(err) = ref_result {
-            deploy_tx.rollback(&deploy_ctx);
-            root_swap.rollback();
-            return Err(err);
+        match ref_result {
+            Ok(()) => {}
+            Err(lillux::AtomicMutationError::BeforeCommit(err)) => {
+                deploy_tx.rollback(&deploy_ctx);
+                root_swap.rollback();
+                return Err(err);
+            }
+            Err(lillux::AtomicMutationError::DurabilityUncertain(err)) => {
+                tracing::warn!(
+                    error = %err,
+                    "deployed project ref is visible but durability is uncertain; preserving committed project activation"
+                );
+            }
         }
 
         let deploy_report = deploy_tx.report.clone();

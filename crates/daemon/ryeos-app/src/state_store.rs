@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -20,11 +21,36 @@ use ryeos_state::UsageSubject;
 use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
-pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
+pub use runtime_db::{
+    CommandRecord, HookDispatchReservation, NewCommandRecord, NewHookDispatch, RuntimeInfo,
+    StopIntent,
+};
 
 mod projection_access;
 
 use projection_access::committed_value;
+
+const MAX_THREAD_ARTIFACT_ITEMS: usize = 512;
+const MAX_THREAD_ARTIFACT_TYPE_BYTES: usize = 1024;
+const MAX_THREAD_ARTIFACT_METADATA_BYTES: usize = 256 * 1024;
+const MAX_THREAD_ARTIFACT_METADATA_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_THREAD_ARTIFACT_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
+const MAX_THREAD_FACET_ITEMS: usize = 128;
+const MAX_THREAD_FACET_KEY_BYTES: usize = 4 * 1024;
+const MAX_THREAD_FACET_VALUE_BYTES: usize = 256 * 1024;
+const MAX_THREAD_FACET_CONTENT_BYTES: usize = 1024 * 1024;
+const MAX_THREAD_FACET_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_THREAD_LIST_ENRICHMENT_THREADS: usize = 2_000;
+const MAX_THREAD_LIST_FACET_ITEMS: usize = 8 * 1024;
+const MAX_THREAD_LIST_FACET_CONTENT_BYTES: usize = 1024 * 1024;
+const MAX_THREAD_LIST_FACET_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
+const MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+/// Exact JSON budget for the response-facing thread result record. The
+/// projection content itself is capped by the 512 KiB ThreadEvent ceiling;
+/// four MiB also covers worst-case JSON escaping of a malformed stored error
+/// converted to a JSON string.
+const MAX_THREAD_RESULT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -46,6 +72,12 @@ pub struct PersistedEventRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_thread_event_hash: Option<String>,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedEventPage {
+    pub events: Vec<PersistedEventRecord>,
+    pub has_more: bool,
 }
 
 pub struct NodeIdentitySigner {
@@ -70,6 +102,10 @@ impl Signer for NodeIdentitySigner {
 
     fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+        self.signing_key.verifying_key()
     }
 }
 
@@ -562,14 +598,14 @@ pub struct ThreadListItem {
 /// mutex and rerunning projection queries for every row.
 #[derive(Debug, Default)]
 pub struct ThreadListEnrichment {
-    pub follow_waiters: Vec<runtime_db::FollowWaiter>,
+    pub follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
     pub facets: HashMap<String, Vec<(String, String)>>,
     pub current_graph_nodes: HashMap<String, (String, u32)>,
 }
 
 #[derive(Debug, Default)]
 pub struct FollowParentListSnapshot {
-    pub waiters: Vec<runtime_db::FollowWaiter>,
+    pub waiters: Vec<runtime_db::FollowWaiterSummary>,
     pub parents: Vec<ThreadListItem>,
 }
 
@@ -636,6 +672,50 @@ pub enum ContinuationOutcome {
     Conflict { successor_thread_id: String },
 }
 
+/// Result of the atomic pre-launch cleanup transition used after child-lineage
+/// admission fails. The store only finalizes when the row is still `created`,
+/// has no attached process identity, and has no launch claim. Callers therefore
+/// never turn a concurrently launching/running child terminal from a stale
+/// status read.
+#[derive(Debug)]
+pub enum FinalizeCreatedUnattachedOutcome {
+    Finalized {
+        persisted: Vec<PersistedEventRecord>,
+        effective: FinalizeThreadRecord,
+    },
+    AlreadyTerminal,
+    NotCurrent {
+        status: String,
+        process_attached: bool,
+        launch_claimed: bool,
+    },
+}
+
+/// Result of an atomic finalize-if-live transition. The terminal check,
+/// shutdown fence, durable-stop dominance, and terminal write all share one
+/// StateStore lock, so a callback winner is observed as `AlreadyTerminal`
+/// rather than surfacing an invalid-transition race.
+#[derive(Debug)]
+pub enum FinalizeIfNonterminalOutcome {
+    Finalized {
+        persisted: Vec<PersistedEventRecord>,
+        effective: FinalizeThreadRecord,
+    },
+    AlreadyTerminal {
+        status: String,
+    },
+    PreservedForShutdown,
+}
+
+/// Result of atomically admitting an execution-owner stop against shutdown and
+/// lifecycle finalization.
+#[derive(Debug)]
+pub enum StopIfAdmissionOpenOutcome {
+    Requested(RuntimeInfo),
+    AlreadyTerminal,
+    PreservedForShutdown,
+}
+
 struct Inner {
     state_db: StateDb,
     runtime_db: runtime_db::RuntimeDb,
@@ -646,6 +726,7 @@ struct Inner {
 pub struct StateStore {
     inner: Mutex<Inner>,
     projection_health: Arc<ThreadProjectionHealth>,
+    process_attachment_admission_open: AtomicBool,
 }
 
 impl std::fmt::Debug for StateStore {
@@ -689,6 +770,26 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         last_chain_seq: 0,
         last_thread_seq: 0,
     }
+}
+
+fn build_continuation_snapshot(
+    thread: &NewThreadRecord,
+    resume: &crate::launch_metadata::ResumeContext,
+) -> Result<ThreadSnapshot> {
+    let (project_root, base_project_snapshot_hash) = resume
+        .authoritative_project_identity()
+        .context("derive continuation successor project identity")?;
+    if thread.project_root.as_deref() != project_root.as_deref() {
+        bail!(
+            "continuation successor project root {:?} contradicts captured launch root {:?}",
+            thread.project_root,
+            project_root
+        );
+    }
+    let mut snapshot = build_snapshot(thread);
+    snapshot.project_root = project_root;
+    snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
+    Ok(snapshot)
 }
 
 fn convert_events(
@@ -791,25 +892,33 @@ fn append_events_locked(
     thread_id: &str,
     events: &[NewEventRecord],
 ) -> Result<Vec<PersistedEventRecord>> {
+    validate_artifact_event_admission(g, thread_id, events)?;
+    validate_facet_event_admission(g, thread_id, events)?;
     let mut records: Vec<Option<PersistedEventRecord>> = vec![None; events.len()];
     let mut durable_events = Vec::new();
+    let mut durable_thread_events = Vec::new();
     let mut durable_indices = Vec::new();
+    let converted_events = convert_events(events, chain_root_id, thread_id);
 
-    for (idx, event) in events.iter().enumerate() {
+    for (idx, (event, thread_event)) in events.iter().zip(converted_events).enumerate() {
+        // Validate before separating ephemeral records: ephemeral events bypass
+        // CAS, but must observe the same complete-event byte ceiling as every
+        // durable writer.
+        thread_event.validate()?;
         if event.storage_class == "ephemeral" {
             records[idx] = Some(ephemeral_record(chain_root_id, thread_id, event));
         } else {
             durable_indices.push(idx);
             durable_events.push(event.clone());
+            durable_thread_events.push(thread_event);
         }
     }
 
     if !durable_events.is_empty() {
-        let te = convert_events(&durable_events, chain_root_id, thread_id);
         let result = committed_value(g.state_db.append_events(
             chain_root_id,
             thread_id,
-            te,
+            durable_thread_events,
             vec![],
             g.signer.as_ref(),
         )?);
@@ -825,6 +934,277 @@ fn append_events_locked(
         .into_iter()
         .map(|record| record.ok_or_else(|| anyhow!("append event record missing")))
         .collect()
+}
+
+fn has_indexed_collection_events(events: &[NewEventRecord]) -> bool {
+    events.iter().any(|event| {
+        event.storage_class == "indexed"
+            && matches!(
+                event.event_type.as_str(),
+                ryeos_state::event_types::ARTIFACT_PUBLISHED
+                    | ryeos_state::event_types::THREAD_FACET_SET
+            )
+    })
+}
+
+fn validate_artifact_shape(artifact_type: &str, metadata: Option<&Value>) -> Result<usize> {
+    if artifact_type.is_empty() || artifact_type.len() > MAX_THREAD_ARTIFACT_TYPE_BYTES {
+        bail!("artifact_type must be 1..={MAX_THREAD_ARTIFACT_TYPE_BYTES} UTF-8 bytes");
+    }
+    let metadata_bytes = metadata
+        .map(serde_json::to_vec)
+        .transpose()?
+        .map_or(0, |bytes| bytes.len());
+    if metadata_bytes > MAX_THREAD_ARTIFACT_METADATA_BYTES {
+        bail!(
+            "artifact metadata is {metadata_bytes} bytes; maximum is {MAX_THREAD_ARTIFACT_METADATA_BYTES}"
+        );
+    }
+    Ok(metadata_bytes)
+}
+
+fn validate_new_artifact_shape(artifact_type: &str, metadata: Option<&Value>) -> Result<usize> {
+    let null_metadata = Value::Null;
+    validate_artifact_shape(artifact_type, Some(metadata.unwrap_or(&null_metadata)))
+}
+
+fn ensure_artifact_projection_capacity(
+    g: &Inner,
+    thread_id: &str,
+    additional_items: usize,
+    additional_kind_bytes: usize,
+    additional_metadata_bytes: usize,
+) -> Result<()> {
+    let (current_items, current_kind_bytes, current_metadata_bytes) =
+        queries::thread_artifact_stats(g.state_db.projection(), thread_id)?;
+    let final_items = current_items
+        .checked_add(additional_items)
+        .ok_or_else(|| anyhow!("thread artifact count overflow"))?;
+    let final_metadata_bytes = current_metadata_bytes
+        .checked_add(additional_metadata_bytes)
+        .ok_or_else(|| anyhow!("thread artifact byte total overflow"))?;
+    let final_kind_bytes = current_kind_bytes
+        .checked_add(additional_kind_bytes)
+        .ok_or_else(|| anyhow!("thread artifact kind byte total overflow"))?;
+    if final_items > MAX_THREAD_ARTIFACT_ITEMS {
+        bail!(
+            "thread {thread_id} would have {final_items} artifacts; maximum is {MAX_THREAD_ARTIFACT_ITEMS}"
+        );
+    }
+    if final_metadata_bytes > MAX_THREAD_ARTIFACT_METADATA_TOTAL_BYTES {
+        bail!(
+            "thread {thread_id} artifact metadata would total {final_metadata_bytes} bytes; maximum is {MAX_THREAD_ARTIFACT_METADATA_TOTAL_BYTES}"
+        );
+    }
+    // JSON escaping can expand an arbitrary UTF-8 kind by at most six bytes
+    // per source byte. Metadata is already stored as serialized JSON. Include
+    // conservative fixed record overhead so every newly admitted collection is
+    // guaranteed to fit the same response ceiling enforced by readers.
+    let fixed_record_bytes = final_items
+        .checked_mul(160)
+        .ok_or_else(|| anyhow!("thread artifact response estimate overflow"))?;
+    let estimated_response_bytes = final_kind_bytes
+        .checked_mul(6)
+        .and_then(|bytes| bytes.checked_add(final_metadata_bytes))
+        .and_then(|bytes| bytes.checked_add(fixed_record_bytes))
+        .and_then(|bytes| bytes.checked_add(2))
+        .ok_or_else(|| anyhow!("thread artifact response estimate overflow"))?;
+    if estimated_response_bytes > MAX_THREAD_ARTIFACT_RESPONSE_BYTES {
+        bail!(
+            "thread {thread_id} artifacts would exceed the {MAX_THREAD_ARTIFACT_RESPONSE_BYTES}-byte response maximum"
+        );
+    }
+    Ok(())
+}
+
+fn validate_artifact_event_admission(
+    g: &Inner,
+    thread_id: &str,
+    events: &[NewEventRecord],
+) -> Result<()> {
+    let mut additional_items = 0usize;
+    let mut additional_kind_bytes = 0usize;
+    let mut additional_metadata_bytes = 0usize;
+    for event in events.iter().filter(|event| {
+        event.storage_class == "indexed"
+            && event.event_type == ryeos_state::event_types::ARTIFACT_PUBLISHED
+    }) {
+        let artifact_type = event
+            .payload
+            .get("artifact_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("artifact_published requires string artifact_type"))?;
+        let metadata_bytes = validate_artifact_shape(artifact_type, event.payload.get("metadata"))?;
+        additional_items = additional_items
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("artifact batch count overflow"))?;
+        additional_kind_bytes = additional_kind_bytes
+            .checked_add(artifact_type.len())
+            .ok_or_else(|| anyhow!("artifact batch kind byte total overflow"))?;
+        additional_metadata_bytes = additional_metadata_bytes
+            .checked_add(metadata_bytes)
+            .ok_or_else(|| anyhow!("artifact batch byte total overflow"))?;
+    }
+    if additional_items > 0 {
+        ensure_artifact_projection_capacity(
+            g,
+            thread_id,
+            additional_items,
+            additional_kind_bytes,
+            additional_metadata_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_facet_event_admission(
+    g: &Inner,
+    thread_id: &str,
+    events: &[NewEventRecord],
+) -> Result<()> {
+    let mut updates = HashMap::<String, usize>::new();
+    for event in events.iter().filter(|event| {
+        event.storage_class == "indexed"
+            && event.event_type == ryeos_state::event_types::THREAD_FACET_SET
+    }) {
+        let key = event
+            .payload
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("thread_facet_set requires string key"))?;
+        let value = event
+            .payload
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("thread_facet_set requires string value"))?;
+        if key.is_empty() || key.len() > MAX_THREAD_FACET_KEY_BYTES {
+            bail!("facet key must be 1..={MAX_THREAD_FACET_KEY_BYTES} UTF-8 bytes");
+        }
+        if value.len() > MAX_THREAD_FACET_VALUE_BYTES {
+            bail!(
+                "facet value is {} bytes; maximum is {MAX_THREAD_FACET_VALUE_BYTES}",
+                value.len()
+            );
+        }
+        // Multiple updates to one key in a batch project sequentially; only the
+        // final value contributes to the durable facet collection.
+        updates.insert(key.to_string(), value.len());
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let (mut final_items, mut final_content_bytes) =
+        queries::thread_facet_stats(g.state_db.projection(), thread_id)?;
+    for (key, value_bytes) in updates {
+        match queries::thread_facet_value_bytes(g.state_db.projection(), thread_id, &key)? {
+            Some(previous_value_bytes) => {
+                final_content_bytes = final_content_bytes
+                    .checked_sub(previous_value_bytes)
+                    .and_then(|bytes| bytes.checked_add(value_bytes))
+                    .ok_or_else(|| anyhow!("thread facet byte total overflow"))?;
+            }
+            None => {
+                final_items = final_items
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("thread facet count overflow"))?;
+                final_content_bytes = final_content_bytes
+                    .checked_add(key.len())
+                    .and_then(|bytes| bytes.checked_add(value_bytes))
+                    .ok_or_else(|| anyhow!("thread facet byte total overflow"))?;
+            }
+        }
+    }
+    ensure_facet_collection_bounds(thread_id, final_items, final_content_bytes)
+}
+
+fn ensure_facet_collection_bounds(
+    thread_id: &str,
+    final_items: usize,
+    final_content_bytes: usize,
+) -> Result<()> {
+    if final_items > MAX_THREAD_FACET_ITEMS {
+        bail!(
+            "thread {thread_id} would have {final_items} facets; maximum is {MAX_THREAD_FACET_ITEMS}"
+        );
+    }
+    if final_content_bytes > MAX_THREAD_FACET_CONTENT_BYTES {
+        bail!(
+            "thread {thread_id} facet content would total {final_content_bytes} bytes; maximum is {MAX_THREAD_FACET_CONTENT_BYTES}"
+        );
+    }
+    let fixed_entry_bytes = final_items
+        .checked_mul(8)
+        .ok_or_else(|| anyhow!("thread facet response estimate overflow"))?;
+    let estimated_response_bytes = final_content_bytes
+        .checked_mul(6)
+        .and_then(|bytes| bytes.checked_add(fixed_entry_bytes))
+        .and_then(|bytes| bytes.checked_add(2))
+        .ok_or_else(|| anyhow!("thread facet response estimate overflow"))?;
+    if estimated_response_bytes > MAX_THREAD_FACET_RESPONSE_BYTES {
+        bail!(
+            "thread {thread_id} facets would exceed the {MAX_THREAD_FACET_RESPONSE_BYTES}-byte response maximum"
+        );
+    }
+    Ok(())
+}
+
+fn load_bounded_facets_many(g: &Inner, thread_ids: &[String]) -> Result<Vec<queries::FacetRow>> {
+    let mut seen = HashSet::new();
+    let thread_ids = thread_ids
+        .iter()
+        .filter(|thread_id| seen.insert(thread_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if thread_ids.len() > MAX_THREAD_LIST_ENRICHMENT_THREADS {
+        bail!(
+            "thread-list enrichment requested {} threads; maximum is {MAX_THREAD_LIST_ENRICHMENT_THREADS}",
+            thread_ids.len()
+        );
+    }
+    let stats = queries::thread_facet_stats_many(g.state_db.projection(), &thread_ids)?;
+    let mut total_items = 0usize;
+    let mut total_content_bytes = 0usize;
+    for (thread_id, items, content_bytes) in stats {
+        ensure_facet_collection_bounds(&thread_id, items, content_bytes)?;
+        total_items = total_items
+            .checked_add(items)
+            .ok_or_else(|| anyhow!("thread-list facet count overflow"))?;
+        total_content_bytes = total_content_bytes
+            .checked_add(content_bytes)
+            .ok_or_else(|| anyhow!("thread-list facet byte total overflow"))?;
+    }
+    if total_items > MAX_THREAD_LIST_FACET_ITEMS {
+        bail!(
+            "thread-list facets contain {total_items} entries; maximum is {MAX_THREAD_LIST_FACET_ITEMS}"
+        );
+    }
+    if total_content_bytes > MAX_THREAD_LIST_FACET_CONTENT_BYTES {
+        bail!(
+            "thread-list facet content is {total_content_bytes} bytes; maximum is {MAX_THREAD_LIST_FACET_CONTENT_BYTES}"
+        );
+    }
+    let fixed_entry_bytes = total_items
+        .checked_mul(8)
+        .ok_or_else(|| anyhow!("thread-list facet response estimate overflow"))?;
+    let estimated_response_bytes = total_content_bytes
+        .checked_mul(6)
+        .and_then(|bytes| bytes.checked_add(fixed_entry_bytes))
+        .and_then(|bytes| bytes.checked_add(2))
+        .ok_or_else(|| anyhow!("thread-list facet response estimate overflow"))?;
+    if estimated_response_bytes > MAX_THREAD_LIST_FACET_RESPONSE_BYTES {
+        bail!(
+            "thread-list facets would exceed the {MAX_THREAD_LIST_FACET_RESPONSE_BYTES}-byte response maximum"
+        );
+    }
+    queries::get_facets_many_bounded(
+        g.state_db.projection(),
+        &thread_ids,
+        MAX_THREAD_LIST_FACET_ITEMS,
+        MAX_THREAD_FACET_KEY_BYTES,
+        MAX_THREAD_FACET_VALUE_BYTES,
+        MAX_THREAD_LIST_FACET_CONTENT_BYTES,
+    )
 }
 
 /// Which kind of running-source continuation successor to create. Both kinds
@@ -852,8 +1232,11 @@ impl StateStore {
         let state_db = StateDb::open_with_projection_repair_sink(
             &runtime_state_dir,
             projection_health.clone(),
+            signer.as_ref(),
         )?;
         let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
+        reconcile_continuation_runtime_seeds(&state_db, &runtime_db)?;
+        reconcile_unauthenticated_process_fields(&state_db, &runtime_db)?;
 
         Ok(Self {
             inner: Mutex::new(Inner {
@@ -863,6 +1246,7 @@ impl StateStore {
                 write_barrier,
             }),
             projection_health,
+            process_attachment_admission_open: AtomicBool::new(true),
         })
     }
 
@@ -936,6 +1320,12 @@ impl StateStore {
     pub fn create_thread(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("thread creation is closed for daemon shutdown");
+        }
         let snapshot = build_snapshot(thread);
 
         if thread.thread_id == thread.chain_root_id {
@@ -1011,6 +1401,12 @@ impl StateStore {
     ) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("trace-branch creation is closed for daemon shutdown");
+        }
 
         if thread.thread_id == thread.chain_root_id {
             bail!("trace branch child must not be a chain root thread");
@@ -1072,6 +1468,22 @@ impl StateStore {
             .state_db
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("mark_running is fenced during daemon shutdown");
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing while marking running: {thread_id}"))?;
+        if let Some(intent) = runtime.stop_intent {
+            bail!(
+                "mark_running is fenced after {} request for thread {thread_id}",
+                intent.as_str()
+            );
+        }
 
         match thread_row.status.as_str() {
             // Fresh launch: fall through to the created -> running transition
@@ -1089,6 +1501,20 @@ impl StateStore {
             }
         }
 
+        if let (Some(authoritative), Some(requested)) = (
+            thread_row.base_project_snapshot_hash.as_deref(),
+            base_project_snapshot_hash,
+        ) {
+            if authoritative != requested {
+                bail!(
+                    "mark_running project snapshot mismatch for {thread_id}: authoritative {authoritative}, requested {requested}"
+                );
+            }
+        }
+        let base_project_snapshot_hash = base_project_snapshot_hash
+            .map(String::from)
+            .or_else(|| thread_row.base_project_snapshot_hash.clone());
+
         let now = lillux::time::iso8601_now();
         let updated_snapshot = ThreadSnapshot {
             schema: ryeos_state::objects::SCHEMA_VERSION,
@@ -1105,8 +1531,8 @@ impl StateStore {
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
             project_root: thread_row.project_root.as_ref().map(PathBuf::from),
-            base_project_snapshot_hash: base_project_snapshot_hash.map(String::from),
-            result_project_snapshot_hash: None,
+            base_project_snapshot_hash,
+            result_project_snapshot_hash: thread_row.result_project_snapshot_hash.clone(),
             created_at: thread_row.created_at.clone(),
             updated_at: now.clone(),
             started_at: Some(now.clone()),
@@ -1159,6 +1585,207 @@ impl StateStore {
         thread_id: &str,
         update: &FinalizeThreadRecord,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.finalize_thread_locked(thread_id, update)
+            .map(|(events, _)| events)
+    }
+
+    /// Generic lifecycle finalization that also returns the effective record
+    /// after global durable-stop dominance. Higher layers must use this form so
+    /// scheduler/command/follow side effects match the persisted terminal event.
+    pub fn finalize_thread_effective(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        self.finalize_thread_locked(thread_id, update)
+    }
+
+    /// Runtime-callback finalization with stop/shutdown policy enforced under
+    /// the same StateStore lock as the terminal commit. A durable Cancel/Kill
+    /// dominates any self-reported status; shutdown without an explicit stop
+    /// rejects the commit so recovery can resume the preserved row.
+    pub fn finalize_thread_from_runtime(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        self.finalize_thread_locked(thread_id, update)
+    }
+
+    fn finalize_thread_locked(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        self.finalize_thread_with_guard(&g, thread_id, update, false)
+    }
+
+    /// Atomically finalize a child-link failure only while the child is still a
+    /// never-launched row. This conditional transition is deliberately allowed
+    /// after shutdown admission closes: unlike a generic finalizer, the guarded
+    /// row has no process for shutdown to own and no launcher entitled to attach
+    /// one. A durable stop still dominates the requested failure outcome.
+    pub fn finalize_created_unattached_if_current(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<FinalizeCreatedUnattachedOutcome> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+
+        if is_terminal_status(&thread_row.status) {
+            return Ok(FinalizeCreatedUnattachedOutcome::AlreadyTerminal);
+        }
+
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+        let process_attached =
+            runtime.pid.is_some() || runtime.pgid.is_some() || runtime.process_identity.is_some();
+        let launch_claimed = g.runtime_db.get_launch_claim(thread_id)?.is_some();
+        if thread_row.status != ThreadStatus::Created.as_str() || process_attached || launch_claimed
+        {
+            return Ok(FinalizeCreatedUnattachedOutcome::NotCurrent {
+                status: thread_row.status,
+                process_attached,
+                launch_claimed,
+            });
+        }
+
+        let (persisted, effective) =
+            self.finalize_thread_with_rows(&g, thread_id, thread_row, runtime, update, true)?;
+        Ok(FinalizeCreatedUnattachedOutcome::Finalized {
+            persisted,
+            effective,
+        })
+    }
+
+    /// Atomically finalize a nonterminal row, or report the terminal/shutdown
+    /// winner without a check-then-write race. A durable Cancel/Kill tombstone
+    /// is folded into the effective terminal record by
+    /// [`Self::finalize_thread_with_rows`].
+    pub fn finalize_if_nonterminal(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<FinalizeIfNonterminalOutcome> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+        if is_terminal_status(&thread_row.status) {
+            return Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal {
+                status: thread_row.status,
+            });
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+        if runtime.stop_intent.is_none()
+            && !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            g.runtime_db.reset_resume_attempts(thread_id)?;
+            return Ok(FinalizeIfNonterminalOutcome::PreservedForShutdown);
+        }
+        let (persisted, effective) =
+            self.finalize_thread_with_rows(&g, thread_id, thread_row, runtime, update, false)?;
+        Ok(FinalizeIfNonterminalOutcome::Finalized {
+            persisted,
+            effective,
+        })
+    }
+
+    fn finalize_thread_with_guard(
+        &self,
+        g: &Inner,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+        allow_closed_admission: bool,
+    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+        self.finalize_thread_with_rows(
+            g,
+            thread_id,
+            thread_row,
+            runtime,
+            update,
+            allow_closed_admission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_thread_with_rows(
+        &self,
+        g: &Inner,
+        thread_id: &str,
+        thread_row: queries::ThreadRow,
+        runtime: RuntimeInfo,
+        update: &FinalizeThreadRecord,
+        allow_closed_admission: bool,
+    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        let mut effective_update = update.clone();
+        // Stop intent dominates every later finalizer, including administrative
+        // failure nets. This is intentionally global: a check-then-finalize
+        // caller must not be able to overwrite a stop that committed between
+        // its check and this lock acquisition.
+        if let Some(intent) = runtime.stop_intent {
+            let status = match intent {
+                StopIntent::Cancel => ThreadStatus::Cancelled,
+                StopIntent::Kill => ThreadStatus::Killed,
+            };
+            effective_update.status = status.as_str().to_string();
+            effective_update.outcome_code = Some(status.as_str().to_string());
+            effective_update.result_json = None;
+            effective_update.error_json = Some(json!({
+                "reason": "durable_stop_intent",
+                "intent": intent.as_str(),
+            }));
+            // The runtime supplied envelope describes its reported outcome,
+            // not the daemon-owned durable-stop winner above. Never sign that
+            // contradictory process claim into the effective terminal
+            // snapshot. Incurred cost remains authoritative and is retained.
+            effective_update.managed_envelope = None;
+        } else if !allow_closed_admission
+            && !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            // Every terminal writer shares the shutdown fence. Otherwise an
+            // execution-result fallback could turn a shutdown-owned kill into a
+            // terminal failure after drain had taken ownership of the process.
+            // A durable stop remains the one exception: it must be allowed to
+            // settle to its dominant cancelled/killed outcome while draining.
+            bail!("thread finalization is fenced during daemon shutdown");
+        }
+        let update = &effective_update;
+
+        if is_terminal_status(&thread_row.status) {
+            bail!(
+                "invalid status transition: {} -> {}",
+                thread_row.status,
+                update.status
+            );
+        }
+
         let terminal_status = ThreadStatus::from_str_lossy(&update.status)
             .ok_or_else(|| anyhow!("invalid terminal status: {}", update.status))?;
         if !terminal_status.is_terminal() {
@@ -1176,19 +1803,36 @@ impl StateStore {
                 update.final_cost.as_ref(),
             )?;
         }
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        let thread_row = g
-            .state_db
-            .get_thread(thread_id)?
-            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
 
-        if is_terminal_status(&thread_row.status) {
-            bail!(
-                "invalid status transition: {} -> {}",
-                thread_row.status,
-                update.status
-            );
+        let (additional_artifact_kind_bytes, additional_artifact_metadata_bytes) =
+            update.artifacts.iter().try_fold(
+                (0usize, 0usize),
+                |(kind_total, metadata_total), artifact| {
+                    let metadata_bytes = validate_new_artifact_shape(
+                        &artifact.artifact_type,
+                        artifact.metadata.as_ref(),
+                    )?;
+                    Ok::<_, anyhow::Error>((
+                        kind_total
+                            .checked_add(artifact.artifact_type.len())
+                            .ok_or_else(|| anyhow!("terminal artifact kind byte total overflow"))?,
+                        metadata_total.checked_add(metadata_bytes).ok_or_else(|| {
+                            anyhow!("terminal artifact metadata byte total overflow")
+                        })?,
+                    ))
+                },
+            )?;
+        if !update.artifacts.is_empty() {
+            if !self.projection_health.is_current() {
+                bail!("artifact admission requires a current thread projection");
+            }
+            ensure_artifact_projection_capacity(
+                g,
+                thread_id,
+                update.artifacts.len(),
+                additional_artifact_kind_bytes,
+                additional_artifact_metadata_bytes,
+            )?;
         }
 
         let now = lillux::time::iso8601_now();
@@ -1215,8 +1859,8 @@ impl StateStore {
             upstream_thread_id: thread_row.upstream_thread_id.clone(),
             requested_by: thread_row.requested_by.clone(),
             project_root: thread_row.project_root.as_ref().map(PathBuf::from),
-            base_project_snapshot_hash: None,
-            result_project_snapshot_hash: None,
+            base_project_snapshot_hash: thread_row.base_project_snapshot_hash.clone(),
+            result_project_snapshot_hash: thread_row.result_project_snapshot_hash.clone(),
             created_at: thread_row.created_at.clone(),
             updated_at: now.clone(),
             started_at: thread_row.started_at.clone(),
@@ -1265,6 +1909,7 @@ impl StateStore {
                     "artifact_type": artifact.artifact_type,
                     "uri": artifact.uri,
                     "content_hash": artifact.content_hash,
+                    "metadata": artifact.metadata,
                 }),
             });
         }
@@ -1295,7 +1940,10 @@ impl StateStore {
             g.signer.as_ref(),
         )?);
 
-        Ok(persisted_from_append(&result, &events_to_append))
+        Ok((
+            persisted_from_append(&result, &events_to_append),
+            effective_update,
+        ))
     }
 
     #[tracing::instrument(
@@ -1316,14 +1964,20 @@ impl StateStore {
     ) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("continuation creation is closed for daemon shutdown");
+        }
         let source_row = g
             .state_db
             .get_thread(source_thread_id)?
             .ok_or_else(|| anyhow!("source thread not found: {source_thread_id}"))?;
 
         if is_terminal_status(&source_row.status)
-            && source_row.status != "failed"
-            && source_row.status != "completed"
+            && source_row.status != ThreadStatus::Failed.as_str()
+            && source_row.status != ThreadStatus::Completed.as_str()
         {
             bail!(
                 "cannot continue thread in terminal status '{}'",
@@ -1372,8 +2026,8 @@ impl StateStore {
                 upstream_thread_id: source_row.upstream_thread_id.clone(),
                 requested_by: source_row.requested_by.clone(),
                 project_root: source_row.project_root.as_ref().map(PathBuf::from),
-                base_project_snapshot_hash: None,
-                result_project_snapshot_hash: None,
+                base_project_snapshot_hash: source_row.base_project_snapshot_hash.clone(),
+                result_project_snapshot_hash: source_row.result_project_snapshot_hash.clone(),
                 created_at: source_row.created_at.clone(),
                 updated_at: now.clone(),
                 started_at: source_row.started_at.clone(),
@@ -1549,10 +2203,32 @@ impl StateStore {
         )?;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        if !self.projection_health.is_current() {
+            bail!(
+                "cannot author a running continuation while the thread projection is stale"
+            );
+        }
         let source_row = g
             .state_db
             .get_thread(source_thread_id)?
             .ok_or_else(|| anyhow!("source thread not found: {source_thread_id}"))?;
+
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("continuation authoring is closed for daemon shutdown");
+        }
+        let source_runtime = g
+            .runtime_db
+            .get_runtime_info(source_thread_id)?
+            .ok_or_else(|| anyhow!("source runtime row missing: {source_thread_id}"))?;
+        if let Some(intent) = source_runtime.stop_intent {
+            bail!(
+                "cannot continue stop-requested thread {source_thread_id} ({})",
+                intent.as_str()
+            );
+        }
 
         // A running-source continuation cuts a still-running source. Re-checked
         // under the lock to close the caller's check-then-commit race; a terminal
@@ -1636,79 +2312,66 @@ impl StateStore {
         let mut successor_with_upstream = successor.clone();
         successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
 
-        // Runtime-db writes FIRST: insert the successor runtime row and seed its
-        // launch identity before any state-db successor snapshot or source
-        // settle. If the seed fails, only an orphan runtime row exists — no
-        // state-db successor edge, source untouched and still running.
-        g.runtime_db
-            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+        let successor_snapshot =
+            build_continuation_snapshot(&successor_with_upstream, &source_resume_context)?;
         let successor_meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
-            .with_resume_context(source_resume_context);
-        g.runtime_db
-            .set_launch_metadata(&successor.thread_id, &successor_meta)?;
+            .with_resume_context(source_resume_context)
+            .with_continuation_source(source_thread_id);
 
-        // State-db successor snapshot (creates the upstream edge).
-        let successor_snapshot = build_snapshot(&successor_with_upstream);
-        committed_value(g.state_db.add_thread(
-            chain_root_id,
-            successor_snapshot,
-            g.signer.as_ref(),
-        )?);
-
-        // Settle the source to `continued` (running by the check above) in the
-        // same append as its `thread_continued` event — the final state change.
+        // Prepare both snapshots and both relation events before advancing any
+        // state head. The state layer commits all four through one signed head,
+        // so no crash can expose only half of the handoff.
         let now = lillux::time::iso8601_now();
         let facets = terminal_facets(
             settlement.final_cost.as_ref(),
             Some(&settlement.managed_envelope),
         )?;
-        let source_snapshot = ThreadSnapshot {
-            schema: ryeos_state::objects::SCHEMA_VERSION,
-            kind: "thread_snapshot".to_string(),
-            thread_id: source_row.thread_id.clone(),
-            chain_root_id: source_row.chain_root_id.clone(),
-            status: ThreadStatus::Continued,
-            kind_name: source_row.kind.clone(),
-            item_ref: source_row.item_ref.clone(),
-            executor_ref: source_row.executor_ref.clone(),
-            launch_mode: source_row.launch_mode.clone(),
-            current_site_id: source_row.current_site_id.clone(),
-            origin_site_id: source_row.origin_site_id.clone(),
-            upstream_thread_id: source_row.upstream_thread_id.clone(),
-            requested_by: source_row.requested_by.clone(),
-            project_root: source_row.project_root.as_ref().map(PathBuf::from),
-            base_project_snapshot_hash: None,
-            result_project_snapshot_hash: None,
-            created_at: source_row.created_at.clone(),
-            updated_at: now.clone(),
-            started_at: source_row.started_at.clone(),
-            finished_at: Some(now.clone()),
-            result: settlement.result_json.clone(),
-            outcome_code: Some(ThreadStatus::Continued.as_str().to_string()),
-            error: None,
-            budget: settlement.final_cost.as_ref().map(|cost| ThreadUsage {
+        let mut source_snapshot = g
+            .state_db
+            .read_thread_authoritatively(chain_root_id, source_thread_id)?
+            .snapshot
+            .ok_or_else(|| anyhow!("source thread missing from signed chain: {source_thread_id}"))?;
+        if source_snapshot.status != ThreadStatus::Running {
+            bail!(
+                "running continuation requires an authoritatively running source; thread {source_thread_id} is '{}'",
+                source_snapshot.status
+            );
+        }
+        let expected_source_snapshot_hash = lillux::sha256_hex(
+            lillux::canonical_json(&source_snapshot.to_value()).as_bytes(),
+        );
+        source_snapshot.status = ThreadStatus::Continued;
+        source_snapshot.updated_at = now.clone();
+        source_snapshot.finished_at = Some(now.clone());
+        source_snapshot.result = settlement.result_json.clone();
+        source_snapshot.outcome_code = Some(ThreadStatus::Continued.as_str().to_string());
+        source_snapshot.error = None;
+        if let Some(cost) = settlement.final_cost.as_ref() {
+            let prior_budget = source_snapshot.budget.as_ref();
+            let spawns_used = prior_budget.map_or(0, |usage| usage.spawns_used);
+            let elapsed_ms = prior_budget.map_or(0, |usage| usage.elapsed_ms);
+            let provider_id = prior_budget.and_then(|usage| usage.provider_id.clone());
+            let model = prior_budget.and_then(|usage| usage.model.clone());
+            let profile = prior_budget.and_then(|usage| usage.profile.clone());
+            source_snapshot.budget = Some(ThreadUsage {
                 completed_turns: cost.turns,
                 input_tokens: cost.input_tokens,
                 output_tokens: cost.output_tokens,
                 spend_usd: cost.spend,
-                spawns_used: 0,
-                started_at: source_row
+                spawns_used,
+                started_at: source_snapshot
                     .started_at
                     .clone()
-                    .unwrap_or_else(|| source_row.created_at.clone()),
+                    .unwrap_or_else(|| source_snapshot.created_at.clone()),
                 settled_at: now.clone(),
                 last_settled_turn_seq: u64::from(cost.turns),
-                elapsed_ms: 0,
-                provider_id: None,
-                model: None,
-                profile: None,
-            }),
-            artifacts: vec![],
-            facets,
-            last_event_hash: None,
-            last_chain_seq: 0,
-            last_thread_seq: 0,
-        };
+                elapsed_ms,
+                provider_id,
+                model,
+                profile,
+            });
+        }
+        source_snapshot.facets.extend(facets);
         let edge_reason: Option<&str> = match &kind {
             RunningContinuationKind::Machine { sanitized_reason } => *sanitized_reason,
             RunningContinuationKind::GraphFollowResume => {
@@ -1728,16 +2391,6 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = committed_value(g.state_db.append_events(
-            chain_root_id,
-            source_thread_id,
-            ste,
-            vec![SnapshotUpdate {
-                thread_id: source_thread_id.to_string(),
-                new_snapshot: source_snapshot,
-            }],
-            g.signer.as_ref(),
-        )?);
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -1753,17 +2406,76 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = committed_value(g.state_db.append_events(
-            chain_root_id,
-            &successor.thread_id,
-            sste,
-            vec![],
+        // Runtime identity is durable before the one authoritative state commit.
+        // This seed is idempotent for an exact unattached orphan left by a prior
+        // crash; if the state commit fails below it is removed conditionally.
+        g.runtime_db
+            .seed_continuation_runtime(&successor.thread_id, chain_root_id, &successor_meta)?;
+        let committed = g.state_db.commit_continuation(
+            ryeos_state::ContinuationCommit {
+                chain_root_id,
+                source_thread_id,
+                expected_source_snapshot_hash: &expected_source_snapshot_hash,
+                source_snapshot,
+                successor_snapshot,
+                source_event: ste
+                    .into_iter()
+                    .next()
+                    .expect("one source continuation event"),
+                successor_event: sste
+                    .into_iter()
+                    .next()
+                    .expect("one successor creation event"),
+            },
             g.signer.as_ref(),
-        )?);
-
-        let mut all_events = persisted_from_append(&source_result, &[source_event]);
-        all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
-        Ok(all_events)
+        );
+        let result = match committed {
+            Ok(write) => {
+                let head_durable = write.value.head_durability.is_durable();
+                let result = committed_value(write);
+                if !head_durable {
+                    tracing::warn!(
+                        thread_id = %successor.thread_id,
+                        "continuation head is visible but durability is uncertain; retaining runtime seed marker for startup reconciliation"
+                    );
+                } else if let Err(error) = g.runtime_db.clear_continuation_seed_marker(
+                    &successor.thread_id,
+                    chain_root_id,
+                ) {
+                    tracing::warn!(
+                        thread_id = %successor.thread_id,
+                        %error,
+                        "continuation committed but runtime seed marker cleanup was deferred to startup reconciliation"
+                    );
+                }
+                result
+            }
+            Err(commit_error) => {
+                match g.runtime_db.remove_seeded_continuation_runtime(
+                    &successor.thread_id,
+                    chain_root_id,
+                    &successor_meta,
+                ) {
+                    Ok(true) => return Err(commit_error),
+                    Ok(false) => {
+                        bail!(
+                            "continuation state commit failed ({commit_error:#}); seeded runtime row {} could not be safely removed",
+                            successor.thread_id
+                        )
+                    }
+                    Err(cleanup_error) => {
+                        bail!(
+                            "continuation state commit failed ({commit_error:#}); cleanup of seeded runtime row {} also failed: {cleanup_error:#}",
+                            successor.thread_id
+                        )
+                    }
+                }
+            }
+        };
+        Ok(persisted_from_stored_events(
+            &result.events,
+            &[source_event, successor_event],
+        ))
     }
 
     /// Operator follow-up continuation, made idempotent by a request fingerprint.
@@ -1789,6 +2501,12 @@ impl StateStore {
     ) -> Result<ContinuationOutcome> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("continuation creation is closed for daemon shutdown");
+        }
         let source_row = g
             .state_db
             .get_thread(source_thread_id)?
@@ -1806,8 +2524,8 @@ impl StateStore {
         }
 
         if is_terminal_status(&source_row.status)
-            && source_row.status != "failed"
-            && source_row.status != "completed"
+            && source_row.status != ThreadStatus::Failed.as_str()
+            && source_row.status != ThreadStatus::Completed.as_str()
         {
             bail!(
                 "cannot continue thread in terminal status '{}'",
@@ -1855,8 +2573,8 @@ impl StateStore {
                 upstream_thread_id: source_row.upstream_thread_id.clone(),
                 requested_by: source_row.requested_by.clone(),
                 project_root: source_row.project_root.as_ref().map(PathBuf::from),
-                base_project_snapshot_hash: None,
-                result_project_snapshot_hash: None,
+                base_project_snapshot_hash: source_row.base_project_snapshot_hash.clone(),
+                result_project_snapshot_hash: source_row.result_project_snapshot_hash.clone(),
                 created_at: source_row.created_at.clone(),
                 updated_at: now.clone(),
                 started_at: source_row.started_at.clone(),
@@ -2023,6 +2741,56 @@ impl StateStore {
         }))
     }
 
+    /// Read a newly-created thread from signed CAS authority. This is used
+    /// immediately after a continuation commit, when projection repair may be
+    /// pending even though the successor is already authoritative.
+    pub(crate) fn get_created_thread_authoritatively(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<ThreadDetail>> {
+        let g = self.lock()?;
+        let Some(snapshot) = g
+            .state_db
+            .read_thread_authoritatively(chain_root_id, thread_id)?
+            .snapshot
+        else {
+            return Ok(None);
+        };
+        if snapshot.status != ThreadStatus::Created {
+            bail!(
+                "authoritative continuation successor {thread_id} has status '{}', expected created",
+                snapshot.status
+            );
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("continuation successor {thread_id} is missing runtime state"))?;
+        Ok(Some(ThreadDetail {
+            thread_id: snapshot.thread_id,
+            chain_root_id: snapshot.chain_root_id,
+            kind: snapshot.kind_name,
+            status: snapshot.status.as_str().to_string(),
+            item_ref: snapshot.item_ref,
+            executor_ref: snapshot.executor_ref,
+            launch_mode: snapshot.launch_mode,
+            current_site_id: snapshot.current_site_id,
+            origin_site_id: snapshot.origin_site_id,
+            upstream_thread_id: snapshot.upstream_thread_id,
+            successor_thread_id: None,
+            requested_by: snapshot.requested_by,
+            project_root: snapshot
+                .project_root
+                .map(|path| path.to_string_lossy().into_owned()),
+            created_at: snapshot.created_at,
+            updated_at: snapshot.updated_at,
+            started_at: snapshot.started_at,
+            finished_at: snapshot.finished_at,
+            runtime,
+        }))
+    }
+
     pub fn touch_seat_lease(
         &self,
         thread_id: &str,
@@ -2036,7 +2804,7 @@ impl StateStore {
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("seat thread {thread_id} does not exist"))?;
         if thread.kind != "seat_session"
-            || thread.status != "running"
+            || thread.status != ThreadStatus::Running.as_str()
             || thread.requested_by.as_deref() != Some(owner)
             || thread.item_ref != surface
         {
@@ -2118,33 +2886,40 @@ impl StateStore {
     }
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
-        let g = self.lock()?;
-        let result_row = queries::get_thread_result(g.state_db.projection(), thread_id)?;
-        let result = match result_row {
-            Some(row) => {
-                let result_val = match row.result {
-                    Some(bytes) => {
-                        Some(serde_json::from_slice::<Value>(&bytes).with_context(|| {
-                            format!(
-                                "malformed JSON in thread_results.result for thread_id {}",
-                                thread_id
-                            )
-                        })?)
-                    }
-                    None => None,
-                };
-                Some(ThreadResultRecord {
-                    outcome_code: row.outcome_code,
-                    result: result_val,
-                    error: row
-                        .error
-                        .map(|e| serde_json::from_str::<Value>(&e).unwrap_or(Value::String(e))),
-                    metadata: None,
-                })
-            }
+        let result_row = {
+            let g = self.lock()?;
+            queries::get_thread_result(g.state_db.projection(), thread_id)?
+        };
+        let Some(row) = result_row else {
+            return Ok(None);
+        };
+        // JSON parsing and exact response serialization happen after releasing
+        // the global store mutex. The query has already bounded both source
+        // columns before allocating them.
+        let result = match row.result {
+            Some(bytes) => Some(serde_json::from_slice::<Value>(&bytes).with_context(|| {
+                format!(
+                    "malformed JSON in thread_results.result for thread_id {}",
+                    thread_id
+                )
+            })?),
             None => None,
         };
-        Ok(result)
+        let record = ThreadResultRecord {
+            outcome_code: row.outcome_code,
+            result,
+            error: row
+                .error
+                .map(|error| serde_json::from_str::<Value>(&error).unwrap_or(Value::String(error))),
+            metadata: None,
+        };
+        let response_bytes = serde_json::to_vec(&record)?.len();
+        if response_bytes > MAX_THREAD_RESULT_RESPONSE_BYTES {
+            bail!(
+                "thread {thread_id} result response is {response_bytes} bytes; maximum is {MAX_THREAD_RESULT_RESPONSE_BYTES}"
+            );
+        }
+        Ok(Some(record))
     }
 
     pub fn get_thread_terminal_authority(
@@ -2162,13 +2937,11 @@ impl StateStore {
             return Ok(None);
         }
 
-        let mut head_cache = ryeos_state::HeadCache::new();
-        let snapshot = ryeos_state::chain::read_thread_snapshot(
-            g.state_db.cas_root(),
-            g.state_db.refs_root(),
+        let snapshot = g
+            .state_db
+            .read_thread_authoritatively(
             &thread.chain_root_id,
             thread_id,
-            &mut head_cache,
         )?
         .snapshot
         .ok_or_else(|| anyhow!("terminal thread {thread_id} is missing its CAS snapshot"))?;
@@ -2221,9 +2994,22 @@ impl StateStore {
     }
 
     pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
-        let g = self.lock()?;
-        let artifact_rows = queries::list_thread_artifacts(g.state_db.projection(), thread_id)?;
+        let artifact_rows = {
+            let g = self.lock()?;
+            // Aggregate/count-only preflight happens before the guarded SELECT,
+            // so no collection BLOB is copied until the whole collection fits.
+            ensure_artifact_projection_capacity(&g, thread_id, 0, 0, 0)?;
+            queries::list_thread_artifacts_bounded(
+                g.state_db.projection(),
+                thread_id,
+                MAX_THREAD_ARTIFACT_ITEMS,
+                MAX_THREAD_ARTIFACT_TYPE_BYTES,
+                MAX_THREAD_ARTIFACT_METADATA_BYTES,
+                MAX_THREAD_ARTIFACT_METADATA_TOTAL_BYTES,
+            )?
+        };
         let mut records = Vec::with_capacity(artifact_rows.len());
+        let mut response_bytes = b"[]".len();
         for (idx, row) in artifact_rows.into_iter().enumerate() {
             let metadata = match row.metadata {
                 Some(bytes) => {
@@ -2237,13 +3023,24 @@ impl StateStore {
                 }
                 None => None,
             };
-            records.push(ThreadArtifactRecord {
+            let record = ThreadArtifactRecord {
                 artifact_id: idx as i64 + 1,
                 artifact_type: row.kind,
                 uri: String::new(),
                 content_hash: None,
                 metadata,
-            });
+            };
+            let encoded = serde_json::to_vec(&record)?;
+            response_bytes = response_bytes
+                .checked_add(encoded.len())
+                .and_then(|bytes| bytes.checked_add(usize::from(!records.is_empty())))
+                .ok_or_else(|| anyhow!("thread artifact response size overflow"))?;
+            if response_bytes > MAX_THREAD_ARTIFACT_RESPONSE_BYTES {
+                bail!(
+                    "thread {thread_id} artifact response exceeds the {MAX_THREAD_ARTIFACT_RESPONSE_BYTES}-byte maximum"
+                );
+            }
+            records.push(record);
         }
         Ok(records)
     }
@@ -2278,6 +3075,10 @@ impl StateStore {
                 "metadata": artifact.metadata,
             }),
         };
+        if !self.projection_health.is_current() {
+            bail!("artifact admission requires a current thread projection");
+        }
+        validate_artifact_event_admission(&g, thread_id, std::slice::from_ref(&event))?;
 
         let te = convert_events(
             std::slice::from_ref(&event),
@@ -2418,7 +3219,13 @@ impl StateStore {
             .filter(|row| is_terminal_status(&row.status))
             .map(|row| row.thread_id.clone())
             .collect::<Vec<_>>();
-        queries::continuation_successor_payloads(g.state_db.projection(), &terminal_thread_ids)
+        queries::continuation_successor_payloads(
+            g.state_db.projection(),
+            &terminal_thread_ids,
+            MAX_THREAD_LIST_ENRICHMENT_THREADS,
+            MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
+            MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
+        )
     }
 
     fn rows_to_list_items(
@@ -2467,53 +3274,62 @@ impl StateStore {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
             let result = (
-                queries::get_facets_many(g.state_db.projection(), thread_ids)?,
-                queries::current_graph_node_payloads(g.state_db.projection(), thread_ids)?,
-                g.runtime_db.list_follow_waiters()?,
+                load_bounded_facets_many(&g, thread_ids)?,
+                queries::current_graph_node_payloads(
+                    g.state_db.projection(),
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                    MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
+                    MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
+                )?,
+                g.runtime_db.follow_waiter_summaries_for_threads(
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                )?,
             );
             Self::warn_slow_lock_hold("thread_list_enrichment", hold_started);
             result
         };
-        Ok(Self::assemble_thread_list_enrichment(
-            facet_rows,
-            graph_node_payloads,
-            follow_waiters,
-        ))
+        Self::assemble_thread_list_enrichment(facet_rows, graph_node_payloads, follow_waiters)
     }
 
     pub fn thread_list_enrichment_with_waiters(
         &self,
         thread_ids: &[String],
-        follow_waiters: Vec<runtime_db::FollowWaiter>,
+        follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
     ) -> Result<ThreadListEnrichment> {
         let (facet_rows, graph_node_payloads) = {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
             let result = (
-                queries::get_facets_many(g.state_db.projection(), thread_ids)?,
-                queries::current_graph_node_payloads(g.state_db.projection(), thread_ids)?,
+                load_bounded_facets_many(&g, thread_ids)?,
+                queries::current_graph_node_payloads(
+                    g.state_db.projection(),
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                    MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
+                    MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
+                )?,
             );
             Self::warn_slow_lock_hold("thread_list_enrichment_with_waiters", hold_started);
             result
         };
-        Ok(Self::assemble_thread_list_enrichment(
-            facet_rows,
-            graph_node_payloads,
-            follow_waiters,
-        ))
+        Self::assemble_thread_list_enrichment(facet_rows, graph_node_payloads, follow_waiters)
     }
 
     fn assemble_thread_list_enrichment(
         facet_rows: Vec<queries::FacetRow>,
         graph_node_payloads: HashMap<String, Vec<u8>>,
-        follow_waiters: Vec<runtime_db::FollowWaiter>,
-    ) -> ThreadListEnrichment {
+        follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
+    ) -> Result<ThreadListEnrichment> {
         let mut facets: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for row in facet_rows {
+            let value =
+                String::from_utf8(row.value).context("thread-list facet value is not UTF-8")?;
             facets
                 .entry(row.thread_id)
                 .or_default()
-                .push((row.key, String::from_utf8_lossy(&row.value).to_string()));
+                .push((row.key, value));
         }
         let mut current_graph_nodes = HashMap::new();
         for (thread_id, payload) in graph_node_payloads {
@@ -2537,11 +3353,11 @@ impl StateStore {
                 .unwrap_or(0) as u32;
             current_graph_nodes.insert(thread_id, (node.to_string(), step));
         }
-        ThreadListEnrichment {
+        Ok(ThreadListEnrichment {
             follow_waiters,
             facets,
             current_graph_nodes,
-        }
+        })
     }
 
     /// One consistent runtime waiter snapshot plus its projected suspended
@@ -2551,11 +3367,15 @@ impl StateStore {
         let (waiters, rows, successor_payloads) = {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
-            let waiters = g.runtime_db.list_follow_waiters()?;
-            let parent_ids = waiters
+            let waiters = g
+                .runtime_db
+                .follow_waiter_summaries_bounded(MAX_THREAD_LIST_ENRICHMENT_THREADS)?;
+            let mut parent_ids = waiters
                 .iter()
                 .map(|waiter| waiter.parent_thread_id.clone())
                 .collect::<Vec<_>>();
+            parent_ids.sort();
+            parent_ids.dedup();
             let rows = queries::get_threads_many(g.state_db.projection(), &parent_ids)?;
             let payloads = Self::continuation_payloads_for_rows(&g, &rows)?;
             Self::warn_slow_lock_hold("follow_parent_list_snapshot", hold_started);
@@ -2713,6 +3533,41 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection())
     }
 
+    /// Immutable project snapshots required by active or queued runtimes.
+    ///
+    /// These runtime-DB references are not signed CAS heads, so online GC must
+    /// add them as daemon-authoritative transient roots. Retain both fields
+    /// defensively if a record carries both; resume selection intentionally
+    /// chooses one, while reachability must not collect either active pin.
+    pub fn active_resume_snapshot_roots(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        let statuses = [
+            ThreadStatus::Created.as_str(),
+            ThreadStatus::Running.as_str(),
+        ];
+        let rows = queries::list_threads_by_status(g.state_db.projection(), &statuses)?;
+        let mut roots = std::collections::BTreeSet::new();
+        for row in rows {
+            let Some(metadata) = g
+                .runtime_db
+                .get_runtime_info(&row.thread_id)?
+                .and_then(|info| info.launch_metadata)
+            else {
+                continue;
+            };
+            let Some(resume) = metadata.resume_context else {
+                continue;
+            };
+            if let Some(hash) = resume.original_snapshot_hash {
+                roots.insert(hash);
+            }
+            if let Some(pushed) = resume.original_pushed_head_ref {
+                roots.insert(pushed.snapshot_hash);
+            }
+        }
+        Ok(roots.into_iter().collect())
+    }
+
     /// Read a thread's persisted launch metadata (resume context), if any.
     pub fn get_launch_metadata(
         &self,
@@ -2747,35 +3602,209 @@ impl StateStore {
         thread_id: &str,
         pid: i64,
         pgid: i64,
+        process_identity: &crate::process::ExecutionProcessIdentity,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<()> {
         let g = self.lock()?;
+        // The projection row is the authoritative lifecycle identity. A bare
+        // runtime row must never acquire a process that reconcile/drain cannot
+        // subsequently account for.
+        let thread = g.state_db.get_thread(thread_id)?.ok_or_else(|| {
+            anyhow::anyhow!("thread not found before process attach: {thread_id}")
+        })?;
+        let exact_repeat = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .is_some_and(|runtime| {
+                runtime.pid == Some(pid)
+                    && runtime.pgid == Some(pgid)
+                    && runtime.process_identity.as_ref() == Some(process_identity)
+            });
+        if !exact_repeat
+            && !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            anyhow::bail!("process attachment admission is closed for daemon shutdown");
+        }
         // Defensive: skip attach if the thread was already finalized
-        // (e.g. cancelled while the runner was between spawn and attach).
-        if let Some(thread) = g.state_db.get_thread(thread_id)? {
-            if is_terminal_status(&thread.status) {
-                tracing::warn!(
-                    thread_id,
-                    status = %thread.status,
-                    pid,
-                    pgid,
-                    "skipping attach_process — thread already terminal"
-                );
-                anyhow::bail!(
-                    "refusing to attach process {pid}/{pgid} to terminal thread {thread_id} ({})",
-                    thread.status
-                );
-            }
-            if g.runtime_db
+        // (e.g. cancelled while the runner was between spawn and attach). An
+        // exact identity repeat remains safe and idempotent: fast callback
+        // runtimes can self-attach and finalize before their in-process owner
+        // reaches the same attach call.
+        if is_terminal_status(&thread.status) && !exact_repeat {
+            tracing::warn!(
+                thread_id,
+                status = %thread.status,
+                pid,
+                pgid,
+                "skipping attach_process — thread already terminal"
+            );
+            anyhow::bail!(
+                "refusing to attach process {pid}/{pgid} to terminal thread {thread_id} ({})",
+                thread.status
+            );
+        }
+        if !exact_repeat
+            && g.runtime_db
                 .launch_window_is_cancelled(&thread.chain_root_id)?
-            {
-                anyhow::bail!(
-                    "refusing to attach process {pid}/{pgid} to cancelled launch-window member {thread_id}"
-                );
-            }
+        {
+            anyhow::bail!(
+                "refusing to attach process {pid}/{pgid} to cancelled launch-window member {thread_id}"
+            );
         }
         g.runtime_db
-            .attach_process(thread_id, pid, pgid, launch_metadata)
+            .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
+    }
+
+    /// Close process attachment admission at the shutdown serialization point.
+    /// Taking the StateStore lock first waits for every prior attach to commit;
+    /// every later attach acquires the lock and observes the closed gate.
+    pub fn close_process_attachment_admission(&self) -> Result<()> {
+        let _g = self.lock()?;
+        self.process_attachment_admission_open
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether this daemon instance still admits/finalizes live executions.
+    /// Shutdown closes the gate before draining; process owners that wake from
+    /// a shutdown-owned signal use this to preserve resumable rows instead of
+    /// misclassifying the interruption as an execution failure.
+    pub fn process_attachment_admission_is_open(&self) -> bool {
+        self.process_attachment_admission_open
+            .load(Ordering::Acquire)
+    }
+
+    /// Fail closed before a runtime callback authors or dispatches new work.
+    /// Durable child-link/continuation mutations repeat this check or inherit
+    /// the stop under the same store lock; this front-door check avoids doing
+    /// expensive resolution after the authoring fence is already closed.
+    pub fn ensure_running_runtime_mutation_allowed(&self, thread_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            anyhow::bail!("runtime authoring is closed for daemon shutdown");
+        }
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow::anyhow!("runtime row missing for callback thread {thread_id}")
+        })?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("callback thread not found: {thread_id}"))?;
+        if thread.status != ThreadStatus::Running.as_str() {
+            anyhow::bail!(
+                "runtime mutation requires a running thread; {thread_id} is {}",
+                thread.status
+            );
+        }
+        if let Some(intent) = runtime.stop_intent {
+            anyhow::bail!(
+                "runtime mutation is closed for stop-requested thread {thread_id} ({})",
+                intent.as_str()
+            );
+        }
+        Ok(())
+    }
+
+    /// Atomically admit a non-read runtime callback against authoritative
+    /// lifecycle, stop, and shutdown state. This is the callback
+    /// linearization point: a request admitted here may finish, while every
+    /// request that arrives after terminal/stop/shutdown is refused.
+    pub fn ensure_runtime_callback_mutation_allowed(
+        &self,
+        thread_id: &str,
+        stop_completion: bool,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("callback thread not found: {thread_id}"))?;
+        if is_terminal_status(&thread.status) {
+            anyhow::bail!(
+                "runtime callback mutation is fenced for terminal thread {thread_id} ({})",
+                thread.status
+            );
+        }
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow::anyhow!("runtime row missing for callback thread {thread_id}")
+        })?;
+        if let Some(intent) = runtime.stop_intent {
+            if stop_completion {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "runtime callback mutation is fenced after {} request for thread {thread_id}",
+                intent.as_str()
+            );
+        }
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            anyhow::bail!("runtime callback mutation is fenced during daemon shutdown");
+        }
+        Ok(())
+    }
+
+    /// Atomically tombstone an explicit stop against process attachment and
+    /// return the identity (if any) that won the attach race before the stop.
+    pub fn request_thread_stop(
+        &self,
+        thread_id: &str,
+        intent: runtime_db::StopIntent,
+    ) -> Result<RuntimeInfo> {
+        let g = self.lock()?;
+        g.runtime_db.request_thread_stop(thread_id, intent)
+    }
+
+    /// Request a stop only if ordinary execution ownership is still open.
+    ///
+    /// The gate check and tombstone share the StateStore lock with shutdown's
+    /// gate close. Cancellation cleanup therefore either wins before shutdown
+    /// and owns the durable stop, or observes the closed gate and leaves the row
+    /// untouched for the shutdown coordinator.
+    pub fn request_thread_stop_if_admission_open(
+        &self,
+        thread_id: &str,
+        intent: runtime_db::StopIntent,
+    ) -> Result<StopIfAdmissionOpenOutcome> {
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found before owner-drop stop: {thread_id}"))?;
+        if is_terminal_status(&thread.status) {
+            return Ok(StopIfAdmissionOpenOutcome::AlreadyTerminal);
+        }
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            return Ok(StopIfAdmissionOpenOutcome::PreservedForShutdown);
+        }
+        g.runtime_db
+            .request_thread_stop(thread_id, intent)
+            .map(StopIfAdmissionOpenOutcome::Requested)
+    }
+
+    pub fn clear_thread_process_if_matches(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db
+            .clear_process_if_matches(thread_id, process_identity)
+    }
+
+    pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.list_attached_thread_ids()
     }
 
     /// Read the auto-resume attempt counter for a thread.
@@ -2817,6 +3846,27 @@ impl StateStore {
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<runtime_db::LaunchClaim>> {
         let g = self.lock()?;
         g.runtime_db.get_launch_claim(thread_id)
+    }
+
+    // ── Hook dispatch ledger ─────────────────────────────────────────────
+
+    pub fn reserve_hook_dispatch(
+        &self,
+        seed: &runtime_db::NewHookDispatch,
+    ) -> Result<runtime_db::HookDispatchReservation> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_hook_dispatch(seed)
+    }
+
+    pub fn complete_hook_dispatch(
+        &self,
+        dispatch_key: &str,
+        request_hash: &str,
+        response: &Value,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .complete_hook_dispatch(dispatch_key, request_hash, response)
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -2993,6 +4043,9 @@ impl StateStore {
             None
         };
         let g = self.lock()?;
+        if has_indexed_collection_events(events) && !self.projection_health.is_current() {
+            bail!("collection event admission requires a current thread projection");
+        }
         append_events_locked(&g, chain_root_id, thread_id, events)
     }
 
@@ -3020,10 +4073,24 @@ impl StateStore {
             None
         };
         let g = self.lock()?;
+        if has_indexed_collection_events(events) && !self.projection_health.is_current() {
+            bail!("collection event admission requires a current thread projection");
+        }
         let Some(thread) = g.state_db.get_thread(thread_id)? else {
             return Ok(None);
         };
-        if thread.status != "running" {
+        if thread.status != ThreadStatus::Running.as_str() {
+            return Ok(None);
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing while appending events: {thread_id}"))?;
+        if runtime.stop_intent.is_some()
+            || !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
             return Ok(None);
         }
 
@@ -3044,16 +4111,20 @@ impl StateStore {
         thread_id: Option<&str>,
         after_seq: Option<i64>,
         limit: usize,
-    ) -> Result<Vec<PersistedEventRecord>> {
+        max_serialized_bytes: usize,
+    ) -> Result<PersistedEventPage> {
         let g = self.lock()?;
-        let event_rows = queries::replay_events(
+        let page = queries::replay_events_bounded(
             g.state_db.projection(),
             chain_root_id,
             thread_id,
             after_seq,
             limit,
+            max_serialized_bytes,
         )?;
-        event_rows
+        drop(g);
+        let events = page
+            .rows
             .into_iter()
             .map(|row| {
                 let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
@@ -3077,7 +4148,11 @@ impl StateStore {
                     payload,
                 })
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(PersistedEventPage {
+            events,
+            has_more: page.has_more,
+        })
     }
 
     /// Latest durable events across every thread on the node — the feed
@@ -3161,24 +4236,44 @@ impl StateStore {
         g.state_db.append_bundle_event(request, g.signer.as_ref())
     }
 
-    pub fn read_bundle_event_chain(
+    pub fn read_bundle_event_chain_page(
         &self,
         bundle_id: &str,
         event_kind: &str,
         chain_id: &str,
-    ) -> Result<Vec<ryeos_state::BundleEventRecord>> {
+        cursor: Option<&ryeos_state::BundleEventCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<ryeos_state::BundleEventChainPage> {
         let g = self.lock()?;
-        g.state_db
-            .read_bundle_event_chain(bundle_id, event_kind, chain_id)
+        g.state_db.read_bundle_event_chain_page(
+            bundle_id,
+            event_kind,
+            chain_id,
+            cursor,
+            limit,
+            max_serialized_bytes,
+            g.signer.as_ref(),
+        )
     }
 
-    pub fn scan_bundle_events(
+    pub fn scan_bundle_events_page(
         &self,
         bundle_id: &str,
         event_kind: &str,
-    ) -> Result<Vec<ryeos_state::BundleEventRecord>> {
+        cursor: Option<&ryeos_state::BundleEventCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<ryeos_state::BundleEventScanPage> {
         let g = self.lock()?;
-        g.state_db.scan_bundle_events(bundle_id, event_kind)
+        g.state_db.scan_bundle_events_page(
+            bundle_id,
+            event_kind,
+            cursor,
+            limit,
+            max_serialized_bytes,
+            g.signer.as_ref(),
+        )
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
@@ -3186,9 +4281,15 @@ impl StateStore {
         g.runtime_db.submit_command(cmd)
     }
 
-    pub fn claim_commands(&self, thread_id: &str) -> Result<Vec<CommandRecord>> {
+    pub fn claim_commands(
+        &self,
+        thread_id: &str,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> Result<Vec<CommandRecord>> {
         let g = self.lock()?;
-        g.runtime_db.claim_commands(thread_id)
+        g.runtime_db
+            .claim_commands(thread_id, limit, max_serialized_bytes)
     }
 
     pub fn reset_resume_attempts(&self, thread_id: &str) -> Result<()> {
@@ -3346,16 +4447,64 @@ impl StateStore {
     }
 
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
-    /// lineage for cancel/kill cascade). Idempotent on the child.
+    /// lineage for cancel/kill cascade). Idempotent on the child. If the parent
+    /// was already stop-tombstoned, atomically inherit that monotonic intent on
+    /// the child before releasing the store lock, closing the late-link race.
     pub fn record_child_link(
         &self,
         parent_thread_id: &str,
         child_thread_id: &str,
         relation: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<StopIntent>> {
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            // The shutdown gate may close after a callback created its child but
+            // before it reached this second durable mutation. Tombstone the child
+            // first so no later attach can win, then preserve operational lineage
+            // on a best-effort basis. Link persistence is useful for inspection,
+            // but must not prevent the already-durable stop from settling.
+            let stopped = g
+                .runtime_db
+                .request_thread_stop(child_thread_id, StopIntent::Cancel)?;
+            if let Err(error) =
+                g.runtime_db
+                    .record_child_link(parent_thread_id, child_thread_id, relation)
+            {
+                tracing::warn!(
+                    parent_thread_id,
+                    child_thread_id,
+                    relation,
+                    error = %error,
+                    "failed to preserve child lineage after shutdown tombstone"
+                );
+            }
+            return Ok(Some(stopped.stop_intent.unwrap_or(StopIntent::Cancel)));
+        }
+        let parent = g
+            .state_db
+            .get_thread(parent_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("parent thread not found: {parent_thread_id}"))?;
+        let mut inherited_stop = g
+            .runtime_db
+            .get_runtime_info(parent_thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("parent runtime row missing: {parent_thread_id}"))?
+            .stop_intent;
+        // A dispatch admitted immediately before its parent finalized may reach
+        // this atomic linkage point afterward. Preserve the lineage, but stop
+        // the freshly-created child before it can attach. Continuations are
+        // different: their predecessor is intentionally terminal/continued.
+        if relation == "dispatch" && is_terminal_status(&parent.status) {
+            inherited_stop = Some(StopIntent::Cancel);
+        }
         g.runtime_db
-            .record_child_link(parent_thread_id, child_thread_id, relation)
+            .record_child_link(parent_thread_id, child_thread_id, relation)?;
+        if let Some(intent) = inherited_stop {
+            g.runtime_db.request_thread_stop(child_thread_id, intent)?;
+        }
+        Ok(inherited_stop)
     }
 
     /// Every transitive descendant thread id of `root_thread_id`, breadth-first
@@ -3366,12 +4515,41 @@ impl StateStore {
     }
 
     pub fn get_facets(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
-        let g = self.lock()?;
-        let facet_rows = queries::get_facets(g.state_db.projection(), thread_id)?;
-        Ok(facet_rows
-            .into_iter()
-            .map(|row| (row.key, String::from_utf8_lossy(&row.value).to_string()))
-            .collect())
+        let facet_rows = {
+            let g = self.lock()?;
+            let (items, content_bytes) =
+                queries::thread_facet_stats(g.state_db.projection(), thread_id)?;
+            ensure_facet_collection_bounds(thread_id, items, content_bytes)?;
+            queries::get_facets_bounded(
+                g.state_db.projection(),
+                thread_id,
+                MAX_THREAD_FACET_ITEMS,
+                MAX_THREAD_FACET_KEY_BYTES,
+                MAX_THREAD_FACET_VALUE_BYTES,
+                MAX_THREAD_FACET_CONTENT_BYTES,
+            )?
+        };
+        let mut facets = Vec::with_capacity(facet_rows.len());
+        let mut response_bytes = b"{}".len();
+        for row in facet_rows {
+            let value = String::from_utf8(row.value)
+                .with_context(|| format!("thread {thread_id} facet value is not UTF-8"))?;
+            let key_bytes = serde_json::to_vec(&row.key)?.len();
+            let value_bytes = serde_json::to_vec(&value)?.len();
+            response_bytes = response_bytes
+                .checked_add(key_bytes)
+                .and_then(|bytes| bytes.checked_add(value_bytes))
+                .and_then(|bytes| bytes.checked_add(1)) // colon
+                .and_then(|bytes| bytes.checked_add(usize::from(!facets.is_empty())))
+                .ok_or_else(|| anyhow!("thread facet response size overflow"))?;
+            if response_bytes > MAX_THREAD_FACET_RESPONSE_BYTES {
+                bail!(
+                    "thread {thread_id} facet response exceeds the {MAX_THREAD_FACET_RESPONSE_BYTES}-byte maximum"
+                );
+            }
+            facets.push((row.key, value));
+        }
+        Ok(facets)
     }
 
     /// A graph thread's current `(node, step)` from its latest
@@ -3381,6 +4559,169 @@ impl StateStore {
         let g = self.lock()?;
         queries::current_graph_node(g.state_db.projection(), thread_id)
     }
+}
+
+/// Reconcile process fields introduced before durable process identities.
+///
+/// Terminal threads and rows absent from the authoritative projection cannot
+/// be resumed, so their pid/pgid values are non-authoritative history and are
+/// safe to clear. A nonterminal row may still name a live process incarnation;
+/// without its boot/start-time identity RyeOS cannot safely signal it or launch
+/// a replacement beside it, so startup remains fail-closed for those rows.
+fn reconcile_continuation_runtime_seeds(
+    state_db: &StateDb,
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<()> {
+    let mut after_thread_id: Option<String> = None;
+    let mut cleared_markers = 0usize;
+    let mut removed_orphans = 0usize;
+
+    loop {
+        let rows = runtime_db.continuation_seed_rows_after(
+            after_thread_id.as_deref(),
+            runtime_db::CONTINUATION_SEED_RECONCILE_PAGE_SIZE,
+        )?;
+        if rows.is_empty() {
+            break;
+        }
+        after_thread_id = rows.last().map(|(thread_id, _)| thread_id.clone());
+        for (thread_id, chain_root_id) in rows {
+            let authoritative = state_db
+                .read_thread_authoritatively(&chain_root_id, &thread_id)
+                .with_context(|| {
+                    format!(
+                        "verify continuation runtime seed {thread_id} against signed chain {chain_root_id}"
+                    )
+                })?;
+            if let Some(snapshot) = authoritative.snapshot {
+                let runtime = runtime_db
+                    .get_runtime_info(&thread_id)?
+                    .ok_or_else(|| anyhow!("continuation seed runtime row disappeared for {thread_id}"))?;
+                let launch = runtime.launch_metadata.ok_or_else(|| {
+                    anyhow!("continuation seed {thread_id} is missing launch metadata")
+                })?;
+                verify_continuation_seed_identity(&snapshot, &launch).with_context(|| {
+                    format!("continuation seed identity mismatch for {thread_id}")
+                })?;
+                if runtime_db.clear_continuation_seed_marker(&thread_id, &chain_root_id)? {
+                    cleared_markers += 1;
+                }
+            } else if runtime_db
+                .remove_orphaned_continuation_seed(&thread_id, &chain_root_id)?
+            {
+                removed_orphans += 1;
+            } else {
+                bail!(
+                    "continuation runtime seed {thread_id} has no authoritative state thread and could not be safely removed"
+                );
+            }
+        }
+    }
+
+    if cleared_markers > 0 || removed_orphans > 0 {
+        tracing::info!(
+            cleared_markers,
+            removed_orphans,
+            "reconciled continuation runtime seed markers"
+        );
+    }
+    Ok(())
+}
+
+fn verify_continuation_seed_identity(
+    snapshot: &ryeos_state::ThreadSnapshot,
+    launch: &crate::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<()> {
+    let source_thread_id = launch
+        .continuation_source_thread_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("launch metadata has no continuation source"))?;
+    if snapshot.upstream_thread_id.as_deref() != Some(source_thread_id) {
+        bail!("authoritative upstream does not match the seeded continuation source");
+    }
+    let resume = launch
+        .resume_context
+        .as_ref()
+        .ok_or_else(|| anyhow!("launch metadata has no resume context"))?;
+    let (expected_project_root, expected_base_snapshot_hash) = resume
+        .authoritative_project_identity()
+        .context("derive expected continuation project identity")?;
+    if snapshot.kind_name != resume.kind
+        || snapshot.item_ref != resume.item_ref
+        || snapshot.launch_mode != resume.launch_mode
+        || snapshot.current_site_id != resume.current_site_id
+        || snapshot.origin_site_id != resume.origin_site_id
+        || snapshot.requested_by != resume.requested_by_name()
+        || snapshot.project_root.as_deref() != expected_project_root.as_deref()
+        || snapshot.base_project_snapshot_hash.as_deref()
+            != expected_base_snapshot_hash.as_deref()
+        || resume.executor_ref.as_deref() != Some(snapshot.executor_ref.as_str())
+    {
+        bail!("authoritative immutable thread identity does not match seeded resume context");
+    }
+    Ok(())
+}
+
+fn reconcile_unauthenticated_process_fields(
+    state_db: &StateDb,
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<()> {
+    const DIAGNOSTIC_SAMPLE_LIMIT: usize = 8;
+
+    let mut after_thread_id: Option<String> = None;
+    let mut cleared_total = 0usize;
+    let mut nonterminal_total = 0usize;
+    let mut nonterminal_sample = Vec::new();
+
+    loop {
+        let rows = runtime_db
+            .unauthenticated_process_rows_after(after_thread_id.as_deref())
+            .context("scan runtime process fields without durable identity")?;
+        if rows.is_empty() {
+            break;
+        }
+        after_thread_id = rows.last().map(|row| row.thread_id.clone());
+
+        let thread_ids = rows
+            .iter()
+            .map(|row| row.thread_id.clone())
+            .collect::<Vec<_>>();
+        let projected_statuses = queries::get_threads_many(state_db.projection(), &thread_ids)?
+            .into_iter()
+            .map(|thread| (thread.thread_id, thread.status))
+            .collect::<HashMap<_, _>>();
+
+        let mut clearable = Vec::with_capacity(rows.len());
+        for row in rows {
+            match projected_statuses.get(&row.thread_id) {
+                None => clearable.push(row.thread_id),
+                Some(status) if is_terminal_status(status) => clearable.push(row.thread_id),
+                Some(status) => {
+                    nonterminal_total += 1;
+                    if nonterminal_sample.len() < DIAGNOSTIC_SAMPLE_LIMIT {
+                        nonterminal_sample.push(format!("{} ({status})", row.thread_id));
+                    }
+                }
+            }
+        }
+        cleared_total += runtime_db
+            .clear_unauthenticated_process_fields(&clearable)
+            .context("clear non-authoritative process fields from terminal runtime history")?;
+    }
+
+    if cleared_total > 0 {
+        tracing::info!(
+            rows = cleared_total,
+            "cleared non-authoritative pid/pgid fields from terminal or unprojected runtime history"
+        );
+    }
+    if nonterminal_total > 0 {
+        bail!(
+            "runtime state contains {nonterminal_total} nonterminal process row(s) without durable identity; refusing startup because their live process incarnation cannot be proven (sample: {})",
+            nonterminal_sample.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Whether a thread's persisted `status` is terminal. The canonical predicate —
@@ -3409,17 +4750,41 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::contracts::{
+        EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+    };
+    use rusqlite::{params, Connection};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
-    struct LocalTestSigner;
+    struct LocalTestSigner {
+        signing_key: lillux::crypto::SigningKey,
+        fingerprint: String,
+    }
+
+    impl Default for LocalTestSigner {
+        fn default() -> Self {
+            let signing_key = lillux::crypto::SigningKey::from_bytes(&[91; 32]);
+            let fingerprint = lillux::crypto::fingerprint(&signing_key.verifying_key());
+            Self {
+                signing_key,
+                fingerprint,
+            }
+        }
+    }
 
     impl Signer for LocalTestSigner {
-        fn sign(&self, _data: &[u8]) -> Vec<u8> {
-            vec![1; 64]
+        fn sign(&self, data: &[u8]) -> Vec<u8> {
+            use lillux::crypto::Signer as _;
+            self.signing_key.sign(data).to_bytes().to_vec()
         }
 
         fn fingerprint(&self) -> &str {
-            "fp:test"
+            &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
         }
     }
 
@@ -3428,10 +4793,173 @@ mod tests {
         StateStore::new(
             tmp.join("state"),
             tmp.join("runtime.sqlite3"),
-            Arc::new(LocalTestSigner),
+            Arc::new(LocalTestSigner::default()),
             WriteBarrier::new(),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn startup_clears_unauthenticated_process_fields_only_from_inactive_history() {
+        let tmp = tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let runtime_path = tmp.path().join("runtime.sqlite3");
+
+        {
+            let store = StateStore::new(
+                state_dir.clone(),
+                runtime_path.clone(),
+                Arc::new(LocalTestSigner::default()),
+                WriteBarrier::new(),
+            )
+            .expect("initial state store");
+            store
+                .create_thread(&thread_record("T-terminal", "T-terminal"))
+                .expect("terminal test thread");
+            store
+                .finalize_if_nonterminal(
+                    "T-terminal",
+                    &FinalizeThreadRecord {
+                        status: "completed".into(),
+                        outcome_code: None,
+                        result_json: None,
+                        error_json: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        managed_envelope: None,
+                    },
+                )
+                .expect("finalize test thread");
+        }
+
+        {
+            let runtime = runtime_db::RuntimeDb::open(&runtime_path).expect("runtime db");
+            runtime
+                .insert_thread_runtime("T-unprojected", "T-unprojected")
+                .expect("unprojected runtime row");
+        }
+        {
+            let conn = Connection::open(&runtime_path).expect("raw runtime db");
+            for thread_id in ["T-terminal", "T-unprojected"] {
+                conn.execute(
+                    "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
+                    params![thread_id, 101_i64, 101_i64],
+                )
+                .expect("seed process fields without identity");
+            }
+        }
+
+        let store = StateStore::new(
+            state_dir,
+            runtime_path,
+            Arc::new(LocalTestSigner::default()),
+            WriteBarrier::new(),
+        )
+        .expect("reconciled state store");
+        let inner = store.lock().expect("state store lock");
+        for thread_id in ["T-terminal", "T-unprojected"] {
+            let runtime = inner
+                .runtime_db
+                .get_runtime_info(thread_id)
+                .expect("runtime info")
+                .expect("runtime row");
+            assert_eq!(runtime.pid, None);
+            assert_eq!(runtime.pgid, None);
+            assert_eq!(runtime.process_identity, None);
+        }
+    }
+
+    #[test]
+    fn startup_removes_uncommitted_continuation_runtime_seed() {
+        let tmp = tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let runtime_path = tmp.path().join("runtime.sqlite3");
+
+        {
+            let store = StateStore::new(
+                state_dir.clone(),
+                runtime_path.clone(),
+                Arc::new(LocalTestSigner::default()),
+                WriteBarrier::new(),
+            )
+            .expect("initial state store");
+            store
+                .create_thread(&thread_record("T-root", "T-root"))
+                .expect("source chain");
+            let inner = store.lock().expect("state store lock");
+            inner
+                .runtime_db
+                .seed_continuation_runtime(
+                    "T-orphan",
+                    "T-root",
+                    &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                )
+                .expect("orphan continuation seed");
+        }
+
+        let store = StateStore::new(
+            state_dir,
+            runtime_path,
+            Arc::new(LocalTestSigner::default()),
+            WriteBarrier::new(),
+        )
+        .expect("reconciled state store");
+        assert!(store
+            .lock()
+            .expect("state store lock")
+            .runtime_db
+            .get_runtime_info("T-orphan")
+            .expect("runtime info")
+            .is_none());
+    }
+
+    #[test]
+    fn startup_refuses_nonterminal_process_fields_without_durable_identity() {
+        let tmp = tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let runtime_path = tmp.path().join("runtime.sqlite3");
+
+        {
+            let store = StateStore::new(
+                state_dir.clone(),
+                runtime_path.clone(),
+                Arc::new(LocalTestSigner::default()),
+                WriteBarrier::new(),
+            )
+            .expect("initial state store");
+            store
+                .create_thread(&thread_record("T-active", "T-active"))
+                .expect("active test thread");
+        }
+        {
+            let conn = Connection::open(&runtime_path).expect("raw runtime db");
+            conn.execute(
+                "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
+                params!["T-active", 202_i64, 202_i64],
+            )
+            .expect("seed active process fields without identity");
+        }
+
+        let error = StateStore::new(
+            state_dir,
+            runtime_path.clone(),
+            Arc::new(LocalTestSigner::default()),
+            WriteBarrier::new(),
+        )
+        .expect_err("active process state must fail closed");
+        assert!(error
+            .to_string()
+            .contains("1 nonterminal process row(s) without durable identity"));
+
+        let conn = Connection::open(runtime_path).expect("raw runtime db");
+        let process_fields = conn
+            .query_row(
+                "SELECT pid, pgid FROM thread_runtime WHERE thread_id = ?1",
+                params!["T-active"],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .expect("active process fields");
+        assert_eq!(process_fields, (Some(202), Some(202)));
     }
 
     #[test]
@@ -3597,6 +5125,59 @@ mod tests {
         }
     }
 
+    fn continuation_resume_context(project_context: ProjectContext) -> crate::launch_metadata::ResumeContext {
+        crate::launch_metadata::ResumeContext {
+            kind: "directive".to_string(),
+            item_ref: "directive:test".to_string(),
+            launch_mode: "inline".to_string(),
+            parameters: json!({}),
+            project_context,
+            original_snapshot_hash: Some("a".repeat(64)),
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".to_string(),
+                scopes: vec!["execute".to_string()],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            executor_ref: Some("native:test".to_string()),
+            runtime_ref: None,
+        }
+    }
+
+    #[test]
+    fn continuation_seed_identity_binds_project_root_and_pin_across_lifecycle_progress() {
+        let source = "T-source";
+        let mut record = thread_record("T-successor", "T-root");
+        record.upstream_thread_id = Some(source.to_string());
+        let resume = continuation_resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        record.project_root = Some(PathBuf::from("/wrong/caller/path"));
+        assert!(build_continuation_snapshot(&record, &resume).is_err());
+        record.project_root = Some(PathBuf::from("/work/project"));
+        let mut snapshot = build_continuation_snapshot(&record, &resume).unwrap();
+        assert_eq!(snapshot.project_root, Some(PathBuf::from("/work/project")));
+        assert_eq!(snapshot.base_project_snapshot_hash, Some("a".repeat(64)));
+        snapshot.status = ThreadStatus::Running;
+        let launch = crate::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_resume_context(resume)
+            .with_continuation_source(source);
+
+        verify_continuation_seed_identity(&snapshot, &launch).unwrap();
+
+        let mut wrong_root = snapshot.clone();
+        wrong_root.project_root = Some(PathBuf::from("/other/project"));
+        assert!(verify_continuation_seed_identity(&wrong_root, &launch).is_err());
+
+        let mut wrong_pin = snapshot;
+        wrong_pin.base_project_snapshot_hash = Some("b".repeat(64));
+        assert!(verify_continuation_seed_identity(&wrong_pin, &launch).is_err());
+    }
+
     #[test]
     fn trace_branch_does_not_project_ordinary_upstream_edge() {
         let store = test_store();
@@ -3688,15 +5269,15 @@ mod tests {
         assert_eq!(head_after_duplicate, head_after_first);
 
         let events = store
-            .replay_events("T-root", Some("T-branch"), None, 10)
+            .replay_events("T-root", Some("T-branch"), None, 10, 1024 * 1024)
             .expect("branch replay");
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.events.len(), 2);
         assert_eq!(
-            events[0].event_type,
+            events.events[0].event_type,
             ryeos_state::event_types::THREAD_CREATED
         );
         assert_eq!(
-            events[1].event_type,
+            events.events[1].event_type,
             ryeos_state::event_types::EDGE_RECORDED
         );
     }

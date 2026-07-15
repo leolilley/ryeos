@@ -77,15 +77,15 @@ pub struct TrustStore {
 
 impl TrustStore {
     /// Load trust from the project's trusted-keys dir plus the
-    /// operator's trusted-keys dir (`<app_root>/.ai/config/keys/trusted`,
+    /// node's trusted-keys dir (`<app_root>/.ai/config/keys/trusted`,
     /// passed explicitly by the caller — the daemon for preflight, the
     /// launch envelope for runtimes). Bundle roots are NOT a trust
     /// authority: a bundle cannot ship keys that vouch for itself.
-    pub fn load(project_root: &Path, operator_trusted_keys_dir: &Path) -> Self {
+    pub fn load(project_root: &Path, node_trusted_keys_dir: &Path) -> Self {
         let mut keys = HashMap::new();
 
         let project_trusted_dir = project_root.join(".ai/config/keys/trusted");
-        for dir in [project_trusted_dir.as_path(), operator_trusted_keys_dir] {
+        for dir in [project_trusted_dir.as_path(), node_trusted_keys_dir] {
             if !dir.is_dir() {
                 continue;
             }
@@ -228,7 +228,7 @@ impl TrustStore {
 pub struct VerifiedLoader {
     project_root: PathBuf,
     bundle_roots: Vec<PathBuf>,
-    operator_trusted_keys_dir: PathBuf,
+    node_trusted_keys_dir: PathBuf,
     trust_store: TrustStore,
 }
 
@@ -249,18 +249,18 @@ pub struct ScannedItem {
 impl VerifiedLoader {
     /// `bundle_roots` are CONFIG search roots only (configs ship in
     /// bundles); trust comes exclusively from the project root and the
-    /// explicit operator trusted-keys dir. No hidden env reads here —
+    /// explicit node trusted-keys dir. No hidden env reads here —
     /// the caller owns the trust context.
     pub fn new(
         project_root: PathBuf,
         bundle_roots: Vec<PathBuf>,
-        operator_trusted_keys_dir: &Path,
+        node_trusted_keys_dir: &Path,
     ) -> Self {
-        let trust_store = TrustStore::load(&project_root, operator_trusted_keys_dir);
+        let trust_store = TrustStore::load(&project_root, node_trusted_keys_dir);
         Self {
             project_root,
             bundle_roots,
-            operator_trusted_keys_dir: operator_trusted_keys_dir.to_path_buf(),
+            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
             trust_store,
         }
     }
@@ -269,8 +269,8 @@ impl VerifiedLoader {
         &self.project_root
     }
 
-    pub fn operator_trusted_keys_dir(&self) -> &Path {
-        &self.operator_trusted_keys_dir
+    pub fn node_trusted_keys_dir(&self) -> &Path {
+        &self.node_trusted_keys_dir
     }
 
     pub fn trust_store(&self) -> &TrustStore {
@@ -574,6 +574,26 @@ impl VerifiedLoader {
         config_id: &str,
         strictness: LoadStrictness,
     ) -> std::result::Result<Option<(T, Vec<String>)>, ConfigLoadError> {
+        self.load_config_with_strictness_from_roots(config_id, strictness, true)
+    }
+
+    /// Load a privileged config exclusively from signed bundle roots. Project
+    /// overlays are deliberately excluded so they cannot claim a system-owned
+    /// provenance layer inside the config payload.
+    pub fn load_bundle_config_strict_signed<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<Option<T>, ConfigLoadError> {
+        self.load_config_with_strictness_from_roots(config_id, LoadStrictness::Required, false)
+            .map(|value| value.map(|(config, _)| config))
+    }
+
+    fn load_config_with_strictness_from_roots<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+        strictness: LoadStrictness,
+        include_project: bool,
+    ) -> std::result::Result<Option<(T, Vec<String>)>, ConfigLoadError> {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
@@ -589,9 +609,11 @@ impl VerifiedLoader {
             }
         }
 
-        let p = self.project_root.join(&item_path);
-        if p.exists() {
-            candidate_paths.push((p, "project"));
+        if include_project {
+            let p = self.project_root.join(&item_path);
+            if p.exists() {
+                candidate_paths.push((p, "project"));
+            }
         }
 
         if candidate_paths.is_empty() {
@@ -741,7 +763,7 @@ mod tests {
         p
     }
 
-    /// Operator trusted-keys dir for tests that don't exercise operator
+    /// Node trusted-keys dir for tests that don't exercise operator
     /// trust. Nonexistent path — `TrustStore::load` skips non-dirs.
     fn no_operator_trust() -> PathBuf {
         PathBuf::from("/nonexistent-operator-trust")

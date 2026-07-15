@@ -7,6 +7,7 @@
 //! advisory checks report `unknown` rather than a false green.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -14,6 +15,9 @@ use serde_json::{json, Value};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_engine::engine::Engine;
+use ryeos_engine::sandbox::{
+    SandboxLaunchContext, SandboxProjectAuthority, SandboxRuntime, SandboxVerifiedCode,
+};
 
 /// Status of a single doctor check.
 pub const OK: &str = "ok";
@@ -54,18 +58,30 @@ pub struct DoctorReport {
 ///
 /// `engine` is `Err(reason)` when an offline engine could not be built; the
 /// static checks still run and the import check reports `unavailable` rather
-/// than the whole command failing.
+/// than the whole command failing. `sandbox` follows the same rule when the
+/// immutable node policy snapshot cannot be loaded.
 pub fn run_doctor(
     engine: Result<&Engine, &str>,
+    sandbox: Result<Arc<SandboxRuntime>, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
 ) -> DoctorReport {
     let mut checks = vec![
         check_manifest(source),
-        check_verify(source, dependency_roots, operator_config_root),
+        check_verify(
+            source,
+            dependency_roots,
+            operator_config_root,
+            sandbox.as_ref().map(Arc::clone).map_err(|reason| *reason),
+        ),
     ];
-    checks.extend(check_imports(engine, source));
+    checks.extend(check_imports(
+        engine,
+        sandbox.as_deref().map_err(|reason| *reason),
+        source,
+        operator_config_root,
+    ));
     checks.push(advisory_bundle_events(source));
 
     let ok = checks.iter().all(|c| c.status != FAIL);
@@ -80,12 +96,34 @@ pub fn run_doctor(
 fn check_manifest(source: &Path) -> CheckResult {
     let ai_dir = source.join(ryeos_engine::AI_DIR);
     let source_path = ai_dir.join("manifest.source.yaml");
-    if !source_path.exists() {
-        return CheckResult::new(
-            "manifest",
-            NA,
-            json!({ "note": "no .ai/manifest.source.yaml — manifests are optional" }),
-        );
+    match std::fs::symlink_metadata(&source_path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({
+                    "error": ".ai/manifest.source.yaml must be a regular non-symlink file",
+                }),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({
+                    "error": "required .ai/manifest.source.yaml is missing",
+                    "remedy": "add the bundle manifest source, then run `ryeos bundle publish`",
+                }),
+            );
+        }
+        Err(error) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": format!("cannot inspect manifest.source.yaml: {error}") }),
+            );
+        }
     }
     let raw = match std::fs::read_to_string(&source_path) {
         Ok(raw) => raw,
@@ -133,16 +171,33 @@ fn check_manifest(source: &Path) -> CheckResult {
     let declares_runtime_authority = !source_manifest.runtime_authority.is_empty();
 
     let generated = ai_dir.join("manifest.yaml");
-    if !generated.exists() {
-        return CheckResult::new(
-            "manifest",
-            FAIL,
-            json!({
-                "error": "manifest.source.yaml present but .ai/manifest.yaml is not generated",
-                "remedy": "run `ryeos bundle manifest-sign` (or `bundle publish`)",
-                "declared_name": declared_name,
-            }),
-        );
+    match std::fs::symlink_metadata(&generated) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": ".ai/manifest.yaml must be a regular non-symlink file" }),
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({
+                    "error": "manifest.source.yaml present but .ai/manifest.yaml is not generated",
+                    "remedy": "run `ryeos bundle manifest-sign` (or `bundle publish`)",
+                    "declared_name": declared_name,
+                }),
+            );
+        }
+        Err(error) => {
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": format!("cannot inspect manifest.yaml: {error}") }),
+            );
+        }
     }
     let dir_name = source
         .file_name()
@@ -185,11 +240,23 @@ fn check_verify(
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
+    sandbox: Result<Arc<SandboxRuntime>, &str>,
 ) -> CheckResult {
+    let sandbox = match sandbox {
+        Ok(sandbox) => sandbox,
+        Err(reason) => {
+            return CheckResult::new(
+                "verify",
+                FAIL,
+                json!({ "error": format!("sandbox policy unavailable: {reason}") }),
+            )
+        }
+    };
     match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         source,
         dependency_roots,
         operator_config_root,
+        sandbox,
     ) {
         Ok(report) => {
             let warnings: Vec<String> = report.warnings.iter().map(|w| format!("{w:?}")).collect();
@@ -200,7 +267,12 @@ fn check_verify(
 }
 
 /// Python-tool import dry-run via the shared probe over an offline engine.
-fn check_imports(engine: Result<&Engine, &str>, source: &Path) -> Vec<CheckResult> {
+fn check_imports(
+    engine: Result<&Engine, &str>,
+    sandbox: Result<&SandboxRuntime, &str>,
+    source: &Path,
+    operator_config_root: &Path,
+) -> Vec<CheckResult> {
     let refs = python_tool_refs(source);
     if refs.is_empty() {
         return vec![CheckResult::new(
@@ -223,6 +295,53 @@ fn check_imports(engine: Result<&Engine, &str>, source: &Path) -> Vec<CheckResul
             )];
         }
     };
+    let sandbox = match sandbox {
+        Ok(sandbox) => sandbox,
+        Err(reason) => {
+            return vec![CheckResult::new(
+                "imports",
+                NA,
+                json!({
+                    "import_check": "unavailable",
+                    "import_check_reason": format!("sandbox policy unavailable: {reason}"),
+                    "note": "static checks ran; python imports were not dry-run",
+                }),
+            )];
+        }
+    };
+    let project_path = match std::fs::canonicalize(source) {
+        Ok(path) if path.is_dir() => path,
+        Ok(path) => {
+            return vec![CheckResult::new(
+                "imports",
+                NA,
+                json!({
+                    "import_check": "unavailable",
+                    "import_check_reason": format!("project path is not a directory: {}", path.display()),
+                    "note": "static checks ran; python imports were not dry-run",
+                }),
+            )];
+        }
+        Err(error) => {
+            return vec![CheckResult::new(
+                "imports",
+                NA,
+                json!({
+                    "import_check": "unavailable",
+                    "import_check_reason": format!("could not canonicalize project path {}: {error}", source.display()),
+                    "note": "static checks ran; python imports were not dry-run",
+                }),
+            )];
+        }
+    };
+    let sandbox_bundle_roots = engine
+        .resolution_roots(Some(project_path.clone()))
+        .ordered
+        .iter()
+        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+        .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    let sandbox_node_trusted_keys_dir = operator_config_root.join("keys/trusted");
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -230,7 +349,7 @@ fn check_imports(engine: Result<&Engine, &str>, source: &Path) -> Vec<CheckResul
             scopes: vec!["execute".into()],
         }),
         project_context: ProjectContext::LocalPath {
-            path: source.to_path_buf(),
+            path: project_path.clone(),
         },
         current_site_id: "site:doctor".into(),
         origin_site_id: "site:doctor".into(),
@@ -240,7 +359,15 @@ fn check_imports(engine: Result<&Engine, &str>, source: &Path) -> Vec<CheckResul
 
     refs.into_iter()
         .map(|item_ref| {
-            let detail = match import_one(engine, &plan_ctx, &item_ref) {
+            let detail = match import_one(
+                engine,
+                sandbox,
+                &plan_ctx,
+                &project_path,
+                &sandbox_bundle_roots,
+                &sandbox_node_trusted_keys_dir,
+                &item_ref,
+            ) {
                 Ok(report) => report,
                 Err(e) => json!({ "import_check": "unavailable", "import_check_reason": e }),
             };
@@ -261,7 +388,15 @@ fn check_imports(engine: Result<&Engine, &str>, source: &Path) -> Vec<CheckResul
         .collect()
 }
 
-fn import_one(engine: &Engine, plan_ctx: &PlanContext, item_ref: &str) -> Result<Value, String> {
+fn import_one(
+    engine: &Engine,
+    sandbox: &SandboxRuntime,
+    plan_ctx: &PlanContext,
+    project_path: &Path,
+    sandbox_bundle_roots: &[PathBuf],
+    sandbox_node_trusted_keys_dir: &Path,
+    item_ref: &str,
+) -> Result<Value, String> {
     let canonical = CanonicalRef::parse(item_ref).map_err(|e| format!("invalid ref: {e}"))?;
     let resolved = engine
         .resolve(plan_ctx, &canonical)
@@ -269,11 +404,28 @@ fn import_one(engine: &Engine, plan_ctx: &PlanContext, item_ref: &str) -> Result
     let verified = engine
         .verify(plan_ctx, resolved)
         .map_err(|e| format!("verify: {e}"))?;
+    let sandbox_verified_code = [SandboxVerifiedCode {
+        source_path: verified.resolved.source_path.clone(),
+        content_hash: verified.resolved.content_hash.clone(),
+    }];
     Ok(ryeos_app::env_probe::import_dry_run(
         engine,
         plan_ctx,
         &verified,
         &[],
+        sandbox,
+        SandboxLaunchContext {
+            project_path,
+            project_authority: SandboxProjectAuthority::External,
+            state_root: None,
+            checkpoint_dir: None,
+            daemon_socket_path: None,
+            bundle_roots: sandbox_bundle_roots,
+            node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
+            verified_code: &sandbox_verified_code,
+            item_ref,
+            thread_id: "offline-doctor",
+        },
     ))
 }
 
@@ -356,11 +508,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_check_na_when_no_source() {
+    fn manifest_check_fails_when_no_source() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
         let r = check_manifest(tmp.path());
-        assert_eq!(r.status, NA);
+        assert_eq!(r.status, FAIL);
+        assert!(r.detail["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("required")));
     }
 
     #[test]

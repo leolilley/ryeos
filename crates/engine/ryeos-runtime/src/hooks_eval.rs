@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::callback::CallbackError;
+use crate::callback::{CallbackError, HookDispatchIdentity, HookDispatchOccurrence};
 use crate::envelope::{
     HookDispatchFailureKind, HookDispatchOutput, RuntimeCost, COST_BASIS_ROLLUP,
     HOOK_INTEGRITY_FAILURE_CODE,
@@ -14,6 +14,7 @@ pub type HookDispatcher = Box<
     dyn Fn(
             Value,
             String,
+            HookDispatchIdentity,
         )
             -> Pin<Box<dyn Future<Output = Result<HookDispatchOutput, CallbackError>> + Send>>
         + Send
@@ -67,12 +68,14 @@ impl std::fmt::Display for HookRunError {
 impl std::error::Error for HookRunError {}
 
 pub async fn run_hooks(
-    event: &str,
+    occurrence: HookDispatchOccurrence,
     context: &Value,
     hooks: &[CompiledHook],
     project_path: &str,
     dispatcher: &HookDispatcher,
 ) -> Result<HookRunResult, HookRunError> {
+    let event = occurrence.event();
+    let context_hash = lillux::sha256_hex(lillux::canonical_json(context).as_bytes());
     let mut control_result: Option<Value> = None;
     let mut aggregate_cost: Option<RuntimeCost> = None;
     let evaluation_limits = EvaluationLimits::default();
@@ -122,7 +125,13 @@ pub async fn run_hooks(
             )
         })?;
 
-        let dispatched = match dispatcher(rendered, project_path.to_string()).await {
+        let identity = HookDispatchIdentity {
+            occurrence: occurrence.clone(),
+            hook_id: hook.id().to_string(),
+            layer: hook.layer(),
+            context_hash: context_hash.clone(),
+        };
+        let dispatched = match dispatcher(rendered, project_path.to_string(), identity).await {
             Ok(val) => val,
             Err(e) => {
                 let kind = match &e {
@@ -131,6 +140,7 @@ pub async fn run_hooks(
                     {
                         HookRunErrorKind::Integrity
                     }
+                    CallbackError::Transport(_) => HookRunErrorKind::Integrity,
                     _ => HookRunErrorKind::Dispatch,
                 };
                 return Err(HookRunError::new(
@@ -207,11 +217,40 @@ mod tests {
 
     fn schemas() -> Vec<HookContextSchema> {
         vec![
-            HookContextSchema::new("step_complete", ["state"]),
-            HookContextSchema::new("error", ["state"]),
+            HookContextSchema::new("graph_step_completed", ["state"]),
+            HookContextSchema::new("graph_completed", ["state"]),
             HookContextSchema::new("after_step", ["turn"]),
             HookContextSchema::new("continuation", ["event"]),
         ]
+    }
+
+    fn occurrence(event: &str) -> HookDispatchOccurrence {
+        match event {
+            "graph_step_completed" => HookDispatchOccurrence::GraphStepCompleted {
+                graph_run_id: "graph-run-test".to_string(),
+                definition_ref: "graph:test/workflow".to_string(),
+                definition_hash: "definition-hash".to_string(),
+                step: 3,
+                node: "work".to_string(),
+            },
+            "graph_completed" => HookDispatchOccurrence::GraphCompleted {
+                graph_run_id: "graph-run-test".to_string(),
+                definition_ref: "graph:test/workflow".to_string(),
+                definition_hash: "definition-hash".to_string(),
+                steps: 4,
+            },
+            "after_step" => HookDispatchOccurrence::DirectiveAfterStep {
+                definition_ref: "directive:test/runner".to_string(),
+                definition_hash: "definition-hash".to_string(),
+                turn: 2,
+            },
+            "continuation" => HookDispatchOccurrence::DirectiveContinuation {
+                definition_ref: "directive:test/runner".to_string(),
+                definition_hash: "definition-hash".to_string(),
+                turn: 2,
+            },
+            other => panic!("unsupported test hook occurrence: {other}"),
+        }
     }
 
     fn compile(hooks: Vec<HookDefinition>) -> Vec<CompiledHook> {
@@ -230,12 +269,12 @@ mod tests {
     fn compile_hooks_uses_fixed_source_precedence() {
         let compiled = compile_hooks(
             HookSources {
-                authored: vec![make_hook("authored", "step_complete")],
-                builtin: vec![make_hook("builtin", "step_complete")],
-                infrastructure: vec![make_hook("infra", "step_complete")],
-                context: vec![make_hook("context", "step_complete")],
-                operator: vec![make_hook("operator", "step_complete")],
-                project: vec![make_hook("project", "step_complete")],
+                authored: vec![make_hook("authored", "graph_step_completed")],
+                builtin: vec![make_hook("builtin", "graph_step_completed")],
+                infrastructure: vec![make_hook("infra", "graph_step_completed")],
+                context: vec![make_hook("context", "graph_step_completed")],
+                operator: vec![make_hook("operator", "graph_step_completed")],
+                project: vec![make_hook("project", "graph_step_completed")],
             },
             &schemas(),
             &CompilationLimits::default(),
@@ -258,8 +297,8 @@ mod tests {
     fn compile_hooks_rejects_duplicate_ids_across_layers() {
         let error = compile_hooks(
             HookSources {
-                authored: vec![make_hook("duplicate", "step_complete")],
-                project: vec![make_hook("duplicate", "step_complete")],
+                authored: vec![make_hook("duplicate", "graph_step_completed")],
+                project: vec![make_hook("duplicate", "graph_step_completed")],
                 ..HookSources::default()
             },
             &schemas(),
@@ -274,35 +313,90 @@ mod tests {
     #[tokio::test]
     async fn run_hooks_filters_by_event() {
         let hooks = compile(vec![
-            make_hook("h1", "step_complete"),
-            make_hook("h2", "error"),
+            make_hook("h1", "graph_step_completed"),
+            make_hook("h2", "graph_completed"),
         ]);
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async { Ok(HookDispatchOutput::bare(json!({"dispatched": true}))) })
         });
         let ctx = json!({"state": {}});
-        let result = run_hooks("error", &ctx, &hooks, "/tmp", &dispatcher)
+        let result = run_hooks(
+            occurrence("graph_completed"),
+            &ctx,
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
             .await
             .unwrap();
         assert!(result.control.is_none());
     }
 
     #[tokio::test]
-    async fn infrastructure_hooks_are_observer_only() {
+    async fn run_hooks_attaches_compiled_identity_and_exact_context_hash() {
         let hooks = compile_hooks(
             HookSources {
-                infrastructure: vec![make_hook("infra", "step_complete")],
+                infrastructure: vec![make_hook("audit", "graph_step_completed")],
                 ..HookSources::default()
             },
             &schemas(),
             &CompilationLimits::default(),
         )
         .unwrap();
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_for_dispatch = captured.clone();
+        let dispatcher: HookDispatcher = Box::new(move |_action, _project, identity| {
+            let captured = captured_for_dispatch.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(identity);
+                Ok(HookDispatchOutput::bare(json!({})))
+            })
+        });
+        let occurrence = occurrence("graph_step_completed");
+        let context = json!({"state": {"answer": 42}});
+
+        run_hooks(
+            occurrence.clone(),
+            &context,
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+        let identity = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(identity.occurrence, occurrence);
+        assert_eq!(identity.hook_id, "audit");
+        assert_eq!(identity.layer, HookLayer::Infrastructure);
+        assert_eq!(
+            identity.context_hash,
+            lillux::sha256_hex(lillux::canonical_json(&context).as_bytes())
+        );
+    }
+
+    #[tokio::test]
+    async fn infrastructure_hooks_are_observer_only() {
+        let hooks = compile_hooks(
+            HookSources {
+                infrastructure: vec![make_hook("infra", "graph_step_completed")],
+                ..HookSources::default()
+            },
+            &schemas(),
+            &CompilationLimits::default(),
+        )
+        .unwrap();
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async { Ok(HookDispatchOutput::bare(json!({"should_be_ignored": true}))) })
         });
         let ctx = json!({"state": {}});
-        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher)
+        let result = run_hooks(
+            occurrence("graph_step_completed"),
+            &ctx,
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
             .await
             .unwrap();
         assert!(result.control.is_none());
@@ -311,10 +405,10 @@ mod tests {
     #[tokio::test]
     async fn run_hooks_checked_accumulates_child_cost() {
         let hooks = compile(vec![
-            make_hook("h1", "step_complete"),
-            make_hook("h2", "step_complete"),
+            make_hook("h1", "graph_step_completed"),
+            make_hook("h2", "graph_step_completed"),
         ]);
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async {
                 Ok(HookDispatchOutput {
                     value: json!({}),
@@ -329,7 +423,7 @@ mod tests {
             })
         });
         let result = run_hooks(
-            "step_complete",
+            occurrence("graph_step_completed"),
             &json!({"state": {}}),
             &hooks,
             "/tmp",
@@ -345,8 +439,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_hooks_propagates_dispatch_error() {
-        let hooks = compile(vec![make_hook("h1", "step_complete")]);
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let hooks = compile(vec![make_hook("h1", "graph_step_completed")]);
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async {
                 Err(CallbackError::ActionFailed {
                     code: "timeout".to_string(),
@@ -356,7 +450,14 @@ mod tests {
             })
         });
         let ctx = json!({"state": {}});
-        let result = run_hooks("step_complete", &ctx, &hooks, "/tmp", &dispatcher).await;
+        let result = run_hooks(
+            occurrence("graph_step_completed"),
+            &ctx,
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await;
         assert!(
             result.is_err(),
             "dispatch failure should propagate as Err: {result:?}"
@@ -376,12 +477,12 @@ mod tests {
                 "params": {"reason": "${event.missing}"}
             }),
         }]);
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async { Ok(HookDispatchOutput::bare(json!({"action": "continue"}))) })
         });
 
         let result = run_hooks(
-            "continuation",
+            occurrence("continuation"),
             &json!({"event": {"reason": "context_window"}}),
             &hooks,
             "/tmp",
@@ -411,7 +512,7 @@ mod tests {
         }]);
         let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
         let captured_for_dispatch = captured.clone();
-        let dispatcher: HookDispatcher = Box::new(move |action, _project| {
+        let dispatcher: HookDispatcher = Box::new(move |action, _project, _identity| {
             let captured = captured_for_dispatch.clone();
             Box::pin(async move {
                 *captured.lock().unwrap() = Some(action);
@@ -420,7 +521,7 @@ mod tests {
         });
 
         run_hooks(
-            "continuation",
+            occurrence("continuation"),
             &json!({
                 "event": {
                     "messages": [{"role": "assistant", "content": "hi"}],
@@ -447,7 +548,7 @@ mod tests {
         ]);
         let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let calls_for_dispatch = calls.clone();
-        let dispatcher: HookDispatcher = Box::new(move |_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(move |_action, _project, _identity| {
             let calls = calls_for_dispatch.clone();
             Box::pin(async move {
                 let mut count = calls.lock().unwrap();
@@ -462,9 +563,15 @@ mod tests {
             })
         });
 
-        let result = run_hooks("continuation", &json!({}), &hooks, "/tmp", &dispatcher)
-            .await
-            .unwrap();
+        let result = run_hooks(
+            occurrence("continuation"),
+            &json!({}),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.control, Some(json!({"action": "abort"})));
     }
@@ -481,7 +588,7 @@ mod tests {
         let hooks = compile(vec![constant_false, expression_false, selected]);
         let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let calls_for_dispatch = calls.clone();
-        let dispatcher: HookDispatcher = Box::new(move |_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(move |_action, _project, _identity| {
             let calls = calls_for_dispatch.clone();
             Box::pin(async move {
                 *calls.lock().unwrap() += 1;
@@ -490,7 +597,7 @@ mod tests {
         });
 
         let result = run_hooks(
-            "continuation",
+            occurrence("continuation"),
             &json!({"event": {"ready": true}}),
             &hooks,
             "/tmp",
@@ -508,12 +615,12 @@ mod tests {
         let mut source = make_hook("bad-condition", "continuation");
         source.condition = ExpressionCondition::Expression("event.reason".to_string());
         let hooks = compile(vec![source]);
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async { Ok(HookDispatchOutput::bare(json!({}))) })
         });
 
         let error = run_hooks(
-            "continuation",
+            occurrence("continuation"),
             &json!({"event": {"reason": "limit"}}),
             &hooks,
             "/tmp",
@@ -580,12 +687,12 @@ mod tests {
     #[tokio::test]
     async fn run_hooks_rejects_undeclared_context_roots() {
         let hooks = compile(vec![make_hook("strict-context", "continuation")]);
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(|_action, _project, _identity| {
             Box::pin(async { Ok(HookDispatchOutput::bare(json!({}))) })
         });
 
         let error = run_hooks(
-            "continuation",
+            occurrence("continuation"),
             &json!({"event": {}, "ambient_secret": "not visible"}),
             &hooks,
             "/tmp",
@@ -605,7 +712,7 @@ mod tests {
         ]);
         let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let calls_for_dispatch = calls.clone();
-        let dispatcher: HookDispatcher = Box::new(move |_action, _project| {
+        let dispatcher: HookDispatcher = Box::new(move |_action, _project, _identity| {
             let calls = calls_for_dispatch.clone();
             Box::pin(async move {
                 let mut calls = calls.lock().unwrap();
@@ -624,9 +731,15 @@ mod tests {
             })
         });
 
-        let error = run_hooks("continuation", &json!({}), &hooks, "/tmp", &dispatcher)
-            .await
-            .unwrap_err();
+        let error = run_hooks(
+            occurrence("continuation"),
+            &json!({}),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.kind, HookRunErrorKind::Accounting);
         assert_eq!(error.cost.unwrap().input_tokens, i64::MAX as u64);

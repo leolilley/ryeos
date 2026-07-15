@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::object_closure::collect_object_closure;
-use crate::refs::read_signed_ref;
+use crate::refs::{read_verified_ref, TrustStore};
 
 /// Complete set of reachable hashes from all signed heads.
 #[derive(Debug, Clone, Default)]
@@ -37,9 +37,27 @@ pub struct ReachableSet {
 ///     → source_manifest (item_source_hashes values)
 ///       → item_source (content_blob_hash) → blob
 ///   project_snapshot.parent_hashes → walk history
-pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableSet> {
+pub fn collect_reachable(
+    cas_root: &Path,
+    refs_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<ReachableSet> {
+    collect_reachable_with_extra_roots(cas_root, refs_root, &[], trust_store)
+}
+
+/// Walk signed heads plus daemon-authoritative transient roots.
+///
+/// Extra roots are intentionally not part of any public GC request schema;
+/// the online daemon derives them from active runtime launch metadata so a
+/// resumable process's immutable project pin cannot be swept mid-lifecycle.
+pub fn collect_reachable_with_extra_roots(
+    cas_root: &Path,
+    refs_root: &Path,
+    extra_roots: &[String],
+    trust_store: &TrustStore,
+) -> Result<ReachableSet> {
     let mut set = ReachableSet::default();
-    let mut roots: Vec<String> = Vec::new();
+    let mut roots: Vec<String> = extra_roots.to_vec();
 
     // Seed from chain heads
     let chains_dir = refs_root.join("generic/chains");
@@ -53,7 +71,9 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                 let head_path = entry.path().join("head");
                 if head_path.exists() {
                     let expected_ref_path = format!("chains/{chain_root_id}/head");
-                    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
+                    if let Some(target) =
+                        read_ref_target(&head_path, &expected_ref_path, trust_store)?
+                    {
                         roots.push(target);
                         set.chain_root_ids.push(chain_root_id);
                     }
@@ -84,7 +104,9 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                         if head_path.exists() {
                             let expected_ref_path =
                                 format!("projects/{principal_key}/{project_hash}");
-                            if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
+                            if let Some(target) =
+                                read_ref_target(&head_path, &expected_ref_path, trust_store)?
+                            {
                                 roots.push(target);
                                 set.project_hashes.push(project_hash);
                             }
@@ -109,7 +131,9 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
                 let head_path = project_entry.path().join("head");
                 if head_path.exists() {
                     let expected_ref_path = format!("deployed/projects/{project_hash}");
-                    if let Some(target) = read_ref_target(&head_path, &expected_ref_path)? {
+                    if let Some(target) =
+                        read_ref_target(&head_path, &expected_ref_path, trust_store)?
+                    {
                         roots.push(target);
                         set.project_hashes.push(project_hash);
                     }
@@ -124,7 +148,7 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
     // sweep deletes event objects while their head refs survive.
     let bundle_events_dir = refs_root.join("generic").join("bundle_events");
     if bundle_events_dir.is_dir() {
-        collect_bundle_event_roots(refs_root, &bundle_events_dir, &mut roots)?;
+        collect_bundle_event_roots(refs_root, &bundle_events_dir, trust_store, &mut roots)?;
     }
 
     merge_object_closure(cas_root, roots, &mut set)?;
@@ -139,7 +163,12 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
 /// relocated head (e.g. an operator backup of retired state) can never be
 /// read again and must not anchor objects. Such heads are skipped with a
 /// warning instead of failing the traversal.
-fn collect_bundle_event_roots(refs_root: &Path, dir: &Path, roots: &mut Vec<String>) -> Result<()> {
+fn collect_bundle_event_roots(
+    refs_root: &Path,
+    dir: &Path,
+    trust_store: &TrustStore,
+    roots: &mut Vec<String>,
+) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| {
         format!(
             "failed to read bundle event refs directory {}",
@@ -152,13 +181,13 @@ fn collect_bundle_event_roots(refs_root: &Path, dir: &Path, roots: &mut Vec<Stri
             .file_type()
             .context("failed to inspect bundle event ref entry")?;
         if file_type.is_dir() {
-            collect_bundle_event_roots(refs_root, &path, roots)?;
+            collect_bundle_event_roots(refs_root, &path, trust_store, roots)?;
             continue;
         }
         if !file_type.is_file() || entry.file_name() != "head" {
             continue;
         }
-        let signed_ref = match read_signed_ref(&path) {
+        let signed_ref = match read_verified_ref(&path, trust_store) {
             Ok(signed_ref) => signed_ref,
             Err(err) => {
                 tracing::warn!(
@@ -187,11 +216,15 @@ fn collect_bundle_event_roots(refs_root: &Path, dir: &Path, roots: &mut Vec<Stri
 }
 
 /// Read the target hash from a signed ref file.
-fn read_ref_target(path: &Path, expected_ref_path: &str) -> Result<Option<String>> {
+fn read_ref_target(
+    path: &Path,
+    expected_ref_path: &str,
+    trust_store: &TrustStore,
+) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
-    let signed_ref = read_signed_ref(path)?;
+    let signed_ref = read_verified_ref(path, trust_store)?;
     if signed_ref.ref_path != expected_ref_path {
         anyhow::bail!(
             "signed ref path mismatch for {}: expected {}, got {}",
@@ -210,12 +243,18 @@ pub fn collect_chain_reachable(
     cas_root: &Path,
     refs_root: &Path,
     chain_root_id: &str,
+    trust_store: &TrustStore,
 ) -> Result<ReachableSet> {
     let mut set = ReachableSet::default();
     let mut roots: Vec<String> = Vec::new();
 
     if let Some(signed_ref) =
-        crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+        crate::refs::read_verified_generic_head_ref(
+            refs_root,
+            "chains",
+            chain_root_id,
+            trust_store,
+        )?
     {
         roots.push(signed_ref.target_hash);
         set.chain_root_ids.push(chain_root_id.to_string());
@@ -249,6 +288,21 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    fn trust_store() -> TrustStore {
+        crate::signer::trust_store_for_signer(&crate::signer::TestSigner::default())
+    }
+
+    fn write_test_ref(path: &Path, ref_path: &str, target_hash: &str, updated_at: &str) {
+        let signer = crate::signer::TestSigner::default();
+        let signed_ref = crate::SignedRef::new(
+            ref_path.to_owned(),
+            target_hash.to_owned(),
+            updated_at.to_owned(),
+            crate::Signer::fingerprint(&signer).to_owned(),
+        );
+        crate::refs::write_signed_ref(path, signed_ref, &signer).unwrap();
+    }
+
     fn setup_cas_refs() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("state").join("objects");
@@ -278,7 +332,7 @@ mod tests {
     #[test]
     fn collect_reachable_empty_state() {
         let (_tmp, cas_root, refs_root) = setup_cas_refs();
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert!(set.object_hashes.is_empty());
         assert!(set.blob_hashes.is_empty());
         assert!(set.chain_root_ids.is_empty());
@@ -347,18 +401,14 @@ mod tests {
         // Write signed head ref
         let head_path = refs_root.join("generic/chains/T-root/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1,
-            "kind": "signed_ref",
-            "ref_path": "chains/T-root/head",
-            "target_hash": cs_hash,
-            "updated_at": "2026-04-22T00:00:00Z",
-            "signer": "test",
-            "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "chains/T-root/head",
+            &cs_hash,
+            "2026-04-22T00:00:00Z",
+        );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert_eq!(set.chain_root_ids.len(), 1);
         assert_eq!(set.chain_root_ids[0], "T-root");
         assert!(set.object_hashes.contains(&cs_hash));
@@ -404,18 +454,14 @@ mod tests {
         let head_path =
             refs_root.join("generic/bundle_events/ryeos-email/campaign_event/chains/camp_1/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1,
-            "kind": "signed_ref",
-            "ref_path": "bundle_events/ryeos-email/campaign_event/chains/camp_1/head",
-            "target_hash": head_hash,
-            "updated_at": "2026-04-22T00:00:01Z",
-            "signer": "test",
-            "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "bundle_events/ryeos-email/campaign_event/chains/camp_1/head",
+            &head_hash,
+            "2026-04-22T00:00:01Z",
+        );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert!(
             set.object_hashes.contains(&head_hash),
             "bundle event head must be reachable"
@@ -437,18 +483,14 @@ mod tests {
             "generic/bundle_events/ryeos-email.broken-backup-20260610T021602Z/campaign_event/chains/camp_1/head",
         );
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1,
-            "kind": "signed_ref",
-            "ref_path": "bundle_events/ryeos-email/campaign_event/chains/camp_1/head",
-            "target_hash": make_hash("gone"),
-            "updated_at": "2026-04-22T00:00:00Z",
-            "signer": "test",
-            "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "bundle_events/ryeos-email/campaign_event/chains/camp_1/head",
+            &make_hash("gone"),
+            "2026-04-22T00:00:00Z",
+        );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert!(
             set.object_hashes.is_empty(),
             "relocated bundle event refs must not seed reachability roots"
@@ -553,16 +595,14 @@ mod tests {
 
         let head_path = refs_root.join("generic/chains/T-root/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1, "kind": "signed_ref",
-            "ref_path": "chains/T-root/head",
-            "target_hash": cs_hash,
-            "updated_at": "2026-04-22T00:00:00Z",
-            "signer": "test", "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "chains/T-root/head",
+            &cs_hash,
+            "2026-04-22T00:00:00Z",
+        );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert_eq!(set.object_hashes.len(), 4);
         assert!(set.object_hashes.contains(&cs_hash));
         assert!(set.object_hashes.contains(&snap_hash));
@@ -616,16 +656,14 @@ mod tests {
 
         let head_path = refs_root.join("projects/principal-test/test_project/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1, "kind": "signed_ref",
-            "ref_path": "projects/principal-test/test_project",
-            "target_hash": proj_snap_hash,
-            "updated_at": "2026-04-22T00:00:00Z",
-            "signer": "test", "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "projects/principal-test/test_project",
+            &proj_snap_hash,
+            "2026-04-22T00:00:00Z",
+        );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert_eq!(set.project_hashes.len(), 1);
         assert!(set.object_hashes.contains(&proj_snap_hash));
         assert!(set.object_hashes.contains(&manifest_hash));
@@ -660,7 +698,7 @@ mod tests {
             }),
         );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         assert!(set.object_hashes.is_empty());
         assert!(!set.object_hashes.contains(&orphan_hash));
     }
@@ -778,16 +816,14 @@ mod tests {
 
         let head_path = refs_root.join("generic/chains/T-root/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1, "kind": "signed_ref",
-            "ref_path": "chains/T-root/head",
-            "target_hash": cs_v2_hash,
-            "updated_at": "2026-04-22T00:00:01Z",
-            "signer": "test", "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "chains/T-root/head",
+            &cs_v2_hash,
+            "2026-04-22T00:00:01Z",
+        );
 
-        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        let set = collect_reachable(&cas_root, &refs_root, &trust_store()).unwrap();
         // Both chain states + both snapshots = 4 objects
         assert_eq!(set.object_hashes.len(), 4);
         assert!(set.object_hashes.contains(&cs_v1_hash));
@@ -870,18 +906,17 @@ mod tests {
 
         let head_path = refs_root.join("generic/chains/T-root/head");
         fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        let ref_value = serde_json::json!({
-            "schema": 1, "kind": "signed_ref",
-            "ref_path": "chains/T-root/head",
-            "target_hash": cs_hash,
-            "updated_at": "2026-04-22T00:00:00Z",
-            "signer": "test", "signature": "test"
-        });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        write_test_ref(
+            &head_path,
+            "chains/T-root/head",
+            &cs_hash,
+            "2026-04-22T00:00:00Z",
+        );
 
         // Don't write T-other head ref
 
-        let set = collect_chain_reachable(&cas_root, &refs_root, "T-root").unwrap();
+        let set =
+            collect_chain_reachable(&cas_root, &refs_root, "T-root", &trust_store()).unwrap();
         assert_eq!(set.chain_root_ids.len(), 1);
         assert_eq!(set.chain_root_ids[0], "T-root");
         assert!(set.object_hashes.contains(&cs_hash));

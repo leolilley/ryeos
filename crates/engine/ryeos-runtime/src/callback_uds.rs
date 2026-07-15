@@ -65,6 +65,23 @@ impl UdsRuntimeClient {
             }
         }
     }
+
+    fn serialize_dispatch_action_request(
+        request: DispatchActionRequest,
+    ) -> Result<(Value, bool), CallbackError> {
+        let inline = request.action.thread == "inline";
+        let params = serde_json::to_value(request).map_err(|error| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "serialize runtime.dispatch_action request: {error}"
+            ))
+        })?;
+        if !params.is_object() {
+            return Err(CallbackError::Transport(anyhow::anyhow!(
+                "serialized runtime.dispatch_action request must be an object"
+            )));
+        }
+        Ok((params, inline))
+    }
 }
 
 #[async_trait]
@@ -73,18 +90,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         request: DispatchActionRequest,
     ) -> Result<Value, CallbackError> {
-        // Serialize the whole typed `ActionPayload` rather than hand-listing
-        // its fields, so wire and struct can't drift (a hand-rolled list
-        // silently dropped `call`, defaulting graph method dispatch to the
-        // kind default). The daemon deserializes this back into `ActionPayload`.
-        let action = serde_json::to_value(&request.action)
-            .map_err(|e| CallbackError::Transport(anyhow::anyhow!("serialize action: {e}")))?;
-        let inline = request.action.thread == "inline";
-        let mut params = json!({
-            "thread_id": request.thread_id,
-            "project_path": request.project_path,
-            "action": action,
-        });
+        let (mut params, inline) = Self::serialize_dispatch_action_request(request)?;
         self.inject_callback_token(&mut params);
         if inline {
             // An inline dispatch's response arrives only after the leaf
@@ -455,5 +461,58 @@ mod tests {
         client.inject_callback_token(&mut params);
         assert!(params.get("callback_token").is_none());
         assert!(params.get("thread_auth_token").is_none());
+    }
+
+    #[test]
+    fn dispatch_action_serializes_typed_hook_identity() {
+        let identity = HookDispatchIdentity {
+            occurrence: HookDispatchOccurrence::GraphStepCompleted {
+                graph_run_id: "graph-run-7".to_string(),
+                definition_ref: "graph:test/workflow".to_string(),
+                definition_hash: "definition-hash".to_string(),
+                step: 4,
+                node: "audit-node".to_string(),
+            },
+            hook_id: "audit".to_string(),
+            layer: crate::hooks_loader::HookLayer::Infrastructure,
+            context_hash: "sha256-context".to_string(),
+        };
+        let request = DispatchActionRequest {
+            thread_id: "T-1".to_string(),
+            project_path: "/project".to_string(),
+            action: ActionPayload {
+                item_id: "tool:test/audit".to_string(),
+                params: json!({}),
+                thread: "inline".to_string(),
+                call: None,
+                facets: None,
+                launch_window: None,
+            },
+            hook_dispatch: Some(identity.clone()),
+        };
+
+        let (params, inline) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();
+        assert!(inline);
+        assert_eq!(params["hook_dispatch"], serde_json::to_value(identity).unwrap());
+    }
+
+    #[test]
+    fn dispatch_action_omits_hook_identity_for_regular_actions() {
+        let request = DispatchActionRequest {
+            thread_id: "T-1".to_string(),
+            project_path: "/project".to_string(),
+            action: ActionPayload {
+                item_id: "tool:test/noop".to_string(),
+                params: json!({}),
+                thread: "inline".to_string(),
+                call: None,
+                facets: None,
+                launch_window: None,
+            },
+            hook_dispatch: None,
+        };
+
+        let (params, _) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();
+        assert!(params.get("hook_dispatch").is_none());
     }
 }

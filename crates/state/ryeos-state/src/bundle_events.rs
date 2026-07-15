@@ -6,17 +6,26 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use anyhow::Context;
+use base64::Engine as _;
+use lillux::crypto::Verifier as _;
 use serde::{Deserialize, Serialize};
 
 use crate::objects::{
     hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
-    BUNDLE_EVENT_KIND, SCHEMA_VERSION,
+    BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES, SCHEMA_VERSION,
 };
 use crate::refs;
+use crate::refs::TrustStore;
 use crate::signer::Signer;
 
 const BUNDLE_EVENTS_NAMESPACE: &str = "bundle_events";
 const MAX_BUNDLE_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// Maximum filesystem entries a single paged cross-chain scan may inspect while
+/// selecting the next lexicographic chain. `read_dir` order is unspecified, so
+/// correctness requires examining the whole directory; rejecting an oversized
+/// namespace gives that operation a hard CPU/syscall bound until chain heads
+/// gain an indexed ordering structure.
+pub const MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES: usize = 4_096;
 
 #[derive(Debug, Clone)]
 pub struct BundleEventAppendRequest {
@@ -46,6 +55,144 @@ pub struct BundleEventAppendResult {
 pub struct BundleEventRecord {
     pub event_hash: String,
     pub event: BundleEventObject,
+}
+
+/// A newest-first page from one bundle event chain.
+#[derive(Debug, Clone)]
+pub struct BundleEventChainPage {
+    pub records: Vec<BundleEventRecord>,
+    pub next_cursor: Option<BundleEventCursor>,
+}
+
+/// Signed keyset cursor for bundle-event pagination.
+///
+/// The cursor is bound to one bundle identity and the verified chain head from
+/// which it was produced. A cursor becomes stale when that head advances; its
+/// signature prevents callers from substituting an unreachable CAS event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleEventCursor {
+    pub schema: u32,
+    pub kind: String,
+    pub bundle_id: String,
+    pub event_kind: String,
+    pub chain_id: String,
+    pub head_hash: String,
+    pub event_hash: String,
+    pub signer: String,
+    pub signature: String,
+}
+
+/// A newest-first page from one chain in a cross-chain scan. Chains are
+/// visited in lexicographic `chain_id` order.
+#[derive(Debug, Clone)]
+pub struct BundleEventScanPage {
+    pub records: Vec<BundleEventRecord>,
+    pub next_cursor: Option<BundleEventCursor>,
+}
+
+#[derive(Debug)]
+struct BundleEventHashPage {
+    records: Vec<BundleEventRecord>,
+    next_hash: Option<String>,
+}
+
+const BUNDLE_EVENT_CURSOR_KIND: &str = "bundle_event_cursor";
+
+impl BundleEventCursor {
+    fn new(
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+        head_hash: &str,
+        event_hash: &str,
+        signer: &dyn Signer,
+        trust_store: &TrustStore,
+    ) -> anyhow::Result<Self> {
+        let mut cursor = Self {
+            schema: SCHEMA_VERSION,
+            kind: BUNDLE_EVENT_CURSOR_KIND.to_string(),
+            bundle_id: bundle_id.to_string(),
+            event_kind: event_kind.to_string(),
+            chain_id: chain_id.to_string(),
+            head_hash: head_hash.to_string(),
+            event_hash: event_hash.to_string(),
+            signer: signer.fingerprint().to_string(),
+            signature: String::new(),
+        };
+        cursor.validate_structure(false)?;
+        let signature = signer.sign(cursor.canonical_unsigned().as_bytes());
+        cursor.signature = base64::engine::general_purpose::STANDARD.encode(signature);
+        cursor.verify(bundle_id, event_kind, trust_store)?;
+        Ok(cursor)
+    }
+
+    fn verify(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        trust_store: &TrustStore,
+    ) -> anyhow::Result<()> {
+        self.validate_structure(true)?;
+        if self.bundle_id != bundle_id || self.event_kind != event_kind {
+            anyhow::bail!(
+                "bundle event cursor identity mismatch: expected {}/{}, got {}/{}",
+                bundle_id,
+                event_kind,
+                self.bundle_id,
+                self.event_kind
+            );
+        }
+        let verifying_key = trust_store
+            .get(&self.signer)
+            .ok_or_else(|| anyhow::anyhow!("bundle event cursor signer is not trusted"))?;
+        let signature_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.signature)
+            .context("failed to decode bundle event cursor signature")?;
+        let signature = lillux::crypto::Signature::from_slice(&signature_bytes).map_err(|error| {
+            anyhow::anyhow!("failed to parse bundle event cursor signature: {error}")
+        })?;
+        verifying_key
+            .verify(self.canonical_unsigned().as_bytes(), &signature)
+            .map_err(|error| {
+                anyhow::anyhow!("bundle event cursor signature verification failed: {error}")
+            })
+    }
+
+    fn validate_structure(&self, require_signature: bool) -> anyhow::Result<()> {
+        if self.schema != SCHEMA_VERSION {
+            anyhow::bail!("unsupported bundle event cursor schema: {}", self.schema);
+        }
+        if self.kind != BUNDLE_EVENT_CURSOR_KIND {
+            anyhow::bail!("invalid bundle event cursor kind: {}", self.kind);
+        }
+        validate_bundle_identifier("cursor bundle_id", &self.bundle_id)?;
+        validate_bundle_identifier("cursor event_kind", &self.event_kind)?;
+        validate_bundle_identifier("cursor chain_id", &self.chain_id)?;
+        validate_canonical_hash("cursor head_hash", &self.head_hash)?;
+        validate_canonical_hash("cursor event_hash", &self.event_hash)?;
+        validate_canonical_hash("cursor signer", &self.signer)?;
+        if require_signature && self.signature.is_empty() {
+            anyhow::bail!("bundle event cursor signature must not be empty");
+        }
+        if self.signature.len() > 128 {
+            anyhow::bail!("bundle event cursor signature is too long");
+        }
+        Ok(())
+    }
+
+    fn canonical_unsigned(&self) -> String {
+        lillux::canonical_json(&serde_json::json!({
+            "schema": self.schema,
+            "kind": self.kind,
+            "bundle_id": self.bundle_id,
+            "event_kind": self.event_kind,
+            "chain_id": self.chain_id,
+            "head_hash": self.head_hash,
+            "event_hash": self.event_hash,
+            "signer": self.signer,
+        }))
+    }
 }
 
 struct BundleEventChainLock {
@@ -109,7 +256,7 @@ impl Drop for BundleEventChainLock {
 
 #[tracing::instrument(
     name = "state:bundle_event_append",
-    skip(cas_root, refs_root, request, signer),
+    skip(cas_root, refs_root, request, signer, trust_store),
     fields(
         effective_bundle_id = %request.effective_bundle_id,
         event_kind = %request.event_kind,
@@ -122,6 +269,7 @@ pub fn append_bundle_event(
     refs_root: &Path,
     request: BundleEventAppendRequest,
     signer: &dyn Signer,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<BundleEventAppendResult> {
     let bundle_id = request
         .bundle_id
@@ -137,6 +285,7 @@ pub fn append_bundle_event(
     }
 
     validate_append_request(&bundle_id, &request)?;
+    require_trusted_signer(signer, trust_store)?;
     let _lock = BundleEventChainLock::acquire(
         refs_root,
         &bundle_id,
@@ -152,14 +301,16 @@ pub fn append_bundle_event(
         &request,
         &request_fingerprint,
         signer,
+        trust_store,
     )? {
         return Ok(result);
     }
 
-    let current_head = refs::read_generic_head_ref(
+    let current_head = refs::read_verified_generic_head_ref(
         refs_root,
         BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(&bundle_id, &request.event_kind, &request.chain_id),
+        trust_store,
     )?;
     let current_head_hash = current_head.as_ref().map(|head| head.target_hash.as_str());
     if current_head_hash != request.expected_chain_head_hash.as_deref() {
@@ -205,29 +356,39 @@ pub fn append_bundle_event(
     lillux::atomic_write(&event_path, event_json.as_bytes())
         .context("failed to store bundle event in CAS")?;
 
-    refs::write_generic_head_ref(
-        refs_root,
-        BUNDLE_EVENTS_NAMESPACE,
-        &chain_ref_name(&bundle_id, &event.event_kind, &event.chain_id),
-        &event_hash,
-        signer,
-    )
-    .context("failed to write bundle event chain head")?;
-
-    if let Some(idempotency_key) = &event.idempotency_key {
+    let chain_head_outcome = refs::classify_ref_write(
         refs::write_generic_head_ref(
             refs_root,
             BUNDLE_EVENTS_NAMESPACE,
-            &idempotency_ref_name(
-                &bundle_id,
-                &event.event_kind,
-                &event.chain_id,
-                idempotency_key,
-            ),
+            &chain_ref_name(&bundle_id, &event.event_kind, &event.chain_id),
             &event_hash,
             signer,
-        )
-        .context("failed to write bundle event idempotency head")?;
+        ),
+        "failed to write bundle event chain head",
+    )?;
+    if let refs::RefWriteOutcome::DurabilityUncertain(error) = chain_head_outcome {
+        tracing::warn!(%error, "bundle event chain head committed with uncertain durability");
+    }
+
+    if let Some(idempotency_key) = &event.idempotency_key {
+        let outcome = refs::classify_ref_write(
+            refs::write_generic_head_ref(
+                refs_root,
+                BUNDLE_EVENTS_NAMESPACE,
+                &idempotency_ref_name(
+                    &bundle_id,
+                    &event.event_kind,
+                    &event.chain_id,
+                    idempotency_key,
+                ),
+                &event_hash,
+                signer,
+            ),
+            "failed to write bundle event idempotency head",
+        )?;
+        if let refs::RefWriteOutcome::DurabilityUncertain(error) = outcome {
+            tracing::warn!(%error, "bundle event idempotency head committed with uncertain durability");
+        }
     }
 
     Ok(BundleEventAppendResult {
@@ -244,14 +405,16 @@ pub fn read_bundle_event_chain(
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Vec<BundleEventRecord>> {
     validate_bundle_identifier("bundle_id", bundle_id)?;
     validate_bundle_identifier("event_kind", event_kind)?;
     validate_bundle_identifier("chain_id", chain_id)?;
-    let Some(head) = refs::read_generic_head_ref(
+    let Some(head) = refs::read_verified_generic_head_ref(
         refs_root,
         BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(bundle_id, event_kind, chain_id),
+        trust_store,
     )?
     else {
         return Ok(Vec::new());
@@ -280,6 +443,7 @@ pub fn scan_bundle_events(
     refs_root: &Path,
     bundle_id: &str,
     event_kind: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Vec<BundleEventRecord>> {
     validate_bundle_identifier("bundle_id", bundle_id)?;
     validate_bundle_identifier("event_kind", event_kind)?;
@@ -287,7 +451,7 @@ pub fn scan_bundle_events(
         "{}/{}/{}/chains",
         BUNDLE_EVENTS_NAMESPACE, bundle_id, event_kind
     );
-    let heads = refs::list_generic_head_refs(refs_root, &prefix)?;
+    let heads = refs::list_verified_generic_head_refs(refs_root, &prefix, trust_store)?;
     let mut records = Vec::new();
     for head in heads {
         let parts: Vec<_> = head.name.split('/').collect();
@@ -299,7 +463,12 @@ pub fn scan_bundle_events(
             continue;
         }
         records.extend(read_bundle_event_chain(
-            cas_root, refs_root, bundle_id, event_kind, parts[3],
+            cas_root,
+            refs_root,
+            bundle_id,
+            event_kind,
+            parts[3],
+            trust_store,
         )?);
     }
     records.sort_by(|a, b| {
@@ -319,6 +488,386 @@ pub fn scan_bundle_events(
             ))
     });
     Ok(records)
+}
+
+/// Read a bounded, newest-first page from one chain.
+pub fn read_bundle_event_chain_page(
+    cas_root: &Path,
+    refs_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    chain_id: &str,
+    cursor: Option<&BundleEventCursor>,
+    limit: usize,
+    max_serialized_bytes: usize,
+    trust_store: &TrustStore,
+    signer: &dyn Signer,
+) -> anyhow::Result<BundleEventChainPage> {
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", event_kind)?;
+    validate_bundle_identifier("chain_id", chain_id)?;
+    validate_bundle_event_page_bounds(limit, max_serialized_bytes)?;
+
+    let current_head = refs::read_verified_generic_head_ref(
+        refs_root,
+        BUNDLE_EVENTS_NAMESPACE,
+        &chain_ref_name(bundle_id, event_kind, chain_id),
+        trust_store,
+    )?;
+    let Some(current_head) = current_head else {
+        if cursor.is_some() {
+            anyhow::bail!("bundle event cursor names a chain with no current head");
+        }
+        return Ok(BundleEventChainPage {
+            records: Vec::new(),
+            next_cursor: None,
+        });
+    };
+    let head_hash = current_head.target_hash;
+    let start_hash = match cursor {
+        Some(cursor) => {
+            cursor.verify(bundle_id, event_kind, trust_store)?;
+            if cursor.chain_id != chain_id {
+                anyhow::bail!(
+                    "bundle event cursor chain mismatch: expected {}, got {}",
+                    chain_id,
+                    cursor.chain_id
+                );
+            }
+            if cursor.head_hash != head_hash {
+                anyhow::bail!(
+                    "stale bundle event cursor for chain {}: anchored at {}, current head {}",
+                    chain_id,
+                    cursor.head_hash,
+                    head_hash
+                );
+            }
+            cursor.event_hash.clone()
+        }
+        None => head_hash.clone(),
+    };
+
+    let page = read_bundle_event_chain_page_from_hash(
+        cas_root,
+        bundle_id,
+        event_kind,
+        chain_id,
+        Some(start_hash),
+        limit,
+        max_serialized_bytes,
+    )?;
+    let next_cursor = page
+        .next_hash
+        .as_deref()
+        .map(|event_hash| {
+            BundleEventCursor::new(
+                bundle_id,
+                event_kind,
+                chain_id,
+                &head_hash,
+                event_hash,
+                signer,
+                trust_store,
+            )
+        })
+        .transpose()?;
+    Ok(BundleEventChainPage {
+        records: page.records,
+        next_cursor,
+    })
+}
+
+/// Scan bounded pages across bundle event chains without collecting every
+/// signed head or every event under the StateStore lock.
+pub fn scan_bundle_events_page(
+    cas_root: &Path,
+    refs_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    cursor: Option<&BundleEventCursor>,
+    limit: usize,
+    max_serialized_bytes: usize,
+    trust_store: &TrustStore,
+    signer: &dyn Signer,
+) -> anyhow::Result<BundleEventScanPage> {
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", event_kind)?;
+    validate_bundle_event_page_bounds(limit, max_serialized_bytes)?;
+
+    let Some((chain_id, head_hash, start_hash)) = (match cursor {
+        Some(cursor) => {
+            cursor.verify(bundle_id, event_kind, trust_store)?;
+            let current_head = refs::read_verified_generic_head_ref(
+                refs_root,
+                BUNDLE_EVENTS_NAMESPACE,
+                &chain_ref_name(bundle_id, event_kind, &cursor.chain_id),
+                trust_store,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("bundle event cursor names a chain with no current head"))?;
+            if cursor.head_hash != current_head.target_hash {
+                anyhow::bail!(
+                    "stale bundle event cursor for chain {}: anchored at {}, current head {}",
+                    cursor.chain_id,
+                    cursor.head_hash,
+                    current_head.target_hash
+                );
+            }
+            Some((
+                cursor.chain_id.clone(),
+                cursor.head_hash.clone(),
+                cursor.event_hash.clone(),
+            ))
+        }
+        None => next_bundle_event_chain_head(
+            refs_root,
+            bundle_id,
+            event_kind,
+            None,
+            trust_store,
+        )?
+        .map(|(chain_id, head_hash)| (chain_id, head_hash.clone(), head_hash)),
+    }) else {
+        return Ok(BundleEventScanPage {
+            records: Vec::new(),
+            next_cursor: None,
+        });
+    };
+
+    let page = read_bundle_event_chain_page_from_hash(
+        cas_root,
+        bundle_id,
+        event_kind,
+        &chain_id,
+        Some(start_hash),
+        limit,
+        max_serialized_bytes,
+    )?;
+
+    let next_cursor = if let Some(event_hash) = page.next_hash {
+        Some(BundleEventCursor::new(
+            bundle_id,
+            event_kind,
+            &chain_id,
+            &head_hash,
+            &event_hash,
+            signer,
+            trust_store,
+        )?)
+    } else {
+        next_bundle_event_chain_head(
+            refs_root,
+            bundle_id,
+            event_kind,
+            Some(&chain_id),
+            trust_store,
+        )?
+        .map(|(chain_id, head_hash)| {
+            BundleEventCursor::new(
+                bundle_id,
+                event_kind,
+                &chain_id,
+                &head_hash,
+                &head_hash,
+                signer,
+                trust_store,
+            )
+        })
+        .transpose()?
+    };
+
+    Ok(BundleEventScanPage {
+        records: page.records,
+        next_cursor,
+    })
+}
+
+fn read_bundle_event_chain_page_from_hash(
+    cas_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    chain_id: &str,
+    mut next_hash: Option<String>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<BundleEventHashPage> {
+    let mut records = Vec::with_capacity(limit.min(64));
+    let mut serialized_bytes = 0usize;
+    let mut expected_seq = None;
+
+    while records.len() < limit {
+        let Some(hash) = next_hash.take() else {
+            break;
+        };
+        let record = read_bundle_event_by_hash(cas_root, &hash)?;
+        if record.event.bundle_id != bundle_id
+            || record.event.event_kind != event_kind
+            || record.event.chain_id != chain_id
+        {
+            anyhow::bail!("bundle event chain cursor contains mismatched event metadata");
+        }
+        if let Some(expected_seq) = expected_seq {
+            if record.event.chain_seq != expected_seq {
+                anyhow::bail!(
+                    "bundle event chain {}/{}/{} has sequence gap: expected {}, got {}",
+                    bundle_id,
+                    event_kind,
+                    chain_id,
+                    expected_seq,
+                    record.event.chain_seq
+                );
+            }
+        }
+        match &record.event.prev_chain_event_hash {
+            Some(_) if record.event.chain_seq == 1 => anyhow::bail!(
+                "bundle event chain {}/{}/{} has a predecessor at sequence 1",
+                bundle_id,
+                event_kind,
+                chain_id
+            ),
+            None if record.event.chain_seq != 1 => anyhow::bail!(
+                "bundle event chain {}/{}/{} ends at sequence {}",
+                bundle_id,
+                event_kind,
+                chain_id,
+                record.event.chain_seq
+            ),
+            _ => {}
+        }
+
+        let record_bytes = serde_json::to_vec(&record)
+            .context("failed to measure serialized bundle event record")?
+            .len();
+        let next_serialized_bytes = serialized_bytes
+            .checked_add(record_bytes)
+            .context("bundle event page serialized byte count overflow")?;
+        if next_serialized_bytes > max_serialized_bytes {
+            if records.is_empty() {
+                anyhow::bail!(
+                    "single bundle event requires {} serialized bytes (page budget {})",
+                    record_bytes,
+                    max_serialized_bytes
+                );
+            }
+            next_hash = Some(hash);
+            break;
+        }
+
+        expected_seq = record.event.chain_seq.checked_sub(1);
+        next_hash = record.event.prev_chain_event_hash.clone();
+        serialized_bytes = next_serialized_bytes;
+        records.push(record);
+    }
+
+    Ok(BundleEventHashPage {
+        records,
+        next_hash,
+    })
+}
+
+fn next_bundle_event_chain_head(
+    refs_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    after_chain_id: Option<&str>,
+    trust_store: &TrustStore,
+) -> anyhow::Result<Option<(String, String)>> {
+    let chains_root = refs_root
+        .join("generic")
+        .join(BUNDLE_EVENTS_NAMESPACE)
+        .join(bundle_id)
+        .join(event_kind)
+        .join("chains");
+    let entries = match std::fs::read_dir(&chains_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", chains_root.display()))
+        }
+    };
+
+    // read_dir order is unspecified, so retain only the smallest eligible id
+    // instead of collecting and sorting chain heads. The inspection ceiling is
+    // intentionally independent of the response page size: an adversarial refs
+    // directory must not make a one-record callback scan walk unbounded entries
+    // while the StateStore lock is held.
+    let mut next_chain_id: Option<String> = None;
+    let mut inspected_entries = 0usize;
+    for entry in entries {
+        if inspected_entries >= MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES {
+            anyhow::bail!(
+                "bundle event scan exceeds the {}-entry chain directory inspection limit",
+                MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES
+            );
+        }
+        inspected_entries += 1;
+        let entry = entry.context("failed to read bundle event chain directory entry")?;
+        if !entry
+            .file_type()
+            .context("failed to inspect bundle event chain directory entry")?
+            .is_dir()
+        {
+            continue;
+        }
+        let chain_id = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("bundle event chain directory name is not valid UTF-8"))?;
+        validate_bundle_identifier("chain_id", &chain_id)?;
+        if let Some(after_chain_id) = after_chain_id {
+            if chain_id.as_str() <= after_chain_id {
+                continue;
+            }
+        }
+        if match next_chain_id.as_ref() {
+            Some(current) => chain_id < *current,
+            None => true,
+        } {
+            next_chain_id = Some(chain_id);
+        }
+    }
+
+    let Some(chain_id) = next_chain_id else {
+        return Ok(None);
+    };
+    let head = refs::read_verified_generic_head_ref(
+        refs_root,
+        BUNDLE_EVENTS_NAMESPACE,
+        &chain_ref_name(bundle_id, event_kind, &chain_id),
+        trust_store,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "bundle event chain {}/{}/{} has no signed head",
+            bundle_id,
+            event_kind,
+            chain_id
+        )
+    })?;
+    Ok(Some((chain_id, head.target_hash)))
+}
+
+fn validate_bundle_event_page_bounds(
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<()> {
+    if limit == 0 {
+        anyhow::bail!("bundle event page limit must be greater than zero");
+    }
+    if max_serialized_bytes == 0 {
+        anyhow::bail!("bundle event page byte budget must be greater than zero");
+    }
+    Ok(())
+}
+
+fn require_trusted_signer(signer: &dyn Signer, trust_store: &TrustStore) -> anyhow::Result<()> {
+    let trusted_key = trust_store
+        .get(signer.fingerprint())
+        .ok_or_else(|| anyhow::anyhow!("bundle event signer is not in the state trust store"))?;
+    let signer_key = signer.verifying_key();
+    if trusted_key.as_bytes() != signer_key.as_bytes() {
+        anyhow::bail!("bundle event signer key does not match the state trust store");
+    }
+    Ok(())
 }
 
 fn validate_bundle_event_chain_links(
@@ -364,8 +913,27 @@ pub fn read_bundle_event_by_hash(
 ) -> anyhow::Result<BundleEventRecord> {
     validate_canonical_hash("event_hash", event_hash)?;
     let path = lillux::shard_path(cas_root, "objects", event_hash, ".json");
+    let object_bytes = std::fs::metadata(&path)
+        .with_context(|| format!("failed to inspect bundle event object {}", path.display()))?
+        .len();
+    if object_bytes > MAX_BUNDLE_EVENT_SERIALIZED_BYTES as u64 {
+        anyhow::bail!(
+            "bundle event object {} is {} serialized bytes (max {})",
+            event_hash,
+            object_bytes,
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES
+        );
+    }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read bundle event object {}", path.display()))?;
+    if content.len() > MAX_BUNDLE_EVENT_SERIALIZED_BYTES {
+        anyhow::bail!(
+            "bundle event object {} is {} serialized bytes (max {})",
+            event_hash,
+            content.len(),
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES
+        );
+    }
     let event: BundleEventObject = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse bundle event {}", event_hash))?;
     event.validate()?;
@@ -390,11 +958,12 @@ fn maybe_return_idempotent(
     request: &BundleEventAppendRequest,
     request_fingerprint: &str,
     signer: &dyn Signer,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<BundleEventAppendResult>> {
     let Some(idempotency_key) = &request.idempotency_key else {
         return Ok(None);
     };
-    if let Some(existing_ref) = refs::read_generic_head_ref(
+    if let Some(existing_ref) = refs::read_verified_generic_head_ref(
         refs_root,
         BUNDLE_EVENTS_NAMESPACE,
         &idempotency_ref_name(
@@ -403,6 +972,7 @@ fn maybe_return_idempotent(
             &request.chain_id,
             idempotency_key,
         ),
+        trust_store,
     )? {
         let existing = read_bundle_event_by_hash(cas_root, &existing_ref.target_hash)?;
         return idempotent_result_or_conflict(
@@ -412,6 +982,7 @@ fn maybe_return_idempotent(
             request_fingerprint,
             existing,
             None,
+            trust_store,
         );
     }
 
@@ -422,6 +993,7 @@ fn maybe_return_idempotent(
         &request.event_kind,
         &request.chain_id,
         idempotency_key,
+        trust_store,
     )? {
         return idempotent_result_or_conflict(
             refs_root,
@@ -430,6 +1002,7 @@ fn maybe_return_idempotent(
             request_fingerprint,
             existing,
             Some(signer),
+            trust_store,
         );
     }
 
@@ -443,8 +1016,16 @@ fn find_idempotent_event_in_chain(
     event_kind: &str,
     chain_id: &str,
     idempotency_key: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<BundleEventRecord>> {
-    for record in read_bundle_event_chain(cas_root, refs_root, bundle_id, event_kind, chain_id)? {
+    for record in read_bundle_event_chain(
+        cas_root,
+        refs_root,
+        bundle_id,
+        event_kind,
+        chain_id,
+        trust_store,
+    )? {
         if record.event.idempotency_key.as_deref() == Some(idempotency_key) {
             return Ok(Some(record));
         }
@@ -459,6 +1040,7 @@ fn idempotent_result_or_conflict(
     request_fingerprint: &str,
     existing: BundleEventRecord,
     repair_signer: Option<&dyn Signer>,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<BundleEventAppendResult>> {
     if existing.event.request_fingerprint.as_deref() != Some(request_fingerprint) {
         anyhow::bail!(
@@ -470,24 +1052,35 @@ fn idempotent_result_or_conflict(
     }
     if let Some(signer) = repair_signer {
         if let Some(idempotency_key) = &existing.event.idempotency_key {
-            refs::write_generic_head_ref(
-                refs_root,
-                BUNDLE_EVENTS_NAMESPACE,
-                &idempotency_ref_name(
-                    bundle_id,
-                    &existing.event.event_kind,
-                    &existing.event.chain_id,
-                    idempotency_key,
+            let outcome = refs::classify_ref_write(
+                refs::write_generic_head_ref(
+                    refs_root,
+                    BUNDLE_EVENTS_NAMESPACE,
+                    &idempotency_ref_name(
+                        bundle_id,
+                        &existing.event.event_kind,
+                        &existing.event.chain_id,
+                        idempotency_key,
+                    ),
+                    &existing.event_hash,
+                    signer,
                 ),
-                &existing.event_hash,
-                signer,
-            )
-            .context("failed to repair bundle event idempotency head")?;
+                "failed to repair bundle event idempotency head",
+            )?;
+            if let refs::RefWriteOutcome::DurabilityUncertain(error) = outcome {
+                tracing::warn!(%error, "repaired idempotency head has uncertain durability");
+            }
         }
     }
     let chain_head_hash =
-        current_chain_head_hash(refs_root, bundle_id, &request.event_kind, &request.chain_id)?
-            .unwrap_or_else(|| existing.event_hash.clone());
+        current_chain_head_hash(
+            refs_root,
+            bundle_id,
+            &request.event_kind,
+            &request.chain_id,
+            trust_store,
+        )?
+        .unwrap_or_else(|| existing.event_hash.clone());
     Ok(Some(BundleEventAppendResult {
         event_hash: existing.event_hash,
         chain_head_hash,
@@ -501,11 +1094,13 @@ fn current_chain_head_hash(
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
+    trust_store: &TrustStore,
 ) -> anyhow::Result<Option<String>> {
-    Ok(refs::read_generic_head_ref(
+    Ok(refs::read_verified_generic_head_ref(
         refs_root,
         BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(bundle_id, event_kind, chain_id),
+        trust_store,
     )?
     .map(|head| head.target_hash))
 }
@@ -588,7 +1183,17 @@ fn validate_canonical_hash(label: &str, hash: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signer::TestSigner;
+    use crate::signer::{trust_store_for_signer, TestSigner};
+
+    fn append_test_bundle_event(
+        cas_root: &Path,
+        refs_root: &Path,
+        request: BundleEventAppendRequest,
+        signer: &TestSigner,
+    ) -> anyhow::Result<BundleEventAppendResult> {
+        let trust_store = trust_store_for_signer(signer);
+        append_bundle_event(cas_root, refs_root, request, signer, &trust_store)
+    }
 
     fn roots() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -616,12 +1221,19 @@ mod tests {
         }
     }
 
+    fn corrupt_ref_signature(path: &Path) {
+        let mut signed_ref = refs::read_signed_ref(path).unwrap();
+        signed_ref.signature = "AA==".to_string();
+        let encoded = lillux::canonical_json(&signed_ref.to_value());
+        lillux::atomic_write(path, encoded.as_bytes()).unwrap();
+    }
+
     #[test]
     fn appends_and_reads_bundle_event_chain() {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        let first = append_bundle_event(
+        let first = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -630,7 +1242,9 @@ mod tests {
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        let second = append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        let second = append_test_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+
+        let trust_store = trust_store_for_signer(&signer);
 
         let chain = read_bundle_event_chain(
             &cas_root,
@@ -638,6 +1252,7 @@ mod tests {
             "ryeos-email",
             "email_event",
             "email_1",
+            &trust_store,
         )
         .unwrap();
         assert_eq!(chain.len(), 2);
@@ -651,18 +1266,107 @@ mod tests {
     }
 
     #[test]
-    fn stale_expected_head_is_rejected() {
+    fn page_cursor_is_signed_identity_bound_and_head_anchored() {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
-
-        append_bundle_event(
+        let first = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
         )
         .unwrap();
-        let err = append_bundle_event(
+        let mut second_request = append_request("email_1", "email_approved");
+        second_request.expected_chain_head_hash = Some(first.event_hash.clone());
+        let second =
+            append_test_bundle_event(&cas_root, &refs_root, second_request, &signer).unwrap();
+        let trust_store = trust_store_for_signer(&signer);
+
+        let first_page = read_bundle_event_chain_page(
+            &cas_root,
+            &refs_root,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            None,
+            1,
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+            &trust_store,
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(first_page.records[0].event_hash, second.event_hash);
+        let cursor = first_page.next_cursor.unwrap();
+        assert_eq!(cursor.bundle_id, "ryeos-email");
+        assert_eq!(cursor.event_kind, "email_event");
+        assert_eq!(cursor.chain_id, "email_1");
+        assert_eq!(cursor.head_hash, second.event_hash);
+        assert_eq!(cursor.event_hash, first.event_hash);
+
+        let second_page = read_bundle_event_chain_page(
+            &cas_root,
+            &refs_root,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            Some(&cursor),
+            1,
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+            &trust_store,
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(second_page.records[0].event_hash, first.event_hash);
+
+        let mut forged = cursor.clone();
+        forged.event_hash = second.event_hash.clone();
+        let forged_error = read_bundle_event_chain_page(
+            &cas_root,
+            &refs_root,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            Some(&forged),
+            1,
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+            &trust_store,
+            &signer,
+        )
+        .unwrap_err();
+        assert!(format!("{forged_error:#}").contains("signature"));
+
+        let mut third_request = append_request("email_1", "email_sent");
+        third_request.expected_chain_head_hash = Some(second.event_hash);
+        append_test_bundle_event(&cas_root, &refs_root, third_request, &signer).unwrap();
+        let stale_error = read_bundle_event_chain_page(
+            &cas_root,
+            &refs_root,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            Some(&cursor),
+            1,
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+            &trust_store,
+            &signer,
+        )
+        .unwrap_err();
+        assert!(format!("{stale_error:#}").contains("stale bundle event cursor"));
+    }
+
+    #[test]
+    fn stale_expected_head_is_rejected() {
+        let (_tmp, cas_root, refs_root) = roots();
+        let signer = TestSigner::default();
+
+        append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_1", "email_planned"),
+            &signer,
+        )
+        .unwrap();
+        let err = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_approved"),
@@ -679,14 +1383,14 @@ mod tests {
 
         let mut req = append_request("email_1", "email_send_requested");
         req.idempotency_key = Some("request-send:email_1".to_string());
-        let first = append_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
+        let first = append_test_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
 
-        let retry = append_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
+        let retry = append_test_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
         assert!(retry.idempotent);
         assert_eq!(retry.event_hash, first.event_hash);
 
         req.payload = serde_json::json!({"email_id":"email_1","changed":true});
-        let err = append_bundle_event(&cas_root, &refs_root, req, &signer).unwrap_err();
+        let err = append_test_bundle_event(&cas_root, &refs_root, req, &signer).unwrap_err();
         assert!(format!("{err:#}").contains("IdempotencyConflict"));
     }
 
@@ -697,7 +1401,7 @@ mod tests {
 
         let mut req = append_request("email_1", "email_send_requested");
         req.idempotency_key = Some("request-send:email_1".to_string());
-        let first = append_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
+        let first = append_test_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
         let idem_path = refs_root
             .join("generic")
             .join(BUNDLE_EVENTS_NAMESPACE)
@@ -711,7 +1415,7 @@ mod tests {
         assert!(idem_path.is_file());
         std::fs::remove_file(&idem_path).unwrap();
 
-        let retry = append_bundle_event(&cas_root, &refs_root, req, &signer).unwrap();
+        let retry = append_test_bundle_event(&cas_root, &refs_root, req, &signer).unwrap();
         assert!(retry.idempotent);
         assert_eq!(retry.event_hash, first.event_hash);
         assert!(
@@ -727,13 +1431,14 @@ mod tests {
 
         let mut first_req = append_request("email_1", "email_send_requested");
         first_req.idempotency_key = Some("request-send:email_1".to_string());
-        let first = append_bundle_event(&cas_root, &refs_root, first_req.clone(), &signer).unwrap();
+        let first =
+            append_test_bundle_event(&cas_root, &refs_root, first_req.clone(), &signer).unwrap();
 
         let mut second_req = append_request("email_1", "email_send_claimed");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        let second = append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        let second = append_test_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
 
-        let retry = append_bundle_event(&cas_root, &refs_root, first_req, &signer).unwrap();
+        let retry = append_test_bundle_event(&cas_root, &refs_root, first_req, &signer).unwrap();
         assert!(retry.idempotent);
         assert_eq!(retry.event_hash, first.event_hash);
         assert_eq!(retry.chain_head_hash, second.event_hash);
@@ -744,14 +1449,14 @@ mod tests {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        append_bundle_event(
+        append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_b", "email_planned"),
             &signer,
         )
         .unwrap();
-        append_bundle_event(
+        append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_a", "email_planned"),
@@ -759,8 +1464,15 @@ mod tests {
         )
         .unwrap();
 
-        let scanned =
-            scan_bundle_events(&cas_root, &refs_root, "ryeos-email", "email_event").unwrap();
+        let trust_store = trust_store_for_signer(&signer);
+        let scanned = scan_bundle_events(
+            &cas_root,
+            &refs_root,
+            "ryeos-email",
+            "email_event",
+            &trust_store,
+        )
+        .unwrap();
         assert_eq!(scanned.len(), 2);
         assert_eq!(scanned[0].event.chain_id, "email_a");
         assert_eq!(scanned[1].event.chain_id, "email_b");
@@ -771,7 +1483,7 @@ mod tests {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        let first = append_bundle_event(
+        let first = append_test_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -796,15 +1508,73 @@ mod tests {
         )
         .unwrap();
 
+        let trust_store = trust_store_for_signer(&signer);
         let err = read_bundle_event_chain(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
             "email_1",
+            &trust_store,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("sequence gap"));
+    }
+
+    #[test]
+    fn read_chain_rejects_tampered_head_signature() {
+        let (_tmp, cas_root, refs_root) = roots();
+        let signer = TestSigner::default();
+        append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_1", "email_planned"),
+            &signer,
+        )
+        .unwrap();
+
+        let head_path = refs_root
+            .join("generic")
+            .join(BUNDLE_EVENTS_NAMESPACE)
+            .join(chain_ref_name("ryeos-email", "email_event", "email_1"))
+            .join("head");
+        corrupt_ref_signature(&head_path);
+
+        let trust_store = trust_store_for_signer(&signer);
+        let err = read_bundle_event_chain(
+            &cas_root,
+            &refs_root,
+            "ryeos-email",
+            "email_event",
+            "email_1",
+            &trust_store,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("signature"));
+    }
+
+    #[test]
+    fn idempotent_retry_rejects_tampered_idempotency_signature() {
+        let (_tmp, cas_root, refs_root) = roots();
+        let signer = TestSigner::default();
+        let mut request = append_request("email_1", "email_send_requested");
+        request.idempotency_key = Some("request-send:email_1".to_string());
+        append_test_bundle_event(&cas_root, &refs_root, request.clone(), &signer).unwrap();
+
+        let idempotency_path = refs_root
+            .join("generic")
+            .join(BUNDLE_EVENTS_NAMESPACE)
+            .join(idempotency_ref_name(
+                "ryeos-email",
+                "email_event",
+                "email_1",
+                "request-send:email_1",
+            ))
+            .join("head");
+        corrupt_ref_signature(&idempotency_path);
+
+        let err = append_test_bundle_event(&cas_root, &refs_root, request, &signer).unwrap_err();
+        assert!(format!("{err:#}").contains("signature"));
     }
 
     #[test]
@@ -813,7 +1583,7 @@ mod tests {
         let signer = TestSigner::default();
         let mut req = append_request("email_1", "email_planned");
         req.bundle_id = Some("other-bundle".to_string());
-        let err = append_bundle_event(&cas_root, &refs_root, req, &signer).unwrap_err();
+        let err = append_test_bundle_event(&cas_root, &refs_root, req, &signer).unwrap_err();
         assert!(format!("{err:#}").contains("bundle_id mismatch"));
     }
 }

@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::reachability;
-use crate::rebuild;
 use crate::{CasEntryKind, CasEntryState, NewCasEntryAttribution, StateDb};
 
 /// A single entry in a sync payload (object or blob).
@@ -80,12 +79,19 @@ pub fn export_chain(
     cas_root: &Path,
     refs_root: &Path,
     chain_root_id: &str,
+    trust_store: &crate::refs::TrustStore,
 ) -> Result<ExportPayload> {
-    let reachable = reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id)?;
+    let reachable =
+        reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id, trust_store)?;
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let signed_ref = crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+        let signed_ref = crate::refs::read_verified_generic_head_ref(
+            refs_root,
+            "chains",
+            chain_root_id,
+            trust_store,
+        )?
             .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
@@ -143,12 +149,19 @@ pub fn reconcile_export(
     refs_root: &Path,
     chain_root_id: &str,
     remote_has: &HashSet<String>,
+    trust_store: &crate::refs::TrustStore,
 ) -> Result<ExportPayload> {
-    let reachable = reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id)?;
+    let reachable =
+        reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id, trust_store)?;
 
     // Read the chain head hash from the signed ref
     let chain_head_hash = {
-        let signed_ref = crate::refs::read_generic_head_ref(refs_root, "chains", chain_root_id)?
+        let signed_ref = crate::refs::read_verified_generic_head_ref(
+            refs_root,
+            "chains",
+            chain_root_id,
+            trust_store,
+        )?
             .ok_or_else(|| anyhow::anyhow!("missing chain head ref for {chain_root_id}"))
             .with_context(|| format!("failed to read chain head ref for {}", chain_root_id))?;
         signed_ref.target_hash
@@ -359,25 +372,67 @@ pub fn finalize_import(
             chain_head_hash
         );
     }
+    let head_json = std::fs::read_to_string(&head_path)
+        .with_context(|| format!("read imported chain head {chain_head_hash}"))?;
+    let head: crate::ChainState = serde_json::from_str(&head_json)
+        .with_context(|| format!("parse imported chain head {chain_head_hash}"))?;
+    head.validate()?;
+    let actual_head_hash =
+        lillux::sha256_hex(lillux::canonical_json(&head.to_value()).as_bytes());
+    if actual_head_hash != chain_head_hash {
+        anyhow::bail!(
+            "imported chain head hash mismatch: expected {}, got {}",
+            chain_head_hash,
+            actual_head_hash
+        );
+    }
+    if head.chain_root_id != chain_root_id {
+        anyhow::bail!(
+            "imported chain head identity mismatch: expected {}, got {}",
+            chain_root_id,
+            head.chain_root_id
+        );
+    }
 
     // Step 2: Sign and write local chain head ref
-    crate::refs::write_generic_head_ref(
-        refs_root,
-        "chains",
-        chain_root_id,
-        chain_head_hash,
-        signer,
-    )?;
+    let ref_path = refs_root
+        .join("generic/chains")
+        .join(chain_root_id)
+        .join("head");
+    let signed_ref = crate::SignedRef::new(
+        format!("chains/{chain_root_id}/head"),
+        chain_head_hash.to_owned(),
+        head.updated_at.clone(),
+        signer.fingerprint().to_owned(),
+    );
+    match crate::refs::write_signed_ref(&ref_path, signed_ref, signer) {
+        Ok(()) => {}
+        Err(lillux::AtomicMutationError::BeforeCommit(error)) => {
+            return Err(error.context("writing imported chain head"));
+        }
+        Err(lillux::AtomicMutationError::DurabilityUncertain(error)) => {
+            tracing::warn!(
+                chain_root_id,
+                chain_head_hash,
+                error = %error,
+                "imported chain head is visible but durability is uncertain"
+            );
+        }
+    }
 
     tracing::info!(
         chain_root_id,
         chain_head_hash,
         "signed local chain head ref after import"
     );
+    state_db.replace_chain_head_cache(
+        chain_root_id,
+        chain_head_hash.to_owned(),
+        head,
+    );
 
     // Step 3: Catch up projection from CAS
-    let projection = state_db.projection();
-    let report = rebuild::catch_up_projection(projection, cas_root, refs_root)?;
+    let report = state_db.catch_up_projection()?;
 
     if report.chains_updated > 0 || report.threads_restored > 0 {
         tracing::info!(
@@ -399,8 +454,10 @@ pub fn collect_local_hashes(
     cas_root: &Path,
     refs_root: &Path,
     chain_root_id: &str,
+    trust_store: &crate::refs::TrustStore,
 ) -> Result<HashSet<String>> {
-    let reachable = reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id)?;
+    let reachable =
+        reachability::collect_chain_reachable(cas_root, refs_root, chain_root_id, trust_store)?;
     let mut hashes =
         HashSet::with_capacity(reachable.object_hashes.len() + reachable.blob_hashes.len());
     hashes.extend(reachable.object_hashes);
@@ -516,7 +573,13 @@ mod tests {
         write_object(&cas_root, &snap_hash, &snap);
         write_signed_head(&refs_root, "T-root", &cs_hash);
 
-        let payload = export_chain(&cas_root, &refs_root, "T-root").unwrap();
+        let payload = export_chain(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            &crate::signer::trust_store_for_signer(&TestSigner::default()),
+        )
+        .unwrap();
         assert_eq!(payload.chain_root_id, "T-root");
         assert_eq!(payload.entries.len(), 2);
 
@@ -564,7 +627,7 @@ mod tests {
     #[test]
     fn import_objects_staged_records_attribution() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
+        let db = StateDb::open(tmp.path(), &TestSigner::default()).unwrap();
 
         let data = b"{\"kind\":\"test\",\"value\":42}";
         let hash = lillux::sha256_hex(data);
@@ -721,7 +784,14 @@ mod tests {
         let mut remote_has = HashSet::new();
         remote_has.insert(cs_hash.clone());
 
-        let payload = reconcile_export(&cas_root, &refs_root, "T-root", &remote_has).unwrap();
+        let payload = reconcile_export(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            &remote_has,
+            &crate::signer::trust_store_for_signer(&TestSigner::default()),
+        )
+        .unwrap();
         assert_eq!(payload.entries.len(), 1);
         assert_eq!(payload.entries[0].hash, snap_hash);
     }
@@ -733,8 +803,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let runtime_state_dir = tmp.path();
-        let db = StateDb::open(runtime_state_dir).unwrap();
         let signer = TestSigner::default();
+        let db = StateDb::open(runtime_state_dir, &signer).unwrap();
 
         let cas_root = db.cas_root();
         let refs_root = db.refs_root();

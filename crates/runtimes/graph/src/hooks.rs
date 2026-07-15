@@ -11,33 +11,36 @@
 
 use serde_json::Value;
 
-use ryeos_runtime::callback::{parse_hook_action, CallbackError, DispatchActionRequest};
+use ryeos_runtime::callback::{
+    parse_hook_action, CallbackError, DispatchActionRequest, HookDispatchOccurrence,
+};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
     normalize_hook_dispatch_result, RuntimeCost, HOOK_INTEGRITY_FAILURE_CODE,
 };
-use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::hooks_eval::{run_hooks, HookDispatcher, HookRunError};
 use ryeos_runtime::CompiledHook;
 
 /// Fire every hook matching `event` against `context`. Returns `Err` with a
 /// diagnostic when a hook's condition, action evaluation, or dispatch fails
 /// (including a hook child that ran but reported failure, normalized to
-/// `hook_child_failed`) — the caller records it as a warning rather than failing
-/// the graph. The hook control result is discarded: graph hooks observe.
+/// `hook_child_failed`). Ordinary evaluation/child failures remain observer
+/// warnings, while accounting or integrity failures are fatal because the
+/// caller can no longer prove the graph's terminal history. The hook control
+/// result is always discarded: graph hooks never steer routing.
 pub async fn run_graph_hooks(
     callback: &CallbackClient,
     thread_id: &str,
     project_path: &str,
     hooks: &[CompiledHook],
-    event: RuntimeEventType,
+    occurrence: HookDispatchOccurrence,
     context: &Value,
 ) -> Result<Option<RuntimeCost>, HookRunError> {
     if hooks.is_empty() {
         return Ok(None);
     }
     let dispatcher = build_dispatcher(callback.clone(), thread_id.to_string());
-    run_hooks(event.as_str(), context, hooks, project_path, &dispatcher)
+    run_hooks(occurrence, context, hooks, project_path, &dispatcher)
         .await
         .map(|result| result.cost)
 }
@@ -47,7 +50,7 @@ pub async fn run_graph_hooks(
 /// failed hook child surfaces as a `hook_child_failed` error instead of a silent
 /// success.
 fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatcher {
-    Box::new(move |action, project_path| {
+    Box::new(move |action, project_path, hook_dispatch| {
         let cb = callback.clone();
         let tid = thread_id.clone();
         Box::pin(async move {
@@ -64,9 +67,9 @@ fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatch
                     thread_id: tid,
                     project_path,
                     action: payload,
+                    hook_dispatch: Some(hook_dispatch),
                 })
-                .await
-                .map_err(|e| CallbackError::Transport(anyhow::anyhow!("{e}")))?;
+                .await?;
             // Hooks run on the leaf result only — the parent-thread snapshot has
             // no bearing on hook control flow.
             normalize_hook_dispatch_result(response.result).map_err(|message| {
@@ -220,7 +223,11 @@ mod tests {
                 "T-test",
                 "/tmp",
                 &[],
-                RuntimeEventType::GraphStarted,
+                HookDispatchOccurrence::GraphStarted {
+                    graph_run_id: "run-1".to_string(),
+                    definition_ref: "graph:test/fixture".to_string(),
+                    definition_hash: "definition-hash".to_string(),
+                },
                 &ctx,
             )
                 .await

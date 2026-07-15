@@ -16,6 +16,7 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
     normalize_hook_dispatch_result, RuntimeCost, RuntimeResult, RuntimeResultStatus,
 };
+use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
 
 mod request_context;
@@ -65,7 +66,7 @@ pub enum State {
         raw_args: String,
     },
     FiringHooks {
-        event: String,
+        occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
         context: Value,
         resume_to: Box<State>,
     },
@@ -99,6 +100,8 @@ pub struct Runner {
     execution: ExecutionConfig,
     model_name: String,
     thread_id: String,
+    definition_ref: String,
+    definition_hash: String,
     initial_turn: u32,
     hooks: Vec<ryeos_runtime::CompiledHook>,
     /// Declared directive outputs — used to validate `directive_return`
@@ -247,6 +250,8 @@ pub struct RunnerConfig {
     pub execution: ExecutionConfig,
     pub model_name: String,
     pub thread_id: String,
+    pub definition_ref: String,
+    pub definition_hash: String,
     pub hooks: Vec<ryeos_runtime::CompiledHook>,
     pub outputs: Option<Vec<OutputSpec>>,
     pub return_nudge: ReturnNudge,
@@ -272,6 +277,8 @@ impl Runner {
             execution,
             model_name,
             thread_id,
+            definition_ref,
+            definition_hash,
             hooks,
             outputs,
             return_nudge,
@@ -303,6 +310,8 @@ impl Runner {
             execution,
             model_name,
             thread_id,
+            definition_ref,
+            definition_hash,
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
@@ -893,7 +902,10 @@ impl Runner {
                         &mut warnings,
                         "stream_opened",
                         self.callback
-                            .append_event("stream_opened", json!({"turn": turn}))
+                            .append_runtime_event(
+                                RuntimeEventType::StreamOpened,
+                                json!({"turn": turn}),
+                            )
                             .await,
                     );
 
@@ -1123,8 +1135,8 @@ impl Runner {
                                     &mut warnings,
                                     "tool_call_result(blocked)",
                                     self.callback
-                                        .append_event(
-                                            "tool_call_result",
+                                        .append_runtime_event(
+                                            RuntimeEventType::ToolCallResult,
                                             json!({
                                                 "tool": dispatch_result.canonical_ref,
                                                 "call_id": dispatch_result.call_id,
@@ -1161,6 +1173,7 @@ impl Runner {
                                                 facets: None,
                                                 launch_window: None,
                                             },
+                                            hook_dispatch: None,
                                         },
                                     )
                                     .await
@@ -1284,7 +1297,11 @@ impl Runner {
                     } else {
                         // All tools processed — fire after_step hook
                         State::FiringHooks {
-                            event: "after_step".to_string(),
+                            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                                definition_ref: self.definition_ref.clone(),
+                                definition_hash: self.definition_hash.clone(),
+                                turn,
+                            },
                             context: json!({"turn": turn}),
                             resume_to: Box::new(State::CheckingContinuation),
                         }
@@ -1445,16 +1462,17 @@ impl Runner {
                 }
 
                 State::FiringHooks {
-                    event,
+                    occurrence,
                     context,
                     resume_to,
                 } => {
+                    let event = occurrence.event().to_string();
                     let callback = self.callback.clone();
                     let thread_id = self.thread_id.clone();
                     let project_path = self.callback.project_path().to_string();
 
                     let dispatcher: ryeos_runtime::hooks_eval::HookDispatcher =
-                        Box::new(move |action, proj| {
+                        Box::new(move |action, proj, hook_dispatch| {
                             let cb = callback.clone();
                             let tid = thread_id.clone();
                             Box::pin(async move {
@@ -1472,14 +1490,10 @@ impl Runner {
                                             thread_id: tid,
                                             project_path: proj,
                                             action: payload,
+                                            hook_dispatch: Some(hook_dispatch),
                                         },
                                     )
-                                    .await
-                                    .map_err(|e| {
-                                        ryeos_runtime::callback::CallbackError::Transport(
-                                            anyhow::anyhow!("{}", e),
-                                        )
-                                    })?;
+                                    .await?;
                                 // Hooks run on the leaf result only —
                                 // the parent-thread snapshot has no
                                 // bearing on hook control flow.
@@ -1495,7 +1509,7 @@ impl Runner {
                         });
 
                     let hook_run = ryeos_runtime::hooks_eval::run_hooks(
-                        &event,
+                        occurrence,
                         &context,
                         &self.hooks,
                         &project_path,
@@ -1530,8 +1544,8 @@ impl Runner {
                                 &mut warnings,
                                 &format!("cognition_reasoning(hook={event})"),
                                 self.callback
-                                    .append_event(
-                                        "cognition_reasoning",
+                                    .append_runtime_event(
+                                        RuntimeEventType::CognitionReasoning,
                                         json!({
                                             "hook_event": event.clone(),
                                             "hook_result": hook_result.clone(),
@@ -1592,7 +1606,11 @@ impl Runner {
                         // resolved carry_turns policy when folding history.)
                         if self.continuation_config.enabled() {
                             State::FiringHooks {
-                                event: "continuation".to_string(),
+                                occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
+                                    definition_ref: self.definition_ref.clone(),
+                                    definition_hash: self.definition_hash.clone(),
+                                    turn,
+                                },
                                 context: self.continuation_hook_context(live_context, threshold),
                                 resume_to: Box::new(State::Continued),
                             }
@@ -1984,6 +2002,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2031,6 +2051,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2084,6 +2106,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2135,6 +2159,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs,
             return_nudge: ReturnNudge::default(),
@@ -2187,6 +2213,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2350,6 +2378,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2411,6 +2441,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "claude-haiku-4-5".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2466,6 +2498,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "unknown-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),
@@ -2517,6 +2551,8 @@ mod tests {
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
             hooks: vec![],
             outputs: None,
             return_nudge: ReturnNudge::default(),

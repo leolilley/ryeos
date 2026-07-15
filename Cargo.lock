@@ -2603,6 +2603,7 @@ dependencies = [
  "base64",
  "directories",
  "jsonschema",
+ "libc",
  "lillux",
  "regex",
  "ryeos-handler-protocol",

@@ -30,9 +30,18 @@ impl StateStore {
     }
 
     pub fn repair_thread_projection(&self) -> Result<()> {
-        let g = self.lock()?;
-        g.state_db.catch_up_projection()?;
+        self.catch_up_thread_projection()?;
         Ok(())
+    }
+
+    pub fn catch_up_thread_projection(&self) -> Result<ryeos_state::rebuild::CatchUpReport> {
+        let g = self.lock()?;
+        g.state_db.catch_up_projection()
+    }
+
+    pub fn rebuild_thread_projection(&self) -> Result<ryeos_state::rebuild::RebuildReport> {
+        let g = self.lock()?;
+        g.state_db.rebuild_projection()
     }
 
     /// Run a closure with access to the projection database.

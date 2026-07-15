@@ -98,31 +98,40 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     // If a HEAD already exists for this principal+project, advance it with CAS.
     // Otherwise, write a new ref.
-    match state
+    let ref_outcome = match state
         .state_store
         .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?
     {
         Some(current_hash) => {
             // Advance with conflict detection
-            ryeos_state::refs::advance_project_head_ref(
+            ryeos_state::refs::classify_ref_write(
+                ryeos_state::refs::advance_project_head_ref(
                 &refs_root,
                 principal_key,
                 &project_hash,
                 &req.snapshot_hash,
                 &current_hash,
                 &signer,
-            )?;
+                ),
+                "advancing pushed project head",
+            )?
         }
         None => {
             // First push — write new ref
-            ryeos_state::refs::write_project_head_ref(
+            ryeos_state::refs::classify_ref_write(
+                ryeos_state::refs::write_project_head_ref(
                 &refs_root,
                 principal_key,
                 &project_hash,
                 &req.snapshot_hash,
                 &signer,
-            )?;
+                ),
+                "publishing pushed project head",
+            )?
         }
+    };
+    if let ryeos_state::refs::RefWriteOutcome::DurabilityUncertain(error) = ref_outcome {
+        tracing::warn!(%error, "push-head ref is visible but durability is uncertain");
     }
 
     tracing::info!(

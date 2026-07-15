@@ -14,6 +14,7 @@ use crate::directive::{
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
+use ryeos_runtime::events::RuntimeEventType;
 
 mod metadata;
 
@@ -1126,8 +1127,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                     StreamEvent::Delta(text) => {
                         accumulated_text.push_str(text);
                         callback
-                            .append_event(
-                                "cognition_out",
+                            .append_runtime_event(
+                                RuntimeEventType::CognitionOut,
                                 json!({
                                     "turn": turn,
                                     "delta": text,
@@ -1156,8 +1157,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                             arguments: arguments.clone(),
                         });
                         callback
-                            .append_event(
-                                "cognition_out",
+                            .append_runtime_event(
+                                RuntimeEventType::CognitionOut,
                                 json!({
                                     "turn": turn,
                                     "tool_use": tool_use_payload(id, name, arguments, malformed_args),
@@ -1180,8 +1181,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                     } => {
                         accumulated_tool_arg_lens.insert(tool_arg_len_key(id, name), *total_len);
                         callback
-                            .append_event(
-                                "cognition_out",
+                            .append_runtime_event(
+                                RuntimeEventType::CognitionOut,
                                 json!({
                                     "turn": turn,
                                     "tool_use_partial": {
@@ -1240,7 +1241,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                 StreamEvent::Delta(text) => {
                     accumulated_text.push_str(text);
                     callback
-                        .append_event("cognition_out", json!({"turn": turn, "delta": text}))
+                        .append_runtime_event(
+                            RuntimeEventType::CognitionOut,
+                            json!({"turn": turn, "delta": text}),
+                        )
                         .await
                         .map_err(|e| {
                             anyhow!(
@@ -1263,8 +1267,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                         arguments: arguments.clone(),
                     });
                     callback
-                        .append_event(
-                            "cognition_out",
+                        .append_runtime_event(
+                            RuntimeEventType::CognitionOut,
                             json!({
                                 "turn": turn,
                                 "tool_use": tool_use_payload(id, name, arguments, malformed_args),
@@ -1286,8 +1290,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                 } => {
                     accumulated_tool_arg_lens.insert(tool_arg_len_key(id, name), *total_len);
                     callback
-                        .append_event(
-                            "cognition_out",
+                        .append_runtime_event(
+                            RuntimeEventType::CognitionOut,
                             json!({
                                 "turn": turn,
                                 "tool_use_partial": {

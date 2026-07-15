@@ -380,6 +380,14 @@ mod integration_tests {
                 "T-proc-1",
                 12345,
                 67890,
+                &ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 12345,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 67890,
+                    group_leader_start_time_ticks: 20,
+                },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
             .expect("attach_thread_process should succeed");
@@ -1688,9 +1696,6 @@ mod integration_tests {
         // Now delete the projection and rebuild from CAS
         store
             .with_state_db(|db| {
-                let cas_root = db.cas_root().to_path_buf();
-                let refs_root = db.refs_root().to_path_buf();
-
                 // Clear edges from projection
                 db.projection()
                     .connection()
@@ -1698,12 +1703,7 @@ mod integration_tests {
                     .expect("clear projection should succeed");
 
                 // Rebuild from CAS
-                let report = ryeos_state::rebuild::rebuild_projection(
-                    db.projection(),
-                    &cas_root,
-                    &refs_root,
-                )
-                .expect("rebuild should succeed");
+                let report = db.rebuild_projection().expect("rebuild should succeed");
 
                 assert_eq!(report.chains_rebuilt, 1);
                 assert_eq!(report.threads_restored, 2);
@@ -1770,15 +1770,7 @@ mod integration_tests {
         // Rebuild from CAS
         store
             .with_state_db(|db| {
-                let cas_root = db.cas_root().to_path_buf();
-                let refs_root = db.refs_root().to_path_buf();
-
-                let report = ryeos_state::rebuild::rebuild_projection(
-                    db.projection(),
-                    &cas_root,
-                    &refs_root,
-                )
-                .expect("rebuild should succeed");
+                let report = db.rebuild_projection().expect("rebuild should succeed");
 
                 assert_eq!(report.chains_rebuilt, 1);
 
@@ -1832,15 +1824,7 @@ mod integration_tests {
         // Run catch-up
         store
             .with_state_db(|db| {
-                let cas_root = db.cas_root().to_path_buf();
-                let refs_root = db.refs_root().to_path_buf();
-
-                let report = ryeos_state::rebuild::catch_up_projection(
-                    db.projection(),
-                    &cas_root,
-                    &refs_root,
-                )
-                .expect("catch_up should succeed");
+                let report = db.catch_up_projection().expect("catch_up should succeed");
 
                 assert_eq!(report.chains_updated, 1, "chain should be caught up");
 
@@ -1933,14 +1917,7 @@ mod integration_tests {
                     )
                     .expect("clear projection");
 
-                let cas_root = db.cas_root().to_path_buf();
-                let refs_root = db.refs_root().to_path_buf();
-                let report = ryeos_state::rebuild::rebuild_projection(
-                    db.projection(),
-                    &cas_root,
-                    &refs_root,
-                )
-                .expect("rebuild");
+                let report = db.rebuild_projection().expect("rebuild");
 
                 assert!(report.chains_rebuilt >= 1);
 
@@ -2006,6 +1983,14 @@ mod integration_tests {
                 "T-skip-attach",
                 99999,
                 99999,
+                &ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 99999,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 99999,
+                    group_leader_start_time_ticks: 10,
+                },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
             )
             .expect_err("attach_process on a terminal thread must fail loudly");

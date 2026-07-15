@@ -712,6 +712,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
                 }
                 for (key, left) in left {
                     self.traverse_element(span)?;
+                    self.check_scalar(key, span)?;
                     self.spend_fuel(key.len(), span, "comparing object keys")?;
                     let Some(right) = right.get(key) else {
                         return Ok(false);
@@ -842,6 +843,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
                     span,
                 )?;
                 for value in values {
+                    self.traverse_element(span)?;
                     self.inspect_result(value, depth + 1, nodes, bytes, span)?;
                 }
             }
@@ -852,6 +854,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
                     span,
                 )?;
                 for (key, value) in values {
+                    self.traverse_element(span)?;
                     self.check_scalar(key, span)?;
                     self.add_result_bytes(bytes, json_string_bytes(key).saturating_add(1), span)?;
                     self.inspect_result(value, depth + 1, nodes, bytes, span)?;
@@ -881,6 +884,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
             span,
         )?;
         for value in values {
+            self.traverse_element(span)?;
             self.inspect_result(value, 2, &mut nodes, &mut bytes, span)?;
         }
         Ok(())

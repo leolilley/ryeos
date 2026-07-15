@@ -1226,6 +1226,22 @@ fn bound_view_vm_keyed(
                 message: "No conversation yet — type below to start one.".to_string(),
             }
         }
+        (_, None) if core.data.source_errors.contains_key(source_key) => RyeOsViewVm::Placeholder {
+            title,
+            message: format!(
+                "could not load {}: {}",
+                binding
+                    .source
+                    .as_ref()
+                    .map(|s| s.item_ref.as_str())
+                    .unwrap_or("source"),
+                core.data
+                    .source_errors
+                    .get(source_key)
+                    .map(String::as_str)
+                    .unwrap_or("source request failed")
+            ),
+        },
         (_, None) => RyeOsViewVm::Placeholder {
             title,
             message: format!(
@@ -2832,6 +2848,48 @@ mod tests {
             role,
             pair_key: pair_key.map(str::to_string),
             raw: json!({ "primary": primary }),
+        }
+    }
+
+    #[test]
+    fn failed_source_renders_error_instead_of_loading_forever() {
+        let mut core = RyeOsCore::default();
+        let view_ref = "view:test/threads";
+        let source_key = "tile-1";
+        core.views.insert(
+            view_ref.to_string(),
+            serde_json::from_value(json!({
+                "widget": "rows",
+                "source": {
+                    "ref": "service:ui/ryeos-ui/threads/list",
+                    "collection": "threads"
+                }
+            }))
+            .expect("view binding"),
+        );
+        core.data
+            .source_errors
+            .insert(source_key.to_string(), "metadata type mismatch".to_string());
+
+        let view = bound_view_vm_keyed(
+            &core,
+            source_key,
+            RowLocalState {
+                cursor: None,
+                collapsed: None,
+                expanded_rows: None,
+                changed_rows: None,
+            },
+            view_ref,
+            &core.ui.atlas,
+        );
+        match view {
+            RyeOsViewVm::Placeholder { message, .. } => {
+                assert!(message.contains("could not load"));
+                assert!(message.contains("metadata type mismatch"));
+                assert!(!message.contains("loading"));
+            }
+            other => panic!("expected source error placeholder, got {other:?}"),
         }
     }
 

@@ -2599,10 +2599,25 @@ mod tests {
             "system/test",
             "directive-runtime",
         )
+        .project_root(Some(std::path::PathBuf::from("/work/project")))
+        .base_project_snapshot_hash("a".repeat(64))
+        .result_project_snapshot_hash("b".repeat(64))
         .build();
 
         let result = project_thread_snapshot(&db, &snapshot, "T-root");
         assert!(result.is_ok());
+        let projected = crate::queries::get_thread(&db, "T-test")
+            .unwrap()
+            .expect("projected thread");
+        assert_eq!(projected.project_root.as_deref(), Some("/work/project"));
+        assert_eq!(
+            projected.base_project_snapshot_hash.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            projected.result_project_snapshot_hash.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
     }
 
     #[test]

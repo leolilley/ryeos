@@ -34,7 +34,6 @@ impl Walker {
             exec_ctx,
             cache,
             graph_run_id,
-            suppressed_errors: _suppressed_errors,
             retry_attempt,
         } = ctx;
         let execution = exec_ctx.as_context_value();
@@ -215,14 +214,19 @@ impl Walker {
                     }
                 }
             } else if node.is_cacheable() {
-                let cache_key = compute_cache_key(&self.graph.graph_id, current, &rendered_action);
+                let cache_key = compute_cache_key(
+                    &self.graph.definition_hash,
+                    &self.graph.graph_id,
+                    current,
+                    &rendered_action,
+                );
                 if let Some(cached) = cache.lookup(&cache_key) {
                     cache_hit = true;
-                    // A cache hit replays the stored result and must NOT re-bill cost —
-                    // `bare` carries no cost. A stale/tampered entry still carrying a
-                    // top-level continuation_id is rejected loudly, exactly like a live
-                    // inline-continuation dispatch (F10 — inline continuation is retired;
-                    // use a `follow: true` node). New dispatches never cache such a value.
+                    // A cache hit replays a result retained earlier in this execution
+                    // and must NOT re-bill cost — `bare` carries no cost. A cached value
+                    // carrying a top-level continuation_id is still rejected loudly,
+                    // exactly like a live inline-continuation dispatch (F10 — inline
+                    // continuation is retired; use a `follow: true` node).
                     if cached
                         .get("continuation_id")
                         .and_then(|v| v.as_str())

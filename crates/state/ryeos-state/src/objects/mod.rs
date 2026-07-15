@@ -26,14 +26,14 @@ pub mod thread_snapshot;
 pub use attestation::Attestation;
 pub use bundle_event::{
     hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
-    BUNDLE_EVENT_KIND,
+    BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use project_snapshot::ProjectSnapshot;
 pub use source_manifest::SourceManifest;
-pub use thread_event::{EventDurability, ThreadEvent};
+pub use thread_event::{EventDurability, ThreadEvent, MAX_THREAD_EVENT_SERIALIZED_BYTES};
 pub use thread_snapshot::{
     ThreadSnapshot, ThreadSnapshotBuilder, ThreadStatus, ThreadUsage, UsageSubject,
 };

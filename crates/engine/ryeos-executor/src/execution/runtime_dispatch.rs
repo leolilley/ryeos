@@ -18,6 +18,8 @@ struct DispatchActionParams {
     // action payload (incl. its `call` block) can't drift from the runtime
     // side of the wire.
     action: ryeos_runtime::callback::ActionPayload,
+    #[serde(default)]
+    hook_dispatch: Option<ryeos_runtime::callback::HookDispatchIdentity>,
 }
 
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
@@ -50,6 +52,28 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         .thread_auth
         .validate(&params.thread_auth_token, &params.thread_id)?;
 
+    // The chain root is authority, not callback input. Bind hook replay to the
+    // durable caller row and prove the callback capability was minted for that
+    // same chain before consulting the ledger.
+    let caller_thread = state
+        .threads
+        .get_thread(&params.thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("callback caller thread not found: {}", params.thread_id))?;
+    cap.assert_chain_root(&caller_thread.chain_root_id)?;
+
+    if let Some(hook) = params.hook_dispatch.as_ref() {
+        let callback_root_item_ref = cap.item_ref.as_deref().ok_or_else(|| {
+            hook_integrity("hook callback capability is missing its root item ref")
+        })?;
+        validate_hook_dispatch_preflight(
+            hook,
+            &params.action,
+            callback_root_item_ref,
+            &cap.root_content_digest,
+            state,
+        )?;
+    }
+
     // Note: DispatchActionParams has `deny_unknown_fields` and no
     // `principal` field — the request body cannot supply (and so
     // cannot spoof) a principal. The principal logged here is read
@@ -63,7 +87,202 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
-    handle_execute(params, state, &thread_auth, &cap, child_provenance).await
+    handle_execute(
+        params,
+        state,
+        &thread_auth,
+        &cap,
+        &caller_thread.chain_root_id,
+        child_provenance,
+    )
+    .await
+}
+
+fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(crate::dispatch_error::DispatchError::HookDispatchIntegrity {
+        detail: detail.into(),
+    })
+}
+
+fn validate_hook_dispatch_preflight(
+    hook: &ryeos_runtime::callback::HookDispatchIdentity,
+    action: &ryeos_runtime::callback::ActionPayload,
+    callback_root_item_ref: &str,
+    callback_root_content_digest: &str,
+    state: &AppState,
+) -> Result<()> {
+    let canonical = validate_hook_identity_authority(
+        hook,
+        action,
+        callback_root_item_ref,
+        callback_root_content_digest,
+    )?;
+    let managed_thread_target = state
+        .engine
+        .kinds
+        .get(&canonical.kind)
+        .and_then(|schema| schema.execution())
+        .is_some_and(|execution| execution.delegate.is_some());
+    if managed_thread_target {
+        return Err(hook_integrity(format!(
+            "hook `{}` targets managed-thread kind `{}`; hooks must settle inline",
+            hook.hook_id, canonical.kind
+        )));
+    }
+    Ok(())
+}
+
+fn validate_hook_identity_authority(
+    hook: &ryeos_runtime::callback::HookDispatchIdentity,
+    action: &ryeos_runtime::callback::ActionPayload,
+    callback_root_item_ref: &str,
+    callback_root_content_digest: &str,
+) -> Result<ryeos_engine::canonical_ref::CanonicalRef> {
+    let canonical_sha256 = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    };
+    if !canonical_sha256(&hook.context_hash) {
+        return Err(hook_integrity(
+            "hook context_hash is not a canonical lowercase SHA-256 digest",
+        ));
+    }
+    if hook.hook_id.is_empty() || hook.hook_id.len() > 4 * 1024 {
+        return Err(hook_integrity(
+            "hook_id must contain between 1 and 4096 UTF-8 bytes",
+        ));
+    }
+    let (coordinates, expected_definition_kind, definition_ref) = match &hook.occurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
+            graph_run_id,
+            definition_ref,
+            definition_hash,
+        }
+        | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
+            graph_run_id,
+            definition_ref,
+            definition_hash,
+            ..
+        } => (
+            vec![
+                ("graph_run_id", graph_run_id.as_str()),
+                ("definition_ref", definition_ref.as_str()),
+                ("definition_hash", definition_hash.as_str()),
+            ],
+            "graph",
+            definition_ref.as_str(),
+        ),
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+            graph_run_id,
+            definition_ref,
+            definition_hash,
+            node,
+            ..
+        } => (
+            vec![
+                ("graph_run_id", graph_run_id.as_str()),
+                ("definition_ref", definition_ref.as_str()),
+                ("definition_hash", definition_hash.as_str()),
+                ("node", node.as_str()),
+            ],
+            "graph",
+            definition_ref.as_str(),
+        ),
+        ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+            definition_ref,
+            definition_hash,
+            turn,
+        }
+        | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
+            definition_ref,
+            definition_hash,
+            turn,
+        } => {
+            if *turn == 0 {
+                return Err(hook_integrity("directive hook turn must be greater than zero"));
+            }
+            (
+                vec![
+                    ("definition_ref", definition_ref.as_str()),
+                    ("definition_hash", definition_hash.as_str()),
+                ],
+                "directive",
+                definition_ref.as_str(),
+            )
+        }
+    };
+    for (field, value) in coordinates {
+        if value.is_empty() || value.len() > 4 * 1024 {
+            return Err(hook_integrity(format!(
+                "hook occurrence field `{field}` must contain between 1 and 4096 UTF-8 bytes"
+            )));
+        }
+        if field == "definition_hash" && !canonical_sha256(value) {
+            return Err(hook_integrity(
+                "hook definition_hash is not a canonical lowercase SHA-256 digest",
+            ));
+        }
+    }
+    let canonical_definition = ryeos_engine::canonical_ref::CanonicalRef::parse(definition_ref)
+        .map_err(|error| hook_integrity(format!("invalid hook definition_ref: {error}")))?;
+    if canonical_definition.kind != expected_definition_kind {
+        return Err(hook_integrity(format!(
+            "hook definition_ref kind must be `{expected_definition_kind}`, got `{}`",
+            canonical_definition.kind
+        )));
+    }
+    let canonical_callback_root =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(callback_root_item_ref).map_err(
+            |error| hook_integrity(format!("invalid callback root item ref: {error}")),
+        )?;
+    if canonical_callback_root != canonical_definition {
+        return Err(hook_integrity(format!(
+            "hook definition_ref `{definition_ref}` does not match callback root `{callback_root_item_ref}`"
+        )));
+    }
+    if !canonical_sha256(callback_root_content_digest) {
+        return Err(hook_integrity(
+            "callback capability root content digest is not a canonical lowercase SHA-256 digest",
+        ));
+    }
+    let occurrence_definition_hash = match &hook.occurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
+            definition_hash,
+            ..
+        }
+        | ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+            definition_hash,
+            ..
+        }
+        | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
+            definition_hash,
+            ..
+        }
+        | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+            definition_hash,
+            ..
+        }
+        | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveContinuation {
+            definition_hash,
+            ..
+        } => definition_hash,
+    };
+    if occurrence_definition_hash != callback_root_content_digest {
+        return Err(hook_integrity(
+            "hook definition_hash does not match launch-captured root content digest",
+        ));
+    }
+    if action.thread != "inline" {
+        return Err(hook_integrity(format!(
+            "hook `{}` requested non-inline thread mode {:?}",
+            hook.hook_id, action.thread
+        )));
+    }
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&action.item_id)
+        .map_err(|error| hook_integrity(format!("invalid hook item ref: {error}")))?;
+    Ok(canonical)
 }
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
@@ -108,6 +327,7 @@ async fn handle_execute(
     state: &AppState,
     thread_auth: &ThreadAuthState,
     cap: &ryeos_app::callback_token::CallbackCapability,
+    authoritative_chain_root_id: &str,
     child_provenance: ryeos_app::execution_provenance::ExecutionProvenance,
 ) -> Result<Value> {
     // V5.4 P2 — strict typed callback contract requires every leaf
@@ -215,6 +435,45 @@ async fn handle_execute(
         requested_call: params.action.call.clone(),
     };
 
+    let hook_ledger = if let Some(identity) = params.hook_dispatch.as_ref() {
+        let callback_root_item_ref = cap.item_ref.as_deref().ok_or_else(|| {
+            hook_integrity("hook callback capability is missing its root item ref")
+        })?;
+        let (seed, request_hash) = hook_dispatch_ledger_seed(
+            identity,
+            &params.action,
+            authoritative_chain_root_id,
+            &params.thread_id,
+            &cap.project_path,
+            &thread_auth.acting_principal,
+            &cap.effective_caps,
+            &cap.hard_limits,
+            cap.depth,
+            callback_root_item_ref,
+        );
+        match state
+            .state_store
+            .reserve_hook_dispatch(&seed)
+            .map_err(|error| {
+                hook_integrity(format!("could not reserve hook dispatch: {error:#}"))
+            })? {
+            ryeos_app::state_store::HookDispatchReservation::Execute => {
+                Some((seed.dispatch_key, request_hash))
+            }
+            ryeos_app::state_store::HookDispatchReservation::Replay(response) => {
+                return Ok(response);
+            }
+            ryeos_app::state_store::HookDispatchReservation::PendingUnknown => {
+                return Err(hook_integrity(format!(
+                    "hook dispatch `{}` has an unknown outcome and cannot be issued again",
+                    seed.dispatch_key
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
     let project_path = child_provenance.effective_path().to_path_buf();
     // C0 diagnostic: snapshot the run's resolution source before `provenance` is
     // moved into the dispatch request, so a content-hash mismatch can be pinned
@@ -260,7 +519,80 @@ async fn handle_execute(
             );
         }
     }
-    result.map_err(anyhow::Error::new)
+    match hook_ledger {
+        None => result.map_err(anyhow::Error::new),
+        Some((dispatch_key, request_hash)) => {
+            let response = result.map_err(|error| {
+                hook_integrity(format!(
+                    "reserved hook dispatch `{dispatch_key}` failed after reservation: {error:#}"
+                ))
+            })?;
+            serde_json::from_value::<
+                ryeos_runtime::callback_contract::CallbackDispatchResponse,
+            >(response.clone())
+            .map_err(|error| {
+                hook_integrity(format!(
+                    "reserved hook dispatch `{dispatch_key}` returned an invalid callback response: {error}"
+                ))
+            })?;
+            state
+                .state_store
+                .complete_hook_dispatch(&dispatch_key, &request_hash, &response)
+                .map_err(|error| {
+                    hook_integrity(format!(
+                        "could not complete reserved hook dispatch `{dispatch_key}`: {error:#}"
+                    ))
+                })?;
+            Ok(response)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hook_dispatch_ledger_seed(
+    identity: &ryeos_runtime::callback::HookDispatchIdentity,
+    action: &ryeos_runtime::callback::ActionPayload,
+    chain_root_id: &str,
+    caller_thread_id: &str,
+    validated_project_path: &std::path::Path,
+    acting_principal: &str,
+    effective_caps: &[String],
+    hard_limits: &Value,
+    depth: u32,
+    callback_root_item_ref: &str,
+) -> (ryeos_app::state_store::NewHookDispatch, String) {
+    let mut effective_caps = effective_caps.to_vec();
+    effective_caps.sort();
+    let dispatch_identity = serde_json::json!({
+        "chain_root_id": chain_root_id,
+        "occurrence": &identity.occurrence,
+        "hook_id": &identity.hook_id,
+    });
+    let dispatch_key = lillux::sha256_hex(
+        lillux::canonical_json(&dispatch_identity).as_bytes(),
+    );
+    let request_identity = serde_json::json!({
+        "hook_dispatch": identity,
+        "action": action,
+        "chain_root_id": chain_root_id,
+        "validated_project_path": validated_project_path.to_string_lossy(),
+        "acting_principal": acting_principal,
+        "effective_caps": effective_caps,
+        "hard_limits": hard_limits,
+        "depth": depth,
+        "callback_root_item_ref": callback_root_item_ref,
+    });
+    let request_hash =
+        lillux::sha256_hex(lillux::canonical_json(&request_identity).as_bytes());
+    let seed = ryeos_app::state_store::NewHookDispatch {
+        dispatch_key,
+        chain_root_id: chain_root_id.to_string(),
+        caller_thread_id: caller_thread_id.to_string(),
+        event: identity.occurrence.event().to_string(),
+        hook_id: identity.hook_id.clone(),
+        request_hash: request_hash.clone(),
+    };
+    (seed, request_hash)
 }
 
 fn parent_execution_context_from_capability(
@@ -317,6 +649,7 @@ mod tests {
             ),
             effective_bundle_id: None,
             item_ref: Some("graph:team/parent".to_string()),
+            root_content_digest: "0".repeat(64),
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
         };
@@ -346,6 +679,7 @@ mod tests {
             ),
             effective_bundle_id: None,
             item_ref: Some("graph:arc/solve".to_string()),
+            root_content_digest: "0".repeat(64),
             hard_limits: serde_json::json!({}),
             depth: 0,
         };
@@ -354,6 +688,117 @@ mod tests {
             callback_dispatch_scopes(&cap),
             vec!["ryeos.execute.knowledge.arc/*".to_string()]
         );
+    }
+
+    #[test]
+    fn hook_ledger_key_is_chain_occurrence_scoped_and_request_hash_binds_action() {
+        let identity = ryeos_runtime::callback::HookDispatchIdentity {
+            occurrence:
+                ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+                    graph_run_id: "run-1".to_string(),
+                    definition_ref: "graph:test/fixture".to_string(),
+                    definition_hash: "d".repeat(64),
+                    step: 3,
+                    node: "audit".to_string(),
+                },
+            hook_id: "audit-hook".to_string(),
+            layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
+            context_hash: "c".repeat(64),
+        };
+        let action = ryeos_runtime::callback::ActionPayload {
+            item_id: "tool:test/audit".to_string(),
+            params: serde_json::json!({"value": 1}),
+            thread: "inline".to_string(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        };
+        let (seed_a, request_a) = hook_dispatch_ledger_seed(
+            &identity,
+            &action,
+            "T-root",
+            "T-segment-a",
+            std::path::Path::new("/project"),
+            "principal",
+            &["cap:b".to_string(), "cap:a".to_string()],
+            &serde_json::json!({"turns": 4}),
+            2,
+            "graph:test/fixture",
+        );
+        let (seed_b, request_b) = hook_dispatch_ledger_seed(
+            &identity,
+            &action,
+            "T-root",
+            "T-segment-b",
+            std::path::Path::new("/project"),
+            "principal",
+            &["cap:a".to_string(), "cap:b".to_string()],
+            &serde_json::json!({"turns": 4}),
+            2,
+            "graph:test/fixture",
+        );
+        assert_eq!(seed_a.dispatch_key, seed_b.dispatch_key);
+        assert_eq!(request_a, request_b);
+
+        let mut changed_action = action;
+        changed_action.params = serde_json::json!({"value": 2});
+        let (changed_seed, changed_request) = hook_dispatch_ledger_seed(
+            &identity,
+            &changed_action,
+            "T-root",
+            "T-segment-a",
+            std::path::Path::new("/project"),
+            "principal",
+            &["cap:a".to_string(), "cap:b".to_string()],
+            &serde_json::json!({"turns": 4}),
+            2,
+            "graph:test/fixture",
+        );
+        assert_eq!(seed_a.dispatch_key, changed_seed.dispatch_key);
+        assert_ne!(request_a, changed_request);
+    }
+
+    #[test]
+    fn hook_identity_must_match_launch_captured_root_authority() {
+        let hook = ryeos_runtime::callback::HookDispatchIdentity {
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                definition_ref: "directive:test/fixture".to_string(),
+                definition_hash: "a".repeat(64),
+                turn: 1,
+            },
+            hook_id: "audit".to_string(),
+            layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
+            context_hash: "b".repeat(64),
+        };
+        let action = ryeos_runtime::callback::ActionPayload {
+            item_id: "tool:test/audit".to_string(),
+            params: serde_json::json!({}),
+            thread: "inline".to_string(),
+            call: None,
+            facets: None,
+            launch_window: None,
+        };
+        assert!(validate_hook_identity_authority(
+            &hook,
+            &action,
+            "directive:test/fixture",
+            &"a".repeat(64),
+        )
+        .is_ok());
+        assert!(validate_hook_identity_authority(
+            &hook,
+            &action,
+            "directive:test/other",
+            &"a".repeat(64),
+        )
+        .is_err());
+        assert!(validate_hook_identity_authority(
+            &hook,
+            &action,
+            "directive:test/fixture",
+            &"c".repeat(64),
+        )
+        .is_err());
     }
 
     #[test]

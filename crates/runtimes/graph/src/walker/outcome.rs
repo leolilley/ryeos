@@ -547,7 +547,6 @@ pub(super) struct RunNodeBodyContext<'a> {
     pub(super) exec_ctx: &'a context::ExecutionContext,
     pub(super) cache: &'a NodeCache,
     pub(super) graph_run_id: &'a str,
-    pub(super) suppressed_errors: &'a mut Vec<ErrorRecord>,
     pub(super) retry_attempt: u32,
 }
 
@@ -561,6 +560,7 @@ pub(super) struct CommitStepInput<'a> {
     pub(super) guard: &'a mut RunGuard,
     pub(super) inputs: &'a Value,
     pub(super) execution: &'a Value,
+    pub(super) cache: &'a NodeCache,
 }
 
 pub(super) struct CommitStepContext<'a> {
@@ -572,6 +572,7 @@ pub(super) struct CommitStepContext<'a> {
     pub(super) guard: &'a mut RunGuard,
     pub(super) inputs: &'a Value,
     pub(super) execution: &'a Value,
+    pub(super) cache: &'a NodeCache,
 }
 
 pub(super) struct CommitTerminalInput<'a> {

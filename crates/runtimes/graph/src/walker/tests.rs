@@ -1442,12 +1442,9 @@ config:
 }
 
 #[tokio::test]
-async fn cost_bearing_cache_hit_does_not_rebill() {
-    // First run dispatches and bills cost; a second run hits the
-    // (disk-backed) cache, replays the stored result, and bills nothing.
-    let cache_dir = NodeCache::new("cache_rebill/test").cache_dir;
-    let _ = std::fs::remove_dir_all(&cache_dir);
-
+async fn node_cache_does_not_cross_execution_authority_boundaries() {
+    // A fresh graph execution must dispatch and bill independently. Cache
+    // replay authority is intentionally scoped to one Walker::execute call.
     let yaml = r#"
 version: "1.0.0"
 category: cache_rebill
@@ -1474,15 +1471,16 @@ config:
     assert!(r1.success, "got: {:?}", r1.error);
     assert_eq!(r1.cost.expect("first run bills").input_tokens, 100);
 
-    // Second run: NO dispatch result supplied — success proves the
-    // cached result was replayed, and `cost: None` proves no re-bill.
-    let w2 = make_walker(make_graph(yaml), vec![]);
+    let second = native_envelope(
+        true,
+        json!({"recommendations": ["c", "d"]}),
+        Some((100, 20, 0.001)),
+    );
+    let w2 = make_walker(make_graph(yaml), vec![second]);
     let r2 = w2.execute(json!({}), None).await;
-    assert!(r2.success, "cache hit should replay; got: {:?}", r2.error);
-    assert_eq!(r2.result, Some(json!(["a", "b"])), "cached result replayed");
-    assert!(r2.cost.is_none(), "cache hit must not re-bill cost");
-
-    let _ = std::fs::remove_dir_all(&cache_dir);
+    assert!(r2.success, "second dispatch should run; got: {:?}", r2.error);
+    assert_eq!(r2.result, Some(json!(["c", "d"])));
+    assert_eq!(r2.cost.expect("second run bills").input_tokens, 100);
 }
 
 #[tokio::test]
@@ -2231,13 +2229,15 @@ config:
 }
 
 #[test]
-fn cache_result_hits_cache_on_second_run() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cache = NodeCache {
-        cache_dir: tmp.path().join("cache-test-unique-sequential"),
-    };
+fn cache_result_replays_within_one_execution_cache() {
+    let cache = NodeCache::new("cache-test-unique-sequential");
     let action = json!({"item_id": "tool:test/echo"});
-    let key = compute_cache_key("cache-test-unique-sequential", "step1", &action);
+    let key = compute_cache_key(
+        "definition-hash",
+        "cache-test-unique-sequential",
+        "step1",
+        &action,
+    );
 
     assert!(cache.lookup(&key).is_none());
 

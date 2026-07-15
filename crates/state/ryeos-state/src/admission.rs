@@ -203,13 +203,19 @@ pub fn admit_root(
         state: CasEntryState::Local,
     })?;
 
-    db.advance_generic_head_ref(
-        &format!("admissions/{}", request.policy),
-        &request.subject_hash,
-        &attestation_hash,
-        None,
-        signer,
+    let head_outcome = crate::refs::classify_ref_write(
+        db.advance_generic_head_ref(
+            &format!("admissions/{}", request.policy),
+            &request.subject_hash,
+            &attestation_hash,
+            None,
+            signer,
+        ),
+        "publishing admission head",
     )?;
+    if let crate::refs::RefWriteOutcome::DurabilityUncertain(error) = head_outcome {
+        tracing::warn!(%error, "admission head committed with uncertain durability");
+    }
     db.record_admission_attestation(&NewAdmissionAttestationRecord {
         attestation_hash: attestation_hash.clone(),
         subject_hash: attestation.subject_hash.clone(),
@@ -317,8 +323,8 @@ mod tests {
     #[test]
     fn admit_root_writes_attestation_and_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
         let signer = TestSigner::default();
+        let db = StateDb::open(tmp.path(), &signer).unwrap();
         let subject_hash = write_object(
             &db,
             &json!({
@@ -388,8 +394,8 @@ mod tests {
     #[test]
     fn admit_root_rejects_missing_subject() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
         let signer = TestSigner::default();
+        let db = StateDb::open(tmp.path(), &signer).unwrap();
 
         let err = admit_root(
             &db,
@@ -404,8 +410,8 @@ mod tests {
     #[test]
     fn admit_root_rejects_unsafe_policy_before_writing_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
         let signer = TestSigner::default();
+        let db = StateDb::open(tmp.path(), &signer).unwrap();
         let subject_hash = write_object(
             &db,
             &json!({

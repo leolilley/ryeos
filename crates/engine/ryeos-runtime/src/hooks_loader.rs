@@ -25,7 +25,8 @@ pub struct HookDefinition {
 
 /// Deterministic source precedence for runtime hooks. A source owns its layer;
 /// authored data cannot forge or reorder this trust/provenance boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum HookLayer {
     Authored = 1,
@@ -427,7 +428,9 @@ pub fn load_configured_hook_sources(
     loader: &crate::verified_loader::VerifiedLoader,
 ) -> anyhow::Result<HookSources> {
     let conditions = loader
-        .load_config_strict::<HookConditionsConfig>("ryeos-runtime/hook_conditions")
+        .load_bundle_config_strict_signed::<HookConditionsConfig>(
+            "ryeos-runtime/hook_conditions",
+        )
         .map_err(|error| anyhow::anyhow!("loading configured runtime hook conditions: {error}"))?
         .unwrap_or_default();
 
@@ -438,7 +441,7 @@ pub fn load_configured_hook_sources(
         .unwrap_or_default()
         .hooks;
 
-    let operator_path = operator_hooks_path(loader.operator_trusted_keys_dir())?;
+    let operator_path = operator_hooks_path(loader.node_trusted_keys_dir())?;
     let operator = loader
         .load_config_file_strict::<HooksFile>(&operator_path)
         .map_err(|error| anyhow::anyhow!("loading configured operator hooks: {error}"))?
@@ -525,6 +528,16 @@ fn operator_hooks_path(trusted_keys_dir: &Path) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_layer_has_closed_named_wire_values() {
+        assert_eq!(
+            serde_json::to_value(HookLayer::Infrastructure).unwrap(),
+            serde_json::json!("infrastructure")
+        );
+        assert!(serde_json::from_value::<HookLayer>(serde_json::json!("legacy")).is_err());
+        assert!(serde_json::from_value::<HookLayer>(serde_json::json!(3)).is_err());
+    }
 
     #[test]
     fn operator_hook_path_is_anchored_to_configured_trust_root() {

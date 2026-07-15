@@ -11,6 +11,7 @@ pub mod launch;
 pub mod launch_envelope;
 pub mod lillux_bridge;
 pub mod limits;
+pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;
@@ -29,6 +30,82 @@ use ryeos_state::objects::SourceManifest;
 use ryeos_state::signer::Signer;
 
 use self::cache::MaterializationCache;
+
+/// A freshly-created project snapshot that is not yet published through
+/// runtime launch metadata. Holding the write permit closes the GC race between
+/// storing the CAS object and making its daemon-authoritative transient root
+/// visible; callers drop this only after metadata persistence succeeds.
+pub(crate) struct PendingProjectSnapshot {
+    pub hash: String,
+    _write_permit: ryeos_app::write_barrier::WritePermit,
+}
+
+/// Capture a live project tree as an immutable CAS snapshot for durable
+/// runtime reconstruction. The caller decides whether snapshot pinning is
+/// required; once requested, any ingest/store failure is fail-closed.
+pub(crate) fn capture_live_project_snapshot(
+    state: &ryeos_app::state::AppState,
+    project_path: &Path,
+    source: &str,
+) -> Result<PendingProjectSnapshot> {
+    if !project_path.is_dir() {
+        anyhow::bail!(
+            "cannot snapshot missing project directory {}",
+            project_path.display()
+        );
+    }
+    let permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let cas_root = state.state_store.cas_root()?;
+    let items = ingest::ingest_directory(&cas_root, project_path, &state.ignore_matcher)?;
+    let cas = CasStore::new(cas_root);
+    let manifest = SourceManifest {
+        item_source_hashes: items,
+    };
+    let manifest_hash = cas.store_object(&manifest.to_value())?;
+    let hash = store_project_snapshot(&cas, manifest_hash, source)?;
+    Ok(PendingProjectSnapshot {
+        hash,
+        _write_permit: permit,
+    })
+}
+
+/// Promote an already-stored source manifest to a project snapshot while
+/// retaining the permit that protected the manifest from before its creation.
+/// The returned guard continues holding that same permit until the caller has
+/// durably published the snapshot hash in runtime metadata.
+pub(crate) fn capture_manifest_project_snapshot(
+    state: &ryeos_app::state::AppState,
+    manifest_hash: String,
+    source: &str,
+    permit: ryeos_app::write_barrier::WritePermit,
+) -> Result<PendingProjectSnapshot> {
+    let cas_root = state.state_store.cas_root()?;
+    let cas = CasStore::new(cas_root);
+    if cas.get_object(&manifest_hash)?.is_none() {
+        anyhow::bail!("project source manifest {manifest_hash} is no longer present in CAS");
+    }
+    let hash = store_project_snapshot(&cas, manifest_hash, source)?;
+    Ok(PendingProjectSnapshot {
+        hash,
+        _write_permit: permit,
+    })
+}
+
+fn store_project_snapshot(cas: &CasStore, manifest_hash: String, source: &str) -> Result<String> {
+    let snapshot = ryeos_state::objects::ProjectSnapshot {
+        project_manifest_hash: manifest_hash,
+        user_manifest_hash: None,
+        message: None,
+        project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
+        parent_hashes: Vec::new(),
+        created_at: lillux::time::iso8601_now(),
+        source: source.to_string(),
+    };
+    Ok(cas.store_object(&snapshot.to_value())?)
+}
 
 // ── Checkout ────────────────────────────────────────────────────────
 
@@ -236,14 +313,20 @@ pub fn advance_after_foldback(
     };
     let new_snapshot_hash = cas.store_object(&snapshot.to_value())?;
 
-    ryeos_state::refs::advance_project_head_ref(
-        refs_root,
-        principal_key,
-        project_path_hash,
-        &new_snapshot_hash,
-        current_snapshot_hash,
-        signer,
+    let head_outcome = ryeos_state::refs::classify_ref_write(
+        ryeos_state::refs::advance_project_head_ref(
+            refs_root,
+            principal_key,
+            project_path_hash,
+            &new_snapshot_hash,
+            current_snapshot_hash,
+            signer,
+        ),
+        "advancing fold-back project head",
     )?;
+    if let ryeos_state::refs::RefWriteOutcome::DurabilityUncertain(error) = head_outcome {
+        tracing::warn!(%error, "fold-back project head committed with uncertain durability");
+    }
 
     Ok(new_snapshot_hash)
 }

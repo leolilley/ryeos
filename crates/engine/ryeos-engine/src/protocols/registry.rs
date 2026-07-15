@@ -323,7 +323,9 @@ fn validate_protocol_descriptor(
 
     // 7. Env injection invariants
     let mut seen_names = std::collections::HashSet::new();
-    let mut has_callback_injection = false;
+    let mut has_callback_socket_injection = false;
+    let mut has_callback_token_injection = false;
+    let mut callback_injection_name = None;
     for inj in &desc.env_injections {
         // 7a. valid POSIX name, not reserved
         validate_env_name(&inj.name).map_err(|e| ProtocolError::Vocabulary {
@@ -339,42 +341,38 @@ fn validate_protocol_descriptor(
                 },
             });
         }
+        match inj.source {
+            EnvInjectionSource::CallbackSocketPath => has_callback_socket_injection = true,
+            EnvInjectionSource::CallbackToken => has_callback_token_injection = true,
+            _ => {}
+        }
         if matches!(
             inj.source,
-            EnvInjectionSource::CallbackTokenUrl
-                | EnvInjectionSource::CallbackSocketPath
+            EnvInjectionSource::CallbackSocketPath
                 | EnvInjectionSource::CallbackToken
+                | EnvInjectionSource::ThreadAuthToken
+                | EnvInjectionSource::CallbackProjectPath
         ) {
-            has_callback_injection = true;
+            callback_injection_name.get_or_insert_with(|| inj.name.clone());
         }
     }
 
-    // 8. callback_channel ↔ callback_token_url injection symmetry
+    // 8. callback channel ↔ callback-source injection symmetry
     match desc.callback_channel {
         CallbackChannel::HttpV1 => {
-            if !has_callback_injection {
+            if !has_callback_socket_injection || !has_callback_token_injection {
                 return Err(ProtocolError::Vocabulary {
                     name: desc.name.clone(),
-                    source:
-                        crate::protocol_vocabulary::VocabularyError::HttpV1WithoutCallbackInjection,
+                    source: crate::protocol_vocabulary::VocabularyError::HttpV1IncompleteCallbackTransport,
                 });
             }
         }
         CallbackChannel::None => {
-            if has_callback_injection {
+            if let Some(name) = callback_injection_name {
                 return Err(ProtocolError::Vocabulary {
                     name: desc.name.clone(),
                     source: crate::protocol_vocabulary::VocabularyError::CallbackInjectionWithoutChannel {
-                        name: desc.env_injections
-                            .iter()
-                            .find(|i| matches!(
-                                i.source,
-                                EnvInjectionSource::CallbackTokenUrl
-                                    | EnvInjectionSource::CallbackSocketPath
-                                    | EnvInjectionSource::CallbackToken
-                            ))
-                            .map(|i| i.name.clone())
-                            .unwrap_or_default(),
+                        name,
                     },
                 });
             }
@@ -387,6 +385,13 @@ fn validate_protocol_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn descriptor(callback_channel: &str, env_injections: &str) -> ProtocolDescriptor {
+        serde_yaml::from_str(&format!(
+            "kind: protocol\nname: test\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n{env_injections}capabilities:\n  allows_pushed_head: false\n  allows_target_site: false\n  allows_detached: true\nlifecycle:\n  mode: detached_ok\ncallback_channel: {callback_channel}\n"
+        ))
+        .unwrap()
+    }
 
     #[test]
     fn empty_registry_has_fingerprint() {
@@ -404,5 +409,38 @@ mod tests {
             ProtocolError::NotRegistered { .. } => {}
             other => panic!("wrong error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn http_v1_requires_socket_and_token_sources() {
+        for env_injections in [
+            "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n",
+            "  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
+        ] {
+            let desc = descriptor("http_v1", env_injections);
+            assert!(matches!(
+                validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc),
+                Err(ProtocolError::Vocabulary {
+                    source: crate::protocol_vocabulary::VocabularyError::HttpV1IncompleteCallbackTransport,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn callback_free_protocol_rejects_thread_auth_source() {
+        let desc = descriptor(
+            "none",
+            "  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }\n",
+        );
+        assert!(matches!(
+            validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc),
+            Err(ProtocolError::Vocabulary {
+                source:
+                    crate::protocol_vocabulary::VocabularyError::CallbackInjectionWithoutChannel { .. },
+                ..
+            })
+        ));
     }
 }

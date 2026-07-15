@@ -58,8 +58,18 @@ pub struct EventReplayResult {
     pub next_cursor: Option<i64>,
 }
 
+const DEFAULT_REPLAY_LIMIT: usize = 32;
+// Shared daemon consumers include the public 200-record replay surface and a
+// few bounded internal 500-record scans. Runtime callbacks apply their tighter
+// trust-boundary limit before entering this service.
+const MAX_REPLAY_LIMIT: usize = 500;
+const MAX_REPLAY_SERIALIZED_BYTES: usize = 6 * 1024 * 1024;
+const MAX_RUNTIME_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+const MAX_RUNTIME_EVENT_BATCH_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RUNTIME_EVENT_BATCH_ITEMS: usize = 64;
+
 fn default_replay_limit() -> usize {
-    200
+    DEFAULT_REPLAY_LIMIT
 }
 
 impl EventStoreService {
@@ -89,40 +99,53 @@ impl EventStoreService {
         )
     )]
     pub fn append_batch(&self, params: &EventAppendBatchParams) -> Result<EventAppendBatchResult> {
+        if params.events.is_empty() {
+            bail!("event batch must not be empty");
+        }
+        if params.events.len() > MAX_RUNTIME_EVENT_BATCH_ITEMS {
+            bail!(
+                "event batch contains {} items (max {})",
+                params.events.len(),
+                MAX_RUNTIME_EVENT_BATCH_ITEMS
+            );
+        }
+        let mut batch_bytes = 0usize;
+        for event in &params.events {
+            let payload_bytes = serde_json::to_vec(&event.payload)?.len();
+            if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
+                bail!(
+                    "event '{}' payload is {} bytes (max {})",
+                    event.event_type,
+                    payload_bytes,
+                    MAX_RUNTIME_EVENT_PAYLOAD_BYTES
+                );
+            }
+            batch_bytes = batch_bytes
+                .checked_add(payload_bytes)
+                .ok_or_else(|| anyhow::anyhow!("event batch byte count overflow"))?;
+        }
+        if batch_bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
+            bail!(
+                "event batch payload is {} bytes (max {})",
+                batch_bytes,
+                MAX_RUNTIME_EVENT_BATCH_BYTES
+            );
+        }
         let thread = self
             .state_store
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
 
-        // Defense-in-depth behind the status state machine. The transition guard
-        // (`StateStore::finalize_thread`) refuses a contradictory terminal STATUS
-        // change; this closes the parallel gap where a terminal EVENT still
-        // appends onto an already-terminal thread as ordinary braid content (the
-        // observed shape: a mid-braid `thread_failed` beside a later
-        // `graph_completed`). Reject the whole batch LOUDLY — naming both the
-        // settled status and the incoming terminal event — so the next unknown
-        // producer of this shape is impossible to miss rather than silently
-        // braided in. The terminal-event vocabulary is the `RuntimeEventType`
-        // SSOT, not a local literal list.
+        // Runtime-authored events belong only to a live run. Reject every event
+        // on a terminal row, not just a second terminal event: otherwise a
+        // self-finalized process could keep its token and append ordinary braid
+        // content after the authoritative terminal snapshot.
         if crate::state_store::is_terminal_status(&thread.status) {
-            if let Some(conflicting) = params.events.iter().find(|event| {
-                ryeos_runtime::RuntimeEventType::parse(&event.event_type)
-                    .is_ok_and(ryeos_runtime::RuntimeEventType::is_terminal)
-            }) {
-                tracing::error!(
-                    thread_id = %thread.thread_id,
-                    existing_terminal_status = %thread.status,
-                    incoming_terminal_event = %conflicting.event_type,
-                    "refused a terminal event on an already-terminal thread; the braid \
-                     would otherwise carry two contradictory terminal events"
-                );
-                bail!(
-                    "terminal event '{}' refused: thread '{}' is already terminal ('{}')",
-                    conflicting.event_type,
-                    thread.thread_id,
-                    thread.status,
-                );
-            }
+            bail!(
+                "event append refused: thread '{}' is already terminal ('{}')",
+                thread.thread_id,
+                thread.status,
+            );
         }
 
         let events = params
@@ -144,9 +167,15 @@ impl EventStoreService {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let persisted =
-            self.state_store
-                .append_events(&thread.chain_root_id, &thread.thread_id, &events)?;
+        let persisted = self
+            .state_store
+            .append_events_if_thread_running(&thread.chain_root_id, &thread.thread_id, &events)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "event append refused: thread '{}' is no longer running",
+                    thread.thread_id
+                )
+            })?;
 
         Ok(EventAppendBatchResult { persisted })
     }
@@ -162,6 +191,12 @@ impl EventStoreService {
         )
     )]
     pub fn replay(&self, params: &EventReplayParams) -> Result<EventReplayResult> {
+        if params.limit == 0 || params.limit > MAX_REPLAY_LIMIT {
+            bail!(
+                "events.replay limit must be between 1 and {}",
+                MAX_REPLAY_LIMIT
+            );
+        }
         let (chain_root_id, thread_id) = match (&params.chain_root_id, &params.thread_id) {
             (Some(chain_root_id), thread_id) => (chain_root_id.clone(), thread_id.clone()),
             (None, Some(thread_id)) => {
@@ -174,20 +209,21 @@ impl EventStoreService {
             (None, None) => bail!("events.replay requires chain_root_id or thread_id"),
         };
 
-        let events = self.state_store.replay_events(
+        let page = self.state_store.replay_events(
             &chain_root_id,
             thread_id.as_deref(),
             params.after_chain_seq,
             params.limit,
+            MAX_REPLAY_SERIALIZED_BYTES,
         )?;
-        let next_cursor = if events.len() == params.limit {
-            events.last().map(|event| event.chain_seq)
+        let next_cursor = if page.has_more {
+            page.events.last().map(|event| event.chain_seq)
         } else {
             None
         };
 
         Ok(EventReplayResult {
-            events,
+            events: page.events,
             next_cursor,
         })
     }

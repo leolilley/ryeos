@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T01:05:56Z:d09ed41b84a08defa9c2b01c6f00178063f888e950e13e9009a7ef2e751de851:TW71WcKId8ik9UYzxc9U9LjnN7mqIW0M4ExwcXioZxTtiXoCmP8Fb/dDW6j2iWI5W7NhAdpgyLywZ3jwriaOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T10:12:30Z:4bebe560dabba4b3e3e9d3a80133a06e6f972613bd9e0fd0addba3c37d31009c:CaiNUwSxiaqwUgsCyKXu+YwRPtYImDZkzuT13hXh32egM8GMOdQSmPU4wkXL0bMFA+of1jqk7nh5A+aq4fmJCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # rye:unsigned
 category: "engine/kinds/runtime"
 version: "1.0.0"
@@ -41,14 +41,6 @@ composed_value_contract:
       prim: sequence
       elements: { type: single, prim: string }
     description: { type: single, prim: string }
-    schema:
-      type: single
-      prim: mapping
-      contract:
-        root_type: mapping
-        required:
-          envelope: { type: single, prim: string }
-          result: { type: single, prim: string }
 metadata:
   rules:
     version:

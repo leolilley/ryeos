@@ -27,7 +27,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
 
     let refs_root = state.state_store.refs_root()?;
-    let deployed = ryeos_state::refs::read_deployed_project_ref(&refs_root, &project_hash)?;
+    let deployed = state.state_store.with_state_db(|db| {
+        ryeos_state::refs::read_verified_deployed_project_ref(
+            &refs_root,
+            &project_hash,
+            db.trust_store(),
+        )
+    })?;
 
     let Some(deployed) = deployed else {
         return Ok(serde_json::json!({

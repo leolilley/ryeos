@@ -43,6 +43,7 @@ impl Walker {
             guard,
             inputs,
             execution,
+            cache,
         } = input;
         let context = CommitStepContext {
             graph_run_id,
@@ -53,6 +54,7 @@ impl Walker {
             guard,
             inputs,
             execution,
+            cache,
         };
 
         match outcome {
@@ -219,7 +221,7 @@ impl Walker {
             resolve_status(initial_history_failure.is_some());
         if initial_history_failure.is_none() {
             self.fire_graph_hooks(
-                RuntimeEventType::GraphCompleted,
+                self.graph_completed_hook_occurrence(graph_run_id, steps),
                 json!({
                     "event": RuntimeEventType::GraphCompleted.as_str(),
                     "graph_id": &self.graph.graph_id,

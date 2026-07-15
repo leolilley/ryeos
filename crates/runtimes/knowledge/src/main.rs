@@ -2,7 +2,8 @@
 //! the requested method, and writes a MethodCallResult to stdout.
 //!
 //! Spawned exclusively by `ryeosd` via `lillux::run`. Single mode:
-//! always a thread, always wires CallbackClient lifecycle.
+//! always a thread, always attaches and marks running through CallbackClient.
+//! The daemon validates terminal stdout and owns terminal state publication.
 
 mod budget;
 mod compose;
@@ -19,8 +20,9 @@ mod validate;
 use std::io::Read;
 
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::method_wire::{MethodCallEnvelope, MethodCallError, MethodCallResult};
-use ryeos_runtime::ThreadTerminalStatus;
+use ryeos_runtime::method_wire::{
+    MethodCallEnvelope, MethodCallError, MethodCallResult, METHOD_CALL_SCHEMA_VERSION,
+};
 
 use types::KnowledgeError;
 
@@ -38,6 +40,15 @@ fn dispatch_method(envelope: &MethodCallEnvelope) -> MethodCallResult {
     }
 }
 
+fn parse_method_call_envelope(input: &[u8]) -> anyhow::Result<MethodCallEnvelope> {
+    let envelope: MethodCallEnvelope = serde_json::from_slice(input)
+        .map_err(|e| anyhow::anyhow!("invalid MethodCallEnvelope: {e}"))?;
+    envelope
+        .validate_schema_version()
+        .map_err(anyhow::Error::msg)?;
+    Ok(envelope)
+}
+
 fn main() -> anyhow::Result<()> {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_cli_tool());
 
@@ -48,8 +59,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let envelope: MethodCallEnvelope = serde_json::from_slice(&stdin_data)
-        .map_err(|e| anyhow::anyhow!("invalid MethodCallEnvelope: {e}"))?;
+    let envelope = parse_method_call_envelope(&stdin_data)?;
 
     tracing::info!(
         kind = %envelope.kind,
@@ -73,7 +83,7 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
     let client = CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
-        envelope.project_root.to_str().unwrap_or(""),
+        envelope.callback_project_path.to_str().unwrap_or(""),
         &thread_auth_token,
     );
 
@@ -108,11 +118,12 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
         .unwrap_or_else(|e| {
             MethodCallResult::failure(
                 &MethodCallEnvelope {
-                    schema_version: 1,
+                    schema_version: METHOD_CALL_SCHEMA_VERSION,
                     kind,
                     method,
                     thread_id,
                     callback: envelope.callback.clone(),
+                    callback_project_path: envelope.callback_project_path.clone(),
                     project_root: envelope.project_root.clone(),
                     runtime_config: envelope.runtime_config.clone(),
                     payload: serde_json::Value::Null,
@@ -123,34 +134,9 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
             )
         });
 
-    let completion = if result.success {
-        ryeos_runtime::TerminalCompletion {
-            status: ThreadTerminalStatus::Completed,
-            outcome_code: Some("success".to_string()),
-            result: result.output.clone(),
-            error: None,
-            cost: None,
-            outputs: serde_json::Value::Null,
-            warnings: Vec::new(),
-        }
-    } else {
-        ryeos_runtime::TerminalCompletion {
-            status: ThreadTerminalStatus::Failed,
-            outcome_code: Some("failed".to_string()),
-            result: None,
-            error: result
-                .error
-                .as_ref()
-                .and_then(|e| serde_json::to_value(e).ok()),
-            cost: None,
-            outputs: serde_json::Value::Null,
-            warnings: Vec::new(),
-        }
-    };
-    if let Err(e) = client.finalize_thread(completion).await {
-        tracing::error!(error = %e, "finalize_thread failed");
-    }
-
+    // Do not publish terminal state here. The daemon must first validate the
+    // process outcome, method-result wire semantics, kind/method echo, and any
+    // launch-augmentation projection derived from the output.
     result
 }
 
@@ -179,7 +165,7 @@ mod tests {
 
     fn envelope(method: &str, payload: serde_json::Value) -> MethodCallEnvelope {
         MethodCallEnvelope {
-            schema_version: 1,
+            schema_version: METHOD_CALL_SCHEMA_VERSION,
             kind: "knowledge".into(),
             method: method.into(),
             thread_id: "T-test".into(),
@@ -187,6 +173,7 @@ mod tests {
                 socket_path: std::path::PathBuf::from("/tmp/cb.sock"),
                 token: "tat-test".into(),
             },
+            callback_project_path: std::path::PathBuf::from("/tmp/proj-state"),
             project_root: std::path::PathBuf::from("/tmp/proj"),
             runtime_config: std::collections::BTreeMap::new(),
             payload,
@@ -207,6 +194,14 @@ mod tests {
             knowledge_to_batch_error(KnowledgeError::Internal("boom".into())),
             MethodCallError::MethodFailed { .. }
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_method_envelope_schema_version() {
+        let mut envelope = envelope("compose", serde_json::json!({}));
+        envelope.schema_version = METHOD_CALL_SCHEMA_VERSION + 1;
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        assert!(parse_method_call_envelope(&bytes).is_err());
     }
 
     #[test]

@@ -763,7 +763,7 @@ impl Walker {
                 .await;
             self.record_callback_warning(RuntimeEventType::GraphStarted.as_str(), r);
             self.fire_graph_hooks(
-                RuntimeEventType::GraphStarted,
+                self.graph_started_hook_occurrence(&graph_run_id),
                 json!({
                     "event": RuntimeEventType::GraphStarted.as_str(),
                     "graph_id": &self.graph.graph_id,
@@ -796,6 +796,7 @@ impl Walker {
                     guard: &mut guard,
                     inputs: &inputs,
                     execution: &execution_context,
+                    cache: &cache,
                 })
                 .await
             {
@@ -842,6 +843,7 @@ impl Walker {
                         guard: &mut guard,
                         inputs: &inputs,
                         execution: &execution_context,
+                        cache: &cache,
                     })
                     .await
                 {
@@ -872,6 +874,7 @@ impl Walker {
                             guard: &mut guard,
                             inputs: &inputs,
                             execution: &execution_context,
+                            cache: &cache,
                         })
                         .await
                     {
@@ -892,7 +895,6 @@ impl Walker {
                     exec_ctx: &exec_ctx,
                     cache: &cache,
                     graph_run_id: &graph_run_id,
-                    suppressed_errors: &mut suppressed_errors,
                     retry_attempt,
                 })
                 .await;
@@ -908,6 +910,7 @@ impl Walker {
                     guard: &mut guard,
                     inputs: &inputs,
                     execution: &execution_context,
+                    cache: &cache,
                 })
                 .await
             {
@@ -947,6 +950,7 @@ impl Walker {
                     guard: &mut guard,
                     inputs: &inputs,
                     execution: &execution_context,
+                    cache: &cache,
                 })
                 .await
             {
@@ -977,6 +981,7 @@ impl Walker {
                     guard: &mut guard,
                     inputs: &inputs,
                     execution: &execution_context,
+                    cache: &cache,
                 })
                 .await
             {
@@ -1044,6 +1049,7 @@ impl Walker {
                     guard: &mut guard,
                     inputs: &inputs,
                     execution: &execution_context,
+                    cache: &cache,
                 })
                 .await
             {
@@ -1188,7 +1194,6 @@ impl Walker {
             exec_ctx,
             cache,
             graph_run_id,
-            suppressed_errors,
             retry_attempt,
         } = ctx;
         let start = Instant::now();
@@ -1551,7 +1556,6 @@ impl Walker {
                         exec_ctx,
                         cache,
                         graph_run_id,
-                        suppressed_errors,
                         retry_attempt,
                     },
                     start,
@@ -1625,28 +1629,40 @@ impl Walker {
 
     /// Fire authored observer hooks for `event` against `context`. Hook actions
     /// dispatch through the same callback path node actions use (effective_caps
-    /// enforced, cost accrued, braid-visible). A failing hook is recorded as a
-    /// warning, never a graph failure — graph hooks are fire-and-forget
-    /// observers; they cannot steer the walk.
-    async fn fire_graph_hooks(&self, event: RuntimeEventType, context: Value) {
-        let step = match event {
-            RuntimeEventType::GraphStarted => None,
-            RuntimeEventType::GraphStepCompleted => context
-                .get("step")
-                .and_then(Value::as_u64)
-                .and_then(|step| u32::try_from(step).ok()),
-            RuntimeEventType::GraphCompleted => context
-                .get("steps")
-                .and_then(Value::as_u64)
-                .and_then(|step| u32::try_from(step).ok()),
-            _ => None,
+    /// enforced, cost accrued, braid-visible). Ordinary hook failures are
+    /// observer warnings and cannot steer the walk. Accounting or integrity
+    /// failures additionally poison run history so terminal settlement fails
+    /// closed instead of publishing an under-accounted result.
+    async fn fire_graph_hooks(
+        &self,
+        occurrence: ryeos_runtime::callback::HookDispatchOccurrence,
+        context: Value,
+    ) {
+        let (event, step) = match &occurrence {
+            ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted { .. } => {
+                (RuntimeEventType::GraphStarted, None)
+            }
+            ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+                step,
+                ..
+            } => (RuntimeEventType::GraphStepCompleted, Some(*step)),
+            ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { steps, .. } => {
+                (RuntimeEventType::GraphCompleted, Some(*steps))
+            }
+            _ => {
+                self.reject_run_history(format!(
+                    "non-graph hook occurrence `{}` reached graph runtime",
+                    occurrence.event()
+                ));
+                return;
+            }
         };
         match crate::hooks::run_graph_hooks(
             &self.client,
             &self.thread_id,
             &self.project_path,
             self.graph.compiled.hooks(),
-            event,
+            occurrence,
             &context,
         )
         .await
@@ -1662,9 +1678,14 @@ impl Walker {
                     ryeos_runtime::hooks_eval::HookRunErrorKind::Accounting
                         | ryeos_runtime::hooks_eval::HookRunErrorKind::Integrity
                 ) {
+                    let authority_kind = match error.kind {
+                        ryeos_runtime::hooks_eval::HookRunErrorKind::Accounting => "accounting",
+                        ryeos_runtime::hooks_eval::HookRunErrorKind::Integrity => "integrity",
+                        _ => unreachable!("only authority failures enter this branch"),
+                    };
                     self.reject_run_history(format!(
-                        "hook `{}` accounting is incomplete: {error}",
-                        event.as_str()
+                        "hook `{}` {authority_kind} failure invalidated terminal authority: {error}",
+                        event.as_str(),
                     ));
                 }
                 self.record_warning(format!(
@@ -1672,6 +1693,45 @@ impl Walker {
                     event.as_str()
                 ));
             }
+        }
+    }
+
+    fn graph_started_hook_occurrence(
+        &self,
+        graph_run_id: &str,
+    ) -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
+            graph_run_id: graph_run_id.to_string(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
+        }
+    }
+
+    fn graph_step_completed_hook_occurrence(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        node: &str,
+    ) -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+            graph_run_id: graph_run_id.to_string(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
+            step,
+            node: node.to_string(),
+        }
+    }
+
+    fn graph_completed_hook_occurrence(
+        &self,
+        graph_run_id: &str,
+        steps: u32,
+    ) -> ryeos_runtime::callback::HookDispatchOccurrence {
+        ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
+            graph_run_id: graph_run_id.to_string(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
+            steps,
         }
     }
 
@@ -1716,14 +1776,26 @@ fn hash_json_value(value: &Value) -> String {
     lillux::cas::sha256_hex(canonical.as_bytes())
 }
 
-fn compute_cache_key(graph_id: &str, node_name: &str, action: &Value) -> String {
-    // Intentionally preserve existing cache-key serialization behavior.
-    // `node_result_hash` is portable consequence identity; this cache key is
-    // private runtime cache identity and should not change in this PR.
+fn compute_cache_key(
+    definition_hash: &str,
+    graph_id: &str,
+    node_name: &str,
+    action: &Value,
+) -> String {
+    // Length-prefix each identity component so concatenation cannot alias.
+    // The definition hash prevents a changed graph from reusing an entry, and
+    // canonical JSON gives object-key ordering one deterministic identity.
     let mut hasher = Sha256::new();
-    hasher.update(graph_id.as_bytes());
-    hasher.update(node_name.as_bytes());
-    hasher.update(serde_json::to_string(action).unwrap_or_default().as_bytes());
+    let canonical_action = lillux::cas::canonical_json(action);
+    for component in [
+        definition_hash.as_bytes(),
+        graph_id.as_bytes(),
+        node_name.as_bytes(),
+        canonical_action.as_bytes(),
+    ] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
     lillux::cas::sha256_hex(&hasher.finalize())
 }
 

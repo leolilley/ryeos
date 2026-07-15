@@ -192,10 +192,10 @@ impl EnvelopeCallback {
 pub struct EnvelopeRoots {
     pub project_root: PathBuf,
     pub bundle_roots: Vec<PathBuf>,
-    /// Operator trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
+    /// Node trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
     /// The runtime's `VerifiedLoader` takes its trust context from here
     /// and the project root — never from bundle roots, never from env.
-    pub operator_trusted_keys_dir: PathBuf,
+    pub node_trusted_keys_dir: PathBuf,
     /// Deliberate runtime state-root override (`/execute` `state_root`).
     /// Item resolution stays anchored at `project_root`; runtime-state
     /// writes (thread state, transcripts, thread knowledge) should target
@@ -514,7 +514,7 @@ mod tests {
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
-                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
                 state_root: None,
             },
             request: EnvelopeRequest {
@@ -544,6 +544,9 @@ mod tests {
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
                     raw_content: String::new(),
+                    source_content_digest:
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
                     raw_content_digest:
                         "0000000000000000000000000000000000000000000000000000000000000000"
                             .to_string(),
@@ -745,7 +748,7 @@ cost:
         let mut roots = EnvelopeRoots {
             project_root: PathBuf::from("/project"),
             bundle_roots: vec![],
-            operator_trusted_keys_dir: PathBuf::from("/keys"),
+            node_trusted_keys_dir: PathBuf::from("/keys"),
             state_root: None,
         };
         assert_eq!(roots.state_root(), Path::new("/project"));
@@ -760,7 +763,7 @@ cost:
         let roots: EnvelopeRoots = serde_json::from_value(serde_json::json!({
             "project_root": "/project",
             "bundle_roots": [],
-            "operator_trusted_keys_dir": "/keys",
+            "node_trusted_keys_dir": "/keys",
         }))
         .unwrap();
         assert!(roots.state_root.is_none());
@@ -778,6 +781,8 @@ cost:
                 alias_resolution: None,
                 added_by: crate::resolution::ResolutionStepName::PipelineInit,
                 raw_content: String::new(),
+                source_content_digest:
+                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
                 raw_content_digest:
                     "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             },
@@ -795,7 +800,7 @@ cost:
             EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
-                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
                 state_root: None,
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),

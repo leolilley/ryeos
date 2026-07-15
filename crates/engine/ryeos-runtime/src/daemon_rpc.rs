@@ -32,8 +32,6 @@ pub enum RpcError {
     },
     #[error("no response to {method} within {timeout_secs}s; connection discarded")]
     Timeout { method: String, timeout_secs: u64 },
-    #[error("runtime.socket_path is required")]
-    MissingSocketPath,
     #[error("response request_id {actual:?} did not match {expected}")]
     InvalidResponseRequestId { expected: u64, actual: Option<u64> },
     #[error("daemon closed the socket mid-frame")]
@@ -288,175 +286,6 @@ impl DaemonRpcClient {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ThreadLifecycleClient {
-    rpc: DaemonRpcClient,
-}
-
-impl ThreadLifecycleClient {
-    pub fn from_request(request: &Value) -> Result<Self, RpcError> {
-        let socket_path = request
-            .get("runtime")
-            .and_then(|r| r.get("socket_path"))
-            .and_then(|s| s.as_str())
-            .ok_or(RpcError::MissingSocketPath)?;
-        Ok(Self {
-            rpc: DaemonRpcClient::new(PathBuf::from(socket_path)),
-        })
-    }
-
-    pub fn new(socket_path: PathBuf) -> Self {
-        Self {
-            rpc: DaemonRpcClient::new(socket_path),
-        }
-    }
-
-    pub async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "threads.attach_process",
-                serde_json::json!({"thread_id": thread_id, "pid": pid}),
-            )
-            .await
-    }
-
-    pub async fn mark_running(&self, thread_id: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "threads.mark_running",
-                serde_json::json!({"thread_id": thread_id}),
-            )
-            .await
-    }
-
-    pub async fn get_thread(&self, thread_id: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request("threads.get", serde_json::json!({"thread_id": thread_id}))
-            .await
-    }
-
-    pub async fn list_threads(&self) -> Result<Value, RpcError> {
-        self.rpc
-            .request("threads.list", serde_json::json!({}))
-            .await
-    }
-
-    pub async fn list_children(&self, thread_id: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "threads.list_children",
-                serde_json::json!({"thread_id": thread_id}),
-            )
-            .await
-    }
-
-    pub async fn get_chain(&self, thread_id: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "threads.get_chain",
-                serde_json::json!({"thread_id": thread_id}),
-            )
-            .await
-    }
-
-    pub async fn append_event(
-        &self,
-        thread_id: &str,
-        event_type: &str,
-        payload: Value,
-        storage_class: &str,
-    ) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "events.append",
-                serde_json::json!({
-                    "thread_id": thread_id,
-                    "event_type": event_type,
-                    "payload": payload,
-                    "storage_class": storage_class,
-                }),
-            )
-            .await
-    }
-
-    pub async fn append_events(
-        &self,
-        thread_id: &str,
-        events: Vec<Value>,
-    ) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "events.append_batch",
-                serde_json::json!({"thread_id": thread_id, "events": events}),
-            )
-            .await
-    }
-
-    pub async fn replay_events(&self, thread_id: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request("events.replay", serde_json::json!({"thread_id": thread_id}))
-            .await
-    }
-
-    pub async fn send_command(
-        &self,
-        thread_id: &str,
-        command: &str,
-        payload: Value,
-    ) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "commands.send",
-                serde_json::json!({
-                    "thread_id": thread_id,
-                    "command": command,
-                    "payload": payload,
-                }),
-            )
-            .await
-    }
-
-    pub async fn claim_commands(&self, thread_id: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "commands.claim",
-                serde_json::json!({"thread_id": thread_id}),
-            )
-            .await
-    }
-
-    pub async fn complete_command(
-        &self,
-        command_id: i64,
-        status: &str,
-        result: Value,
-    ) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "commands.complete",
-                serde_json::json!({
-                    "command_id": command_id,
-                    "status": status,
-                    "result": result,
-                }),
-            )
-            .await
-    }
-
-    pub async fn publish_artifact(
-        &self,
-        thread_id: &str,
-        artifact: Value,
-    ) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "artifacts.publish",
-                serde_json::json!({"thread_id": thread_id, "artifact": artifact}),
-            )
-            .await
-    }
-}
-
 pub fn resolve_daemon_socket_path(explicit: Option<&Path>) -> PathBuf {
     if let Some(p) = explicit {
         return p.to_path_buf();
@@ -508,13 +337,13 @@ mod tests {
     #[tokio::test]
     async fn request_round_trips_msgpack() {
         let (_dir, socket_path, task) = spawn_one_shot_server(|req| {
-            assert_eq!(req["method"], "threads.get");
+            assert_eq!(req["method"], "system.health");
             serde_json::json!({"request_id": req["request_id"].clone(), "result": {"ok": true}})
         })
         .await;
         let client = DaemonRpcClient::new(socket_path);
         let result = client
-            .request("threads.get", serde_json::json!({"thread_id": "t-1"}))
+            .request("system.health", serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(result, serde_json::json!({"ok": true}));
@@ -532,7 +361,7 @@ mod tests {
         .await;
         let client = DaemonRpcClient::new(socket_path);
         let err = client
-            .request("threads.get", serde_json::json!({}))
+            .request("system.health", serde_json::json!({}))
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::RequestFailed { ref code, .. } if code == "bad"));
@@ -557,23 +386,17 @@ mod tests {
         let client = DaemonRpcClient::new(socket_path);
         let err = client
             .request_with_timeout(
-                "threads.get",
+                "system.health",
                 serde_json::json!({"thread_id": "t-1"}),
                 Some(Duration::from_millis(50)),
             )
             .await
             .unwrap_err();
         assert!(
-            matches!(err, RpcError::Timeout { ref method, .. } if method == "threads.get"),
+            matches!(err, RpcError::Timeout { ref method, .. } if method == "system.health"),
             "expected Timeout, got: {err:?}"
         );
         task.abort();
-    }
-
-    #[test]
-    fn from_request_requires_socket_path() {
-        let err = ThreadLifecycleClient::from_request(&serde_json::json!({})).unwrap_err();
-        assert!(matches!(err, RpcError::MissingSocketPath));
     }
 
     #[test]

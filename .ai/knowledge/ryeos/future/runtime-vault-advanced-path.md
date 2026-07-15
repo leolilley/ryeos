@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T01:27:53Z:c75efca37bc9bc0280f67d29392c2523e2542c3801ca4a86bd0e256d16b95ca7:8BGUGDEvzOxVFGnX3ih5kNTIjg7SYDNg4OwLjWNPpc+uTF6CJVpQM+phsOCYfJp20QhZQm71OyxA8pfmtWWBAQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:d7f7b69133dd01af735976c2a3e4a03b2a8b32e5392133156f2e9e60042145e7:221MagRK+KR4rfiPCVzlcL/Rd0vNkV5apoq93TK4wWeHRcnV6HTtgpep4DSoCaiRydVafJ18ZK58vtT1ZuCLAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Runtime vault advanced path
 
 Status: deferred advanced work.
@@ -16,14 +16,38 @@ refs such as:
 vault://bundle/<bundle-id>/<namespace>/<key>
 ```
 
+## Current bounded boundary
+
+The sealed backend remains one global encrypted map. Every operator-vault or
+runtime-vault operation opens and validates the complete map, and every
+mutation seals the complete map again. Current storage invariants cap it at:
+
+- 1,024 entries;
+- 256 bytes per physical key;
+- 256 KiB per value;
+- 4 MiB serialized/decrypted plaintext; and
+- 6 MiB for the sealed envelope on disk.
+
+Runtime-vault logical namespace/key segments remain `[A-Za-z0-9_]+` and at
+most 64 characters. Runtime list is lexical cursor pagination with a default
+page of 64 keys, a maximum page of 128, and a 64 KiB serialized-response cap.
+That pagination bounds callback response materialization only: selecting a
+page still requires a whole-envelope decrypt and validation. It must not be
+described as narrow per-bundle or per-namespace storage I/O.
+
 ## Deferred improvements
 
 1. First-class scoped storage
-   - Replace flat sealed-map physical storage with explicit vault record scopes.
+   - Replace flat sealed-map physical storage with explicit vault record scopes
+     or sharded per-scope envelopes.
    - Keep at least these scope classes:
      - operator environment secrets;
      - runtime bundle credentials.
    - Ensure `required_secrets` can only read operator-env scope by construction.
+   - Preserve the logical `vault://bundle/...` API while making get/list/update
+     touch only the addressed bundle/namespace shard.
+   - Add bounded per-scope indexes so cursor pagination also bounds storage I/O,
+     rather than only the returned page.
 
 2. Versioned updates / compare-and-set
    - Add a version or etag to runtime vault entries.

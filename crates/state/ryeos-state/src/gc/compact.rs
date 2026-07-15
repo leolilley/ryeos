@@ -146,8 +146,14 @@ fn compact_single_project(
     policy: &RetentionPolicy,
     dry_run: bool,
 ) -> Result<ProjectCompactionResult> {
-    let head_hash = refs::read_project_head_ref(refs_root, principal_key, project_hash)?
-        .ok_or_else(|| {
+    let trust_store = crate::signer::trust_store_for_signer(signer);
+    let head_hash = refs::read_verified_project_head_ref(
+        refs_root,
+        principal_key,
+        project_hash,
+        &trust_store,
+    )?
+    .ok_or_else(|| {
             anyhow::anyhow!(
                 "no project head for principal/project {}/{}",
                 principal_key,
@@ -289,13 +295,19 @@ fn compact_single_project(
         .unwrap_or(head_hash.clone());
 
     if new_head_hash != head_hash && !dry_run {
-        refs::write_project_head_ref(
-            refs_root,
-            principal_key,
-            project_hash,
-            &new_head_hash,
-            signer,
+        let outcome = refs::classify_ref_write(
+            refs::write_project_head_ref(
+                refs_root,
+                principal_key,
+                project_hash,
+                &new_head_hash,
+                signer,
+            ),
+            "publishing compacted project head",
         )?;
+        if let refs::RefWriteOutcome::DurabilityUncertain(error) = outcome {
+            tracing::warn!(%error, "compacted project head committed with uncertain durability");
+        }
         tracing::info!(
             project_hash = %project_hash,
             old_head = %&head_hash[..16.min(head_hash.len())],
@@ -1002,9 +1014,15 @@ mod tests {
 
         // Verify A and B now point to E (not C/D)
         // Read the actual rewritten objects from CAS
-        let new_head = refs::read_project_head_ref(&refs_root, "fp:test-principal", "merge-proj")
-            .unwrap()
-            .unwrap();
+        let trust_store = crate::signer::trust_store_for_signer(&signer);
+        let new_head = refs::read_verified_project_head_ref(
+            &refs_root,
+            "fp:test-principal",
+            "merge-proj",
+            &trust_store,
+        )
+        .unwrap()
+        .unwrap();
         let head_obj: serde_json::Value = {
             let path = lillux::shard_path(&cas_root, "objects", &new_head, ".json");
             let content = std::fs::read_to_string(&path).unwrap();

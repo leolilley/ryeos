@@ -456,6 +456,11 @@ pub struct RyeOsDataState {
     /// system: open JSON, projected through view bindings).
     #[serde(default)]
     pub sources: HashMap<String, serde_json::Value>,
+    /// Latest failed source fetch per bound view instance. Errors are keyed
+    /// exactly like `sources`, cleared when a retry launches or newer data
+    /// lands, and rendered only when no usable response exists.
+    #[serde(default)]
+    pub source_errors: HashMap<String, String>,
     /// Transient projected timeline cache, keyed by the same source key as
     /// `sources`. Rebuilt only when source data lands so scroll keys do not
     /// re-project long transcripts on every frame.
@@ -1094,6 +1099,7 @@ impl RyeOsCore {
                 self.data.source_floor.insert(tile_id.clone(), effect.id);
                 if evict {
                     self.data.sources.remove(tile_id);
+                    self.data.source_errors.remove(tile_id);
                     self.data.source_stored_epoch.remove(tile_id);
                     self.data.timeline_sources.remove(tile_id);
                 }
@@ -1121,6 +1127,7 @@ impl RyeOsCore {
         });
         for key in keys {
             self.data.sources.remove(&key);
+            self.data.source_errors.remove(&key);
             self.data.source_epoch.remove(&key);
             self.data.source_stored_epoch.remove(&key);
             self.data.source_floor.remove(&key);
@@ -1158,6 +1165,7 @@ impl RyeOsCore {
         // (lens/filter/project): an older deferred hint must never refetch the
         // previous subject after the new request settles.
         self.deferred_source_fetches.remove(&source_key);
+        self.data.source_errors.remove(&source_key);
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.clone(),
             source_ref: source.item_ref.clone(),
@@ -1186,6 +1194,7 @@ impl RyeOsCore {
             return None;
         }
         let deferred = self.deferred_source_fetches.remove(source_key)?;
+        self.data.source_errors.remove(source_key);
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.to_string(),
             source_ref: deferred.source_ref,

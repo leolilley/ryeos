@@ -11,10 +11,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 
 use crate::bundle_events::{
-    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord,
+    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage,
+    BundleEventCursor, BundleEventRecord, BundleEventScanPage,
 };
 use crate::bundle_projection::BundleProjectionDb;
-use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
+use crate::chain::{
+    self, AddThreadWithEventsResult, AppendResult, CommitContinuationResult, CreateResult,
+    ReadSnapshotResult, SnapshotUpdate,
+};
 use crate::head_cache::HeadCache;
 use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::objects::ThreadEvent;
@@ -27,7 +31,7 @@ use crate::projection::{
 };
 use crate::queries;
 use crate::refs::{GenericHeadRef, SignedRef};
-use crate::signer::Signer;
+use crate::signer::{trust_store_for_signer, Signer};
 
 /// State of the rebuildable projection after an authoritative CAS write.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +79,16 @@ pub struct CommittedWrite<T> {
     pub projection: ProjectionStatus,
 }
 
+pub struct ContinuationCommit<'a> {
+    pub chain_root_id: &'a str,
+    pub source_thread_id: &'a str,
+    pub expected_source_snapshot_hash: &'a str,
+    pub source_snapshot: ThreadSnapshot,
+    pub successor_snapshot: ThreadSnapshot,
+    pub source_event: ThreadEvent,
+    pub successor_event: ThreadEvent,
+}
+
 impl<T> CommittedWrite<T> {
     fn new(value: T, projection: ProjectionStatus) -> Self {
         Self { value, projection }
@@ -91,6 +105,7 @@ pub struct StateDb {
     locators_root: PathBuf,
     projection: ProjectionDb,
     head_cache: Mutex<HeadCache>,
+    trust_store: Arc<crate::refs::TrustStore>,
     projection_repair_sink: Arc<dyn ProjectionRepairSink>,
 }
 
@@ -99,10 +114,11 @@ impl StateDb {
     ///
     /// Creates `objects/`, `refs/`, and `locators/` subdirectories and opens
     /// `projection.sqlite3` inside `runtime_state_dir`.
-    pub fn open(runtime_state_dir: &Path) -> anyhow::Result<Self> {
+    pub fn open(runtime_state_dir: &Path, signer: &dyn Signer) -> anyhow::Result<Self> {
         Self::open_with_projection_repair_sink(
             runtime_state_dir,
             Arc::new(PendingProjectionRepairs::default()),
+            signer,
         )
     }
 
@@ -110,6 +126,7 @@ impl StateDb {
     pub fn open_with_projection_repair_sink(
         runtime_state_dir: &Path,
         projection_repair_sink: Arc<dyn ProjectionRepairSink>,
+        signer: &dyn Signer,
     ) -> anyhow::Result<Self> {
         let cas_root = runtime_state_dir.join("objects");
         let refs_root = runtime_state_dir.join("refs");
@@ -120,14 +137,20 @@ impl StateDb {
         std::fs::create_dir_all(&refs_root).context("creating refs root")?;
         std::fs::create_dir_all(&locators_root).context("creating locators root")?;
 
+        let trust_store = Arc::new(trust_store_for_signer(signer));
         let ProjectionOpenResult {
             db: projection,
             reset,
         } = ProjectionDb::open_with_status(&projection_path)
             .context("opening projection database")?;
         if reset {
-            let report = crate::rebuild::rebuild_projection(&projection, &cas_root, &refs_root)
-                .context("rebuilding projection after schema epoch reset")?;
+            let report = crate::rebuild::rebuild_projection(
+                &projection,
+                &cas_root,
+                &refs_root,
+                &trust_store,
+            )
+            .context("rebuilding projection after schema epoch reset")?;
             tracing::info!(
                 path = %projection_path.display(),
                 chains_rebuilt = report.chains_rebuilt,
@@ -136,8 +159,13 @@ impl StateDb {
                 "projection rebuilt after schema epoch reset"
             );
         } else {
-            let report = crate::rebuild::catch_up_projection(&projection, &cas_root, &refs_root)
-                .context("catching projection up to authoritative chain heads")?;
+            let report = crate::rebuild::catch_up_projection(
+                &projection,
+                &cas_root,
+                &refs_root,
+                &trust_store,
+            )
+            .context("catching projection up to authoritative chain heads")?;
             if report.chains_updated > 0 {
                 tracing::info!(
                     chains_checked = report.chains_checked,
@@ -155,6 +183,7 @@ impl StateDb {
             locators_root,
             projection,
             head_cache: Mutex::new(HeadCache::new()),
+            trust_store,
             projection_repair_sink,
         })
     }
@@ -190,7 +219,23 @@ impl StateDb {
 
     /// Catch the rebuildable thread projection up to all authoritative heads.
     pub fn catch_up_projection(&self) -> anyhow::Result<crate::rebuild::CatchUpReport> {
-        crate::rebuild::catch_up_projection(&self.projection, &self.cas_root, &self.refs_root)
+        crate::rebuild::catch_up_projection(
+            &self.projection,
+            &self.cas_root,
+            &self.refs_root,
+            &self.trust_store,
+        )
+    }
+
+    /// Rebuild the projection from cryptographically verified authoritative
+    /// chain heads.
+    pub fn rebuild_projection(&self) -> anyhow::Result<crate::rebuild::RebuildReport> {
+        crate::rebuild::rebuild_projection(
+            &self.projection,
+            &self.cas_root,
+            &self.refs_root,
+            &self.trust_store,
+        )
     }
 
     /// CAS objects root (`runtime_state_dir/objects`).
@@ -201,6 +246,48 @@ impl StateDb {
     /// Refs root (`runtime_state_dir/refs`).
     pub fn refs_root(&self) -> &Path {
         &self.refs_root
+    }
+
+    pub fn trust_store(&self) -> &crate::refs::TrustStore {
+        &self.trust_store
+    }
+
+    /// Check thread membership against the signed chain head and CAS snapshot,
+    /// bypassing the rebuildable projection.
+    pub fn thread_exists_authoritatively(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<bool> {
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        Ok(chain::read_thread_snapshot(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            thread_id,
+            &self.trust_store,
+            &mut cache,
+        )?
+        .snapshot
+        .is_some())
+    }
+
+    /// Read a thread snapshot through the signed chain head, bypassing the
+    /// rebuildable projection.
+    pub fn read_thread_authoritatively(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<ReadSnapshotResult> {
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        chain::read_thread_snapshot(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            thread_id,
+            &self.trust_store,
+            &mut cache,
+        )
     }
 
     /// Locators root (`runtime_state_dir/locators`).
@@ -411,6 +498,90 @@ impl StateDb {
         ))
     }
 
+    /// Create a continuation successor, settle its running source, and append
+    /// both relation events through one signed chain-head update and one
+    /// projection transaction.
+    pub fn commit_continuation(
+        &self,
+        input: ContinuationCommit<'_>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<CommittedWrite<CommitContinuationResult>> {
+        let ContinuationCommit {
+            chain_root_id,
+            source_thread_id,
+            expected_source_snapshot_hash,
+            source_snapshot,
+            successor_snapshot,
+            source_event,
+            successor_event,
+        } = input;
+        if !source_event.durability.is_projection_indexed()
+            || !successor_event.durability.is_projection_indexed()
+        {
+            anyhow::bail!(
+                "StateDb::commit_continuation requires indexed durable relation events"
+            );
+        }
+
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::commit_continuation(
+            chain::CommitContinuationInput {
+                cas_root: &self.cas_root,
+                refs_root: &self.refs_root,
+                chain_root_id,
+                source_thread_id,
+                expected_source_snapshot_hash,
+                source_snapshot: source_snapshot.clone(),
+                successor_snapshot: successor_snapshot.clone(),
+                source_event,
+                successor_event,
+                signer,
+            },
+            &mut cache,
+        )?;
+
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot(
+                    &self.projection,
+                    &result.successor_snapshot,
+                    chain_root_id,
+                )
+                .context("projecting continuation successor snapshot")?;
+                projection::project_thread_snapshot(
+                    &self.projection,
+                    &result.source_snapshot,
+                    chain_root_id,
+                )
+                .context("projecting continued source snapshot")?;
+                for event in &result.events {
+                    if event.durability.is_projection_indexed() {
+                        projection::project_event(&self.projection, event).with_context(|| {
+                            format!(
+                                "projection failed for continuation event chain_seq={}",
+                                event.chain_seq
+                            )
+                        })?;
+                    }
+                }
+                Ok(())
+            },
+        );
+
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "commit_continuation",
+            projected,
+        ))
+    }
+
     // ── Project head refs (principal-scoped) ──────────────────────
 
     /// Read a principal-scoped project head ref. Returns the project
@@ -420,7 +591,12 @@ impl StateDb {
         principal_key: &str,
         project_hash: &str,
     ) -> anyhow::Result<Option<String>> {
-        crate::refs::read_project_head_ref(&self.refs_root, principal_key, project_hash)
+        crate::refs::read_verified_project_head_ref(
+            &self.refs_root,
+            principal_key,
+            project_hash,
+            &self.trust_store,
+        )
     }
 
     /// Write a principal-scoped project head ref.
@@ -430,7 +606,7 @@ impl StateDb {
         project_hash: &str,
         project_snapshot_hash: &str,
         signer: &dyn Signer,
-    ) -> anyhow::Result<()> {
+    ) -> lillux::AtomicMutationResult<()> {
         crate::refs::write_project_head_ref(
             &self.refs_root,
             principal_key,
@@ -448,13 +624,14 @@ impl StateDb {
         new_snapshot_hash: &str,
         expected_current_hash: &str,
         signer: &dyn Signer,
-    ) -> anyhow::Result<()> {
-        crate::refs::advance_project_head_ref(
+    ) -> lillux::AtomicMutationResult<()> {
+        crate::refs::advance_verified_project_head_ref(
             &self.refs_root,
             principal_key,
             project_hash,
             new_snapshot_hash,
             expected_current_hash,
+            &self.trust_store,
             signer,
         )
     }
@@ -466,7 +643,7 @@ impl StateDb {
         name: &str,
         target_hash: &str,
         signer: &dyn Signer,
-    ) -> anyhow::Result<()> {
+    ) -> lillux::AtomicMutationResult<()> {
         crate::refs::write_generic_head_ref(&self.refs_root, namespace, name, target_hash, signer)
     }
 
@@ -476,7 +653,12 @@ impl StateDb {
         namespace: &str,
         name: &str,
     ) -> anyhow::Result<Option<SignedRef>> {
-        crate::refs::read_generic_head_ref(&self.refs_root, namespace, name)
+        crate::refs::read_verified_generic_head_ref(
+            &self.refs_root,
+            namespace,
+            name,
+            &self.trust_store,
+        )
     }
 
     pub fn terminal_service_chain_candidates(&self, cutoff: &str) -> anyhow::Result<Vec<String>> {
@@ -530,6 +712,21 @@ impl StateDb {
             .expect("head_cache lock")
             .invalidate(chain_root_id);
         Ok(removed)
+    }
+
+    pub(crate) fn replace_chain_head_cache(
+        &self,
+        chain_root_id: &str,
+        chain_state_hash: String,
+        chain_state: crate::ChainState,
+    ) {
+        self.head_cache
+            .lock()
+            .expect("head_cache lock")
+            .update(
+                chain_root_id.to_owned(),
+                crate::CachedHead::new(chain_state_hash, chain_state),
+            );
     }
 
     pub fn delete_chain_projection(&self, chain_root_id: &str) -> anyhow::Result<usize> {
@@ -598,20 +795,21 @@ impl StateDb {
         new_target_hash: &str,
         expected_current_hash: Option<&str>,
         signer: &dyn Signer,
-    ) -> anyhow::Result<()> {
-        crate::refs::advance_generic_head_ref(
+    ) -> lillux::AtomicMutationResult<()> {
+        crate::refs::advance_verified_generic_head_ref(
             &self.refs_root,
             namespace,
             name,
             new_target_hash,
             expected_current_hash,
+            &self.trust_store,
             signer,
         )
     }
 
     /// List namespace-neutral signed heads beneath `refs/generic/<prefix>`.
     pub fn list_generic_head_refs(&self, prefix: &str) -> anyhow::Result<Vec<GenericHeadRef>> {
-        crate::refs::list_generic_head_refs(&self.refs_root, prefix)
+        crate::refs::list_verified_generic_head_refs(&self.refs_root, prefix, &self.trust_store)
     }
 
     // ── Bundle event chains ────────────────────────────────
@@ -621,7 +819,13 @@ impl StateDb {
         request: BundleEventAppendRequest,
         signer: &dyn Signer,
     ) -> anyhow::Result<BundleEventAppendResult> {
-        bundle_events::append_bundle_event(&self.cas_root, &self.refs_root, request, signer)
+        bundle_events::append_bundle_event(
+            &self.cas_root,
+            &self.refs_root,
+            request,
+            signer,
+            &self.trust_store,
+        )
     }
 
     pub fn read_bundle_event_chain(
@@ -636,6 +840,7 @@ impl StateDb {
             bundle_id,
             event_kind,
             chain_id,
+            &self.trust_store,
         )
     }
 
@@ -644,7 +849,59 @@ impl StateDb {
         bundle_id: &str,
         event_kind: &str,
     ) -> anyhow::Result<Vec<BundleEventRecord>> {
-        bundle_events::scan_bundle_events(&self.cas_root, &self.refs_root, bundle_id, event_kind)
+        bundle_events::scan_bundle_events(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            &self.trust_store,
+        )
+    }
+
+    pub fn read_bundle_event_chain_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+        cursor: Option<&BundleEventCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<BundleEventChainPage> {
+        bundle_events::read_bundle_event_chain_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            chain_id,
+            cursor,
+            limit,
+            max_serialized_bytes,
+            &self.trust_store,
+            signer,
+        )
+    }
+
+    pub fn scan_bundle_events_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        cursor: Option<&BundleEventCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<BundleEventScanPage> {
+        bundle_events::scan_bundle_events_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            cursor,
+            limit,
+            max_serialized_bytes,
+            &self.trust_store,
+            signer,
+        )
     }
 
     pub fn open_bundle_projection(
@@ -803,7 +1060,7 @@ mod tests {
 
     fn open_temp() -> (tempfile::TempDir, StateDb) {
         let dir = tempfile::tempdir().unwrap();
-        let db = StateDb::open(dir.path()).unwrap();
+        let db = StateDb::open(dir.path(), &TestSigner::default()).unwrap();
         (dir, db)
     }
 
@@ -811,7 +1068,7 @@ mod tests {
     fn open_creates_directories() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("state");
-        let db = StateDb::open(&root).unwrap();
+        let db = StateDb::open(&root, &TestSigner::default()).unwrap();
 
         assert!(db.cas_root().exists());
         assert!(db.refs_root().exists());
@@ -992,7 +1249,7 @@ mod tests {
             .execute_batch("DROP TRIGGER reject_test_event_projection")
             .unwrap();
         drop(db);
-        let reopened = StateDb::open(dir.path()).unwrap();
+        let reopened = StateDb::open(dir.path(), &signer).unwrap();
         let projected = reopened
             .projection()
             .get_projection_meta("T-root")
@@ -1016,8 +1273,9 @@ mod tests {
     fn projection_failure_signals_repair_even_when_status_is_discarded() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(RecordingRepairSink::default());
-        let db = StateDb::open_with_projection_repair_sink(dir.path(), sink.clone()).unwrap();
         let signer = TestSigner::default();
+        let db =
+            StateDb::open_with_projection_repair_sink(dir.path(), sink.clone(), &signer).unwrap();
         let snapshot = ThreadSnapshotBuilder::new(
             "T-root",
             "T-root",
@@ -1059,7 +1317,7 @@ mod tests {
         let signer = TestSigner::default();
 
         {
-            let db = StateDb::open(&root).unwrap();
+            let db = StateDb::open(&root, &signer).unwrap();
             let snapshot = ThreadSnapshotBuilder::new(
                 "T-root",
                 "T-root",
@@ -1076,7 +1334,7 @@ mod tests {
         conn.execute_batch("PRAGMA user_version = 0;").unwrap();
         drop(conn);
 
-        let db = StateDb::open(&root).unwrap();
+        let db = StateDb::open(&root, &signer).unwrap();
         let row = db
             .get_thread("T-root")
             .unwrap()
@@ -1093,7 +1351,7 @@ mod tests {
         let signer = TestSigner::default();
 
         {
-            let db = StateDb::open(&root).unwrap();
+            let db = StateDb::open(&root, &signer).unwrap();
             let snapshot = ThreadSnapshotBuilder::new(
                 "T-root",
                 "T-root",
@@ -1143,7 +1401,7 @@ mod tests {
         conn.execute_batch("PRAGMA user_version = 0;").unwrap();
         drop(conn);
 
-        let db = StateDb::open(&root).unwrap();
+        let db = StateDb::open(&root, &signer).unwrap();
         let usage_rows: i64 = db
             .projection()
             .connection()
@@ -1257,6 +1515,111 @@ mod tests {
         assert_eq!(row.thread_id, "T-child");
         assert_eq!(row.chain_root_id, "T-root");
         assert_eq!(row.kind, "tool");
+    }
+
+    #[test]
+    fn continuation_commit_projects_both_snapshots_and_events_together() {
+        use crate::objects::thread_event::NewEvent;
+        use crate::objects::thread_snapshot::ThreadStatus;
+
+        let (_dir, db) = open_temp();
+        let signer = TestSigner::default();
+        let running = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .status(ThreadStatus::Running)
+        .build();
+        let initial = db.create_chain("T-root", running, &signer).unwrap();
+
+        let continued = ThreadSnapshotBuilder::new(
+            "T-root",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .status(ThreadStatus::Continued)
+        .build();
+        let successor = ThreadSnapshotBuilder::new(
+            "T-next",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .upstream_thread_id(Some("T-root".to_string()))
+        .build();
+        let source_event = NewEvent::new(
+            "T-root",
+            "T-root",
+            crate::event_types::THREAD_CONTINUED,
+        )
+        .payload(serde_json::json!({"successor_thread_id": "T-next"}))
+        .build();
+        let successor_event = NewEvent::new(
+            "T-root",
+            "T-next",
+            crate::event_types::THREAD_CREATED,
+        )
+        .payload(serde_json::json!({
+            "continuation_from": "T-root",
+            "kind": "directive",
+            "item_ref": "system/test"
+        }))
+        .build();
+
+        let committed = db
+            .commit_continuation(
+                ContinuationCommit {
+                    chain_root_id: "T-root",
+                    source_thread_id: "T-root",
+                    expected_source_snapshot_hash: &initial.value.snapshot_hash,
+                    source_snapshot: continued,
+                    successor_snapshot: successor,
+                    source_event,
+                    successor_event,
+                },
+                &signer,
+            )
+            .unwrap();
+
+        assert_eq!(db.get_thread("T-root").unwrap().unwrap().status, "continued");
+        assert_eq!(db.get_thread("T-next").unwrap().unwrap().status, "created");
+        let event_count: i64 = db
+            .projection()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE chain_root_id = 'T-root'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 2);
+        let edge_count: i64 = db
+            .projection()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_edges
+                  WHERE chain_root_id = 'T-root'
+                    AND parent_thread_id = 'T-root'
+                    AND child_thread_id = 'T-next'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 1);
+        assert_eq!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .unwrap()
+                .indexed_chain_state_hash,
+            committed.value.chain_state_hash
+        );
     }
 
     #[test]

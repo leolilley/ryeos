@@ -1,5 +1,4 @@
-<!-- ryeos:signed:2026-06-08T03:48:08Z:edba6f7bba6d0bd6e7a1569b70df94b41c72eb3fbfe468385086f895bfe910bc:vJk9rYfkkboT8aU2dr444Mi4wltl+6/PFvy+xiAwtSdfHyNjR7h/F84ETxh14uDp+sRthu9SbWM5S+K23wpqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-# ryeos:signed:2026-06-07T05:37:38Z:88cc30a76a0843c8ac374a4852f0765162468c5fac7ed40f3adec782c9bc1006:nIUMON9IQccg1zVXYUWUSrazOVAiuL/xzlRkuHs9xGoXtGN6Cgy2cjxRDzFNXNyOvAEScITKerSBQ/7j2kXeCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<!-- ryeos:signed:2026-07-14T10:12:30Z:e21e7d28c21b0eb7dca89fabf7df16317dc5c81cba77151d0876127a83a72b50:O4jcwwSgZBMKvuLGZAHDzMrHeVWdrDOQ6aTp4ckoZGcVwAZvc7AIj2HiJIFUmeg6a9z/XgdiWqV0Wxh8susuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
@@ -125,22 +124,32 @@ to report progress incrementally.
 
 ## Environment Variables
 
-All subprocess tools receive these environment variables:
+The default `tool_callback_v1` and callback-free streaming protocol both
+declare the basic tool variables:
 
 | Variable              | Description                        |
 |-----------------------|------------------------------------|
 | `RYE_THREAD_ID`       | Current thread ID                  |
 | `RYE_PROJECT_PATH`    | Absolute path to project root      |
 
-Runtime subprocesses additionally receive:
+`tool_callback_v1` additionally declares these callback bindings (the managed
+`runtime_v1` protocol uses the same callback names):
 
 | Variable                    | Description                        |
 |-----------------------------|------------------------------------|
 | `RYEOSD_SOCKET_PATH`        | Daemon Unix socket path            |
 | `RYEOSD_CALLBACK_TOKEN`     | Auth token for callback channel    |
 | `RYEOSD_THREAD_ID`          | Thread ID (redundant with RYE_)    |
-| `RYEOSD_PROJECT_PATH`       | Project path (redundant with RYE_) |
+| `RYEOSD_PROJECT_PATH`       | Callback authorization/state anchor; may differ from `RYE_PROJECT_PATH` under a state-root override |
 | `RYEOSD_THREAD_AUTH_TOKEN`  | Thread-specific auth token         |
+
+Environment is protocol-authoritative. The default tool protocol explicitly
+requests callback credentials so manifest-backed bundle-event, vault, and item-
+authoring operations work; empty effective capabilities deny capability-gated
+resource operations unless verified authority grants them. Exact-thread and
+chain-local lifecycle methods retain their documented access class. A schema selecting callback-free
+`opaque`, `tool_streaming_v1`, or `cli_exec` receives no undeclared `RYEOSD_*`
+credentials and no daemon-socket access inside an enforced sandbox.
 
 ## Dependency Scanning
 

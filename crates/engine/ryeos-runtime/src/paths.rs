@@ -1,100 +1,11 @@
 use std::path::{Path, PathBuf};
 
 pub const AI_DIR: &str = ".ai";
-pub const STATE_THREADS_REL: &str = "state/threads";
 
-pub fn safe_rel_path(id: &str) -> anyhow::Result<PathBuf> {
-    let mut parts = Vec::new();
-    for segment in id.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\') {
-            anyhow::bail!("invalid path segment in id {:?}: {:?}", id, segment);
-        }
-        parts.push(segment);
-    }
-    if parts.is_empty() {
-        anyhow::bail!("empty id");
-    }
-    let result = parts.iter().fold(PathBuf::new(), |acc, p| acc.join(p));
-    tracing::trace!(input = %id, "validated safe relative path");
-    Ok(result)
+pub fn operator_hooks_path(app_root: &Path) -> PathBuf {
+    app_root.join(AI_DIR).join("config/agent/hooks.yaml")
 }
 
-pub fn thread_state_dir(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {
-    let rel = safe_rel_path(thread_id)?;
-    let resolved = project_root.join(AI_DIR).join(STATE_THREADS_REL).join(rel);
-    tracing::trace!(thread_id = %thread_id, resolved = %resolved.display(), "resolved thread state dir");
-    Ok(resolved)
-}
-
-pub fn thread_transcript_path(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {
-    let resolved = thread_state_dir(project_root, thread_id)?.join("transcript.jsonl");
-    tracing::trace!(thread_id = %thread_id, resolved = %resolved.display(), "resolved thread transcript path");
-    Ok(resolved)
-}
-
-pub fn thread_knowledge_path(project_root: &Path, thread_id: &str) -> anyhow::Result<PathBuf> {
-    let path = thread_state_dir(project_root, thread_id)?.join("transcript.md");
-    tracing::trace!(thread_id = %thread_id, resolved = %path.display(), "resolved thread knowledge path");
-    Ok(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn safe_rel_path_allows_nested_thread_ids() {
-        assert_eq!(
-            safe_rel_path("team/sub/thread-1").unwrap(),
-            PathBuf::from("team").join("sub").join("thread-1")
-        );
-    }
-
-    #[test]
-    fn safe_rel_path_rejects_parent_traversal() {
-        assert!(safe_rel_path("../evil").is_err());
-        assert!(safe_rel_path("ok/../../evil").is_err());
-    }
-
-    #[test]
-    fn safe_rel_path_rejects_empty() {
-        assert!(safe_rel_path("").is_err());
-        assert!(safe_rel_path("a//b").is_err());
-    }
-
-    #[test]
-    fn thread_knowledge_path_mirrors_nested_structure() {
-        let root = Path::new("/tmp/project");
-        assert_eq!(
-            thread_knowledge_path(root, "group/thread-1").unwrap(),
-            PathBuf::from("/tmp/project/.ai/state/threads/group/thread-1/transcript.md")
-        );
-    }
-
-    #[test]
-    fn thread_knowledge_path_simple_id() {
-        let root = Path::new("/tmp/project");
-        assert_eq!(
-            thread_knowledge_path(root, "thread-1").unwrap(),
-            PathBuf::from("/tmp/project/.ai/state/threads/thread-1/transcript.md")
-        );
-    }
-
-    #[test]
-    fn thread_state_dir_constructs_correctly() {
-        let root = Path::new("/tmp/project");
-        assert_eq!(
-            thread_state_dir(root, "t-1").unwrap(),
-            PathBuf::from("/tmp/project/.ai/state/threads/t-1")
-        );
-    }
-
-    #[test]
-    fn thread_transcript_path_constructs_correctly() {
-        let root = Path::new("/tmp/project");
-        assert_eq!(
-            thread_transcript_path(root, "t-1").unwrap(),
-            PathBuf::from("/tmp/project/.ai/state/threads/t-1/transcript.jsonl")
-        );
-    }
+pub fn project_hooks_path(project_root: &Path) -> PathBuf {
+    project_root.join(AI_DIR).join("config/agent/hooks.yaml")
 }

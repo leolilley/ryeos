@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::manifest::{parse_manifest, BundleManifest};
+use crate::manifest::{materialize_manifest_source, parse_manifest, BundleManifest};
 
 pub type BundleName = String;
 pub type KindName = String;
@@ -33,6 +33,11 @@ pub enum BundlePlanMode {
     Replace,
     /// `bundle update-set`: installed bundles with candidates replacing same-name bundles.
     UpdateSet,
+    /// `bundle remove`: installed bundles with candidate names marked for removal.
+    ///
+    /// Candidate paths are not consumed; installed inputs remain the authority
+    /// for every manifest in the exact post-removal graph.
+    Remove,
     /// Verify all registered installed bundles without mutation.
     VerifyInstalled,
 }
@@ -119,14 +124,27 @@ pub fn build_plan(
             );
         }
 
-        let manifest = parse_manifest(input.source.root_path(), &input.name)
-            .with_context(|| format!("parse manifest for bundle '{}'", input.name))?
-            .ok_or_else(|| {
-                anyhow!(
-                    "bundle '{}' has no manifest — planned operations require manifests",
-                    input.name
-                )
-            })?;
+        let manifest = match (mode, &input.source) {
+            // Init is the one development boundary allowed to materialize
+            // publisher input explicitly when no generated manifest exists.
+            // Runtime/install planning always consumes the generated manifest.
+            (BundlePlanMode::InitSourceSet, BundleSource::SourceDir(_)) => {
+                let generated = input
+                    .source
+                    .root_path()
+                    .join(ryeos_engine::AI_DIR)
+                    .join("manifest.yaml");
+                if generated.try_exists().with_context(|| {
+                    format!("inspect generated manifest for bundle '{}'", input.name)
+                })? {
+                    parse_manifest(input.source.root_path(), &input.name)
+                } else {
+                    materialize_manifest_source(input.source.root_path(), &input.name)
+                }
+            }
+            _ => parse_manifest(input.source.root_path(), &input.name),
+        }
+        .with_context(|| format!("parse manifest for bundle '{}'", input.name))?;
 
         let action = determine_action(mode, &input.name, candidates, installed);
         bundles.insert(
@@ -202,6 +220,19 @@ fn validate_mode_policy(
                 }
             }
         }
+        BundlePlanMode::Remove => {
+            if candidates.is_empty() {
+                bail!("Remove planning requires at least one installed bundle name");
+            }
+            for candidate in candidates {
+                if !installed_names.contains(candidate.name.as_str()) {
+                    bail!(
+                        "bundle '{}' is not installed; remove requires an existing bundle",
+                        candidate.name
+                    );
+                }
+            }
+        }
         BundlePlanMode::VerifyInstalled => {
             if !candidates.is_empty() {
                 bail!("VerifyInstalled planning must not include candidate bundles");
@@ -237,6 +268,7 @@ fn build_effective_graph(
             graph.extend_from_slice(candidates);
             Ok(graph)
         }
+        BundlePlanMode::Remove => Ok(installed.to_vec()),
         BundlePlanMode::VerifyInstalled => Ok(installed.to_vec()),
     }
 }
@@ -246,6 +278,9 @@ fn build_provider_map(
 ) -> Result<BTreeMap<KindName, BundleName>> {
     let mut provider_map = BTreeMap::new();
     for (name, bundle) in bundles {
+        if bundle.action == BundleAction::Remove {
+            continue;
+        }
         for kind in &bundle.manifest.provides_kinds {
             if let Some(existing) = provider_map.get(kind) {
                 bail!(
@@ -267,6 +302,7 @@ fn resolve_dependencies(
 ) -> Result<()> {
     let external_kinds_by_bundle: Vec<(BundleName, Vec<KindName>)> = bundles
         .iter()
+        .filter(|(_, bundle)| bundle.action != BundleAction::Remove)
         .map(|(name, bundle)| {
             let provided: HashSet<&str> = bundle
                 .manifest
@@ -375,14 +411,21 @@ fn compute_dependency_closures(bundles: &mut BTreeMap<BundleName, PlannedBundle>
 }
 
 fn compute_install_order(bundles: &BTreeMap<BundleName, PlannedBundle>) -> Result<Vec<BundleName>> {
-    let mut in_degree: BTreeMap<BundleName, usize> =
-        bundles.keys().map(|name| (name.clone(), 0)).collect();
+    let mut in_degree: BTreeMap<BundleName, usize> = bundles
+        .iter()
+        .filter(|(_, bundle)| bundle.action != BundleAction::Remove)
+        .map(|(name, _)| (name.clone(), 0))
+        .collect();
     let mut dependents: BTreeMap<BundleName, BTreeSet<BundleName>> = bundles
-        .keys()
-        .map(|name| (name.clone(), BTreeSet::new()))
+        .iter()
+        .filter(|(_, bundle)| bundle.action != BundleAction::Remove)
+        .map(|(name, _)| (name.clone(), BTreeSet::new()))
         .collect();
 
     for (name, bundle) in bundles {
+        if bundle.action == BundleAction::Remove {
+            continue;
+        }
         for dep in &bundle.direct_dependencies {
             *in_degree
                 .get_mut(name)
@@ -415,11 +458,11 @@ fn compute_install_order(bundles: &BTreeMap<BundleName, PlannedBundle>) -> Resul
         }
     }
 
-    if sorted.len() != bundles.len() {
+    if sorted.len() != in_degree.len() {
         bail!(
             "bundle dependency cycle detected (topological sort incomplete): sorted {} of {} bundles",
             sorted.len(),
-            bundles.len()
+            in_degree.len()
         );
     }
 
@@ -453,6 +496,13 @@ fn determine_action(
                 BundleAction::Keep
             }
         }
+        BundlePlanMode::Remove => {
+            if is_candidate {
+                BundleAction::Remove
+            } else {
+                BundleAction::Keep
+            }
+        }
         BundlePlanMode::VerifyInstalled => BundleAction::Keep,
     }
 }
@@ -474,6 +524,7 @@ fn emit_verification_jobs(
             BundlePlanMode::Install | BundlePlanMode::Replace | BundlePlanMode::UpdateSet => {
                 candidate_names.contains(name.as_str())
             }
+            BundlePlanMode::Remove => true,
             BundlePlanMode::VerifyInstalled => true,
         };
         if !should_verify {

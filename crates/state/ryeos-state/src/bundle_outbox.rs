@@ -337,7 +337,17 @@ fn select_outbox_message(
 mod tests {
     use super::*;
     use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
-    use crate::signer::TestSigner;
+    use crate::signer::{trust_store_for_signer, TestSigner};
+
+    fn append_test_bundle_event(
+        cas_root: &std::path::Path,
+        refs_root: &std::path::Path,
+        request: BundleEventAppendRequest,
+        signer: &TestSigner,
+    ) -> anyhow::Result<crate::BundleEventAppendResult> {
+        let trust_store = trust_store_for_signer(signer);
+        append_bundle_event(cas_root, refs_root, request, signer, &trust_store)
+    }
 
     fn append_request(chain_id: &str) -> BundleEventAppendRequest {
         BundleEventAppendRequest {
@@ -364,8 +374,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_1"), &signer).unwrap();
+        let appended = append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_1"),
+            &signer,
+        )
+        .unwrap();
 
         let mut conn = Connection::open_in_memory().unwrap();
         ensure_bundle_outbox_schema(&conn).unwrap();
@@ -426,8 +441,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_2"), &signer).unwrap();
+        let appended = append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_2"),
+            &signer,
+        )
+        .unwrap();
 
         let mut conn = Connection::open_in_memory().unwrap();
         ensure_bundle_outbox_schema(&conn).unwrap();
@@ -487,8 +507,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_3"), &signer).unwrap();
+        let appended = append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_3"),
+            &signer,
+        )
+        .unwrap();
         let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),
@@ -551,8 +576,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_4"), &signer).unwrap();
+        let appended = append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_4"),
+            &signer,
+        )
+        .unwrap();
         let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),
@@ -614,8 +644,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_5"), &signer).unwrap();
+        let appended = append_test_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_5"),
+            &signer,
+        )
+        .unwrap();
         let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),

@@ -31,8 +31,9 @@ pub fn project_thread_snapshot(
             thread_id, chain_root_id, kind, status,
             item_ref, executor_ref, launch_mode,
             current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
+            base_project_snapshot_hash, result_project_snapshot_hash,
             created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 &snapshot.thread_id,
                 chain_root_id,
@@ -46,6 +47,8 @@ pub fn project_thread_snapshot(
                 &snapshot.upstream_thread_id,
                 &snapshot.requested_by,
                 project_root,
+                &snapshot.base_project_snapshot_hash,
+                &snapshot.result_project_snapshot_hash,
                 &snapshot.created_at,
                 &snapshot.updated_at,
                 &snapshot.started_at,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T01:22:58Z:4b9c34338ed022408b5932261525d11311c7840edd4053fd9f791e067971a9d3:8xrZCFxpPuRZyPA8gyqDV+L88A3dqz/0tv/KKop7fQQr1p66r7U95ETI6v+iLuL3bLfm/b3o86IGFDptyCnuCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-13T07:43:47Z:d3d43d7b3a43de79215c1669a750105706c53480ab3370e34b4d7eac75cccde9:9Ql/8hkc708X6AJsEzfpTlEtJ913/Da9TyhionSGdkUumJakALqzjkzyZTwEAXOH1b0AGKSH515z8qqFxPCmAg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -116,7 +116,7 @@ Use the heavy packaged install only when you intentionally need to update the
 installed binaries/bundles:
 
 ```bash
-scripts/pkg/install-local-direct.sh
+scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 That script runs the heavier packaged-layout path: populate bundles, install
@@ -131,7 +131,7 @@ already-running daemon.
 | `crates/clients/base/src/ui/*` | rebuild WASM / update `crates/clients/web/pkg/ryeos_web*.{js,wasm}` through the project’s WASM build path |
 | `crates/daemon/ryeos-ui/src/assets.rs` or route/static-mode code | rebuild/restart daemon |
 | Bundle YAML or bundle-owned binaries | `scripts/populate-bundles.sh` or `scripts/gate.sh --no-tests` |
-| Full packaged install repair | `scripts/pkg/install-local-direct.sh` |
+| Full packaged install repair | `scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 
 ## Lightweight checks
 

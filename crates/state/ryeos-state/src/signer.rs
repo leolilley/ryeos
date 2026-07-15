@@ -14,6 +14,23 @@ pub trait Signer: Send + Sync {
     /// Return the fingerprint of the signing key (e.g. SHA-256 of the
     /// public key in hex).
     fn fingerprint(&self) -> &str;
+
+    /// Return the public key corresponding to this signer.
+    ///
+    /// Chain state is discovered through signed refs, so state owners must
+    /// supply verification authority as well as write authority. Keeping both
+    /// halves on one trait prevents callers from silently trusting a
+    /// fingerprint string without possessing the corresponding key.
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey;
+}
+
+/// Build the minimum explicit verification authority for state written by a
+/// signer. Callers that need to trust rotated or imported historical keys
+/// should construct a larger [`crate::refs::TrustStore`] instead.
+pub fn trust_store_for_signer(signer: &dyn Signer) -> crate::refs::TrustStore {
+    let mut trust_store = crate::refs::TrustStore::new();
+    trust_store.insert(signer.fingerprint().to_owned(), signer.verifying_key());
+    trust_store
 }
 
 /// Deterministic test signer with real Ed25519 cryptography.
@@ -65,6 +82,10 @@ impl Signer for TestSigner {
 
     fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+        self.signing_key.verifying_key()
     }
 }
 

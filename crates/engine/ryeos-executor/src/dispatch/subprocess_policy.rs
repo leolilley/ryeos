@@ -57,7 +57,6 @@ pub(super) fn enforce_runtime_caps(
 pub struct PreparedManagedLaunch {
     pub resolved: ResolvedExecutionRequest,
     pub executor_ref: String,
-    pub required_envelope_fields: Vec<String>,
     pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     pub acting_principal: String,
     pub project_path: PathBuf,
@@ -104,13 +103,13 @@ pub(super) fn prepare_managed_launch(
         usage_subject: request.usage_subject.clone(),
         usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         parameters: request.params.clone(),
+        root_raw_content_digest: resolved_item.raw_content_digest.clone(),
         resolved_item,
         plan_context: ctx.plan_ctx.clone(),
     };
     Ok(PreparedManagedLaunch {
         resolved,
         executor_ref,
-        required_envelope_fields: verified_runtime.yaml.required_envelope_fields.clone(),
         provenance: request.provenance.clone(),
         acting_principal: request.acting_principal.to_string(),
         project_path: request.project_path.to_path_buf(),

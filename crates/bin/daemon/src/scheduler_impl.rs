@@ -39,7 +39,7 @@ impl SchedulerContext for AppSchedulerContext {
     }
 
     fn trust_store(&self) -> &ryeos_engine::trust::TrustStore {
-        &self.0.engine.trust_store
+        &self.0.engine.node_trust_store
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {

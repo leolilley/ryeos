@@ -29,9 +29,6 @@ use ryeos_runtime::envelope::{EnvelopeCallback, RuntimeResult, RuntimeResultStat
 #[command(name = "graph-runtime", about = "Native graph walker for Rye OS")]
 struct Cli {
     #[arg(long)]
-    graph_path: Option<String>,
-
-    #[arg(long)]
     graph_run_id: Option<String>,
 
     #[arg(long)]
@@ -61,8 +58,13 @@ struct ResolvedLaunch {
     /// the envelope and children resolve daemon-side from token provenance.
     state_root: std::path::PathBuf,
     project_root: std::path::PathBuf,
-    operator_trusted_keys_dir: std::path::PathBuf,
-    graph_path: std::path::PathBuf,
+    node_trusted_keys_dir: std::path::PathBuf,
+    /// Exact graph bytes that the daemon resolved and verified. Runtimes must
+    /// never reopen `source_path`: it is diagnostic provenance and the live
+    /// file may change after verification.
+    graph_raw_content: String,
+    graph_source_label: String,
+    graph_resolved_ref: String,
     thread_id: String,
     graph_run_id: Option<String>,
     inputs: Value,
@@ -105,16 +107,21 @@ fn main() -> anyhow::Result<()> {
 
     let resolved = resolve_from_envelope(&stdin_data, &cli)?;
 
-    let raw = std::fs::read_to_string(&resolved.graph_path)?;
     let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         resolved.project_root.clone(),
         resolved.bundle_roots.clone(),
-        &resolved.operator_trusted_keys_dir,
+        &resolved.node_trusted_keys_dir,
     );
     let hook_sources = ryeos_runtime::load_configured_hook_sources(&loader)?;
-    let graph = model::GraphDefinition::from_yaml_with_hook_sources(
-        &raw,
-        Some(&resolved.graph_path.to_string_lossy()),
+    let target_digest = resolved
+        .target_digest
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("launch envelope omitted graph content digest"))?;
+    let graph = model::GraphDefinition::from_verified_yaml_with_hook_sources(
+        &resolved.graph_raw_content,
+        Some(&resolved.graph_source_label),
+        &resolved.graph_resolved_ref,
+        target_digest,
         hook_sources,
     )?;
 
@@ -330,17 +337,18 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
     let envelope: ryeos_runtime::envelope::LaunchEnvelope =
         serde_json::from_slice(stdin_data).map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
 
-    let graph_path = cli
-        .graph_path
-        .clone()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| envelope.resolution.root.source_path.clone());
-
     Ok(ResolvedLaunch {
         state_root: envelope.roots.state_root().to_path_buf(),
         project_root: envelope.roots.project_root.clone(),
-        operator_trusted_keys_dir: envelope.roots.operator_trusted_keys_dir.clone(),
-        graph_path,
+        node_trusted_keys_dir: envelope.roots.node_trusted_keys_dir.clone(),
+        graph_raw_content: envelope.resolution.root.raw_content.clone(),
+        graph_source_label: envelope
+            .resolution
+            .root
+            .source_path
+            .to_string_lossy()
+            .into_owned(),
+        graph_resolved_ref: envelope.resolution.root.resolved_ref.clone(),
         thread_id: envelope.thread_id.clone(),
         graph_run_id: cli.graph_run_id.clone(),
         inputs: envelope.request.inputs.clone(),
@@ -595,8 +603,9 @@ mod tests {
     }
 
     #[test]
-    fn cli_accepts_all_daemon_spawn_flags() {
+    fn cli_accepts_current_daemon_spawn_flags() {
         // F1 pin: the full set of flags the daemon passes must parse clean.
+        // Graph bytes are carried only in the verified launch envelope.
         let cli = Cli::try_parse_from([
             "graph-runtime",
             "--project-path",
@@ -604,8 +613,6 @@ mod tests {
             "--thread-id",
             "T-full",
             "--pre-registered",
-            "--graph-path",
-            "/tmp/graph.yaml",
             "--graph-run-id",
             "GR-42",
             "--daemon-socket",

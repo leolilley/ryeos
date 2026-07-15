@@ -182,12 +182,22 @@ fn run_gc_and_log(
     retired_service_chains: usize,
     deleted_service_chain_rows: usize,
 ) -> Result<GcResult> {
+    let active_resume_roots = state_store
+        .active_resume_snapshot_roots()
+        .context("failed to collect active runtime snapshot roots")?;
     let mut runtime_cleanup = GcResult::default();
     gc::purge_runtime_state(runtime_state_dir, params, &mut runtime_cleanup)
         .context("runtime-state purge failed")?;
 
-    let mut result =
-        gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
+    let mut result = gc::run_gc_with_extra_roots(
+        cas_root,
+        refs_root,
+        Some(signer),
+        &ryeos_state::signer::trust_store_for_signer(signer),
+        params,
+        &active_resume_roots,
+    )
+    .context("GC pipeline failed")?;
     result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
     result.deleted_fire_records = runtime_cleanup.deleted_fire_records;
     result.freed_bytes += runtime_cleanup.freed_bytes;
