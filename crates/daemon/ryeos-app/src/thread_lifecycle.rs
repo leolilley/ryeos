@@ -2159,7 +2159,7 @@ impl ThreadLifecycleService {
     }
 
     /// Record one portable cross-chain parent→child edge exactly once and
-    /// publish it only after the signed append and projection commit.
+    /// publish it only after the signed authoritative append succeeds.
     pub fn append_child_thread_spawned_once(
         &self,
         chain_root_id: &str,
