@@ -17,6 +17,7 @@
 //! regular files only, deterministic traversal order.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -807,6 +807,7 @@ fn write_staged_regular_file(
     }
 }
 
+#[cfg(test)]
 fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     #[cfg(unix)]
     {
@@ -1261,7 +1262,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: snap-track-discover-feed-scrape
     item_ref: graph:snap-track/discover_feed_scrape
-    ref_bindings: {}
+    ref_bindings: {{}}
     schedule_type: cron
     expression: "0 */15 * * * *"
     timezone: UTC
@@ -1301,7 +1302,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: duplicate-schedule
     item_ref: graph:snap-track/discover_feed_scrape
-    ref_bindings: {}
+    ref_bindings: {{}}
     schedule_type: cron
     expression: "0 */15 * * * *"
     timezone: UTC
@@ -1309,7 +1310,7 @@ schedules:
     overlap_policy: skip
     lateness_grace_secs: 60
     enabled: true
-    params: {}
+    params: {{}}
 "#,
             )
             .unwrap();
@@ -1337,7 +1338,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: bad-schedule
     item_ref: graph:snap-track/discover_feed_scrape
-    ref_bindings: {}
+    ref_bindings: {{}}
     schedule_type: cron
     expression: "0 */15 * * * *"
     execution:
@@ -1370,7 +1371,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: wrong-root
     item_ref: graph:snap-track/discover_feed_scrape
-    ref_bindings: {}
+    ref_bindings: {{}}
     schedule_type: cron
     expression: "0 */15 * * * *"
     timezone: UTC
@@ -1378,7 +1379,7 @@ schedules:
     overlap_policy: skip
     lateness_grace_secs: 60
     enabled: true
-    params: {}
+    params: {{}}
     project_root: {}
 "#,
                 other_project.path().display()

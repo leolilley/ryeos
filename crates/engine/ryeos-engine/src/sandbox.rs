@@ -2572,7 +2572,7 @@ fn read_regular_file_bytes_limited(
     }
 
     #[cfg(unix)]
-    let mut file = {
+    let file = {
         use std::os::unix::fs::OpenOptionsExt as _;
         std::fs::OpenOptions::new()
             .read(true)
@@ -2587,7 +2587,7 @@ fn read_regular_file_bytes_limited(
     })?;
 
     #[cfg(not(unix))]
-    let mut file = std::fs::File::open(path).map_err(|error| {
+    let file = std::fs::File::open(path).map_err(|error| {
         refused(format!(
             "{kind} {} cannot be opened: {error}",
             path.display()

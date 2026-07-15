@@ -589,7 +589,6 @@ fn resolve_through_removed(
 mod tests {
     use super::*;
     use crate::signer::TestSigner;
-    use crate::Signer as _;
     use std::fs;
 
     fn test_signer_and_trust() -> (TestSigner, refs::TrustStore) {

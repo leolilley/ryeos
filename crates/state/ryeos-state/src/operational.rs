@@ -2374,7 +2374,7 @@ mod tests {
         let db = OperationalDb::open(&path).unwrap();
 
         let error = db
-            .immediate_transaction("operational rollback reporting", || {
+            .immediate_transaction("operational rollback reporting", || -> anyhow::Result<()> {
                 db.conn.execute_batch("ROLLBACK")?;
                 anyhow::bail!("operational operation failed")
             })

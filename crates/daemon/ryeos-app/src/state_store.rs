@@ -2715,7 +2715,7 @@ impl StateStore {
         )?);
 
         Ok((
-            persisted_from_append(&result, &events_to_append),
+            persisted_from_append(&result, &events_to_append)?,
             effective_update,
         ))
     }
@@ -5224,7 +5224,7 @@ impl StateStore {
         }
         let persisted = append_events_locked(
             &g,
-            permit.cas_guard(),
+            Some(permit.cas_guard()),
             chain_root_id,
             parent_thread_id,
             &[NewEventRecord {

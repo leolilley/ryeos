@@ -22,9 +22,6 @@ use std::path::Path;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
-use std::fs;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 

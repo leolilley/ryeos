@@ -101,10 +101,10 @@ fn pre_spawn_dispatch_error(
         map.remove("code");
         map.remove("error");
     }
-    let code = error.code();
+    let code = error.code().to_owned();
     let message = error.to_string();
     let stream = async_stream::stream! {
-        yield Ok(error_envelope_with(code, &message, Some(payload)));
+        yield Ok(error_envelope_with(&code, &message, Some(payload)));
     };
     RouteInvocationResult::Stream(RouteEventStream {
         events: Box::pin(stream),

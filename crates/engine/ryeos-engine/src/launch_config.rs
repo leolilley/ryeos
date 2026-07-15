@@ -218,7 +218,7 @@ fn item_path<'a>(
     id: &str,
     extensions: &'a [ExtensionSpec],
 ) -> Result<Option<(PathBuf, &'a ExtensionSpec)>, EngineError> {
-    let mut found = None;
+    let mut found: Option<(PathBuf, &'a ExtensionSpec)> = None;
     for extension in extensions {
         let path = root.ai_root.join("config").join(format!("{id}{}", extension.ext));
         match std::fs::symlink_metadata(&path) {
