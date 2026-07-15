@@ -28,8 +28,8 @@ use crate::remote::push::{push_project, PushResult};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_state::{
-    FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt, SyncJobAttemptState, SyncJobState,
-    SyncJobUpdate,
+    FinishSyncJobAttempt, NewSyncJob, NewSyncJobAttempt, PinnedStateAuthority, SyncJobAttemptState,
+    SyncJobState, SyncJobUpdate,
 };
 
 /// Request shape for the shared unary forward helper.
@@ -149,6 +149,13 @@ pub async fn execute_unary_forward(
     client: &RemoteClient,
     req: RemoteForwardRequest<'_>,
 ) -> Result<RemoteForwardResult, RemoteForwardError> {
+    // Capture one descriptor-bound state authority for the complete
+    // push/execute/pull pipeline. CAS and recovery handles below must all be
+    // derived from this capture; no phase independently reopens runtime paths.
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())
+        .map_err(|err| RemoteForwardError::JobLedgerFailed(format!("{err:#}")))?;
     let job_id = format!("remote-execute:{}", uuid::Uuid::new_v4());
     let attempt_id = format!("remote-execute-attempt:{}", uuid::Uuid::new_v4());
     record_sync_job(
@@ -191,6 +198,7 @@ pub async fn execute_unary_forward(
         Some(proj_path) => push_project(
             client,
             state,
+            &authority,
             proj_path,
             req.remote_project_path,
             req.remote_ignore,
@@ -223,7 +231,7 @@ pub async fn execute_unary_forward(
         })?,
         None => {
             // --no-project mode: push user space only.
-            match push_no_project(state, client, req.remote_project_path).await {
+            match push_no_project(&authority, client, req.remote_project_path).await {
                 Ok(value) => value,
                 Err(err) => {
                     let _ = finish_sync_job_attempt_and_update_job(
@@ -351,7 +359,7 @@ pub async fn execute_unary_forward(
     // 4. Pull results and apply to local workspace.
     let pull_result = pull_results(
         client,
-        &state.config.app_root,
+        &authority,
         &push_result.snapshot_hash,
         &result_snapshot_hash,
         req.local_project_path,
@@ -498,67 +506,106 @@ fn update_sync_job(
 /// This is extracted from the inline push logic in `remote_execute.rs`.
 /// It creates an empty manifest, ingests user space, and uploads.
 async fn push_no_project(
-    state: &AppState,
+    authority: &PinnedStateAuthority,
     client: &RemoteClient,
     remote_project_path: &str,
 ) -> Result<PushResult, RemoteForwardError> {
-    use crate::remote::push::{collect_snapshot_hashes, upload_missing};
+    use crate::remote::push::{collect_snapshot_hashes, finish_staged_roots, upload_missing};
 
-    let local_cas_root = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("objects");
-    let local_cas = lillux::cas::CasStore::new(local_cas_root);
-
-    let empty_manifest = ryeos_state::objects::SourceManifest {
-        item_source_hashes: std::collections::HashMap::new(),
+    let local_cas = authority
+        .cas_store()
+        .map_err(|e| RemoteForwardError::PushFailed(format!("open pinned CAS: {e:#}")))?;
+    let recovery = authority
+        .require_recovery()
+        .map_err(|e| RemoteForwardError::PushFailed(format!("open pinned recovery: {e:#}")))?;
+    let mut staged_roots = {
+        let guard = authority
+            .acquire_shared_guard()
+            .map_err(|e| RemoteForwardError::PushFailed(format!("acquire CAS guard: {e:#}")))?;
+        recovery
+            .begin_staged_cas_roots_admitted(&guard, "remote-forward-no-project")
+            .map_err(|e| RemoteForwardError::PushFailed(format!("stage CAS roots: {e:#}")))?
     };
-    let manifest_hash = local_cas
-        .store_object(&empty_manifest.to_value())
-        .map_err(|e| RemoteForwardError::PushFailed(format!("store empty manifest: {e:#}")))?;
 
-    let snapshot = ryeos_state::objects::ProjectSnapshot {
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
-        message: None,
-        project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
-        parent_hashes: Vec::new(),
-        created_at: lillux::time::iso8601_now(),
-        source: "push-no-project".to_string(),
-    };
-    let snapshot_hash = local_cas
-        .store_object(&snapshot.to_value())
-        .map_err(|e| RemoteForwardError::PushFailed(format!("store snapshot: {e:#}")))?;
+    let operation: anyhow::Result<PushResult> = async {
+        let empty_manifest = ryeos_state::objects::SourceManifest {
+            item_source_hashes: std::collections::HashMap::new(),
+        };
+        let manifest_hash = {
+            let guard = authority.acquire_shared_guard()?;
+            staged_roots.store_object_admitted(&guard, &local_cas, &empty_manifest.to_value())?
+        };
 
-    let all_hashes = collect_snapshot_hashes(
-        &local_cas,
-        &empty_manifest,
-        None,
-        None,
-        &manifest_hash,
-        &snapshot_hash,
-    );
-    let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes)
-        .await
-        .map_err(|e| RemoteForwardError::PushFailed(format!("upload missing objects: {e:#}")))?;
+        let upload_session = client
+            .objects_put(None, remote_project_path, &[], &[])
+            .await?;
 
-    client
-        .push_head(remote_project_path, &snapshot_hash)
-        .await
-        .map_err(|e| RemoteForwardError::PushFailed(format!("push_head failed: {e:#}")))?;
+        let snapshot = ryeos_state::objects::ProjectSnapshot {
+            project_manifest_hash: manifest_hash.clone(),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            parent_hashes: upload_session
+                .expected_previous_hash
+                .iter()
+                .cloned()
+                .collect(),
+            created_at: lillux::time::iso8601_now(),
+            source: "push-no-project".to_string(),
+        };
+        let (snapshot_hash, upload_closure) = {
+            let guard = authority.acquire_shared_guard()?;
+            let snapshot_hash =
+                staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
+            let upload_closure = collect_snapshot_hashes(
+                &local_cas,
+                &empty_manifest,
+                None,
+                None,
+                &manifest_hash,
+                &snapshot_hash,
+            )?;
+            staged_roots.protect_cas_closure_admitted(
+                &guard,
+                upload_closure.object_hashes.iter().map(String::as_str),
+                upload_closure.blob_hashes.iter().map(String::as_str),
+            )?;
+            (snapshot_hash, upload_closure)
+        };
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
+            &snapshot_hash,
+            remote_project_path,
+            upload_session,
+        )
+        .await?;
 
-    Ok(PushResult {
-        snapshot_hash,
-        manifest_hash,
-        manifest: empty_manifest,
-        manifest_entries: 0,
-        blobs_uploaded,
-        blobs_skipped,
-        user_manifest_hash: None,
-        user_manifest: None,
-    })
+        client
+            .push_head(
+                remote_project_path,
+                &snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+
+        Ok(PushResult {
+            snapshot_hash,
+            manifest_hash,
+            manifest: empty_manifest,
+            manifest_entries: 0,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+            user_manifest_hash: None,
+            user_manifest: None,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
+        .map_err(|e| RemoteForwardError::PushFailed(format!("{e:#}")))
 }
 
 #[cfg(test)]

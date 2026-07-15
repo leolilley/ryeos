@@ -31,7 +31,7 @@ use std::time::Duration;
 const VALIDATION_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::canonical_ref::CanonicalRef;
-use crate::composers::ComposerRegistry;
+use crate::composers::{field_requirements_for_schema, ComposerRegistry};
 use crate::contracts::{field_type_covers, ContractViolation, ShapeType, ValueShape};
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
@@ -351,14 +351,18 @@ pub fn validate_boot(
                 }
             };
 
+        let field_requirements = field_requirements_for_schema(schema);
+
         // Cache key: (handler_ref, JSON config) so two kinds that
-        // bind the same handler with identical configs only spawn
-        // once. Different configs spawn independently because the
-        // handler's verdict depends on the config bytes.
+        // bind the same handler with identical configs and exact-value field
+        // contracts only spawn once. Different requirements must validate
+        // independently because the same config may be safe for one field and
+        // unsafe for another.
         let cache_key = format!(
-            "{}|{}",
+            "{}|{}|{}",
             schema.composer,
-            serde_json::to_string(&schema.composer_config).unwrap_or_default()
+            serde_json::to_string(&schema.composer_config).unwrap_or_default(),
+            serde_json::to_string(&field_requirements).unwrap_or_default()
         );
         if composer_config_checked.contains_key(&cache_key) {
             continue;
@@ -367,6 +371,7 @@ pub fn validate_boot(
 
         let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
             composer_config: schema.composer_config.clone(),
+            field_requirements: field_requirements.clone(),
         });
         match run_handler_subprocess(
             handler,
@@ -374,7 +379,29 @@ pub fn validate_boot(
             VALIDATION_SUBPROCESS_TIMEOUT,
             handler_registry.launch_runtime(),
         ) {
-            Ok(HandlerResponse::ValidateOk) => {}
+            Ok(HandlerResponse::ValidateComposerOk {
+                field_requirements: acknowledged,
+            }) if acknowledged == field_requirements => {}
+            Ok(HandlerResponse::ValidateComposerOk {
+                field_requirements: acknowledged,
+            }) => {
+                issues.push(BootIssue::InvalidComposerConfig {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    reason: format!(
+                        "composer acknowledged different field requirements: expected {field_requirements:?}, got {acknowledged:?}"
+                    ),
+                });
+            }
+            Ok(HandlerResponse::ValidateOk) => {
+                issues.push(BootIssue::InvalidComposerConfig {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    reason: format!(
+                        "composer returned parser-only validation success without acknowledging field requirements {field_requirements:?}"
+                    ),
+                });
+            }
             Ok(HandlerResponse::ValidateErr { message }) => {
                 issues.push(BootIssue::InvalidComposerConfig {
                     kind: kind.to_string(),
@@ -415,12 +442,22 @@ pub fn validate_boot(
             Err(EngineError::HandlerBinaryMissing {
                 handler, reason, ..
             }) => {
-                tracing::warn!(
-                    handler = %handler,
-                    reason = %reason,
-                    "skipping boot-time subprocess validation for unresolved composer handler; \
-                     invocation will hard-error if the handler is ever called"
-                );
+                if field_requirements.is_empty() {
+                    tracing::warn!(
+                        handler = %handler,
+                        reason = %reason,
+                        "skipping boot-time subprocess validation for unresolved composer handler; \
+                         invocation will hard-error if the handler is ever called"
+                    );
+                } else {
+                    issues.push(BootIssue::ComposerHandlerUnusable {
+                        kind: kind.to_string(),
+                        handler_id: schema.composer.clone(),
+                        detail: format!(
+                            "handler binary is required to validate exact-value field semantics {field_requirements:?}: {reason}"
+                        ),
+                    });
+                }
             }
             Err(other) => {
                 issues.push(BootIssue::ComposerHandlerUnusable {
@@ -921,6 +958,7 @@ mod tests {
     use crate::test_support::load_live_handler_registry;
     use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
+    use ryeos_handler_protocol::{ComposerFieldRequirement, ComposerFieldSemantics};
     use serde_json::Value;
     use std::fs;
     use std::sync::Arc;
@@ -1768,6 +1806,90 @@ composed_value_contract:
         assert!(
             bad.contains(&"alpha") && bad.contains(&"beta"),
             "expected InvalidComposerConfig for both kinds, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn history_policy_rejects_partial_merge_composer_config_at_boot() {
+        let root = tempdir();
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let yaml = "\
+location:
+  directory: synthetic_items
+resolution:
+  - step: resolve_extends_chain
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  history_policy:
+    composed_path: lifecycle_policy
+effective_trust:
+  include_references: false
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/extends-chain
+composer_config:
+  extends_field: extends
+  fields:
+    - name: lifecycle_policy
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    lifecycle_policy:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          retention:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                terminal_for: { type: single, prim: string }
+";
+        let dir = root.join("synthetic");
+        fs::create_dir_all(&dir).unwrap();
+        let signed = lillux::signature::sign_content(yaml, &sk, "#", None);
+        fs::write(dir.join("synthetic.kind-schema.yaml"), signed).unwrap();
+        let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
+
+        let requirements = field_requirements_for_schema(kinds.get("synthetic").unwrap());
+        assert_eq!(
+            requirements,
+            vec![ComposerFieldRequirement {
+                field: "lifecycle_policy".into(),
+                semantics: ComposerFieldSemantics::InheritOrReplace,
+            }]
+        );
+
+        let parsers = ParserRegistry::from_entries(vec![(
+            "parser:ryeos/core/yaml/yaml".to_string(),
+            parser_descriptor(
+                "handler:ryeos/core/yaml-document",
+                serde_json::json!({ "require_mapping": true }),
+            ),
+        )]);
+        let handlers = live_handler_registry();
+        let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+        let issues = validate_boot(&kinds, &parsers, &handlers, &composers, &[]).unwrap_err();
+        assert!(
+            issues.iter().any(|issue| matches!(
+                issue,
+                BootIssue::InvalidComposerConfig { kind, reason, .. }
+                    if kind == "synthetic"
+                        && reason.contains("cannot provide InheritOrReplace")
+            )),
+            "expected exact-value composer rejection, got: {issues:?}"
         );
     }
 

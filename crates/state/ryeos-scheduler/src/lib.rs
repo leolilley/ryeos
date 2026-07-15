@@ -23,7 +23,7 @@ pub mod types;
 // Re-export primary types
 pub use result_outcome::{
     classify_result_payload, completed_fire_outcome, fire_outcome_for_terminal,
-    fire_status_for_thread_status, ThreadResultOutcome,
+    fire_status_for_thread_status, thread_status_is_terminal, ThreadResultOutcome,
 };
 pub use types::{FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 
@@ -67,6 +67,15 @@ pub trait SchedulerContext: Send + Sync + 'static {
 
     /// Submit a cancel command for a thread.
     fn submit_cancel(&self, thread_id: &str) -> Result<()>;
+
+    /// Hold startup-recovered execution behind the daemon's final readiness
+    /// boundary. False means startup was cancelled and this detached dispatch
+    /// must stop; contexts without a startup coordinator proceed immediately.
+    fn wait_for_recovery_execution_release(
+        &self,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        async { true }
+    }
 
     /// Dispatch a scheduled item for execution.
     ///
@@ -113,6 +122,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
 
     fn submit_cancel(&self, thread_id: &str) -> Result<()> {
         (**self).submit_cancel(thread_id)
+    }
+
+    async fn wait_for_recovery_execution_release(&self) -> bool {
+        (**self).wait_for_recovery_execution_release().await
     }
 
     async fn dispatch_scheduled_item(

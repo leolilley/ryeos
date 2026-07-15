@@ -24,20 +24,21 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let cas = state.cas_store()?;
+    let cas_read = state.acquire_cas_read()?;
+    let cas = cas_read.cas();
 
     let mut entries = Vec::with_capacity(req.hashes.len());
 
     for hash in &req.hashes {
         // Try blob first, then object
-        if let Ok(Some(data)) = cas.get_blob(hash) {
+        if let Some(data) = cas.get_blob(hash)? {
             let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
             entries.push(serde_json::json!({
                 "hash": hash,
                 "kind": "blob",
                 "data": encoded,
             }));
-        } else if let Ok(Some(value)) = cas.get_object(hash) {
+        } else if let Some(value) = cas.get_object(hash)? {
             entries.push(serde_json::json!({
                 "hash": hash,
                 "kind": "object",

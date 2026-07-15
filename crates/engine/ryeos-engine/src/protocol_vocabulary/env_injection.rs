@@ -52,18 +52,30 @@ pub fn produce_env_value(
 ) -> Result<String, EngineError> {
     match source {
         EnvInjectionSource::ThreadId => Ok(request.thread_id.clone()),
-        EnvInjectionSource::ProjectPath => Ok(request.project_path.to_string_lossy().to_string()),
+        EnvInjectionSource::ProjectPath => request
+            .project_path
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("project path is not valid UTF-8".into())),
         EnvInjectionSource::CallbackProjectPath => request
             .callback_project_path
             .as_ref()
-            .map(|path| path.to_string_lossy().to_string())
             .ok_or_else(|| {
                 EngineError::Internal(
                     "callback_project_path requested but no callback project path available".into(),
                 )
+            })?
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                EngineError::Internal("callback project path is not valid UTF-8".into())
             }),
         EnvInjectionSource::ActingPrincipal => Ok(request.acting_principal.clone()),
-        EnvInjectionSource::CasRoot => Ok(request.cas_root.to_string_lossy().to_string()),
+        EnvInjectionSource::CasRoot => request
+            .cas_root
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("CAS root is not valid UTF-8".into())),
         EnvInjectionSource::CallbackSocketPath => {
             request.callback_socket_path.clone().ok_or_else(|| {
                 EngineError::Internal(

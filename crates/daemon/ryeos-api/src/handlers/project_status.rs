@@ -23,11 +23,16 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let canonical = crate::handlers::project_apply_snapshot::canonical_existing_project_path(
         &req.project_path,
     )?;
-    let canonical_project_path = canonical.to_string_lossy().to_string();
+    let canonical_project_path = canonical
+        .to_str()
+        .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?
+        .to_owned();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
+    let cas_read = state.acquire_cas_read()?;
 
-    let refs_root = state.state_store.refs_root()?;
-    let deployed = ryeos_state::refs::read_deployed_project_ref(&refs_root, &project_hash)?;
+    let deployed = state
+        .state_store
+        .with_state_db(|db| db.read_deployed_project_ref(&project_hash))?;
 
     let Some(deployed) = deployed else {
         return Ok(serde_json::json!({
@@ -38,7 +43,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }));
     };
 
-    let cas = state.cas_store()?;
+    let cas = cas_read.cas();
     let snapshot_obj = cas.get_object(&deployed.target_hash)?.ok_or_else(|| {
         anyhow!(
             "deployed snapshot {} not found in CAS",

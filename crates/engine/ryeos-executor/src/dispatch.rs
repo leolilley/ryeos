@@ -288,6 +288,11 @@ pub struct DispatchRequest<'a> {
     /// chain). Set by daemon-internal callers (the thread-input service);
     /// never populated from raw HTTP request bodies.
     pub previous_thread_id: Option<String>,
+    /// Exact verified terminal/root subject and captured history authority
+    /// produced by synchronous public-route admission. Wrapper recursion
+    /// carries this unchanged until it reaches the subject that will actually
+    /// be persisted; leaves reject any identity or schema mismatch.
+    pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     /// Trusted parent context for callback-dispatched child executions. This is
     /// consumed only if schema-driven dispatch reaches a managed runtime launch;
     /// in-process services and terminal tools ignore it.
@@ -1029,32 +1034,52 @@ fn project_method_payload(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     ctx: &ExecutionContext,
     request: &DispatchRequest<'_>,
+    admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
 ) -> Result<Value, DispatchError> {
     let payload = match method_decl.scope {
         MethodScope::SingleRoot => {
-            let effective_parsers = ctx
-                .engine
-                .effective_parser_dispatcher(Some(request.project_path))
-                .map_err(|e| {
-                    DispatchError::InvalidRef(
-                        canonical_ref.to_string(),
-                        format!("parser dispatcher: {e}"),
+            let resolution_output = if let Some(admission) = admitted_root {
+                admission
+                    .ensure_matches_subject(
+                        &ctx.engine,
+                        admission.verified_subject(),
+                        admission.thread_profile(),
                     )
-                })?;
-            let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
-                canonical_ref,
-                &ctx.engine.kinds,
-                &effective_parsers,
-                engine_roots,
-                &ctx.engine.trust_store,
-                &ctx.engine.composers,
-            )
-            .map_err(|e| {
-                DispatchError::InvalidRef(
-                    canonical_ref.to_string(),
-                    format!("resolution pipeline failed: {e}"),
+                    .map_err(DispatchError::Internal)?;
+                if admission.verified_subject().resolved.canonical_ref != *canonical_ref {
+                    return Err(DispatchError::Internal(anyhow::anyhow!(
+                        "method payload ref `{canonical_ref}` does not match admitted subject `{}`",
+                        admission.verified_subject().resolved.canonical_ref
+                    )));
+                }
+                std::borrow::Cow::Borrowed(admission.resolution_output())
+            } else {
+                let effective_parsers = ctx
+                    .engine
+                    .effective_parser_dispatcher(Some(request.project_path))
+                    .map_err(|e| {
+                        DispatchError::InvalidRef(
+                            canonical_ref.to_string(),
+                            format!("parser dispatcher: {e}"),
+                        )
+                    })?;
+                std::borrow::Cow::Owned(
+                    ryeos_engine::resolution::run_resolution_pipeline(
+                        canonical_ref,
+                        &ctx.engine.kinds,
+                        &effective_parsers,
+                        engine_roots,
+                        &ctx.engine.trust_store,
+                        &ctx.engine.composers,
+                    )
+                    .map_err(|e| {
+                        DispatchError::InvalidRef(
+                            canonical_ref.to_string(),
+                            format!("resolution pipeline failed: {e}"),
+                        )
+                    })?,
                 )
-            })?;
+            };
 
             crate::execution::launch::enforce_effective_trust(
                 resolution_output.effective_trust_class,
@@ -1188,6 +1213,7 @@ pub(crate) async fn dispatch_method(
     canonical_ref: &CanonicalRef,
     hop_verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
+    root_subject: Option<RootSubject>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
@@ -1234,13 +1260,18 @@ pub(crate) async fn dispatch_method(
     // guard, so a projection failure finalizes the created thread rather than
     // orphaning the returned id.
 
-    let thread_profile_str =
-        thread_profile
-            .as_deref()
-            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+    let method_subject = match root_subject {
+        Some(subject) => subject,
+        None => RootSubject {
+            item_ref: canonical_ref.to_string(),
+            thread_profile: thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
                 detail: "method dispatch requires execution.thread_profile".into(),
-            })?;
+            })?,
+            verified: hop_verified.clone(),
+        },
+    };
+    let thread_profile_str = method_subject.thread_profile.as_str();
 
     // 6. Validate the launch mode up front — BEFORE the validate_only
     //    short-circuit, so a `validate_only` request with a bad mode is
@@ -1278,6 +1309,7 @@ pub(crate) async fn dispatch_method(
             &engine_roots,
             ctx,
             request,
+            request.root_admission.as_ref(),
         )?;
         method_runtime_config_snapshot(kind, &method_decl.runtime_config, &engine_roots, state)?;
         return Ok(json!({
@@ -1288,6 +1320,39 @@ pub(crate) async fn dispatch_method(
             "executor_ref": executor_ref,
         }));
     }
+
+    // A method invocation is a real executable root. Reuse the exact public
+    // admission when present; otherwise admit this already-verified subject
+    // once. Method/runtime identity must never stand in for the invoked item.
+    let history_subject = method_subject.verified.as_ref().ok_or_else(|| {
+        DispatchError::InvalidRef(
+            method_subject.item_ref.clone(),
+            "method root did not resolve and verify before history-policy admission".to_string(),
+        )
+    })?;
+    let root_admission = if let Some(admission) = request.root_admission.as_ref() {
+        admission
+            .ensure_matches_subject(&ctx.engine, history_subject, thread_profile_str)
+            .map_err(DispatchError::Internal)?;
+        if admission.ref_bindings() != &request.ref_bindings {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "method root admission ref bindings differ from the dispatch request"
+            )));
+        }
+        admission.clone()
+    } else {
+        ryeos_app::thread_lifecycle::admit_verified_root_execution(
+            &ctx.engine,
+            &ctx.plan_ctx,
+            history_subject.clone(),
+            &state.node_history_policy,
+            thread_profile_str.to_string(),
+            request.ref_bindings.clone(),
+            request.usage_subject.clone(),
+            request.usage_subject_asserted_by.clone(),
+        )
+        .map_err(DispatchError::Internal)?
+    };
 
     // 8. Mint the thread record + callback token. Honor a pre-minted
     //    thread id when the caller supplied one: the SSE/gateway source
@@ -1300,46 +1365,63 @@ pub(crate) async fn dispatch_method(
         .pre_minted_thread_id
         .clone()
         .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
-    let (chain_root_id, upstream_thread_id) =
-        if let Some(parent) = request.parent_execution_context.as_ref() {
-            let durable_parent = state
-                .threads
-                .get_thread(&parent.parent_thread_id)
-                .map_err(DispatchError::Internal)?
-                .ok_or_else(|| {
-                    DispatchError::Internal(anyhow::anyhow!(
-                        "method parent thread not found: {}",
-                        parent.parent_thread_id
-                    ))
-                })?;
-            (durable_parent.chain_root_id, Some(durable_parent.thread_id))
-        } else {
-            (thread_id.clone(), None)
-        };
-
-    state
-        .threads
-        .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
-            thread_id: thread_id.clone(),
-            chain_root_id,
+    let created = if let Some(parent) = request.parent_execution_context.as_ref() {
+        let durable_parent = state
+            .threads
+            .get_thread(&parent.parent_thread_id)
+            .map_err(DispatchError::Internal)?
+            .ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "method parent thread not found: {}",
+                    parent.parent_thread_id
+                ))
+            })?;
+        state
+            .threads
+            .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
+                thread_id: thread_id.clone(),
+                chain_root_id: durable_parent.chain_root_id,
+                kind: thread_profile_str.to_string(),
+                item_ref: method_subject.item_ref.clone(),
+                executor_ref: executor_ref.clone(),
+                launch_mode: request.launch_mode.to_string(),
+                current_site_id: ctx.plan_ctx.current_site_id.clone(),
+                origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+                upstream_thread_id: Some(durable_parent.thread_id),
+                requested_by: Some(request.acting_principal.to_string()),
+                project_root: Some(
+                    request
+                        .project_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| request.project_path.to_path_buf()),
+                ),
+                usage_subject: request.usage_subject.clone(),
+                usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+                captured_history_policy: None,
+            })
+    } else {
+        let resolved_method = ResolvedExecutionRequest {
             kind: thread_profile_str.to_string(),
-            item_ref: canonical_ref.to_string(),
+            item_ref: method_subject.item_ref.clone(),
             executor_ref: executor_ref.clone(),
             launch_mode: request.launch_mode.to_string(),
             current_site_id: ctx.plan_ctx.current_site_id.clone(),
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-            upstream_thread_id,
+            target_site_id: None,
             requested_by: Some(request.acting_principal.to_string()),
-            project_root: Some(
-                request
-                    .project_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| request.project_path.to_path_buf()),
-            ),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-        })
-        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
+            parameters: request.params.clone(),
+            ref_bindings: request.ref_bindings.clone(),
+            resolved_item: history_subject.resolved.clone(),
+            plan_context: ctx.plan_ctx.clone(),
+            root_admission: Some(root_admission.clone()),
+        };
+        state
+            .threads
+            .create_root_thread_with_id(&thread_id, &resolved_method)
+    };
+    created.map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &thread_id);
 
@@ -1417,7 +1499,7 @@ pub(crate) async fn dispatch_method(
         Vec::new(), // method threads have no caps for now
         child_provenance,
         None,
-        Some(canonical_ref.to_string()),
+        Some(method_subject.item_ref.clone()),
         serde_json::Value::Null,
         0,
     );
@@ -1453,9 +1535,9 @@ pub(crate) async fn dispatch_method(
     //       revokes all protocol-requested borrowed-child authority. On the
     //       normal path the daemon finalizes only after validating stdout.
     let outcome: Result<Value, DispatchError> = async {
-        // Project the payload now — AFTER the thread row exists — so a
-        // resolution/trust/corpus failure falls through to the cleanup below
-        // and finalizes the thread as failed (no orphaned returned id).
+        // Project the payload now — AFTER the thread row exists — from the
+        // sealed pre-persistence resolution snapshot, so later source changes
+        // cannot alter the admitted execution.
         let mut payload = project_method_payload(
             method_decl,
             canonical_ref,
@@ -1464,7 +1546,11 @@ pub(crate) async fn dispatch_method(
             &engine_roots,
             ctx,
             request,
+            Some(&root_admission),
         )?;
+        root_admission
+            .ensure_matches_subject(&ctx.engine, history_subject, thread_profile_str)
+            .map_err(DispatchError::Internal)?;
         if let Value::Object(ref mut map) = payload {
             map.insert("args".to_string(), validated_args);
         }
@@ -1536,7 +1622,17 @@ pub(crate) async fn dispatch_method(
         })?;
 
         let executor_path = executor.path.clone();
-        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let executor_path_str = executor_path
+            .to_str()
+            .ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "resolved executor path is not valid UTF-8"
+                ))
+            })?
+            .to_owned();
+        let project_path_str = request.project_path.to_str().ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!("dispatch project path is not valid UTF-8"))
+        })?;
         let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
             source_path: executor.path,
             content_hash: executor.content_hash,
@@ -1544,7 +1640,8 @@ pub(crate) async fn dispatch_method(
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
-        );
+        )
+        .map_err(|error| DispatchError::Internal(error.into()))?;
         let callback_socket_requested = runtime_protocol
             .descriptor
             .env_injections
@@ -1570,13 +1667,22 @@ pub(crate) async fn dispatch_method(
                 .cas_root()
                 .map_err(DispatchError::Internal)?,
             callback_token: Some(envelope.callback.token.clone()),
-            callback_socket_path: callback_socket_requested.then(|| {
-                envelope
-                    .callback
-                    .socket_path
-                    .to_string_lossy()
-                    .into_owned()
-            }),
+            callback_socket_path: if callback_socket_requested {
+                Some(
+                    envelope
+                        .callback
+                        .socket_path
+                        .to_str()
+                        .ok_or_else(|| {
+                            DispatchError::Internal(anyhow::anyhow!(
+                                "daemon callback socket path is not valid UTF-8"
+                            ))
+                        })?
+                        .to_owned(),
+                )
+            } else {
+                None
+            },
             callback_project_path: Some(callback_project_path.clone()),
             thread_auth_token: thread_auth.as_ref().map(|auth| auth.token.clone()),
             params: envelope.payload.clone(),
@@ -1623,7 +1729,7 @@ pub(crate) async fn dispatch_method(
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
-            cwd: Some(request.project_path.to_string_lossy().into_owned()),
+            cwd: Some(project_path_str.to_owned()),
             envs,
             stdin_data: Some(stdin_data),
             timeout: METHOD_RUNTIME_TIMEOUT_SECS as f64,
@@ -1761,7 +1867,7 @@ pub(crate) async fn dispatch_method(
             "thread": {
                 "thread_id": thread_id.clone(),
                 "kind": thread_profile_str,
-                "item_ref": canonical_ref.to_string(),
+                "item_ref": method_subject.item_ref.clone(),
                 "status": "completed",
             },
             "result": output,
@@ -2303,7 +2409,7 @@ async fn dispatch_via_method_executor(
         target_site_id: request.target_site_id,
         validate_only: request.validate_only,
         params: args,
-        ref_bindings: BTreeMap::new(),
+        ref_bindings: request.ref_bindings.clone(),
         acting_principal: request.acting_principal,
         project_path: request.project_path,
         provenance: request.provenance.clone(),
@@ -2312,6 +2418,7 @@ async fn dispatch_via_method_executor(
         usage_subject: request.usage_subject.clone(),
         usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         previous_thread_id: request.previous_thread_id.clone(),
+        root_admission: request.root_admission.clone(),
         parent_execution_context: request.parent_execution_context.clone(),
     };
 
@@ -2766,6 +2873,9 @@ async fn dispatch_inner(
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
     let mut verified_root = verified_root;
+    if let Some(admission) = request.root_admission.as_ref() {
+        admission.validate().map_err(DispatchError::Internal)?;
+    }
 
     // Secondary execution identities are independently authorized before any
     // binding resolution or launch preparation. Their slot declarations are
@@ -2885,7 +2995,15 @@ async fn dispatch_inner(
             });
         }
 
-        let hop = resolve_dispatch_hop_with_verified(&current_ref, ctx, verified_root.take())?;
+        let admitted_verified = request.root_admission.as_ref().and_then(|admission| {
+            (admission.verified_subject().resolved.canonical_ref == current_ref)
+                .then(|| admission.verified_subject().clone())
+        });
+        let hop = resolve_dispatch_hop_with_verified(
+            &current_ref,
+            ctx,
+            verified_root.take().or(admitted_verified),
+        )?;
 
         // Destructure up front so the match on `next` (which moves
         // the terminator out) can't conflict with later borrows. All
@@ -2948,6 +3066,7 @@ async fn dispatch_inner(
                     &hop_ref,
                     verified,
                     thread_profile,
+                    root_subject,
                     request,
                     ctx,
                     state,
@@ -2973,6 +3092,10 @@ pub enum RootDispatchClass {
     ManagedNonEnvelope,
     /// Method dispatch (e.g. `knowledge`). Honors a pre-minted thread id.
     MethodDispatch,
+    /// Managed protocol execution with no callback channel. It returns protocol
+    /// frames directly and never creates a lifecycle row, so it cannot honor a
+    /// pre-minted thread id.
+    UnthreadedStreamingSubprocess,
     /// In-process execution (services). Runs synchronously and does NOT
     /// thread a pre-minted id — not eligible for accepted/background launch.
     InProcess,
@@ -3182,9 +3305,61 @@ impl RootDispatchClass {
             Self::ManagedSubprocess => "managed_subprocess",
             Self::ManagedNonEnvelope => "managed_non_envelope",
             Self::MethodDispatch => "method_dispatch",
+            Self::UnthreadedStreamingSubprocess => "unthreaded_streaming_subprocess",
             Self::InProcess => "in_process",
         }
     }
+}
+
+impl RootDispatchClass {
+    /// Whether live dispatch is guaranteed to persist the caller's pre-minted
+    /// id as a root row on its success path.
+    pub fn persists_pre_minted_root(self) -> bool {
+        matches!(
+            self,
+            Self::TerminalSubprocess | Self::ManagedSubprocess | Self::MethodDispatch
+        )
+    }
+}
+
+/// Synchronous public-route admission. `requested_subject` is the exact
+/// caller-named item used for route capability/secret checks. `root_admission`
+/// is the possibly different terminal/root subject that will own the durable
+/// row (for example, the target behind a method-dispatch wrapper).
+#[derive(Debug, Clone)]
+pub struct RootDispatchPreflight {
+    pub class: RootDispatchClass,
+    pub requested_subject: VerifiedItem,
+    pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
+}
+
+fn finish_root_dispatch_preflight(
+    class: RootDispatchClass,
+    requested_subject: VerifiedItem,
+    root_subject: VerifiedItem,
+    thread_profile: String,
+    ref_bindings: &BTreeMap<String, String>,
+    usage_subject: Option<&ryeos_state::UsageSubject>,
+    usage_subject_asserted_by: Option<&str>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<RootDispatchPreflight, DispatchError> {
+    let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
+        &ctx.engine,
+        &ctx.plan_ctx,
+        root_subject,
+        &state.node_history_policy,
+        thread_profile,
+        ref_bindings.clone(),
+        usage_subject.cloned(),
+        usage_subject_asserted_by.map(str::to_string),
+    )
+    .map_err(DispatchError::Internal)?;
+    Ok(RootDispatchPreflight {
+        class,
+        requested_subject,
+        root_admission: Some(root_admission),
+    })
 }
 
 /// Preflight the dispatch route for accepted/background launch.
@@ -3204,20 +3379,41 @@ impl RootDispatchClass {
 /// route class so the caller can refuse routes that cannot honor a pre-minted
 /// id (in-process services).
 ///
-/// Synchronous: classification touches resolution, schema, and the authorizer
-/// only — never the executing leaf dispatchers.
+/// Synchronous: classification touches verified resolution/composition, schema,
+/// and the authorizer only — never the executing leaf dispatchers.
 pub fn preflight_root_dispatch(
     item_ref: &str,
     original_root_kind: &str,
     params: &Value,
+    ref_bindings: &BTreeMap<String, String>,
+    usage_subject: Option<&ryeos_state::UsageSubject>,
+    usage_subject_asserted_by: Option<&str>,
     ctx: &ExecutionContext,
     state: &AppState,
-) -> Result<RootDispatchClass, DispatchError> {
+) -> Result<RootDispatchPreflight, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
     let mut hops: usize = 0;
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
+    let mut requested_subject: Option<VerifiedItem> = None;
+    let mut root_subject: Option<(VerifiedItem, String)> = None;
+
+    let caller_root_executable = ctx
+        .engine
+        .kinds
+        .get(&current_ref.kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.thread_profile.as_ref())
+        .is_some_and(|profile| profile.root_executable);
+    if !caller_root_executable {
+        return Err(DispatchError::NotRootExecutable {
+            kind: current_ref.kind.clone(),
+            detail: format!(
+                "public launch root `{current_ref}` has no root-executable thread profile in its verified kind schema"
+            ),
+        });
+    }
 
     // Mirror dispatch: a method call aimed at a kind that declares no methods
     // is a caller error, not a silent no-op.
@@ -3295,14 +3491,43 @@ pub fn preflight_root_dispatch(
         let VerifiedHop {
             canonical_ref: hop_ref,
             verified,
+            thread_profile,
             runtime: hop_runtime,
             next,
             ..
         } = hop;
 
+        if requested_subject.is_none() {
+            let subject = verified.clone().ok_or_else(|| {
+                DispatchError::InvalidRef(
+                    hop_ref.to_string(),
+                    "public root admission requires the caller-named item to resolve and verify"
+                        .to_string(),
+                )
+            })?;
+            requested_subject = Some(subject);
+        }
+        if root_subject.is_none() {
+            if let (Some(subject), Some(profile)) = (verified.clone(), thread_profile.clone()) {
+                root_subject = Some((subject, profile));
+            }
+        }
+        let admitted_requested_subject = requested_subject.clone().ok_or_else(|| {
+            DispatchError::InvalidRef(
+                item_ref.to_string(),
+                "public root admission lost the verified caller-named subject".to_string(),
+            )
+        })?;
+
         match next {
-            HopAction::Terminate(terminator, _) => match terminator {
-                TerminatorDecl::InProcess { .. } => return Ok(RootDispatchClass::InProcess),
+            HopAction::Terminate(terminator, hop_profile) => match terminator {
+                TerminatorDecl::InProcess { .. } => {
+                    return Ok(RootDispatchPreflight {
+                        class: RootDispatchClass::InProcess,
+                        requested_subject: admitted_requested_subject,
+                        root_admission: None,
+                    });
+                }
                 TerminatorDecl::Subprocess { protocol_ref } => {
                     let protocol =
                         ctx.engine.protocols.require(&protocol_ref).map_err(|_| {
@@ -3395,17 +3620,38 @@ pub fn preflight_root_dispatch(
                                                 },
                                             ),
                                         };
-                                        return preflight_root_dispatch(
+                                        let mut target = preflight_root_dispatch(
                                             &target_ref,
                                             target_canonical.kind.as_str(),
                                             &inner_params,
+                                            ref_bindings,
+                                            usage_subject,
+                                            usage_subject_asserted_by,
                                             &inner_ctx,
                                             state,
-                                        );
+                                        )?;
+                                        target.requested_subject =
+                                            admitted_requested_subject.clone();
+                                        return Ok(target);
                                     }
                                 }
                             }
-                            return Ok(RootDispatchClass::TerminalSubprocess);
+                            return finish_root_dispatch_preflight(
+                                RootDispatchClass::TerminalSubprocess,
+                                admitted_requested_subject,
+                                verified.clone().ok_or_else(|| {
+                                    DispatchError::InvalidRef(
+                                        hop_ref.to_string(),
+                                        "terminal root did not resolve and verify".to_string(),
+                                    )
+                                })?,
+                                hop_profile,
+                                ref_bindings,
+                                usage_subject,
+                                usage_subject_asserted_by,
+                                ctx,
+                                state,
+                            );
                         }
                         LifecycleMode::Managed => {
                             let managed_route = if let Some(verified_runtime) = &hop_runtime {
@@ -3439,10 +3685,30 @@ pub fn preflight_root_dispatch(
                                     )?;
                                 }
                             }
-                            if protocol.descriptor.callback_channel == CallbackChannel::None {
-                                return Ok(RootDispatchClass::ManagedNonEnvelope);
-                            }
-                            return Ok(RootDispatchClass::ManagedSubprocess);
+                            let (subject, profile) = root_subject.clone().ok_or_else(|| {
+                                DispatchError::InvalidRef(
+                                    hop_ref.to_string(),
+                                    "managed root did not resolve and verify".to_string(),
+                                )
+                            })?;
+                            let class = if protocol.descriptor.callback_channel
+                                == CallbackChannel::None
+                            {
+                                RootDispatchClass::ManagedNonEnvelope
+                            } else {
+                                RootDispatchClass::ManagedSubprocess
+                            };
+                            return finish_root_dispatch_preflight(
+                                class,
+                                admitted_requested_subject,
+                                subject,
+                                profile,
+                                ref_bindings,
+                                usage_subject,
+                                usage_subject_asserted_by,
+                                ctx,
+                                state,
+                            );
                         }
                     }
                 }
@@ -3480,7 +3746,25 @@ pub fn preflight_root_dispatch(
                 })?;
                 require_method_runtime_protocol(&ctx.engine, &kind, verified_runtime, "method")?;
                 strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
-                return Ok(RootDispatchClass::MethodDispatch);
+                return finish_root_dispatch_preflight(
+                    RootDispatchClass::MethodDispatch,
+                    admitted_requested_subject,
+                    verified.ok_or_else(|| {
+                        DispatchError::InvalidRef(
+                            hop_ref.to_string(),
+                            "method root did not resolve and verify".to_string(),
+                        )
+                    })?,
+                    thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
+                        kind,
+                        detail: "method root has no execution thread profile".to_string(),
+                    })?,
+                    ref_bindings,
+                    usage_subject,
+                    usage_subject_asserted_by,
+                    ctx,
+                    state,
+                );
             }
         }
     }
@@ -3542,6 +3826,11 @@ async fn dispatch_by(
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
         } => {
+            if request.root_admission.is_some() {
+                return Err(DispatchError::Internal(anyhow::anyhow!(
+                    "threaded root admission resolved to an in-process terminator; refusing to acknowledge a pre-minted id without its admitted row"
+                )));
+            }
             let tp = thread_profile.ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: canonical_ref.kind.clone(),
                 detail: "service terminator has no thread_profile".into(),
@@ -3795,6 +4084,7 @@ metadata:
             usage_subject_asserted_by: None,
             parameters: serde_json::Value::Null,
             ref_bindings: std::collections::BTreeMap::new(),
+            root_admission: None,
             resolved_item,
             plan_context: test_plan_context(source_root.to_path_buf()),
         }
@@ -4847,6 +5137,7 @@ requires:
             terminator: None,
             delegate: None,
             thread_profile: None,
+            history_policy: None,
             method_dispatch: Some(MethodDispatchDecl {
                 via: MethodDispatchVia::RuntimeRegistry,
                 protocol: "protocol:ryeos/core/method_runtime_v1".to_string(),

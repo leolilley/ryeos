@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T00:27:46Z:b777243638f0d91edb03615a1ba16808ef334a6501833aef94cf28fa583196c9:AL1XovDLQ/OkC6EtWByoXE+eD2oh06D3gssEpiIi+lmgMnTh0HOApoXEAK8aJFl1uhXka+sSL+yP8vdGUbYhDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:30:43Z:aedf05a3445a9510cea2d062ecede96504e1ea7538e181e0c6a9dd245e5b7f4d:8dATcsuctsxDqfRuXjmRByxLlbhMQkE3H+mwE//I9uyGkFH1ZVc9TvTm9Q2xqPwJHob8rhf7BO8HJOCiLqkbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "register"
 kind: service
@@ -10,11 +10,11 @@ schema:
   ref_bindings: object
   schedule_type: string
   expression: string
-  params: object?
-  timezone: string?
-  misfire_policy: string?
-  overlap_policy: string?
-  lateness_grace_secs: integer?
-  enabled: boolean?
+  params: object
+  timezone: string
+  misfire_policy: string
+  overlap_policy: string
+  lateness_grace_secs: integer
+  enabled: boolean
   project_root: string?
 description: "Create or update a schedule spec"

@@ -8,6 +8,7 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::objects::CapturedThreadHistoryPolicy;
 use crate::projection::ProjectionDb;
 
 /// Stay below SQLite's conservative host-parameter ceiling regardless of the
@@ -30,6 +31,7 @@ pub struct ThreadRow {
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<String>,
+    pub captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -38,6 +40,18 @@ pub struct ThreadRow {
 
 impl ThreadRow {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let captured_policy_json: Option<String> = row.get("captured_history_policy_json")?;
+        let captured_history_policy = captured_policy_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
         Ok(Self {
             thread_id: row.get("thread_id")?,
             chain_root_id: row.get("chain_root_id")?,
@@ -51,6 +65,7 @@ impl ThreadRow {
             upstream_thread_id: row.get("upstream_thread_id")?,
             requested_by: row.get("requested_by")?,
             project_root: row.get("project_root")?,
+            captured_history_policy,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
             started_at: row.get("started_at")?,
@@ -365,7 +380,7 @@ const THREAD_COLUMNS: &str = r#"
     thread_id, chain_root_id, kind, status,
     item_ref, executor_ref, launch_mode,
     current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
-    created_at, updated_at, started_at, finished_at
+    captured_history_policy_json, created_at, updated_at, started_at, finished_at
 "#;
 
 pub fn get_thread(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Option<ThreadRow>> {
@@ -2122,7 +2137,10 @@ pub fn summarize_usage_by_subject(
 mod tests {
     use super::*;
     use crate::objects::thread_event::NewEvent;
-    use crate::objects::thread_snapshot::{ThreadSnapshotBuilder, ThreadStatus};
+    use crate::objects::thread_snapshot::{
+        CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+        CapturedThreadHistoryPolicy, ThreadHistoryRetention, ThreadSnapshotBuilder, ThreadStatus,
+    };
     use crate::projection::{project_event, project_thread_edge, project_thread_snapshot};
     use serde_json::json;
 
@@ -2148,7 +2166,7 @@ mod tests {
         status: ThreadStatus,
         upstream_thread_id: Option<&str>,
     ) {
-        let snapshot = ThreadSnapshotBuilder::new(
+        let mut builder = ThreadSnapshotBuilder::new(
             thread_id,
             chain_root_id,
             "directive",
@@ -2157,7 +2175,32 @@ mod tests {
         )
         .status(status)
         .upstream_thread_id(upstream_thread_id.map(str::to_string))
-        .build();
+        .created_at("2026-06-01T00:00:00Z".to_string());
+        builder = match status {
+            ThreadStatus::Created => builder.updated_at("2026-06-01T00:00:00Z".to_string()),
+            ThreadStatus::Running => builder
+                .started_at(Some("2026-06-01T00:00:01Z".to_string()))
+                .updated_at("2026-06-01T00:00:01Z".to_string()),
+            status if status.is_terminal() => builder
+                .started_at(Some("2026-06-01T00:00:01Z".to_string()))
+                .finished_at(Some("2026-06-01T00:00:02Z".to_string()))
+                .updated_at("2026-06-01T00:00:02Z".to_string()),
+            _ => unreachable!("ThreadStatus vocabulary is exhaustive"),
+        };
+        if thread_id == chain_root_id {
+            builder = builder.captured_history_policy(Some(CapturedThreadHistoryPolicy {
+                retention: ThreadHistoryRetention::Durable,
+                canonical_item_ref: "system/test".to_string(),
+                item_content_hash: "11".repeat(32),
+                item_signer_fingerprint: Some("22".repeat(32)),
+                item_trust_class: CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: "33".repeat(32),
+                resolved_from: CapturedPolicyProvenance::NodeDefault {
+                    node_policy: CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                },
+            }));
+        }
+        let snapshot = builder.build();
         project_thread_snapshot(db, &snapshot, chain_root_id).unwrap();
     }
 

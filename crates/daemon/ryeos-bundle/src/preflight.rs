@@ -1717,7 +1717,7 @@ name: fixed-parser
 kind: handler
 serves: parser
 binary_ref: {bin_rel}
-abi_version: "v1"
+abi_version: "v3"
 required_caps: []
 description: "fixed parser handler for preflight tests"
 "#

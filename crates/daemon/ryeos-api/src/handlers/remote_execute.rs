@@ -105,7 +105,9 @@ pub async fn handle(
                     path.display()
                 ))
             })?;
-            let ref_str = canonical.to_string_lossy().to_string();
+            let ref_str = config::local_project_identity(&canonical)
+                .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+                .to_owned();
             (Some(canonical), ref_str)
         }
     };

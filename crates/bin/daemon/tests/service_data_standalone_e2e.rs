@@ -1,4 +1,5 @@
-//! E2E for OfflineOnly services: bundle/install, bundle/remove, rebuild.
+//! E2E for OfflineOnly services: bundle/install, bundle/remove, and projection
+//! maintenance.
 //! These services only work via `ryeosd run-service ...` (daemon must be
 //! down). We assert each one actually performs its data work on disk.
 
@@ -10,7 +11,7 @@ use common::{run_service_standalone_fresh, StandaloneHarness};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_rebuild_runs_on_fresh_state() {
-    let (out, _sd, _us) = run_service_standalone_fresh("service:rebuild", None)
+    let (out, _sd, _us) = run_service_standalone_fresh("service:projection/rebuild", None)
         .await
         .expect("run-service rebuild");
     assert!(

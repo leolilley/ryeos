@@ -503,9 +503,7 @@ fn read_thread_outcome_full(
     state_path: &Path,
     thread_id: &str,
 ) -> Option<(String, Option<String>, Option<String>)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = common::selected_projection_path(state_path).ok()?;
     let conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;

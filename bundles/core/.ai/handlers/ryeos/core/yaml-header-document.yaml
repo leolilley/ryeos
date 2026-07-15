@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-07T05:18:54Z:6bd2fcead599403314eb7b26acc47d79fa993212279ae5deb2c83331d2bc7193:dJBrBTpu1/WSO3nl/xLWrZjkewwlsdR07hFRXUzfKHVusV4rN7PAF8pEGJRSk/HOvMZPoJIwEJoVAD/O3anPBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:023d1e2ea355ff207550f0c38325582627205815ec4df59ce2e68c8794160260:ZnGcoHUzzMq0K0n93GdE4uZHoQbl2tfu3+Y1gunmSKRVmfYcBaG4BajrG/HlhjT2qjYIviITG1SBrVe/bXBvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/core
 name: yaml-header-document
 kind: handler
 serves: parser
 binary_ref: bin/x86_64-unknown-linux-gnu/rye-parser-yaml-header-document
-abi_version: "v1"
+abi_version: "v3"
 required_caps: []
 description: "YAML header document parser handler"

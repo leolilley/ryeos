@@ -296,90 +296,43 @@ async fn await_operator_handoff(
 }
 
 fn admit_fresh_launch(
-    item_ref: &str,
+    item_ref: &crate::routes::parsed_ref::ParsedItemRef,
     ref_bindings: &BTreeMap<String, String>,
     project_path: &crate::routes::abs_path::AbsolutePathBuf,
     parameters: &Value,
     ctx: &HandlerContext,
     state: &AppState,
-) -> Result<(), HandlerError> {
-    use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
-
-    let site_id = state.threads.site_id().to_string();
-    let plan_ctx = PlanContext {
-        requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: ctx.fingerprint.clone(),
-            scopes: ctx.scopes.clone(),
-        }),
-        project_context: ProjectContext::LocalPath {
-            path: project_path.as_path().to_path_buf(),
-        },
-        current_site_id: site_id.clone(),
-        origin_site_id: site_id.clone(),
-        execution_hints: Default::default(),
-        validate_only: false,
-    };
-    let exec_ctx = ryeos_executor::executor::ExecutionContext {
-        principal_fingerprint: ctx.fingerprint.clone(),
-        caller_scopes: ctx.scopes.clone(),
-        engine: state.engine.clone(),
-        plan_ctx,
-        requested_call: None,
-    };
-    let primary = ryeos_app::thread_lifecycle::preflight_root_execution(
-        ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-            engine: &state.engine,
-            site_id: &site_id,
-            project_path: project_path.as_path(),
-            item_ref,
-            ref_bindings: ref_bindings.clone(),
-            launch_mode: "inline",
-            parameters: parameters.clone(),
-            requested_by: Some(ctx.fingerprint.clone()),
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            caller_scopes: ctx.scopes.clone(),
-            validate_only: false,
-        },
+) -> Result<crate::routes::launch::DispatchLaunchOptions, HandlerError> {
+    let preflight = crate::routes::launch::preflight_dispatch_launch(
+        state,
+        item_ref,
+        project_path,
+        parameters,
+        ref_bindings,
+        &ctx.fingerprint,
+        &ctx.scopes,
+        None,
+        "inline",
+        false,
+        None,
+        None,
     )
-    .map_err(|error| HandlerError::BadRequest(format!("launch preflight failed: {error}")))?;
-    let root = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
-        .map_err(|error| HandlerError::BadRequest(format!("invalid item_ref: {error}")))?;
-    if matches!(
-        ryeos_executor::dispatch::preflight_root_dispatch(
-            item_ref,
-            &root.kind,
-            parameters,
-            &exec_ctx,
-            state,
-        )
-        .map_err(dispatch_error)?,
-        ryeos_executor::dispatch::RootDispatchClass::InProcess
-    ) {
+    .map_err(dispatch_error)?;
+    if !preflight.class.persists_pre_minted_root() {
         return Err(HandlerError::BadRequest(
             "fresh threads.input target requires a launch-producing item".to_string(),
         ));
     }
-    let applicability =
-        ryeos_executor::dispatch::launch_contract_applicability(item_ref, &exec_ctx)
-            .map_err(dispatch_error)?;
-    if matches!(
-        &applicability,
-        ryeos_executor::dispatch::LaunchContractApplicability::NonEnvelope { .. }
-    ) {
-        return Err(HandlerError::BadRequest(
-            "fresh threads.input target requires a managed-envelope lifecycle".to_string(),
-        ));
-    }
-    ryeos_executor::dispatch::admit_launch_contract(
-        &applicability,
-        &primary,
-        ref_bindings,
-        project_path.as_path(),
-        &exec_ctx,
-        state,
+    let root_admission = preflight.root_admission.ok_or_else(|| {
+        HandlerError::Internal("threaded dispatch preflight returned no root admission".to_string())
+    })?;
+    crate::routes::launch::DispatchLaunchOptions::admitted(
+        root_admission,
+        ref_bindings.clone(),
     )
-    .map_err(dispatch_error)
+    .map_err(|error| HandlerError::Internal(format!(
+        "validated fresh-launch contract rejected at dispatch boundary: {error:#}"
+    )))
 }
 
 fn admit_resume_launch(
@@ -415,6 +368,9 @@ fn admit_resume_launch(
         &resume.item_ref,
         primary.canonical_ref.kind.as_str(),
         &resume.parameters,
+        &resume.ref_bindings,
+        None,
+        None,
         &exec_ctx,
         state,
     )
@@ -479,42 +435,31 @@ pub async fn handle(
                         HandlerError::BadRequest(format!("project_path: {error}"))
                     })?;
             let parameters = json!({ "input": input });
-            admit_fresh_launch(
-                &item_ref,
+            let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
+                .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
+            let launch_options = admit_fresh_launch(
+                &parsed_ref,
                 &ref_bindings,
                 &project_path,
                 &parameters,
                 &ctx,
                 &state,
             )?;
-
-            let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
-                .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             let launch_provenance =
                 ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                    project_path.as_path().to_path_buf(),
+                    launch_options.project_path().to_path_buf(),
                     state.engine.clone(),
                 );
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_ref,
-                project_path,
                 parameters,
                 ctx.fingerprint.clone(),
                 ctx.scopes.clone(),
                 thread_id.clone(),
                 launch_provenance,
-                crate::routes::launch::DispatchLaunchOptions {
-                    ref_bindings,
-                    launch_mode: "inline".to_string(),
-                    target_site_id: None,
-                    validate_only: false,
-                    usage_subject: None,
-                    usage_subject_asserted_by: None,
-                    call: None,
-                    previous_thread_id: None,
-                },
+                launch_options,
             );
             let ready_thread_id = await_dispatch_handoff(handle, ready).await?;
             if ready_thread_id != thread_id {
@@ -756,6 +701,7 @@ pub async fn handle(
         project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: None,
     };
     let project_identity = serde_json::to_string(&resume_context.project_context)
         .map_err(|error| HandlerError::Internal(error.to_string()))?;

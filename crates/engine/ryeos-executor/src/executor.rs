@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
@@ -254,31 +254,66 @@ pub async fn execute_service_verified(
         ),
     };
 
-    let create_params = ryeos_app::thread_lifecycle::ThreadCreateParams {
-        thread_id: invocation_id.clone(),
-        chain_root_id: invocation_id.clone(),
-        kind: "service_run".to_string(),
-        item_ref: service_ref.to_string(),
-        executor_ref: endpoint.clone(),
-        launch_mode: "inline".to_string(),
-        current_site_id: ctx.plan_ctx.current_site_id.clone(),
-        origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-        upstream_thread_id: None,
-        requested_by: Some(ctx.principal_fingerprint.clone()),
-        project_root: match &ctx.plan_ctx.project_context {
-            ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
-            }
-            _ => None,
-        },
-        usage_subject: None,
-        usage_subject_asserted_by: None,
-    };
+    let thread_profile = ctx
+        .engine
+        .kinds
+        .get(&verified.resolved.kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.thread_profile.as_ref())
+        .map(|profile| profile.name.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "verified executable kind '{}' has no execution.thread_profile",
+                verified.resolved.kind
+            )
+        })?;
 
-    let audit_ok = record_thread && state.threads.create_thread(&create_params).is_ok();
-    if audit_ok {
-        let _ = state.threads.mark_running(&invocation_id);
-    }
+    // Only recorded services enter authoritative thread history. Keep every
+    // admission/create concern inside this branch so an unrecorded hot read
+    // neither composes history policy nor canonicalizes a persistence-only
+    // project path.
+    let audit_ok = if record_thread {
+        let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
+            &ctx.engine,
+            &ctx.plan_ctx,
+            verified.clone(),
+            &state.node_history_policy,
+            thread_profile.clone(),
+            std::collections::BTreeMap::new(),
+            None,
+            None,
+        )?;
+        let create_params = ryeos_app::thread_lifecycle::ThreadCreateParams {
+            thread_id: invocation_id.clone(),
+            chain_root_id: invocation_id.clone(),
+            kind: thread_profile,
+            item_ref: service_ref.to_string(),
+            executor_ref: endpoint.clone(),
+            launch_mode: "inline".to_string(),
+            current_site_id: ctx.plan_ctx.current_site_id.clone(),
+            origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+            upstream_thread_id: None,
+            requested_by: Some(ctx.principal_fingerprint.clone()),
+            project_root: match &ctx.plan_ctx.project_context {
+                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
+                    Some(path.canonicalize().with_context(|| {
+                        format!("canonicalize recorded service project {}", path.display())
+                    })?)
+                }
+                _ => None,
+            },
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: None,
+        };
+        state
+            .threads
+            .create_admitted_root_thread(&create_params, &root_admission)?;
+        state.threads.mark_running(&invocation_id)?;
+        true
+    } else {
+        false
+    };
 
     // 6. Inject typed handler context for service handlers.
     //    Handlers opt in via `_ctx: HandlerContext` with `#[serde(default)]`.

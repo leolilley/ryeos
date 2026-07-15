@@ -2482,6 +2482,10 @@ mod kind_contract_regressions {
                 ("offline_execute", ft_string()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
+                (
+                    "state_access",
+                    ft_string_enum(&["read_write", "read_only_existing"]),
+                ),
                 ("schema", ft_mapping()),
             ],
         )

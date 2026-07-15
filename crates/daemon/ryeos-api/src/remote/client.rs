@@ -299,44 +299,57 @@ impl RemoteClient {
     }
 
     /// POST /objects/has (authenticated).
-    pub async fn objects_has(&self, hashes: &[String]) -> Result<ObjectsHasResponse> {
-        if hashes_request_body_size(hashes) > HASH_REQUEST_BODY_BUDGET_BYTES {
-            let mut found = Vec::new();
-            let mut missing = Vec::new();
-            for chunk in chunk_hashes_for_body_budget(hashes, HASH_REQUEST_BODY_BUDGET_BYTES) {
-                let resp = self.objects_has_once(&chunk).await?;
-                found.extend(resp.found);
-                missing.extend(resp.missing);
-            }
-            let response = ObjectsHasResponse { found, missing };
-            response.validate_against_request(hashes)?;
-            return Ok(response);
+    ///
+    /// Object and blob digests stay typed throughout the protocol. A digest in
+    /// one namespace never satisfies a request for the other namespace.
+    pub async fn objects_has(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+    ) -> Result<ObjectsHasResponse> {
+        if typed_hashes_request_body_size(object_hashes, blob_hashes)
+            <= HASH_REQUEST_BODY_BUDGET_BYTES
+        {
+            return self.objects_has_once(object_hashes, blob_hashes).await;
         }
-        self.objects_has_once(hashes).await
+
+        let mut response = ObjectsHasResponse::default();
+        for chunk in
+            chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
+        {
+            let part = self.objects_has_once(&chunk, &[]).await?;
+            response
+                .found_object_hashes
+                .extend(part.found_object_hashes);
+            response
+                .missing_object_hashes
+                .extend(part.missing_object_hashes);
+        }
+        for chunk in chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
+        {
+            let part = self.objects_has_once(&[], &chunk).await?;
+            response.found_blob_hashes.extend(part.found_blob_hashes);
+            response
+                .missing_blob_hashes
+                .extend(part.missing_blob_hashes);
+        }
+        response.validate_against_request(object_hashes, blob_hashes)?;
+        Ok(response)
     }
 
-    async fn objects_has_once(&self, hashes: &[String]) -> Result<ObjectsHasResponse> {
-        let body = serde_json::json!({ "hashes": hashes });
+    async fn objects_has_once(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+    ) -> Result<ObjectsHasResponse> {
+        let body = serde_json::json!({
+            "object_hashes": object_hashes,
+            "blob_hashes": blob_hashes,
+        });
         let resp = self.signed_post("/objects/has", &body).await?;
-        let response = ObjectsHasResponse {
-            found: resp["found"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            missing: resp["missing"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
-        response.validate_against_request(hashes)?;
+        let response: ObjectsHasResponse =
+            serde_json::from_value(resp).context("failed to decode typed objects/has response")?;
+        response.validate_against_request(object_hashes, blob_hashes)?;
         Ok(response)
     }
 
@@ -346,6 +359,8 @@ impl RemoteClient {
     /// `{ "value": ... }` per the server's `ObjectEntry` schema.
     pub async fn objects_put(
         &self,
+        staging_id: Option<&str>,
+        project_path: &str,
         blobs: &[BlobUpload],
         objects: &[Value],
     ) -> Result<ObjectsPutResponse> {
@@ -355,11 +370,22 @@ impl RemoteClient {
             .map(|obj| serde_json::json!({ "value": obj }))
             .collect();
         let body = serde_json::json!({
+            "staging_id": staging_id,
+            "project_path": project_path,
             "blobs": blobs,
             "objects": wrapped_objects,
         });
         let resp = self.signed_post("/objects/put", &body).await?;
         Ok(ObjectsPutResponse {
+            staging_id: resp["staging_id"]
+                .as_str()
+                .context("objects/put response missing staging_id")?
+                .to_string(),
+            expected_previous_hash: match resp.get("expected_previous_hash") {
+                Some(Value::String(hash)) => Some(hash.clone()),
+                Some(Value::Null) => None,
+                _ => anyhow::bail!("objects/put response missing nullable expected_previous_hash"),
+            },
             blob_hashes: resp["blob_hashes"]
                 .as_array()
                 .map(|a| {
@@ -645,10 +671,18 @@ impl RemoteClient {
     }
 
     /// POST /push-head (authenticated).
-    pub async fn push_head(&self, project_path: &str, snapshot_hash: &str) -> Result<Value> {
+    pub async fn push_head(
+        &self,
+        project_path: &str,
+        snapshot_hash: &str,
+        staging_id: &str,
+        expected_previous_hash: Option<&str>,
+    ) -> Result<Value> {
         let body = serde_json::json!({
             "project_path": project_path,
             "snapshot_hash": snapshot_hash,
+            "staging_id": staging_id,
+            "expected_previous_hash": expected_previous_hash,
         });
         self.signed_post("/push-head", &body).await
     }
@@ -659,18 +693,12 @@ impl RemoteClient {
         project_path: &str,
         snapshot_hash: &str,
         expected_deployed_hash: Option<&str>,
-        force: bool,
     ) -> Result<Value> {
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
             "project_path": project_path,
             "snapshot_hash": snapshot_hash,
-            "force": force,
+            "expected_deployed_hash": expected_deployed_hash,
         });
-        if let Some(expected) = expected_deployed_hash {
-            body.as_object_mut()
-                .unwrap()
-                .insert("expected_deployed_hash".into(), serde_json::json!(expected));
-        }
         self.signed_post("/project/apply-snapshot", &body).await
     }
 
@@ -999,6 +1027,49 @@ fn hashes_request_body_size(hashes: &[String]) -> usize {
     serde_json::json!({ "hashes": hashes }).to_string().len()
 }
 
+fn typed_hashes_request_body_size(object_hashes: &[String], blob_hashes: &[String]) -> usize {
+    serde_json::json!({
+        "object_hashes": object_hashes,
+        "blob_hashes": blob_hashes,
+    })
+    .to_string()
+    .len()
+}
+
+fn chunk_typed_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) -> Vec<Vec<String>> {
+    if hashes.is_empty() {
+        return Vec::new();
+    }
+
+    let empty_body_size = typed_hashes_request_body_size(&[], &[]);
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut current_size = empty_body_size;
+    for hash in hashes {
+        let encoded_hash_size = serde_json::to_string(hash)
+            .expect("serializing a string as JSON cannot fail")
+            .len();
+        let separator_size = usize::from(!current.is_empty());
+        if !current.is_empty()
+            && current_size
+                .saturating_add(separator_size)
+                .saturating_add(encoded_hash_size)
+                > budget_bytes
+        {
+            chunks.push(std::mem::take(&mut current));
+            current_size = empty_body_size;
+        }
+        current_size = current_size
+            .saturating_add(usize::from(!current.is_empty()))
+            .saturating_add(encoded_hash_size);
+        current.push(hash.clone());
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 fn chunk_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) -> Vec<Vec<String>> {
     if hashes.is_empty() {
         return Vec::new();
@@ -1159,44 +1230,73 @@ impl PublicKeyResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectsHasResponse {
-    pub found: Vec<String>,
-    pub missing: Vec<String>,
+    pub found_object_hashes: Vec<String>,
+    pub missing_object_hashes: Vec<String>,
+    pub found_blob_hashes: Vec<String>,
+    pub missing_blob_hashes: Vec<String>,
 }
 
 impl ObjectsHasResponse {
-    pub fn validate_against_request(&self, requested: &[String]) -> Result<()> {
-        let requested_set: BTreeSet<&str> = requested.iter().map(String::as_str).collect();
-        if requested_set.len() != requested.len() {
-            anyhow::bail!("objects/has request contains duplicate hashes");
-        }
-
-        let mut seen = BTreeSet::new();
-        for hash in self.found.iter().chain(self.missing.iter()) {
-            if !is_canonical_hash(hash) {
-                anyhow::bail!("objects/has returned invalid hash: {hash}");
-            }
-            if !requested_set.contains(hash.as_str()) {
-                anyhow::bail!("objects/has returned unexpected hash: {hash}");
-            }
-            if !seen.insert(hash.as_str()) {
-                anyhow::bail!("objects/has returned duplicate hash: {hash}");
-            }
-        }
-
-        for hash in requested_set {
-            if !seen.contains(hash) {
-                anyhow::bail!("objects/has omitted requested hash: {hash}");
-            }
-        }
-
-        Ok(())
+    pub fn validate_against_request(
+        &self,
+        requested_objects: &[String],
+        requested_blobs: &[String],
+    ) -> Result<()> {
+        validate_hash_partition(
+            requested_objects,
+            &self.found_object_hashes,
+            &self.missing_object_hashes,
+            "object",
+        )?;
+        validate_hash_partition(
+            requested_blobs,
+            &self.found_blob_hashes,
+            &self.missing_blob_hashes,
+            "blob",
+        )
     }
+}
+
+fn validate_hash_partition(
+    requested: &[String],
+    found: &[String],
+    missing: &[String],
+    namespace: &str,
+) -> Result<()> {
+    let requested_set: BTreeSet<&str> = requested.iter().map(String::as_str).collect();
+    if requested_set.len() != requested.len() {
+        anyhow::bail!("objects/has request contains duplicate {namespace} hashes");
+    }
+
+    let mut seen = BTreeSet::new();
+    for hash in found.iter().chain(missing.iter()) {
+        if !is_canonical_hash(hash) {
+            anyhow::bail!("objects/has returned invalid {namespace} hash: {hash}");
+        }
+        if !requested_set.contains(hash.as_str()) {
+            anyhow::bail!("objects/has returned unexpected {namespace} hash: {hash}");
+        }
+        if !seen.insert(hash.as_str()) {
+            anyhow::bail!("objects/has returned duplicate {namespace} hash: {hash}");
+        }
+    }
+
+    for hash in requested_set {
+        if !seen.contains(hash) {
+            anyhow::bail!("objects/has omitted requested {namespace} hash: {hash}");
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
 pub struct ObjectsPutResponse {
+    pub staging_id: String,
+    pub expected_previous_hash: Option<String>,
     pub blob_hashes: Vec<String>,
     pub object_hashes: Vec<String>,
 }
@@ -1799,6 +1899,11 @@ impl RemoteSignedRef {
         if !is_canonical_hash(&self.target_hash) {
             anyhow::bail!("invalid signed ref target hash: {}", self.target_hash);
         }
+        ryeos_state::parse_canonical_timestamp(&self.updated_at)
+            .map_err(|error| anyhow::anyhow!("invalid signed ref updated_at: {error}"))?;
+        if !is_canonical_hash(&self.signer) {
+            anyhow::bail!("invalid signed ref signer fingerprint: {}", self.signer);
+        }
         Ok(())
     }
 
@@ -2181,7 +2286,7 @@ pub struct AuthorizeKeyResponse {
 }
 
 /// A blob to upload, with base64-encoded data.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BlobUpload {
     pub data: String,
 }
@@ -2302,24 +2407,26 @@ mod tests {
         let a = "11".repeat(32);
         let b = "22".repeat(32);
         ObjectsHasResponse {
-            found: vec![a.clone()],
-            missing: vec![b.clone()],
+            found_object_hashes: vec![a.clone()],
+            missing_object_hashes: vec![b.clone()],
+            ..Default::default()
         }
-        .validate_against_request(&[a.clone(), b.clone()])
+        .validate_against_request(&[a.clone(), b.clone()], &[])
         .unwrap();
 
         assert!(ObjectsHasResponse {
-            found: vec![a.clone()],
-            missing: vec![],
+            found_object_hashes: vec![a.clone()],
+            ..Default::default()
         }
-        .validate_against_request(&[a.clone(), b.clone()])
+        .validate_against_request(&[a.clone(), b.clone()], &[])
         .is_err());
 
         assert!(ObjectsHasResponse {
-            found: vec![a.clone()],
-            missing: vec![a.clone()],
+            found_blob_hashes: vec![a.clone()],
+            missing_blob_hashes: vec![a.clone()],
+            ..Default::default()
         }
-        .validate_against_request(&[a, b])
+        .validate_against_request(&[], &[a, b])
         .is_err());
     }
 
@@ -2489,7 +2596,7 @@ mod tests {
                 "name": "subject-a",
                 "ref_path": "admissions/policy-a/subject-a/head",
                 "target_hash": "11".repeat(32),
-                "signer": "fp:node",
+                "signer": "aa".repeat(32),
                 "updated_at": "2026-05-30T00:00:01Z",
                 "signed_ref": {
                     "schema": 1,
@@ -2497,7 +2604,7 @@ mod tests {
                     "ref_path": "admissions/policy-a/subject-a/head",
                     "target_hash": "11".repeat(32),
                     "updated_at": "2026-05-30T00:00:01Z",
-                    "signer": "fp:node",
+                    "signer": "aa".repeat(32),
                     "signature": "sig"
                 }
             }]
@@ -2515,7 +2622,7 @@ mod tests {
                 "name": "subject-a",
                 "ref_path": "admissions/policy-a/subject-a/head",
                 "target_hash": "AA".repeat(32),
-                "signer": "fp:node",
+                "signer": "aa".repeat(32),
                 "updated_at": "2026-05-30T00:00:01Z",
                 "signed_ref": {
                     "schema": 1,
@@ -2523,7 +2630,7 @@ mod tests {
                     "ref_path": "admissions/policy-a/subject-a/head",
                     "target_hash": "AA".repeat(32),
                     "updated_at": "2026-05-30T00:00:01Z",
-                    "signer": "fp:node",
+                    "signer": "aa".repeat(32),
                     "signature": "sig"
                 }
             }]

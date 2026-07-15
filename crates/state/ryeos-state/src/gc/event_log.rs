@@ -3,7 +3,8 @@
 //! One JSON line per GC run at `runtime_state_dir/logs/gc.jsonl`.
 //! Provides operational observability: when did GC run, how much did it free.
 
-use std::fs::{self, OpenOptions};
+#[cfg(test)]
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
@@ -26,6 +27,9 @@ pub struct GcEvent {
     /// Schedule-fire JSONL lines dropped by the retention sweep.
     #[serde(default)]
     pub deleted_fire_records: usize,
+    /// Terminal rows dropped from the scheduler fire projection.
+    #[serde(default)]
+    pub deleted_fire_projection_rows: usize,
     /// Terminal sync-job rows dropped by the retention sweep.
     #[serde(default)]
     pub deleted_sync_jobs: usize,
@@ -35,9 +39,19 @@ pub struct GcEvent {
     #[serde(default)]
     pub reaped_seats: usize,
     #[serde(default)]
-    pub retired_service_chains: usize,
+    pub terminal_chain_candidates: usize,
     #[serde(default)]
-    pub deleted_service_chain_rows: usize,
+    pub retired_terminal_chains: usize,
+    #[serde(default)]
+    pub deleted_thread_projection_rows: usize,
+    #[serde(default)]
+    pub deleted_thread_runtime_rows: usize,
+    #[serde(default)]
+    pub deleted_thread_runtime_files: usize,
+    #[serde(default)]
+    pub pending_retirements_recovered: usize,
+    #[serde(default)]
+    pub retired_durable_cas_uploads: usize,
     pub freed_bytes: u64,
     pub snapshots_compacted: usize,
     pub duration_ms: u64,
@@ -62,11 +76,17 @@ impl GcEvent {
             deleted_blobs: result.deleted_blobs,
             deleted_runtime_files: result.deleted_runtime_files,
             deleted_fire_records: result.deleted_fire_records,
+            deleted_fire_projection_rows: result.deleted_fire_projection_rows,
             deleted_sync_jobs: result.deleted_sync_jobs,
             deleted_sync_job_attempts: result.deleted_sync_job_attempts,
             reaped_seats: result.reaped_seats,
-            retired_service_chains: result.retired_service_chains,
-            deleted_service_chain_rows: result.deleted_service_chain_rows,
+            terminal_chain_candidates: result.terminal_chain_candidates,
+            retired_terminal_chains: result.retired_terminal_chains,
+            deleted_thread_projection_rows: result.deleted_thread_projection_rows,
+            deleted_thread_runtime_rows: result.deleted_thread_runtime_rows,
+            deleted_thread_runtime_files: result.deleted_thread_runtime_files,
+            pending_retirements_recovered: result.pending_retirements_recovered,
+            retired_durable_cas_uploads: result.retired_durable_cas_uploads,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
@@ -82,20 +102,30 @@ impl GcEvent {
 ///
 /// Creates the log directory and file if they don't exist.
 pub fn append_event(runtime_state_dir: &Path, event: &GcEvent) -> Result<()> {
-    let log_dir = runtime_state_dir.join("logs");
-    let log_path = log_dir.join("gc.jsonl");
+    let runtime_directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
+        .context("failed to open runtime-state directory for GC event log")?;
+    append_event_in_directory(&runtime_directory, event)
+}
 
-    fs::create_dir_all(&log_dir).context("failed to create GC log directory")?;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+/// Append a GC event beneath one already-pinned runtime root.
+pub fn append_event_in_directory(
+    runtime_directory: &lillux::PinnedDirectory,
+    event: &GcEvent,
+) -> Result<()> {
+    let log_directory = runtime_directory
+        .open_or_create_child(std::ffi::OsStr::new("logs"), 0o700)
+        .context("failed to create GC log directory")?;
+    let name = std::ffi::OsStr::new("gc.jsonl");
+    let lock = lillux::ExclusiveFileLock::acquire_in(&log_directory, name)?;
+    let mut file = lock
+        .open_target_append_create()
         .context("failed to open GC event log")?;
 
     let line = serde_json::to_string(event).context("failed to serialize GC event")?;
 
     writeln!(file, "{}", line).context("failed to write GC event")?;
+    file.sync_data().context("failed to sync GC event log")?;
+    lock.sync_parent()?;
 
     Ok(())
 }
@@ -120,11 +150,17 @@ mod tests {
             deleted_blobs: 5,
             deleted_runtime_files: 0,
             deleted_fire_records: 0,
+            deleted_fire_projection_rows: 0,
             deleted_sync_jobs: 0,
             deleted_sync_job_attempts: 0,
             reaped_seats: 0,
-            retired_service_chains: 0,
-            deleted_service_chain_rows: 0,
+            terminal_chain_candidates: 0,
+            retired_terminal_chains: 0,
+            deleted_thread_projection_rows: 0,
+            deleted_thread_runtime_rows: 0,
+            deleted_thread_runtime_files: 0,
+            pending_retirements_recovered: 0,
+            retired_durable_cas_uploads: 0,
             freed_bytes: 4096,
             snapshots_compacted: 0,
             duration_ms: 150,
@@ -158,11 +194,17 @@ mod tests {
                 deleted_blobs: 2,
                 deleted_runtime_files: 0,
                 deleted_fire_records: 0,
+                deleted_fire_projection_rows: 0,
                 deleted_sync_jobs: 0,
                 deleted_sync_job_attempts: 0,
                 reaped_seats: 0,
-                retired_service_chains: 0,
-                deleted_service_chain_rows: 0,
+                terminal_chain_candidates: 0,
+                retired_terminal_chains: 0,
+                deleted_thread_projection_rows: 0,
+                deleted_thread_runtime_rows: 0,
+                deleted_thread_runtime_files: 0,
+                pending_retirements_recovered: 0,
+                retired_durable_cas_uploads: 0,
                 freed_bytes: 1024,
                 snapshots_compacted: 0,
                 duration_ms: 100,

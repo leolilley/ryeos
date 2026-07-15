@@ -1261,16 +1261,31 @@ mod tests {
         let signer = std::sync::Arc::new(
             ryeos_app::state_store::NodeIdentitySigner::from_identity(&identity),
         );
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            identity.verifying_key().clone(),
+        );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
         let state_store = std::sync::Arc::new(
-            ryeos_app::state_store::StateStore::new(
+            ryeos_app::state_store::StateStore::new_with_head_trust(
+                tmpdir.path().to_path_buf(),
                 runtime_state_dir,
                 runtime_db_path,
                 signer,
                 write_barrier.clone(),
+                std::sync::Arc::new(head_trust),
             )
             .unwrap(),
         );
+        let engine = std::sync::Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ));
         let kind_profiles =
             std::sync::Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
         let events = std::sync::Arc::new(ryeos_app::event_store_service::EventStoreService::new(
@@ -1280,6 +1295,7 @@ mod tests {
         let threads = std::sync::Arc::new(
             ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
                 state_store.clone(),
+                engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
@@ -1291,14 +1307,6 @@ mod tests {
             kind_profiles,
             events.clone(),
         ));
-        let engine = ryeos_engine::engine::Engine::new(
-            ryeos_engine::kind_registry::KindRegistry::empty(),
-            ryeos_engine::parsers::ParserDispatcher::new(
-                ryeos_engine::parsers::ParserRegistry::empty(),
-                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-            ),
-            Vec::new(),
-        );
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
             bundles: vec![],
             routes: vec![],
@@ -1314,7 +1322,7 @@ mod tests {
             config: std::sync::Arc::new(config),
             sandbox: std::sync::Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
             state_store,
-            engine: std::sync::Arc::new(engine),
+            engine,
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -1339,6 +1347,9 @@ mod tests {
             services: std::sync::Arc::new(crate::registry::build_service_registry()),
             service_descriptors: crate::handlers::ALL,
             node_config: std::sync::Arc::new(snapshot.clone()),
+            node_history_policy: std::sync::Arc::new(
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            ),
             vault: std::sync::Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: test_command_registry,
             authorizer: test_auth,

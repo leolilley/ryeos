@@ -68,6 +68,27 @@ fn unwrap_tool_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> V
     })
 }
 
+/// Execute a service that deliberately retains the default recorded-thread
+/// behavior and return its durable service thread id.
+async fn recorded_service_thread_id(h: &DaemonHarness) -> String {
+    let (status, body) = exec(h, "service:bundle/list", json!({})).await;
+    assert!(
+        status.is_success(),
+        "recorded bundle.list service failed: {body}"
+    );
+    let tid = body
+        .get("thread")
+        .and_then(|thread| thread.get("thread_id"))
+        .and_then(Value::as_str)
+        .expect("recorded service response carries thread.thread_id")
+        .to_string();
+    assert!(
+        tid.starts_with("svc-"),
+        "recorded service thread id should start with svc-, got {tid}"
+    );
+    tid
+}
+
 // ── 3.1 node/status ────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
@@ -142,33 +163,22 @@ async fn service_threads_list_empty_on_fresh_daemon() {
         .get("threads")
         .and_then(|v| v.as_array())
         .expect("threads array");
-    // A freshly spawned daemon has only the audit thread for THIS very call,
-    // because every service execution creates a `svc-…` audit row. So we
-    // expect EXACTLY one thread, and its id starts with `svc-`.
+    // threads/list is an unrecorded hot read. It must not create the row that
+    // it is trying to observe.
     assert_eq!(
         threads.len(),
-        1,
-        "fresh daemon should have exactly 1 audit thread; got: {result}"
-    );
-    let only = &threads[0];
-    let tid = only
-        .get("thread_id")
-        .and_then(|v| v.as_str())
-        .expect("thread_id");
-    assert!(
-        tid.starts_with("svc-"),
-        "audit thread id should start with svc-, got {tid}"
+        0,
+        "fresh daemon should have no recorded threads; got: {result}"
     );
 }
 
-// ── 3.5 threads/list — populated case ───────────────────────────────────
+// ── 3.5 hot read services do not create threads
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_threads_list_grows_with_each_call() {
+async fn hot_read_services_do_not_create_threads() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    // Each successful service call creates an audit thread row. Call
-    // `node.status` 3 times, then check `threads.list` returns at
-    // least 4 (the 3 calls plus the threads.list call itself).
+    // Neither node/status nor threads/list records a service thread. Repeated
+    // observation must therefore leave the projection empty.
     for _ in 0..3 {
         let (s, b) = exec(&h, "service:node/status", json!({})).await;
         assert!(s.is_success(), "node.status failed: {b}");
@@ -179,28 +189,19 @@ async fn service_threads_list_grows_with_each_call() {
         .get("threads")
         .and_then(|v| v.as_array())
         .expect("threads array");
-    assert!(
-        threads.len() >= 4,
-        "expected ≥4 audit threads after 3 status calls + 1 list call, got {} ({})",
+    assert_eq!(
         threads.len(),
-        result
+        0,
+        "hot reads must not create durable service threads: {result}"
     );
 }
 
-// ── 3.6 threads/get — round-trip via captured audit id ──────────────────
+// ── 3.6 threads/get — round-trip via recorded service id
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_threads_get_returns_audit_row() {
+async fn service_threads_get_returns_recorded_service_row() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    // Run any Both service to mint an audit thread.
-    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
-    let tid = body1
-        .get("thread")
-        .and_then(|t| t.get("thread_id"))
-        .and_then(|v| v.as_str())
-        .expect("thread_id from envelope")
-        .to_string();
-    assert!(tid.starts_with("svc-"));
+    let tid = recorded_service_thread_id(&h).await;
 
     let (status, body2) = exec(&h, "service:threads/get", json!({"thread_id": tid})).await;
     let result = unwrap_result(status, &body2, "threads.get");
@@ -241,17 +242,16 @@ async fn service_threads_get_missing_returns_null() {
     );
 }
 
-// ── 3.8 threads/chain — round-trip via audit id ─────────────────────────
+// ── 3.8 threads/chain — round-trip via recorded service id
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_threads_chain_returns_chain_for_audit_thread() {
+async fn service_threads_chain_returns_chain_for_recorded_service() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
-    let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
+    let tid = recorded_service_thread_id(&h).await;
 
     let (status, body2) = exec(&h, "service:threads/chain", json!({"thread_id": tid})).await;
     let result = unwrap_result(status, &body2, "threads.chain");
-    // The audit thread is its own chain root (chain_root_id == thread_id).
+    // The recorded service thread is its own chain root.
     // Result is either null (chain not modeled for service-run) OR a
     // structured chain object. Accept both, but if non-null, must be an object.
     if !result.is_null() {
@@ -262,13 +262,12 @@ async fn service_threads_chain_returns_chain_for_audit_thread() {
     }
 }
 
-// ── 3.9 threads/children — empty for leaf audit thread ──────────────────
+// ── 3.9 threads/children — empty for recorded service leaf
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_threads_children_returns_empty_for_audit_thread() {
+async fn service_threads_children_returns_empty_for_recorded_service() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
-    let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
+    let tid = recorded_service_thread_id(&h).await;
 
     let (status, body2) = exec(&h, "service:threads/children", json!({"thread_id": tid})).await;
     let result = unwrap_result(status, &body2, "threads.children");
@@ -276,20 +275,19 @@ async fn service_threads_children_returns_empty_for_audit_thread() {
         .get("children")
         .and_then(|v| v.as_array())
         .expect("children array");
-    // Audit thread is a leaf; no children.
+    // The recorded service thread is a leaf; it has no children.
     assert!(
         children.is_empty(),
-        "audit thread should have no children, got {result}"
+        "recorded service thread should have no children, got {result}"
     );
 }
 
 // ── 3.10 events/replay — replay scoped to a thread ──────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_events_replay_returns_events_for_audit_thread() {
+async fn service_events_replay_returns_events_for_recorded_service() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
-    let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
+    let tid = recorded_service_thread_id(&h).await;
 
     let (status, body2) = exec(
         &h,
@@ -312,11 +310,10 @@ async fn service_events_replay_returns_events_for_audit_thread() {
 // ── 3.11 events/chain_replay — replay scoped to a chain ─────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_events_chain_replay_returns_events_for_audit_chain() {
+async fn service_events_chain_replay_returns_events_for_recorded_service_chain() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
-    // For service-run threads, chain_root_id == thread_id (see service_executor.rs).
-    let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
+    // Recorded service threads are their own chain roots.
+    let tid = recorded_service_thread_id(&h).await;
 
     let (status, body2) = exec(
         &h,
@@ -543,11 +540,9 @@ async fn service_maintenance_gc_real_run_writes_event_log() {
 // ── 3.19 commands/submit — DaemonOnly, requires existing thread ──────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_commands_submit_against_audit_thread() {
+async fn service_commands_submit_against_recorded_service_thread() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    // First mint an audit thread by running a Both service.
-    let (_, body1) = exec(&h, "service:node/status", json!({})).await;
-    let tid = body1["thread"]["thread_id"].as_str().unwrap().to_string();
+    let tid = recorded_service_thread_id(&h).await;
 
     let (status, body) = exec(
         &h,
@@ -556,7 +551,7 @@ async fn service_commands_submit_against_audit_thread() {
     )
     .await;
     // Either the submit succeeds (handler created a command record), OR
-    // it fails because the audit thread is already in `completed` status
+    // it fails because the recorded service thread is already `completed`
     // and command_service refuses commands on completed threads. Both
     // are valid outcomes — what we're proving is the handler runs.
     if status.is_success() {
@@ -585,7 +580,8 @@ async fn service_commands_submit_against_audit_thread() {
 async fn service_offline_only_services_reject_in_live_mode() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     for svc in &[
-        "service:rebuild",
+        "service:projection/verify",
+        "service:projection/rebuild",
         "service:bundle/install",
         "service:bundle/remove",
     ] {

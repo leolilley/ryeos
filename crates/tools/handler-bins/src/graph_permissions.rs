@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use ryeos_handler_protocol::{ComposeRequest, ComposeSuccess, ResolutionStepNameWire};
+use ryeos_handler_protocol::{
+    ComposeRequest, ComposeSuccess, ComposerFieldRequirement, ComposerFieldSemantics,
+    ResolutionStepNameWire,
+};
 use serde_json::Value;
 
 pub fn validate_config(config: &Value) -> Result<(), String> {
@@ -17,6 +20,28 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
             value_type(other)
         )),
     }
+}
+
+/// Graph-permissions copies the complete parsed root before deriving separate
+/// policy facts. It therefore supports exact root fields, but not ancestor
+/// inheritance.
+pub fn validate_field_requirements(
+    requirements: &[ComposerFieldRequirement],
+) -> Result<(), String> {
+    for requirement in requirements {
+        if requirement.field.is_empty() {
+            return Err(
+                "graph_permissions composer field requirement must not be empty".to_string(),
+            );
+        }
+        if requirement.semantics != ComposerFieldSemantics::RootVerbatim {
+            return Err(format!(
+                "graph_permissions composer cannot provide {:?} semantics for field `{}`; it only preserves root fields verbatim",
+                requirement.semantics, requirement.field
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn compose(
@@ -219,6 +244,20 @@ mod tests {
     fn declared_non_string_rejected() {
         let err = compose_err(json!({ "requires": { "capabilities": { "declared": [42] } } }));
         assert!(err.contains("only strings"), "got: {err}");
+    }
+
+    #[test]
+    fn exact_field_requirements_are_root_only() {
+        validate_field_requirements(&[ComposerFieldRequirement {
+            field: "policy".into(),
+            semantics: ComposerFieldSemantics::RootVerbatim,
+        }])
+        .unwrap();
+        assert!(validate_field_requirements(&[ComposerFieldRequirement {
+            field: "policy".into(),
+            semantics: ComposerFieldSemantics::InheritOrReplace,
+        }])
+        .is_err());
     }
 
     fn manifest(inner: Value) -> Value {

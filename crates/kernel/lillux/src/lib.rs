@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod exec;
 pub mod identity;
 pub mod locks;
+pub mod secure_fs;
 pub mod signature;
 pub mod time;
 pub mod vault;
@@ -20,10 +21,15 @@ pub use atomic_fs::{
     AtomicMutationError, AtomicMutationResult,
 };
 pub use cas::{
-    atomic_write_batch, canonical_json, sha256_hex, shard_path, valid_hash, CanonicalJsonError,
-    CasStore,
+    atomic_write_batch, atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path,
+    valid_hash, CanonicalJsonError, CasPutOutcome, CasStore,
 };
 pub use locks::{with_exclusive_file_lock, ExclusiveFileLock};
+pub use secure_fs::{
+    collect_directory_tree_no_follow, collect_regular_files_no_follow, read_regular_file_no_follow,
+    read_regular_file_to_string_no_follow, NoFollowDirectoryTree, PinnedDirectory,
+    PinnedRegularFile,
+};
 
 pub use identity::envelope::{
     inspect_envelope, open_envelope, seal_envelope, validate_envelope_env, AadFields, Envelope,

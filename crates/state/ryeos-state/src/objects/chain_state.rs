@@ -13,7 +13,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::{validate_object_kind, SCHEMA_VERSION};
-use crate::objects::thread_snapshot::ThreadStatus;
+use crate::objects::thread_snapshot::{
+    parse_canonical_timestamp, validate_canonical_hash, ThreadStatus,
+};
 
 /// Entry for a single thread within a ChainState.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,13 +37,9 @@ impl ChainThreadEntry {
         if self.snapshot_hash.is_empty() {
             anyhow::bail!("snapshot_hash must not be empty");
         }
-        if !lillux::valid_hash(&self.snapshot_hash) {
-            anyhow::bail!("invalid snapshot_hash: {}", self.snapshot_hash);
-        }
+        validate_canonical_hash("snapshot_hash", &self.snapshot_hash)?;
         if let Some(hash) = &self.last_event_hash {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid last_event_hash: {hash}");
-            }
+            validate_canonical_hash("last_event_hash", hash)?;
         }
         Ok(())
     }
@@ -143,18 +141,13 @@ impl ChainState {
             anyhow::bail!("chain_root_id must not be empty");
         }
         if let Some(hash) = &self.prev_chain_state_hash {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid prev_chain_state_hash: {hash}");
-            }
+            validate_canonical_hash("prev_chain_state_hash", hash)?;
         }
         if let Some(hash) = &self.last_event_hash {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid last_event_hash: {hash}");
-            }
+            validate_canonical_hash("last_event_hash", hash)?;
         }
-        if self.updated_at.is_empty() {
-            anyhow::bail!("updated_at must not be empty");
-        }
+        parse_canonical_timestamp(&self.updated_at)
+            .map_err(|error| anyhow::anyhow!("invalid chain state updated_at: {error}"))?;
 
         // Validate all thread entries
         for (thread_id, entry) in &self.threads {
@@ -384,6 +377,22 @@ mod tests {
             .build();
 
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn chain_state_validation_rejects_noncanonical_timestamp_and_uppercase_hash() {
+        let noncanonical_time = ChainStateBuilder::new("T-root")
+            .updated_at("2026-04-21T12:00:00+00:00".to_string())
+            .thread("T-root", make_thread_entry("01"))
+            .build();
+        assert!(noncanonical_time.validate().is_err());
+
+        let uppercase_hash = ChainStateBuilder::new("T-root")
+            .prev_chain_state_hash(Some("AA".repeat(32)))
+            .updated_at("2026-04-21T12:00:00Z".to_string())
+            .thread("T-root", make_thread_entry("01"))
+            .build();
+        assert!(uppercase_hash.validate().is_err());
     }
 
     #[test]

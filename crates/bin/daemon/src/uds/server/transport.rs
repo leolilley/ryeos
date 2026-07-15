@@ -6,38 +6,27 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::DynamicServerState;
 use crate::uds::protocol::RpcRequest;
-use ryeos_app::state::AppState;
 
-const MAX_FRAME_SIZE: u32 = 10 * 1024 * 1024;
 const FRAME_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub(super) async fn handle_connection(
     mut stream: UnixStream,
-    state: Arc<AppState>,
+    state: DynamicServerState,
     frame_bytes: Arc<Semaphore>,
-    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     loop {
         // A persistent callback client keeps this stream open between requests.
         // Once shutdown is visible, stop before admitting another frame. If a
         // frame wins this biased race first, it is the connection's one
         // already-admitted request and is allowed to drain below.
-        if *shutdown.borrow() {
+        if crate::shutdown_requested() {
             return Ok(());
         }
-        let frame = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    return Ok(());
-                }
-                continue;
-            }
-            frame = read_frame(&mut stream, &frame_bytes) => frame?,
-        };
+        let frame = read_frame(&mut stream, &frame_bytes).await?;
         let Some((frame, frame_permit)) = frame else {
             return Ok(());
         };
@@ -76,11 +65,11 @@ pub(super) async fn handle_connection(
         // waiter. A forced connection-task abort drops this JoinHandle, which
         // detaches (rather than aborts) the owner; shutdown's process-admission
         // fence and exact-identity drain can then settle any subprocess it owns.
-        let request_state = Arc::clone(&state);
+        let request_state = state.clone();
         let request_owner = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 let _frame_permit = frame_permit;
-                super::routing::dispatch_with_peer(request, &request_state, peer.as_ref()).await
+                super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await
             },
             span,
         ));
@@ -156,11 +145,11 @@ async fn read_frame(
 }
 
 fn validate_frame_len(frame_len: u32) -> Result<u32> {
-    if frame_len > MAX_FRAME_SIZE {
+    if frame_len > ryeos_node::LIFECYCLE_FRAME_MAX_BYTES {
         return Err(anyhow!(
             "frame too large: {} bytes (max {})",
             frame_len,
-            MAX_FRAME_SIZE
+            ryeos_node::LIFECYCLE_FRAME_MAX_BYTES
         ));
     }
     Ok(frame_len)
@@ -187,15 +176,21 @@ mod tests {
 
     #[test]
     fn frame_size_boundary_is_inclusive() {
-        assert_eq!(validate_frame_len(MAX_FRAME_SIZE).unwrap(), MAX_FRAME_SIZE);
+        assert_eq!(
+            validate_frame_len(ryeos_node::LIFECYCLE_FRAME_MAX_BYTES).unwrap(),
+            ryeos_node::LIFECYCLE_FRAME_MAX_BYTES
+        );
     }
 
     #[test]
     fn oversized_frame_preserves_wire_error_wording() {
-        let frame_len = MAX_FRAME_SIZE + 1;
+        let frame_len = ryeos_node::LIFECYCLE_FRAME_MAX_BYTES + 1;
         assert_eq!(
             validate_frame_len(frame_len).unwrap_err().to_string(),
-            format!("frame too large: {frame_len} bytes (max {MAX_FRAME_SIZE})")
+            format!(
+                "frame too large: {frame_len} bytes (max {})",
+                ryeos_node::LIFECYCLE_FRAME_MAX_BYTES
+            )
         );
     }
 }

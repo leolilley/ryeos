@@ -2,89 +2,14 @@
 //!
 //! Parses schedule spec YAML files from `.ai/node/schedules/<name>.yaml`.
 
-use std::collections::BTreeMap;
-
-use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
 
-/// A parsed schedule spec loaded from `.ai/node/schedules/<name>.yaml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScheduleRecord {
-    pub spec_version: u32,
-    pub schedule_id: String,
-    pub item_ref: String,
-    pub ref_bindings: BTreeMap<String, String>,
-    pub schedule_type: String,
-    pub expression: String,
-    #[serde(default = "default_params")]
-    pub params: Value,
-    #[serde(default = "default_utc")]
-    pub timezone: String,
-    #[serde(default)]
-    pub misfire_policy: Option<String>,
-    #[serde(default)]
-    pub overlap_policy: Option<String>,
-    #[serde(default)]
-    pub lateness_grace_secs: Option<i64>,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub project_root: Option<String>,
-    /// Canonical registration timestamp (millis since epoch).
-    /// Set once at creation, preserved on updates. Used as anchor for first-fire calculation.
-    #[serde(default)]
-    pub registered_at: Option<i64>,
-    /// Execution authority — who this schedule runs as and with what capabilities.
-    /// Set at registration time by scheduler_register. Read by projection on rebuild.
-    #[serde(default)]
-    pub execution: Option<ScheduleExecution>,
-    /// Ownership metadata for specs reconciled from project-authored intent.
-    /// Node-owned runtime specs use this only for admission/reconciliation;
-    /// dispatch authority still comes from `execution`.
-    #[serde(default)]
-    pub managed_by: Option<ScheduleManagedBy>,
-    /// Path to the YAML file. Set by loader.
-    #[serde(skip)]
-    pub source_file: std::path::PathBuf,
-}
-
-/// Execution authority persisted in schedule YAML.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduleExecution {
-    pub requester_fingerprint: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScheduleManagedBy {
-    #[serde(rename = "type")]
-    pub managed_type: String,
-    pub project_root: String,
-    pub project_key: String,
-    pub source_snapshot_hash: String,
-    pub source_path: String,
-    pub source_body_hash: String,
-    #[serde(default)]
-    pub source_signer_fingerprint: Option<String>,
-}
-
-fn default_utc() -> String {
-    "UTC".to_string()
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_params() -> Value {
-    serde_json::json!({})
-}
+pub use ryeos_scheduler::types::{
+    ScheduleExecution, ScheduleManagedBy, ScheduleSourceRecord as ScheduleRecord,
+};
 
 pub struct ScheduleSection;
 
@@ -94,85 +19,14 @@ impl NodeConfigSection for ScheduleSection {
     }
 
     fn parse(&self, ctx: &NodeItemContext, body: &Value) -> Result<Box<dyn SectionRecord>> {
-        let record: ScheduleRecord = serde_json::from_value(body.clone())
-            .context("failed to parse schedule record")?;
-
-        if record.schedule_id != ctx.id {
-            bail!(
-                "schedule record declares schedule_id '{}' but filename is '{}'",
-                record.schedule_id,
-                ctx.id
-            );
-        }
-
-        if record.spec_version != 1 {
-            bail!(
-                "schedule record declares spec_version {} but only 1 is supported",
-                record.spec_version
-            );
-        }
-
-        // Validate schedule_id syntax
-        ryeos_scheduler::crontab::validate_schedule_id(&record.schedule_id)?;
-
-        // Validate item_ref is a parseable canonical ref
-        ryeos_engine::canonical_ref::CanonicalRef::parse(&record.item_ref).with_context(|| {
-            format!("invalid item_ref '{}' in schedule record", record.item_ref)
-        })?;
-        for (name, item_ref) in &record.ref_bindings {
-            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).with_context(|| {
-                format!("invalid ref_bindings.{name} '{item_ref}' in schedule record")
-            })?;
-        }
-
-        // Validate expression parses for the given type
-        ryeos_scheduler::crontab::validate_expression(&record.schedule_type, &record.expression)?;
-
-        // Validate timezone
-        ryeos_scheduler::crontab::validate_timezone(&record.timezone)?;
-
-        // Validate overlap_policy (all policies ship day 1: allow, skip, cancel_previous)
-        if let Some(ref p) = record.overlap_policy {
-            if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
-                bail!("invalid overlap_policy '{}': must be allow, skip, or cancel_previous", p);
-            }
-        }
-
-        // Validate misfire_policy (all policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S)
-        if let Some(ref p) = record.misfire_policy {
-            if !is_valid_misfire_policy(p) {
-                bail!(
-                    "invalid misfire_policy '{}': must be skip, fire_once_now, catch_up_bounded:N, or catch_up_within_secs:S",
-                    p
-                );
-            }
-        }
-
-        if let Some(secs) = record.lateness_grace_secs {
-            if secs <= 0 {
-                bail!("lateness_grace_secs must be positive, got: {}", secs);
-            }
-        }
+        let record: ScheduleRecord =
+            serde_json::from_value(body.clone()).context("failed to parse schedule record")?;
+        record.validate(Some(&ctx.id))?;
 
         // at schedules in the past are rejected at registration time (service),
         // but not at load time (they may have been valid when registered).
 
         Ok(Box::new(record))
-    }
-}
-
-fn is_valid_misfire_policy(p: &str) -> bool {
-    match p {
-        "skip" | "fire_once_now" => true,
-        s if s.starts_with("catch_up_bounded:") => s
-            .strip_prefix("catch_up_bounded:")
-            .and_then(|n| n.parse::<usize>().ok())
-            .is_some(),
-        s if s.starts_with("catch_up_within_secs:") => s
-            .strip_prefix("catch_up_within_secs:")
-            .and_then(|n| n.parse::<u64>().ok())
-            .is_some(),
-        _ => false,
     }
 }
 
@@ -207,14 +61,28 @@ mod tests {
             "schedule_type": "interval",
             "expression": "60",
             "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
             "enabled": true,
+            "params": {},
+            "project_root": null,
+            "registered_at": 1_700_000_000_000_i64,
+            "execution": {
+                "requester_fingerprint": "fp:test",
+                "capabilities": ["ryeos.execute.directive.*"],
+            },
+            "managed_by": null,
         })
     }
 
     #[test]
     fn source_policy_is_system_and_state() {
         let section = ScheduleSection;
-        assert!(matches!(section.source_policy(), SectionSourcePolicy::SystemAndState));
+        assert!(matches!(
+            section.source_policy(),
+            SectionSourcePolicy::SystemAndState
+        ));
     }
 
     #[test]
@@ -228,8 +96,8 @@ mod tests {
         assert_eq!(record.schedule_type, "interval");
         assert_eq!(record.expression, "60");
         assert!(record.enabled);
-        assert_eq!(record.misfire_policy, None);
-        assert_eq!(record.overlap_policy, None);
+        assert_eq!(record.misfire_policy, "fire_once_now");
+        assert_eq!(record.overlap_policy, "skip");
     }
 
     #[test]
@@ -242,9 +110,9 @@ mod tests {
 
         let result = section.parse(&ctx("my-schedule"), &body).unwrap();
         let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
-        assert_eq!(record.misfire_policy.as_deref(), Some("fire_once_now"));
-        assert_eq!(record.overlap_policy.as_deref(), Some("cancel_previous"));
-        assert_eq!(record.lateness_grace_secs, Some(30));
+        assert_eq!(record.misfire_policy, "fire_once_now");
+        assert_eq!(record.overlap_policy, "cancel_previous");
+        assert_eq!(record.lateness_grace_secs, 30);
     }
 
     #[test]
@@ -387,6 +255,70 @@ mod tests {
         let result = section.parse(&ctx("my-schedule"), &body).unwrap();
         let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
         assert_eq!(record.project_root.as_deref(), Some("/tmp/my-project"));
+    }
+
+    #[test]
+    fn parse_project_managed_shape() {
+        let section = ScheduleSection;
+        let mut body = valid_body();
+        body["project_root"] = serde_json::json!("/tmp/my-project");
+        body["managed_by"] = serde_json::json!({
+            "type": "project_ai_sync",
+            "project_root": "/tmp/my-project",
+            "project_key": "11".repeat(32),
+            "source_snapshot_hash": "22".repeat(32),
+            "source_path": ".ai/config/schedules/report.yaml",
+            "source_body_hash": "33".repeat(32),
+        });
+
+        let result = section.parse(&ctx("my-schedule"), &body).unwrap();
+        let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
+        assert!(matches!(
+            &record.managed_by,
+            Some(ScheduleManagedBy::ProjectAiSync { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_maintenance_managed_shape() {
+        let section = ScheduleSection;
+        let mut body = valid_body();
+        body["managed_by"] = serde_json::json!({
+            "type": "node_maintenance_declaration",
+            "source": "maintenance/schedules.yaml",
+        });
+
+        let result = section.parse(&ctx("my-schedule"), &body).unwrap();
+        let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
+        assert!(matches!(
+            &record.managed_by,
+            Some(ScheduleManagedBy::NodeMaintenanceDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_unknown_managed_shape() {
+        let section = ScheduleSection;
+        let mut body = valid_body();
+        body["managed_by"] = serde_json::json!({
+            "type": "other",
+            "source": "maintenance/schedules.yaml",
+        });
+
+        assert!(section.parse(&ctx("my-schedule"), &body).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_cross_shape_managed_fields() {
+        let section = ScheduleSection;
+        let mut body = valid_body();
+        body["managed_by"] = serde_json::json!({
+            "type": "node_maintenance_declaration",
+            "source": "maintenance/schedules.yaml",
+            "project_key": "unexpected",
+        });
+
+        assert!(section.parse(&ctx("my-schedule"), &body).is_err());
     }
 
     #[test]

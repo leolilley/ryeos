@@ -1,8 +1,10 @@
-# ryeos:signed:2026-06-11T05:13:13Z:4e37a5fa8dbf0a21db0fa377187b0eeb51db5b1bcc8d2464652c38539f4805bd:EsPgYvct3G2/Ch9Ib8gvqMBNFhZZaaj6HkCjLA8Q9neAMo83zpBYPItztR9l6WT9YGkUM6Uq5W4qmgvVrBkdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:a7ea2dd2e748f2eda8b3c3072328a1fad0f3cfde55fe884c4d4ae5c9dbfa7c31:JoFiAi49G80MFNQK7beJJ1UU/kF8eUKyz8hL0Z+lwHZwd1jEAlI8EZPn4dm5wX/IYW4629AIz1nYtuUNVEGaDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.put
 required_caps: ["ryeos.execute.service.objects/put"]
 schema:
-  hash: string
-  content: string
-description: "Store a CAS object"
+  staging_id: string?
+  project_path: string
+  blobs: array?
+  objects: array?
+description: "Stage deterministic CAS upload batches for a project publication"

@@ -1255,6 +1255,9 @@ mod tests {
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
                 "integrity": format!("sha256:{content_blob_hash}"),
+                "signature_info": {
+                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
+                },
                 "mode": 0o755,
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();

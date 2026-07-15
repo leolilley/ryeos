@@ -221,21 +221,9 @@ pub fn validate_timezone(tz: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate a schedule_id (no `/`, `..`, whitespace).
+/// Validate the canonical schedule identity shared with durable fire records.
 pub fn validate_schedule_id(id: &str) -> Result<()> {
-    if id.is_empty() {
-        bail!("schedule_id must not be empty");
-    }
-    if id.contains('/') || id.contains('\\') {
-        bail!("schedule_id must not contain path separators: {}", id);
-    }
-    if id == "." || id == ".." {
-        bail!("schedule_id must not be '.' or '..'");
-    }
-    if id.chars().any(|c| c.is_whitespace()) {
-        bail!("schedule_id must not contain whitespace: {}", id);
-    }
-    Ok(())
+    ryeos_state::gc::retention::validate_schedule_id(id)
 }
 
 #[cfg(test)]

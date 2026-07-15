@@ -5,20 +5,28 @@
 //! queries during normal operation.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
 
 use crate::sqlite_schema;
 
 mod chain_commit;
 mod cursor;
 mod events;
+mod retention;
 mod threads;
+pub(crate) use events::ProjectionEventConflict;
 pub use events::{project_event, project_thread_edge};
+pub(crate) use retention::{derive_terminal_retention, refresh_chain_retention, TerminalMember};
+pub use retention::{ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor};
 pub(crate) use threads::project_thread_snapshot_with_events_in_transaction;
 pub use threads::{
     project_chain_state, project_thread_snapshot, project_thread_snapshot_with_events,
@@ -34,6 +42,24 @@ use schema::{schema_spec_fingerprint, PROJECTION_APP_ID};
 /// Projection database connection wrapper.
 pub struct ProjectionDb {
     conn: Connection,
+    path: PathBuf,
+    // Selected generation instances are opened relative to the exact runtime
+    // directory retained by StateDb. Keeping this descriptor alive also keeps
+    // SQLite's /proc/self/fd pathname valid for lazy WAL/SHM opens.
+    _instance_directory: Option<lillux::PinnedDirectory>,
+    _instance_name: Option<std::ffi::OsString>,
+    // Pin the exact regular database inode for the lifetime of the SQLite
+    // connection. Selected-generation opens validate the namespace still
+    // names this inode after SQLite has opened it with SQLITE_OPEN_NOFOLLOW;
+    // durable close syncs this descriptor instead of reopening by path.
+    _instance_file: Option<fs::File>,
+    _wal_file: Option<fs::File>,
+    _shm_file: Option<fs::File>,
+    // Every open projection instance holds a shared lease. Retention takes an
+    // exclusive non-blocking lease before unlinking an unselected generation,
+    // so abandoned WAL/journal sidecars can be reclaimed without racing a
+    // process that still has the generation instance open.
+    _instance_lease: Option<fs::File>,
 }
 
 /// Result of opening the projection database.
@@ -47,12 +73,6 @@ enum ProjectionOwnershipState {
     Empty,
     Owned,
     Foreign { app_id: i32, user_tables: i64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CasEntryKind {
-    Object,
-    Blob,
 }
 
 fn classify_projection_db(
@@ -109,13 +129,14 @@ fn init_current_projection_schema(
     sqlite_schema::init_owned(conn, spec, SCHEMA_SQL, path)?;
     stamp_projection_schema_epoch(conn)?;
     sqlite_schema::assert_owned(conn, spec, path)?;
+    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)?;
     Ok(())
 }
 
 fn close_connection(conn: Connection) -> anyhow::Result<()> {
     conn.close()
         .map_err(|(_, err)| err)
-        .context("failed to close projection database before reset")
+        .context("failed to close projection database")
 }
 
 fn reset_projection_files(
@@ -132,18 +153,31 @@ fn reset_projection_files(
         process::id()
     );
 
+    let mut candidates = Vec::new();
     for candidate in projection_reset_candidates(path) {
-        if !candidate.exists() {
+        let Some(candidate_file) =
+            open_projection_regular_file_no_follow(&candidate, false, false)?
+        else {
             continue;
-        }
+        };
         let backup = backup_path(&candidate, &suffix);
-        fs::rename(&candidate, &backup).with_context(|| {
-            format!(
-                "failed to rename stale projection file {} to {}",
-                candidate.display(),
+        if open_projection_regular_file_no_follow(&backup, false, false)?.is_some() {
+            anyhow::bail!(
+                "projection reset backup path already exists: {}",
                 backup.display()
-            )
-        })?;
+            );
+        }
+        candidates.push((candidate, candidate_file, backup));
+    }
+
+    // Validate the entire reset set before mutating any member. A symlink or
+    // special sidecar must fail the reset without first moving the main file.
+    for (candidate, candidate_file, _) in &candidates {
+        ensure_open_projection_regular_file_path(candidate, candidate_file)?;
+    }
+    for (candidate, candidate_file, backup) in candidates {
+        ensure_open_projection_regular_file_path(&candidate, &candidate_file)?;
+        rename_open_projection_file_no_follow(&candidate, &backup, &candidate_file)?;
         tracing::warn!(
             path = %candidate.display(),
             backup = %backup.display(),
@@ -170,270 +204,496 @@ fn backup_path(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}.{}", path.to_string_lossy(), suffix))
 }
 
-impl CasEntryKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Object => "object",
-            Self::Blob => "blob",
+#[cfg(unix)]
+fn open_projection_parent_no_follow(path: &Path) -> anyhow::Result<(fs::File, std::ffi::CString)> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("projection path has no filename: {}", path.display()))?;
+    let file_name =
+        std::ffi::CString::new(file_name.as_bytes()).context("projection filename contains NUL")?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let start = if parent.is_absolute() { "/" } else { "." };
+    let start = std::ffi::CString::new(start).expect("static path contains no NUL");
+    let descriptor = unsafe {
+        libc::open(
+            start.as_ptr(),
+            libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_NOFOLLOW
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error()).context("open projection path traversal root");
+    }
+    let mut directory = unsafe { fs::File::from_raw_fd(descriptor) };
+    for component in parent.components() {
+        use std::path::Component;
+        let component = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(component) => component,
+            Component::ParentDir | Component::Prefix(_) => {
+                anyhow::bail!(
+                    "projection path contains an unsafe parent component: {}",
+                    path.display()
+                )
+            }
+        };
+        let component = std::ffi::CString::new(component.as_bytes())
+            .context("projection path component contains NUL")?;
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY
+                    | libc::O_DIRECTORY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "open projection directory component {:?} without following links",
+                    component
+                )
+            });
+        }
+        directory = unsafe { fs::File::from_raw_fd(descriptor) };
+    }
+    Ok((directory, file_name))
+}
+
+/// Open a projection database, lease, or sidecar descriptor-relative without
+/// following any path component. Missing files are reported as `None` only
+/// when creation was not requested; every opened entry must be regular.
+pub(crate) fn open_projection_regular_file_no_follow(
+    path: &Path,
+    writable: bool,
+    create: bool,
+) -> anyhow::Result<Option<fs::File>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, writable, create);
+        anyhow::bail!("secure projection file opening is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        let (parent, file_name) = open_projection_parent_no_follow(path)?;
+        let access = if writable {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        };
+        let flags = access
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | libc::O_NONBLOCK
+            | if create { libc::O_CREAT } else { 0 };
+        let descriptor = if create {
+            unsafe { libc::openat(parent.as_raw_fd(), file_name.as_ptr(), flags, 0o666) }
+        } else {
+            unsafe { libc::openat(parent.as_raw_fd(), file_name.as_ptr(), flags) }
+        };
+        if descriptor < 0 {
+            let error = std::io::Error::last_os_error();
+            if !create && error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "open projection regular file without links {}",
+                    path.display()
+                )
+            });
+        }
+        let file = unsafe { fs::File::from_raw_fd(descriptor) };
+        if !file
+            .metadata()
+            .with_context(|| format!("inspect opened projection file {}", path.display()))?
+            .file_type()
+            .is_file()
+        {
+            anyhow::bail!("projection path is not a regular file: {}", path.display());
+        }
+        Ok(Some(file))
+    }
+}
+
+fn require_projection_regular_file_no_follow(path: &Path) -> anyhow::Result<fs::File> {
+    open_projection_regular_file_no_follow(path, false, false)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "selected projection instance does not exist: {}",
+            path.display()
+        )
+    })
+}
+
+pub(crate) fn ensure_open_projection_regular_file_path(
+    path: &Path,
+    held: &fs::File,
+) -> anyhow::Result<()> {
+    let current = require_projection_regular_file_no_follow(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let held_metadata = held.metadata()?;
+        let current_metadata = current.metadata()?;
+        if held_metadata.dev() != current_metadata.dev()
+            || held_metadata.ino() != current_metadata.ino()
+        {
+            anyhow::bail!(
+                "projection path changed while it was being opened: {}",
+                path.display()
+            );
         }
     }
+    #[cfg(not(unix))]
+    let _ = (path, held, current);
+    Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CasEntryState {
-    Local,
-    Staged,
-    Accepted,
-    Mirrored,
-    Rejected,
+#[cfg(unix)]
+fn projection_files_are_same(left: &fs::File, right: &fs::File) -> anyhow::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let left = left.metadata()?;
+    let right = right.metadata()?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }
 
-impl CasEntryState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Staged => "staged",
-            Self::Accepted => "accepted",
-            Self::Mirrored => "mirrored",
-            Self::Rejected => "rejected",
+#[cfg(not(unix))]
+fn projection_files_are_same(_left: &fs::File, _right: &fs::File) -> anyhow::Result<bool> {
+    anyhow::bail!("projection file identity checks are unavailable on this platform")
+}
+
+#[cfg(unix)]
+fn open_projection_entry_at(
+    parent: &fs::File,
+    file_name: &std::ffi::CStr,
+    display_path: &Path,
+) -> anyhow::Result<fs::File> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "open projection entry descriptor-relative {}",
+                display_path.display()
+            )
+        });
+    }
+    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    if !file.metadata()?.file_type().is_file() {
+        anyhow::bail!(
+            "projection path is not a regular file: {}",
+            display_path.display()
+        );
+    }
+    Ok(file)
+}
+
+fn remove_projection_path_durable_no_follow(path: &Path, held: &fs::File) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, held);
+        anyhow::bail!("secure projection removal is unavailable on this platform");
+    }
+
+    #[cfg(unix)]
+    {
+        // The cleanup lease excludes every cooperating projection opener. Pin
+        // the parent directory, re-open the final name with O_NOFOLLOW, and
+        // unlink relative to that same descriptor so parent substitution can
+        // never redirect cleanup into another namespace.
+        let (parent, file_name) = open_projection_parent_no_follow(path)?;
+        let current = open_projection_entry_at(&parent, &file_name, path)?;
+        if !projection_files_are_same(held, &current)? {
+            anyhow::bail!("projection path changed before removal: {}", path.display());
         }
-    }
-
-    fn from_str(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "local" => Ok(Self::Local),
-            "staged" => Ok(Self::Staged),
-            "accepted" => Ok(Self::Accepted),
-            "mirrored" => Ok(Self::Mirrored),
-            "rejected" => Ok(Self::Rejected),
-            other => anyhow::bail!("unknown CAS entry state: {other}"),
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), file_name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "unlink projection entry descriptor-relative {}",
+                    path.display()
+                )
+            });
         }
+        parent
+            .sync_all()
+            .with_context(|| format!("sync projection parent after removing {}", path.display()))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CasEntryAttribution {
-    pub hash: String,
-    pub entry_kind: CasEntryKind,
-    pub bytes: u64,
-    pub first_seen_at: String,
-    pub updated_at: String,
-    pub source_principal: Option<String>,
-    pub source_peer: Option<String>,
-    pub job_id: Option<String>,
-    pub state: CasEntryState,
-}
+fn rename_open_projection_file_no_follow(
+    source: &Path,
+    destination: &Path,
+    held: &fs::File,
+) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, destination, held);
+        anyhow::bail!("secure projection reset rename is unavailable on this platform");
+    }
 
-#[derive(Debug, Clone)]
-pub struct NewCasEntryAttribution {
-    pub hash: String,
-    pub entry_kind: CasEntryKind,
-    pub bytes: u64,
-    pub source_principal: Option<String>,
-    pub source_peer: Option<String>,
-    pub job_id: Option<String>,
-    pub state: CasEntryState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CasEntriesByStateSummary {
-    pub state: CasEntryState,
-    pub count: u64,
-    pub total_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmissionAttestationState {
-    Accepted,
-    Rejected,
-}
-
-impl AdmissionAttestationState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Rejected => "rejected",
+    #[cfg(target_os = "linux")]
+    {
+        if source.parent() != destination.parent() {
+            anyhow::bail!("projection reset must remain within one pinned directory");
         }
-    }
-
-    fn from_str(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "accepted" => Ok(Self::Accepted),
-            "rejected" => Ok(Self::Rejected),
-            other => anyhow::bail!("unknown admission attestation state: {other}"),
+        let (parent, source_name) = open_projection_parent_no_follow(source)?;
+        let destination_name = destination.file_name().ok_or_else(|| {
+            anyhow::anyhow!(
+                "projection reset destination has no filename: {}",
+                destination.display()
+            )
+        })?;
+        let destination_name = std::ffi::CString::new(destination_name.as_bytes())
+            .context("projection reset destination contains NUL")?;
+        let current = open_projection_entry_at(&parent, &source_name, source)?;
+        if !projection_files_are_same(held, &current)? {
+            anyhow::bail!(
+                "projection path changed before reset rename: {}",
+                source.display()
+            );
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdmissionAttestationRecord {
-    pub attestation_hash: String,
-    pub subject_hash: String,
-    pub policy: String,
-    pub claim: String,
-    pub issuer: String,
-    pub issued_at: String,
-    pub expires_at: Option<String>,
-    pub head_ref_path: Option<String>,
-    pub indexed_at: String,
-    pub state: AdmissionAttestationState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewAdmissionAttestationRecord {
-    pub attestation_hash: String,
-    pub subject_hash: String,
-    pub policy: String,
-    pub claim: String,
-    pub issuer: String,
-    pub issued_at: String,
-    pub expires_at: Option<String>,
-    pub head_ref_path: Option<String>,
-    pub state: AdmissionAttestationState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncJobState {
-    Planned,
-    Running,
-    Completed,
-    Failed,
-    Retryable,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncJobAttemptState {
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-impl SyncJobAttemptState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
+        let renamed = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                parent.as_raw_fd(),
+                source_name.as_ptr(),
+                parent.as_raw_fd(),
+                destination_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if renamed != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "rename projection entry descriptor-relative {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            });
         }
-    }
-
-    fn from_str(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
-            "failed" => Ok(Self::Failed),
-            "cancelled" => Ok(Self::Cancelled),
-            other => anyhow::bail!("unknown sync job attempt state: {other}"),
+        let renamed_file = open_projection_entry_at(&parent, &destination_name, destination)?;
+        if !projection_files_are_same(held, &renamed_file)? {
+            anyhow::bail!(
+                "projection reset rename moved an unexpected file: {}",
+                source.display()
+            );
         }
-    }
-
-    fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
-}
-
-impl SyncJobState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Planned => "planned",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Retryable => "retryable",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    fn from_str(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "planned" => Ok(Self::Planned),
-            "running" => Ok(Self::Running),
-            "completed" => Ok(Self::Completed),
-            "failed" => Ok(Self::Failed),
-            "retryable" => Ok(Self::Retryable),
-            "cancelled" => Ok(Self::Cancelled),
-            other => anyhow::bail!("unknown sync job state: {other}"),
-        }
+        parent.sync_all().with_context(|| {
+            format!(
+                "sync projection parent after reset rename {}",
+                source.display()
+            )
+        })
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SyncJobRecord {
-    pub job_id: String,
-    pub operation_type: String,
-    pub peer: Option<String>,
-    pub state: SyncJobState,
-    pub phase: String,
-    pub roots: Vec<String>,
-    pub heads: Vec<String>,
-    pub uploaded_hashes: Vec<String>,
-    pub fetched_hashes: Vec<String>,
-    pub attempt_count: u64,
-    pub max_attempts: u64,
-    pub last_error: Option<String>,
-    pub result: Option<serde_json::Value>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub finished_at: Option<String>,
+pub(crate) fn remove_open_projection_regular_file_durable_no_follow(
+    path: &Path,
+    held: &fs::File,
+) -> anyhow::Result<()> {
+    remove_projection_path_durable_no_follow(path, held)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewSyncJob {
-    pub job_id: String,
-    pub operation_type: String,
-    pub peer: Option<String>,
-    pub roots: Vec<String>,
-    pub heads: Vec<String>,
-    pub max_attempts: u64,
+pub(crate) fn remove_projection_regular_file_durable_no_follow(
+    path: &Path,
+) -> anyhow::Result<bool> {
+    let Some(file) = open_projection_regular_file_no_follow(path, false, false)? else {
+        return Ok(false);
+    };
+    remove_open_projection_regular_file_durable_no_follow(path, &file)?;
+    Ok(true)
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SyncJobUpdate {
-    pub state: SyncJobState,
-    pub phase: String,
-    pub roots: Option<Vec<String>>,
-    pub heads: Option<Vec<String>>,
-    pub uploaded_hashes: Vec<String>,
-    pub fetched_hashes: Vec<String>,
-    pub last_error: Option<String>,
-    pub result: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SyncJobAttemptRecord {
-    pub attempt_id: String,
-    pub job_id: String,
-    pub attempt_number: u64,
-    pub worker_id: Option<String>,
-    pub state: SyncJobAttemptState,
-    pub phase: String,
-    pub started_at: String,
-    pub updated_at: String,
-    pub finished_at: Option<String>,
-    pub error: Option<String>,
-    pub result: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewSyncJobAttempt {
-    pub attempt_id: String,
-    pub job_id: String,
-    pub worker_id: Option<String>,
-    pub phase: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FinishSyncJobAttempt {
-    pub state: SyncJobAttemptState,
-    pub phase: String,
-    pub error: Option<String>,
-    pub result: Option<serde_json::Value>,
+fn open_existing_projection_connection(
+    path: &Path,
+    read_only: bool,
+) -> anyhow::Result<(Connection, fs::File)> {
+    let instance_file = require_projection_regular_file_no_follow(path)?;
+    let access = if read_only {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let flags = access | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let conn = Connection::open_with_flags(path, flags)?;
+    // SQLITE_OPEN_NOFOLLOW closes the pathname-open race for SQLite itself;
+    // this identity check also ensures the namespace still names the inode we
+    // pinned before the call.
+    ensure_open_projection_regular_file_path(path, &instance_file)?;
+    Ok((conn, instance_file))
 }
 
 impl ProjectionDb {
+    /// Strictly open the selected generation relative to the exact runtime
+    /// directory already pinned by StateDb. No ordinary ancestor pathname is
+    /// resolved while opening SQLite, its lease, or its main file.
+    pub(crate) fn open_selected_current_in_directory(
+        directory: &lillux::PinnedDirectory,
+        name: &std::ffi::OsStr,
+        read_only: bool,
+    ) -> anyhow::Result<Self> {
+        let lease = acquire_projection_instance_lease_in_directory(directory, name, true)?;
+        let instance_file = directory.open_regular(name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "selected projection instance does not exist: {}",
+                directory.path().join(name).display()
+            )
+        })?;
+        let descriptor_path = directory.descriptor_child_path(name)?;
+        let flags = if read_only {
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+        } else {
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+        } | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&descriptor_path, flags).with_context(|| {
+            format!(
+                "open selected projection through pinned runtime directory {}",
+                directory.path().join(name).display()
+            )
+        })?;
+        ensure_pinned_projection_file(directory, name, &instance_file)?;
+        ensure_sqlite_retains_projection_file(&instance_file, "projection database")?;
+        validate_selected_current(&conn, &directory.path().join(name))?;
+        let (wal_file, shm_file) = if read_only {
+            let sidecars = open_existing_projection_sidecars_in_directory(directory, name)?;
+            if let Some(wal) = sidecars.0.as_ref() {
+                ensure_sqlite_retains_projection_file(wal, "projection WAL")?;
+            }
+            if let Some(shm) = sidecars.1.as_ref() {
+                ensure_sqlite_retains_projection_file(shm, "projection shared memory")?;
+            }
+            sidecars
+        } else {
+            establish_projection_sidecars_in_directory(&conn, directory, name)?
+        };
+        Ok(Self {
+            conn,
+            path: directory.path().join(name),
+            _instance_directory: Some(directory.try_clone()?),
+            _instance_name: Some(name.to_os_string()),
+            _instance_file: Some(instance_file),
+            _wal_file: wal_file,
+            _shm_file: shm_file,
+            _instance_lease: Some(lease),
+        })
+    }
+
+    /// Create a fresh current-schema generation relative to the exact runtime
+    /// directory. This clean-cut entry point never resets or migrates an
+    /// existing instance; a colliding name fails closed.
+    pub(crate) fn create_in_directory(
+        directory: &lillux::PinnedDirectory,
+        name: &std::ffi::OsStr,
+    ) -> anyhow::Result<Self> {
+        let lease = acquire_projection_instance_lease_in_directory(directory, name, false)?;
+        let instance_file = directory
+            .open_regular_create(name, true, true, 0o600)
+            .with_context(|| {
+                format!(
+                    "create projection through pinned runtime directory {}",
+                    directory.path().join(name).display()
+                )
+            })?;
+        directory.sync()?;
+        let descriptor_path = directory.descriptor_child_path(name)?;
+        let conn = Connection::open_with_flags(
+            &descriptor_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        ensure_pinned_projection_file(directory, name, &instance_file)?;
+        ensure_sqlite_retains_projection_file(&instance_file, "projection database")?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .context("failed to set projection synchronous=FULL")?;
+        let path = directory.path().join(name);
+        let spec = projection_schema_spec();
+        init_current_projection_schema(&conn, &spec, &path)?;
+        let (wal_file, shm_file) =
+            establish_projection_sidecars_in_directory(&conn, directory, name)?;
+        Ok(Self {
+            conn,
+            path,
+            _instance_directory: Some(directory.try_clone()?),
+            _instance_name: Some(name.to_os_string()),
+            _instance_file: Some(instance_file),
+            _wal_file: wal_file,
+            _shm_file: shm_file,
+            _instance_lease: Some(lease),
+        })
+    }
+
+    /// Strictly open an existing selected projection without creating files,
+    /// sidecars, leases, schema, or reset backups.
+    pub fn open_selected_current_read_only(path: &Path) -> anyhow::Result<Self> {
+        let instance_lease = acquire_existing_projection_instance_lease(path)?;
+        let (conn, instance_file) = open_existing_projection_connection(path, true)
+            .context("failed to open selected projection instance read-only")?;
+        validate_selected_current(&conn, path)?;
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+            _instance_directory: None,
+            _instance_name: None,
+            _instance_file: Some(instance_file),
+            _wal_file: None,
+            _shm_file: None,
+            _instance_lease: Some(instance_lease),
+        })
+    }
+
+    /// Open an already-selected current instance without reset/rename side
+    /// effects. A mismatch is reported so the caller can build another
+    /// generation instance while generation.json continues selecting this one.
+    pub fn open_selected_current(path: &Path) -> anyhow::Result<Self> {
+        let instance_lease = acquire_projection_instance_lease(path)?;
+        let (conn, instance_file) = open_existing_projection_connection(path, false)
+            .context("failed to open selected projection instance")?;
+        validate_selected_current(&conn, path)?;
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+            _instance_directory: None,
+            _instance_name: None,
+            _instance_file: Some(instance_file),
+            _wal_file: None,
+            _shm_file: None,
+            _instance_lease: Some(instance_lease),
+        })
+    }
+
+    /// Create a current-schema projection that is never selected or persisted.
+    /// Offline rebuild/verification control paths use this handle so opening
+    /// the service itself cannot trigger, publish, or acknowledge recovery.
+    pub(crate) fn open_transient() -> anyhow::Result<Self> {
+        let path = PathBuf::from(":memory:");
+        let conn = Connection::open_in_memory().context("open transient projection")?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .context("configure transient projection durability mode")?;
+        let spec = projection_schema_spec();
+        init_current_projection_schema(&conn, &spec, &path)?;
+        Ok(Self {
+            conn,
+            path,
+            _instance_directory: None,
+            _instance_name: None,
+            _instance_file: None,
+            _wal_file: None,
+            _shm_file: None,
+            _instance_lease: None,
+        })
+    }
+
     /// Open or create a projection database.
     ///
     /// If the file exists, verifies it matches the schema spec exactly
@@ -450,7 +710,8 @@ impl ProjectionDb {
     /// epoch. Callers with CAS/refs access should rebuild the projection when
     /// `reset` is true.
     pub fn open_with_status(path: &Path) -> anyhow::Result<ProjectionOpenResult> {
-        let conn =
+        let instance_lease = acquire_projection_instance_lease(path)?;
+        let (conn, instance_file) =
             open_projection_connection(path).context("failed to open projection database")?;
 
         let spec = projection_schema_spec();
@@ -459,7 +720,16 @@ impl ProjectionDb {
             ProjectionOwnershipState::Empty => {
                 init_current_projection_schema(&conn, &spec, path)?;
                 return Ok(ProjectionOpenResult {
-                    db: Self { conn },
+                    db: Self {
+                        conn,
+                        path: path.to_path_buf(),
+                        _instance_directory: None,
+                        _instance_name: None,
+                        _instance_file: Some(instance_file),
+                        _wal_file: None,
+                        _shm_file: None,
+                        _instance_lease: Some(instance_lease),
+                    },
                     reset: false,
                 });
             }
@@ -488,20 +758,40 @@ impl ProjectionDb {
                 "owned projection schema epoch mismatch; resetting projection database"
             );
             close_connection(conn)?;
+            drop(instance_file);
             reset_projection_files(path, stored_epoch, current_epoch)?;
 
-            let conn =
+            let (conn, instance_file) =
                 open_projection_connection(path).context("failed to reopen projection database")?;
             init_current_projection_schema(&conn, &spec, path)?;
             return Ok(ProjectionOpenResult {
-                db: Self { conn },
+                db: Self {
+                    conn,
+                    path: path.to_path_buf(),
+                    _instance_directory: None,
+                    _instance_name: None,
+                    _instance_file: Some(instance_file),
+                    _wal_file: None,
+                    _shm_file: None,
+                    _instance_lease: Some(instance_lease),
+                },
                 reset: true,
             });
         }
 
         sqlite_schema::assert_owned(&conn, &spec, path)?;
+        sqlite_schema::assert_complete_schema_sql(&conn, SCHEMA_SQL, path)?;
         Ok(ProjectionOpenResult {
-            db: Self { conn },
+            db: Self {
+                conn,
+                path: path.to_path_buf(),
+                _instance_directory: None,
+                _instance_name: None,
+                _instance_file: Some(instance_file),
+                _wal_file: None,
+                _shm_file: None,
+                _instance_lease: Some(instance_lease),
+            },
             reset: false,
         })
     }
@@ -516,887 +806,321 @@ impl ProjectionDb {
         &mut self.conn
     }
 
-    pub fn record_cas_entry(&self, entry: &NewCasEntryAttribution) -> anyhow::Result<()> {
-        validate_canonical_hash("CAS entry hash", &entry.hash)?;
-        let bytes = i64::try_from(entry.bytes).context("CAS entry byte count exceeds i64")?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO cas_entries (
-                    hash, entry_kind, bytes, first_seen_at, updated_at,
-                    source_principal, source_peer, job_id, state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(entry_kind, hash) DO UPDATE SET
-                    bytes = CASE
-                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored')
-                            AND excluded.state IN ('staged', 'rejected')
-                            THEN cas_entries.bytes
-                        WHEN cas_entries.state = 'rejected'
-                            AND excluded.state = 'staged'
-                            THEN cas_entries.bytes
-                        ELSE excluded.bytes
-                    END,
-                    updated_at = excluded.updated_at,
-                    source_principal = COALESCE(excluded.source_principal, cas_entries.source_principal),
-                    source_peer = COALESCE(excluded.source_peer, cas_entries.source_peer),
-                    job_id = COALESCE(excluded.job_id, cas_entries.job_id),
-                    state = CASE
-                        WHEN cas_entries.state IN ('local', 'accepted', 'mirrored')
-                            AND excluded.state IN ('staged', 'rejected')
-                            THEN cas_entries.state
-                        WHEN cas_entries.state = 'rejected'
-                            AND excluded.state = 'staged'
-                            THEN cas_entries.state
-                        ELSE excluded.state
-                    END",
-                rusqlite::params![
-                    &entry.hash,
-                    entry.entry_kind.as_str(),
-                    bytes,
-                    &now,
-                    &now,
-                    &entry.source_principal,
-                    &entry.source_peer,
-                    &entry.job_id,
-                    entry.state.as_str(),
-                ],
-            )
-            .context("failed to record CAS entry attribution")?;
-        Ok(())
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    pub fn set_cas_entry_state(
-        &self,
-        entry_kind: CasEntryKind,
-        hash: &str,
-        state: CasEntryState,
-    ) -> anyhow::Result<()> {
-        validate_canonical_hash("CAS entry hash", hash)?;
-        let current = self.get_cas_entry(entry_kind, hash)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "CAS entry attribution not found for {} hash {hash}",
-                entry_kind.as_str()
-            )
+    /// Checkpoint WAL contents, close SQLite, and fsync the database file so a
+    /// staged projection can be atomically installed without orphan sidecars.
+    pub fn close_durable(self) -> anyhow::Result<()> {
+        let Self {
+            conn,
+            path,
+            _instance_directory: instance_directory,
+            _instance_name: instance_name,
+            _instance_file: instance_file,
+            _wal_file: wal_file,
+            _shm_file: shm_file,
+            _instance_lease: instance_lease,
+        } = self;
+        let instance_file = instance_file.ok_or_else(|| {
+            anyhow::anyhow!("transient projection cannot be durably closed by filesystem path")
         })?;
-        if !cas_entry_transition_allowed(current.state, state) {
-            anyhow::bail!(
-                "illegal CAS entry state transition for {} hash {}: {} -> {}",
-                entry_kind.as_str(),
-                hash,
-                current.state.as_str(),
-                state.as_str()
-            );
-        }
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE cas_entries SET state = ?, updated_at = ? WHERE entry_kind = ? AND hash = ?",
-                rusqlite::params![
-                    state.as_str(),
-                    lillux::time::iso8601_now(),
-                    entry_kind.as_str(),
-                    hash,
-                ],
-            )
-            .context("failed to update CAS entry attribution state")?;
-        if changed == 0 {
-            anyhow::bail!(
-                "CAS entry attribution not found for {} hash {hash}",
-                entry_kind.as_str()
-            );
-        }
-        Ok(())
-    }
-
-    pub fn get_cas_entry(
-        &self,
-        entry_kind: CasEntryKind,
-        hash: &str,
-    ) -> anyhow::Result<Option<CasEntryAttribution>> {
-        validate_canonical_hash("CAS entry hash", hash)?;
-        self.conn
-            .query_row(
-                "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
-                    source_principal, source_peer, job_id, state
-                 FROM cas_entries WHERE entry_kind = ? AND hash = ?",
-                rusqlite::params![entry_kind.as_str(), hash],
-                cas_entry_from_row,
-            )
-            .optional()
-            .context("failed to get CAS entry attribution")
-    }
-
-    pub fn list_cas_entries_by_state(
-        &self,
-        state: CasEntryState,
-    ) -> anyhow::Result<Vec<CasEntryAttribution>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
-                    source_principal, source_peer, job_id, state
-                 FROM cas_entries WHERE state = ? ORDER BY first_seen_at, hash",
-            )
-            .context("failed to prepare CAS entry attribution query")?;
-        let rows = stmt
-            .query_map([state.as_str()], cas_entry_from_row)
-            .context("failed to query CAS entry attribution by state")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect CAS entry attribution rows")
-    }
-
-    pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT state, COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS total_bytes FROM cas_entries GROUP BY state ORDER BY state")
-            .context("failed to prepare CAS entry attribution summary")?;
-        let rows = stmt
-            .query_map([], |row| {
-                let state: String = row.get("state")?;
-                let count: i64 = row.get("count")?;
-                let total_bytes: i64 = row.get("total_bytes")?;
-                Ok(CasEntriesByStateSummary {
-                    state: CasEntryState::from_str(&state)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    count: u64::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    total_bytes: u64::try_from(total_bytes)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                })
-            })
-            .context("failed to query CAS entry attribution summary")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect CAS entry attribution summary")
-    }
-
-    pub fn record_admission_attestation(
-        &self,
-        record: &NewAdmissionAttestationRecord,
-    ) -> anyhow::Result<()> {
-        validate_canonical_hash("admission attestation hash", &record.attestation_hash)?;
-        validate_canonical_hash("admission subject hash", &record.subject_hash)?;
-        validate_non_empty_label("admission policy", &record.policy)?;
-        validate_non_empty_label("admission claim", &record.claim)?;
-        validate_non_empty_label("admission issuer", &record.issuer)?;
-        validate_non_empty_label("admission issued_at", &record.issued_at)?;
-        if let Some(head_ref_path) = record.head_ref_path.as_deref() {
-            if head_ref_path.is_empty()
-                || head_ref_path.len() > 512
-                || head_ref_path.starts_with('/')
-                || head_ref_path.contains("..")
-            {
-                anyhow::bail!("invalid admission head_ref_path: {head_ref_path}");
-            }
-        }
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO admission_attestations (
-                    attestation_hash, subject_hash, policy, claim, issuer, issued_at,
-                    expires_at, head_ref_path, indexed_at, state
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(attestation_hash) DO UPDATE SET
-                    subject_hash = excluded.subject_hash,
-                    policy = excluded.policy,
-                    claim = excluded.claim,
-                    issuer = excluded.issuer,
-                    issued_at = excluded.issued_at,
-                    expires_at = excluded.expires_at,
-                    head_ref_path = excluded.head_ref_path,
-                    indexed_at = excluded.indexed_at,
-                    state = excluded.state",
-                rusqlite::params![
-                    &record.attestation_hash,
-                    &record.subject_hash,
-                    &record.policy,
-                    &record.claim,
-                    &record.issuer,
-                    &record.issued_at,
-                    &record.expires_at,
-                    &record.head_ref_path,
-                    &now,
-                    record.state.as_str(),
-                ],
-            )
-            .context("failed to record admission attestation index")?;
-        Ok(())
-    }
-
-    pub fn list_admission_attestations_for_subject(
-        &self,
-        subject_hash: &str,
-        policy: Option<&str>,
-    ) -> anyhow::Result<Vec<AdmissionAttestationRecord>> {
-        validate_canonical_hash("admission subject hash", subject_hash)?;
-        if let Some(policy) = policy {
-            validate_non_empty_label("admission policy", policy)?;
-            let mut stmt = self
-                .conn
-                .prepare_cached(
-                    "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
-                        expires_at, head_ref_path, indexed_at, state
-                     FROM admission_attestations
-                     WHERE subject_hash = ? AND policy = ?
-                     ORDER BY indexed_at DESC, attestation_hash DESC",
-                )
-                .context("failed to prepare admission attestation subject/policy query")?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params![subject_hash, policy],
-                    admission_attestation_from_row,
-                )
-                .context("failed to query admission attestations by subject/policy")?;
-            return rows
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .context("failed to collect admission attestations by subject/policy");
-        }
-
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
-                    expires_at, head_ref_path, indexed_at, state
-                 FROM admission_attestations
-                 WHERE subject_hash = ?
-                 ORDER BY indexed_at DESC, attestation_hash DESC",
-            )
-            .context("failed to prepare admission attestation subject query")?;
-        let rows = stmt
-            .query_map([subject_hash], admission_attestation_from_row)
-            .context("failed to query admission attestations by subject")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect admission attestations by subject")
-    }
-
-    pub fn create_sync_job(&self, job: &NewSyncJob) -> anyhow::Result<SyncJobRecord> {
-        validate_sync_job_id(&job.job_id)?;
-        validate_non_empty_label("operation_type", &job.operation_type)?;
-        for hash in job.roots.iter().chain(job.heads.iter()) {
-            validate_canonical_hash("sync job root/head hash", hash)?;
-        }
-        let max_attempts = i64::try_from(job.max_attempts).context("max_attempts exceeds i64")?;
-        let now = lillux::time::iso8601_now();
-        let roots_json = serde_json::to_vec(&job.roots).context("failed to serialize job roots")?;
-        let heads_json = serde_json::to_vec(&job.heads).context("failed to serialize job heads")?;
-        let empty_hashes = serde_json::to_vec(&Vec::<String>::new())?;
-        self.conn
-            .execute(
-                "INSERT INTO sync_jobs (
-                    job_id, operation_type, peer, state, phase, roots_json, heads_json,
-                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
-                    last_error, result_json, created_at, updated_at, finished_at
-                 ) VALUES (?, ?, ?, 'planned', 'planned', ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, NULL)",
-                rusqlite::params![
-                    &job.job_id,
-                    &job.operation_type,
-                    &job.peer,
-                    roots_json,
-                    heads_json,
-                    empty_hashes,
-                    empty_hashes,
-                    max_attempts,
-                    &now,
-                    &now,
-                ],
-            )
-            .context("failed to create sync job")?;
-        self.get_sync_job(&job.job_id)?
-            .ok_or_else(|| anyhow::anyhow!("created sync job {} not found", job.job_id))
-    }
-
-    pub fn update_sync_job(&self, job_id: &str, update: &SyncJobUpdate) -> anyhow::Result<()> {
-        validate_sync_job_id(job_id)?;
-        validate_non_empty_label("phase", &update.phase)?;
-        let current_state = self
-            .conn
-            .query_row(
-                "SELECT state FROM sync_jobs WHERE job_id = ?",
-                [job_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .context("failed to load sync job state")?
-            .ok_or_else(|| anyhow::anyhow!("sync job not found: {job_id}"))?;
-        let current_state = SyncJobState::from_str(&current_state)?;
-        validate_sync_job_transition(current_state, update.state)?;
-        if matches!(
-            update.state,
-            SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled
-        ) {
-            let running_attempts: i64 = self
-                .conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
-                    [job_id],
-                    |row| row.get(0),
-                )
-                .context("failed to count running sync job attempts")?;
-            if running_attempts > 0 {
-                anyhow::bail!(
-                    "cannot mark sync job {job_id} terminal while {running_attempts} attempt(s) are still running"
-                );
-            }
-        }
-        for hash in update
-            .roots
-            .iter()
-            .flatten()
-            .chain(update.heads.iter().flatten())
-            .chain(update.uploaded_hashes.iter())
-            .chain(update.fetched_hashes.iter())
+        if let (Some(directory), Some(name)) = (instance_directory.as_ref(), instance_name.as_ref())
         {
-            validate_canonical_hash("sync job transfer hash", hash)?;
+            ensure_pinned_projection_file(directory, name, &instance_file)?;
+        } else {
+            ensure_open_projection_regular_file_path(&path, &instance_file)?;
         }
-        let roots_json = update
-            .roots
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize job roots")?;
-        let heads_json = update
-            .heads
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize job heads")?;
-        let uploaded_json = serde_json::to_vec(&update.uploaded_hashes)
-            .context("failed to serialize uploaded hashes")?;
-        let fetched_json = serde_json::to_vec(&update.fetched_hashes)
-            .context("failed to serialize fetched hashes")?;
-        let result_json = update
-            .result
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize sync job result")?;
-        let now = lillux::time::iso8601_now();
-        let finished_at = match update.state {
-            SyncJobState::Completed | SyncJobState::Failed | SyncJobState::Cancelled => {
-                Some(now.clone())
-            }
-            SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable => None,
-        };
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sync_jobs SET
-                state = ?, phase = ?,
-                roots_json = COALESCE(?, roots_json), heads_json = COALESCE(?, heads_json),
-                uploaded_hashes_json = ?, fetched_hashes_json = ?,
-                last_error = ?, result_json = ?,
-                updated_at = ?, finished_at = ?
-             WHERE job_id = ?",
-                rusqlite::params![
-                    update.state.as_str(),
-                    &update.phase,
-                    roots_json,
-                    heads_json,
-                    uploaded_json,
-                    fetched_json,
-                    &update.last_error,
-                    result_json,
-                    &now,
-                    &finished_at,
-                    job_id,
-                ],
-            )
-            .context("failed to update sync job")?;
-        debug_assert_eq!(changed, 1);
-        Ok(())
-    }
-
-    pub fn create_sync_job_attempt(
-        &self,
-        attempt: &NewSyncJobAttempt,
-    ) -> anyhow::Result<SyncJobAttemptRecord> {
-        self.immediate_transaction("create sync job attempt", || {
-            self.create_sync_job_attempt_inner(attempt)
-        })
-    }
-
-    fn create_sync_job_attempt_inner(
-        &self,
-        attempt: &NewSyncJobAttempt,
-    ) -> anyhow::Result<SyncJobAttemptRecord> {
-        validate_sync_job_id(&attempt.job_id)?;
-        validate_sync_job_id(&attempt.attempt_id)?;
-        validate_non_empty_label("phase", &attempt.phase)?;
-        if let Some(worker_id) = attempt.worker_id.as_deref() {
-            validate_non_empty_label("worker_id", worker_id)?;
-        }
-
-        let (job_state, attempt_count, max_attempts) = self
-            .conn
-            .query_row(
-                "SELECT state, attempt_count, max_attempts FROM sync_jobs WHERE job_id = ?",
-                [&attempt.job_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .context("failed to load sync job state for attempt")?
-            .ok_or_else(|| anyhow::anyhow!("sync job not found: {}", attempt.job_id))?;
-        let job_state = SyncJobState::from_str(&job_state)?;
-        if !matches!(
-            job_state,
-            SyncJobState::Planned | SyncJobState::Running | SyncJobState::Retryable
-        ) {
-            anyhow::bail!(
-                "cannot create attempt for terminal sync job {} in state {}",
-                attempt.job_id,
-                job_state.as_str()
-            );
-        }
-        if attempt_count >= max_attempts {
-            anyhow::bail!(
-                "sync job {} has exhausted attempts ({attempt_count}/{max_attempts})",
-                attempt.job_id
-            );
-        }
-        let running_attempts: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_job_attempts WHERE job_id = ? AND state = 'running'",
-                [&attempt.job_id],
-                |row| row.get(0),
-            )
-            .context("failed to count running sync job attempts")?;
-        if running_attempts > 0 {
-            anyhow::bail!("sync job {} already has a running attempt", attempt.job_id);
-        }
-
-        let attempt_number: i64 = self
-            .conn
-            .query_row(
-                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM sync_job_attempts WHERE job_id = ?",
-                [&attempt.job_id],
-                |row| row.get(0),
-            )
-            .context("failed to compute next sync job attempt number")?;
-        let now = lillux::time::iso8601_now();
-        self.conn
-            .execute(
-                "INSERT INTO sync_job_attempts (
-                    attempt_id, job_id, attempt_number, worker_id, state, phase,
-                    started_at, updated_at, finished_at, error, result_json
-                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, NULL, NULL, NULL)",
-                rusqlite::params![
-                    &attempt.attempt_id,
-                    &attempt.job_id,
-                    attempt_number,
-                    &attempt.worker_id,
-                    &attempt.phase,
-                    &now,
-                    &now,
-                ],
-            )
-            .context("failed to create sync job attempt")?;
-        self.conn
-            .execute(
-                "UPDATE sync_jobs SET state = 'running', phase = ?, attempt_count = attempt_count + 1, updated_at = ?, finished_at = NULL WHERE job_id = ?",
-                rusqlite::params![&attempt.phase, &now, &attempt.job_id],
-            )
-            .context("failed to activate sync job attempt")?;
-
-        self.get_sync_job_attempt(&attempt.attempt_id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("created sync job attempt {} not found", attempt.attempt_id)
+        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
-    }
-
-    pub fn finish_sync_job_attempt(
-        &self,
-        attempt_id: &str,
-        finish: &FinishSyncJobAttempt,
-    ) -> anyhow::Result<()> {
-        self.immediate_transaction("finish sync job attempt", || {
-            self.finish_sync_job_attempt_inner(attempt_id, finish)
-        })
-    }
-
-    fn finish_sync_job_attempt_inner(
-        &self,
-        attempt_id: &str,
-        finish: &FinishSyncJobAttempt,
-    ) -> anyhow::Result<()> {
-        validate_sync_job_id(attempt_id)?;
-        validate_non_empty_label("phase", &finish.phase)?;
-        if !finish.state.is_terminal() {
+            .context("failed to checkpoint projection WAL")?;
+        if busy != 0 || log_frames != checkpointed_frames {
             anyhow::bail!(
-                "finish_sync_job_attempt requires terminal state, got {}",
-                finish.state.as_str()
+                "projection WAL checkpoint was incomplete: busy={busy}, \
+                 log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
             );
         }
-        let current_state = self
-            .conn
-            .query_row(
-                "SELECT state FROM sync_job_attempts WHERE attempt_id = ?",
-                [attempt_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .context("failed to load sync job attempt state")?
-            .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
-        let current_state = SyncJobAttemptState::from_str(&current_state)?;
-        if current_state.is_terminal() {
-            anyhow::bail!(
-                "sync job attempt {attempt_id} is already terminal in state {}",
-                current_state.as_str()
-            );
+        close_connection(conn)?;
+        drop(wal_file);
+        drop(shm_file);
+        instance_file
+            .sync_all()
+            .with_context(|| format!("sync projection {}", path.display()))?;
+        if let (Some(directory), Some(name)) = (instance_directory.as_ref(), instance_name.as_ref())
+        {
+            directory
+                .sync()
+                .with_context(|| format!("sync projection parent for {}", path.display()))?;
+            ensure_no_live_projection_wal_in_directory(directory, name)?;
+        } else {
+            #[cfg(unix)]
+            open_projection_parent_no_follow(&path)?
+                .0
+                .sync_all()
+                .with_context(|| format!("sync projection parent for {}", path.display()))?;
+            ensure_no_live_projection_wal(&path)?;
         }
-        let result_json = finish
-            .result
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .context("failed to serialize sync job attempt result")?;
-        let now = lillux::time::iso8601_now();
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sync_job_attempts SET
-                    state = ?, phase = ?, updated_at = ?, finished_at = ?, error = ?, result_json = ?
-                 WHERE attempt_id = ?",
-                rusqlite::params![
-                    finish.state.as_str(),
-                    &finish.phase,
-                    &now,
-                    &now,
-                    &finish.error,
-                    result_json,
-                    attempt_id,
-                ],
-            )
-            .context("failed to finish sync job attempt")?;
-        debug_assert_eq!(changed, 1);
+        drop(instance_lease);
         Ok(())
     }
 
-    pub fn finish_sync_job_attempt_and_update_job(
-        &self,
-        attempt_id: &str,
-        finish: &FinishSyncJobAttempt,
-        job_id: &str,
-        update: &SyncJobUpdate,
-    ) -> anyhow::Result<()> {
-        self.immediate_transaction("finish sync job attempt and update job", || {
-            let attempt_job_id: String = self
-                .conn
-                .query_row(
-                    "SELECT job_id FROM sync_job_attempts WHERE attempt_id = ?",
-                    [attempt_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .context("failed to load sync job attempt owner")?
-                .ok_or_else(|| anyhow::anyhow!("sync job attempt not found: {attempt_id}"))?;
-            if attempt_job_id != job_id {
-                anyhow::bail!(
-                    "sync job attempt {attempt_id} belongs to job {attempt_job_id}, not {job_id}"
-                );
-            }
-            self.finish_sync_job_attempt_inner(attempt_id, finish)?;
-            self.update_sync_job(job_id, update)?;
-            Ok(())
-        })
-    }
-
-    pub fn get_sync_job_attempt(
-        &self,
-        attempt_id: &str,
-    ) -> anyhow::Result<Option<SyncJobAttemptRecord>> {
-        validate_sync_job_id(attempt_id)?;
-        self.conn
-            .query_row(
-                "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
-                    started_at, updated_at, finished_at, error, result_json
-                 FROM sync_job_attempts WHERE attempt_id = ?",
-                [attempt_id],
-                sync_job_attempt_from_row,
-            )
-            .optional()
-            .context("failed to get sync job attempt")
-    }
-
-    pub fn list_sync_job_attempts(
-        &self,
-        job_id: &str,
-    ) -> anyhow::Result<Vec<SyncJobAttemptRecord>> {
-        validate_sync_job_id(job_id)?;
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
-                    started_at, updated_at, finished_at, error, result_json
-                 FROM sync_job_attempts WHERE job_id = ? ORDER BY attempt_number ASC",
-            )
-            .context("failed to prepare sync job attempt list query")?;
-        let rows = stmt
-            .query_map([job_id], sync_job_attempt_from_row)
-            .context("failed to query sync job attempts")?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to collect sync job attempts")
-    }
-
-    pub fn get_sync_job(&self, job_id: &str) -> anyhow::Result<Option<SyncJobRecord>> {
-        validate_sync_job_id(job_id)?;
-        self.conn
-            .query_row(
-                "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
-                    uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
-                    last_error, result_json, created_at, updated_at, finished_at
-                 FROM sync_jobs WHERE job_id = ?",
-                [job_id],
-                sync_job_from_row,
-            )
-            .optional()
-            .context("failed to get sync job")
-    }
-
-    pub fn list_sync_jobs_by_state(
-        &self,
-        state: Option<SyncJobState>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<SyncJobRecord>> {
-        let limit = limit.clamp(1, 500);
-        let sql = if state.is_some() {
-            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
-                uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
-                last_error, result_json, created_at, updated_at, finished_at
-             FROM sync_jobs WHERE state = ? ORDER BY created_at DESC, job_id DESC LIMIT ?"
-        } else {
-            "SELECT job_id, operation_type, peer, state, phase, roots_json, heads_json,
-                uploaded_hashes_json, fetched_hashes_json, attempt_count, max_attempts,
-                last_error, result_json, created_at, updated_at, finished_at
-             FROM sync_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?"
-        };
-        let mut stmt = self
-            .conn
-            .prepare_cached(sql)
-            .context("failed to prepare sync job list query")?;
-        let rows = if let Some(state) = state {
-            stmt.query_map(
-                rusqlite::params![state.as_str(), limit as i64],
-                sync_job_from_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            stmt.query_map(rusqlite::params![limit as i64], sync_job_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        Ok(rows)
-    }
-
-    pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
-        let count: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_jobs WHERE state IN ('planned', 'running', 'retryable')",
-                [],
-                |row| row.get(0),
-            )
-            .context("failed to count active sync jobs")?;
-        u64::try_from(count).context("active sync job count was negative")
-    }
-
-    /// Retention: delete terminal sync jobs (completed/failed/cancelled) whose
-    /// finish time is older than `cutoff_iso`, together with their attempt rows.
-    ///
-    /// `cutoff_iso` must be an ISO8601 UTC timestamp in the projection's stored
-    /// format (`YYYY-MM-DDTHH:MM:SSZ`) so the string comparison is chronological.
-    /// A job with no `finished_at` falls back to its `updated_at`. Active jobs
-    /// (`planned`/`running`/`retryable`) are never touched — they may still pin
-    /// staged CAS roots. Returns `(deleted_jobs, deleted_attempts)`.
-    pub fn delete_terminal_sync_jobs_before(
-        &self,
-        cutoff_iso: &str,
-    ) -> anyhow::Result<(usize, usize)> {
-        self.immediate_transaction("sync-job retention", || {
-            let attempts = self
-                .conn
-                .execute(
-                    "DELETE FROM sync_job_attempts WHERE job_id IN (
-                        SELECT job_id FROM sync_jobs
-                        WHERE state IN ('completed', 'failed', 'cancelled')
-                          AND COALESCE(finished_at, updated_at) < ?1
-                    )",
-                    rusqlite::params![cutoff_iso],
-                )
-                .context("failed to delete retired sync job attempts")?;
-            let jobs = self
-                .conn
-                .execute(
-                    "DELETE FROM sync_jobs
-                     WHERE state IN ('completed', 'failed', 'cancelled')
-                       AND COALESCE(finished_at, updated_at) < ?1",
-                    rusqlite::params![cutoff_iso],
-                )
-                .context("failed to delete retired sync jobs")?;
-            Ok((jobs, attempts))
-        })
+    pub fn current_schema_epoch() -> i32 {
+        projection_schema_epoch()
     }
 }
 
-fn open_projection_connection(path: &Path) -> anyhow::Result<Connection> {
-    let conn = Connection::open(path)?;
-    conn.pragma_update(None, "synchronous", "NORMAL")
-        .context("failed to set projection synchronous=NORMAL")?;
-    Ok(conn)
-}
-
-fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
-    validate_non_empty_label("job_id", job_id)?;
-    if job_id.len() > 128
-        || !job_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
-    {
-        anyhow::bail!("invalid sync job id: {job_id}");
+fn ensure_no_live_projection_wal(path: &Path) -> anyhow::Result<()> {
+    let mut wal_path = path.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    let wal_path = PathBuf::from(wal_path);
+    match open_projection_regular_file_no_follow(&wal_path, false, false)? {
+        Some(file) if file.metadata()?.len() != 0 => anyhow::bail!(
+            "projection WAL remains live after checkpoint and close: {} ({} bytes)",
+            wal_path.display(),
+            file.metadata()?.len()
+        ),
+        Some(_) | None => Ok(()),
     }
-    Ok(())
 }
 
-fn validate_canonical_hash(label: &str, hash: &str) -> anyhow::Result<()> {
-    if !lillux::valid_hash(hash) || hash.bytes().any(|b| b.is_ascii_uppercase()) {
-        anyhow::bail!("invalid {label}: {hash}");
+fn ensure_no_live_projection_wal_in_directory(
+    directory: &lillux::PinnedDirectory,
+    projection_name: &std::ffi::OsStr,
+) -> anyhow::Result<()> {
+    let mut wal_name = projection_name.to_os_string();
+    wal_name.push("-wal");
+    match directory.open_regular(&wal_name, false)? {
+        Some(file) if file.metadata()?.len() != 0 => anyhow::bail!(
+            "projection WAL remains live after checkpoint and close: {} ({} bytes)",
+            directory.path().join(&wal_name).display(),
+            file.metadata()?.len()
+        ),
+        Some(_) | None => Ok(()),
     }
-    Ok(())
 }
 
-fn cas_entry_transition_allowed(current: CasEntryState, next: CasEntryState) -> bool {
-    !matches!(
-        (current, next),
-        (
-            CasEntryState::Local | CasEntryState::Accepted | CasEntryState::Mirrored,
-            CasEntryState::Staged | CasEntryState::Rejected
-        ) | (CasEntryState::Rejected, CasEntryState::Staged)
-    )
-}
-
-fn validate_sync_job_transition(from: SyncJobState, to: SyncJobState) -> anyhow::Result<()> {
-    use SyncJobState::*;
-    let allowed = match from {
-        Planned => matches!(to, Planned | Running | Failed | Cancelled),
-        Running => matches!(to, Running | Completed | Failed | Retryable | Cancelled),
-        Retryable => matches!(to, Retryable | Running | Failed | Cancelled),
-        Completed | Failed | Cancelled => false,
-    };
-    if !allowed {
+fn ensure_pinned_projection_file(
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    held: &fs::File,
+) -> anyhow::Result<()> {
+    let current = directory.open_regular(name, false)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "projection instance disappeared: {}",
+            directory.path().join(name).display()
+        )
+    })?;
+    if !projection_files_are_same(held, &current)? {
         anyhow::bail!(
-            "invalid sync job state transition: {} -> {}",
-            from.as_str(),
-            to.as_str()
+            "projection instance changed while in use: {}",
+            directory.path().join(name).display()
         );
     }
     Ok(())
 }
 
-fn validate_non_empty_label(label: &str, value: &str) -> anyhow::Result<()> {
-    if value.is_empty() || value.len() > 256 || value.contains('/') || value.contains("..") {
-        anyhow::bail!("invalid {label}: {value}");
+fn projection_sidecar_name(name: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
+    let mut sidecar = name.to_os_string();
+    sidecar.push(suffix);
+    sidecar
+}
+
+fn open_existing_projection_sidecars_in_directory(
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+) -> anyhow::Result<(Option<fs::File>, Option<fs::File>)> {
+    Ok((
+        directory.open_regular(&projection_sidecar_name(name, "-wal"), false)?,
+        directory.open_regular(&projection_sidecar_name(name, "-shm"), false)?,
+    ))
+}
+
+fn establish_projection_sidecars_in_directory(
+    conn: &Connection,
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+) -> anyhow::Result<(Option<fs::File>, Option<fs::File>)> {
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if journal_mode != "wal" {
+        anyhow::bail!(
+            "projection journal mode mismatch in {}: stored={journal_mode}, expected=wal",
+            directory.path().join(name).display()
+        );
     }
-    Ok(())
+    // Force the Unix VFS to open WAL/SHM before the ordinary runtime pathname
+    // could be replaced. Retaining and proving those exact inodes prevents a
+    // later lazy sidecar open from rebinding projection writes.
+    conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+    let wal_name = projection_sidecar_name(name, "-wal");
+    let shm_name = projection_sidecar_name(name, "-shm");
+    let wal = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "SQLite did not establish projection WAL: {}",
+            directory.path().join(&wal_name).display()
+        )
+    })?;
+    let shm = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "SQLite did not establish projection shared memory: {}",
+            directory.path().join(&shm_name).display()
+        )
+    })?;
+    ensure_sqlite_retains_projection_file(&wal, "projection WAL")?;
+    ensure_sqlite_retains_projection_file(&shm, "projection shared memory")?;
+    Ok((Some(wal), Some(shm)))
 }
 
-fn admission_attestation_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<AdmissionAttestationRecord> {
-    let state: String = row.get("state")?;
-    Ok(AdmissionAttestationRecord {
-        attestation_hash: row.get("attestation_hash")?,
-        subject_hash: row.get("subject_hash")?,
-        policy: row.get("policy")?,
-        claim: row.get("claim")?,
-        issuer: row.get("issuer")?,
-        issued_at: row.get("issued_at")?,
-        expires_at: row.get("expires_at")?,
-        head_ref_path: row.get("head_ref_path")?,
-        indexed_at: row.get("indexed_at")?,
-        state: AdmissionAttestationState::from_str(&state)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?,
-    })
+fn ensure_sqlite_retains_projection_file(file: &fs::File, label: &str) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, label);
+        anyhow::bail!("descriptor-bound projection SQLite is unavailable on this platform");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let expected = file.metadata()?;
+        let retained = fs::read_dir("/proc/self/fd")?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let descriptor = entry.file_name().to_str()?.parse::<i32>().ok()?;
+                (descriptor != file.as_raw_fd()).then_some(entry.path())
+            })
+            .filter_map(|path| fs::metadata(path).ok())
+            .any(|metadata| metadata.dev() == expected.dev() && metadata.ino() == expected.ino());
+        if !retained {
+            anyhow::bail!("SQLite did not retain a descriptor for the pinned {label} inode");
+        }
+        Ok(())
+    }
 }
 
-fn sync_job_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobAttemptRecord> {
-    let state: String = row.get("state")?;
-    let attempt_number: i64 = row.get("attempt_number")?;
-    let result_json: Option<Vec<u8>> = row.get("result_json")?;
-    Ok(SyncJobAttemptRecord {
-        attempt_id: row.get("attempt_id")?,
-        job_id: row.get("job_id")?,
-        attempt_number: u64::try_from(attempt_number).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        worker_id: row.get("worker_id")?,
-        state: SyncJobAttemptState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        phase: row.get("phase")?,
-        started_at: row.get("started_at")?,
-        updated_at: row.get("updated_at")?,
-        finished_at: row.get("finished_at")?,
-        error: row.get("error")?,
-        result: result_json
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery))
-            .transpose()?,
-    })
+fn validate_selected_current(conn: &Connection, path: &Path) -> anyhow::Result<()> {
+    let spec = projection_schema_spec();
+    match classify_projection_db(conn, spec.application_id)? {
+        ProjectionOwnershipState::Owned => {}
+        ProjectionOwnershipState::Empty => anyhow::bail!("selected projection instance is empty"),
+        ProjectionOwnershipState::Foreign {
+            app_id,
+            user_tables,
+        } => anyhow::bail!(
+            "selected projection has foreign application_id={app_id}, user_tables={user_tables}"
+        ),
+    }
+    let stored_epoch = stored_projection_schema_epoch(conn)?;
+    let expected_epoch = projection_schema_epoch();
+    if stored_epoch != expected_epoch {
+        anyhow::bail!(
+            "selected projection schema epoch mismatch: stored={stored_epoch}, expected={expected_epoch}"
+        );
+    }
+    sqlite_schema::assert_owned(conn, &spec, path)?;
+    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)
 }
 
-fn sync_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyncJobRecord> {
-    let state: String = row.get("state")?;
-    let roots_json: Vec<u8> = row.get("roots_json")?;
-    let heads_json: Vec<u8> = row.get("heads_json")?;
-    let uploaded_json: Vec<u8> = row.get("uploaded_hashes_json")?;
-    let fetched_json: Vec<u8> = row.get("fetched_hashes_json")?;
-    let result_json: Option<Vec<u8>> = row.get("result_json")?;
-    let attempt_count: i64 = row.get("attempt_count")?;
-    let max_attempts: i64 = row.get("max_attempts")?;
-    Ok(SyncJobRecord {
-        job_id: row.get("job_id")?,
-        operation_type: row.get("operation_type")?,
-        peer: row.get("peer")?,
-        state: SyncJobState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        phase: row.get("phase")?,
-        roots: serde_json::from_slice(&roots_json).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        heads: serde_json::from_slice(&heads_json).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        uploaded_hashes: serde_json::from_slice(&uploaded_json)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?,
-        fetched_hashes: serde_json::from_slice(&fetched_json)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?,
-        attempt_count: u64::try_from(attempt_count).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        max_attempts: u64::try_from(max_attempts).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        last_error: row.get("last_error")?,
-        result: result_json
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery))
-            .transpose()?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        finished_at: row.get("finished_at")?,
-    })
+pub(crate) fn projection_instance_lease_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.lease", path.to_string_lossy()))
 }
 
-fn cas_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CasEntryAttribution> {
-    let entry_kind: String = row.get("entry_kind")?;
-    let state: String = row.get("state")?;
-    let bytes: i64 = row.get("bytes")?;
-    Ok(CasEntryAttribution {
-        hash: row.get("hash")?,
-        entry_kind: match entry_kind.as_str() {
-            "object" => CasEntryKind::Object,
-            "blob" => CasEntryKind::Blob,
-            _ => return Err(rusqlite::Error::InvalidQuery),
-        },
-        bytes: u64::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?,
-        first_seen_at: row.get("first_seen_at")?,
-        updated_at: row.get("updated_at")?,
-        source_principal: row.get("source_principal")?,
-        source_peer: row.get("source_peer")?,
-        job_id: row.get("job_id")?,
-        state: CasEntryState::from_str(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
-    })
+fn acquire_projection_instance_lease(path: &Path) -> anyhow::Result<fs::File> {
+    let lease_path = projection_instance_lease_path(path);
+    let lease = open_projection_regular_file_no_follow(&lease_path, true, true)?
+        .expect("create=true always returns an opened projection lease");
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("acquire shared projection lease {}", lease_path.display())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("projection instance leasing is unavailable on this platform");
+    Ok(lease)
 }
 
-// ============= Write operations =============
+fn acquire_existing_projection_instance_lease(path: &Path) -> anyhow::Result<fs::File> {
+    let lease_path = projection_instance_lease_path(path);
+    let lease =
+        open_projection_regular_file_no_follow(&lease_path, false, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing projection lease does not exist: {}",
+                lease_path.display()
+            )
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("acquire shared projection lease {}", lease_path.display())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("projection instance leasing is unavailable on this platform");
+    Ok(lease)
+}
+
+fn acquire_projection_instance_lease_in_directory(
+    directory: &lillux::PinnedDirectory,
+    projection_name: &std::ffi::OsStr,
+    require_existing: bool,
+) -> anyhow::Result<fs::File> {
+    let mut lease_name = projection_name.to_os_string();
+    lease_name.push(".lease");
+    let lease = if require_existing {
+        directory.open_regular(&lease_name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing projection lease does not exist: {}",
+                directory.path().join(&lease_name).display()
+            )
+        })?
+    } else {
+        directory.open_regular_create(&lease_name, true, false, 0o600)?
+    };
+    directory.sync()?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "acquire shared projection lease {}",
+                    directory.path().join(&lease_name).display()
+                )
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("projection instance leasing is unavailable on this platform");
+    Ok(lease)
+}
+
+fn open_projection_connection(path: &Path) -> anyhow::Result<(Connection, fs::File)> {
+    // Pin an existing inode before SQLite opens it. For a new generation the
+    // file is pinned immediately after SQLite atomically creates it.
+    let existing = open_projection_regular_file_no_follow(path, false, false)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let conn = Connection::open_with_flags(path, flags)?;
+    let instance_file = match existing {
+        Some(file) => file,
+        None => require_projection_regular_file_no_follow(path)?,
+    };
+    ensure_open_projection_regular_file_path(path, &instance_file)?;
+    conn.pragma_update(None, "synchronous", "FULL")
+        .context("failed to set projection synchronous=FULL")?;
+    Ok((conn, instance_file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1404,68 +1128,6 @@ mod tests {
     use crate::objects::{ChainState, ChainThreadEntry, ThreadStatus};
     use ryeos_tracing::test as trace_test;
     use std::collections::BTreeMap;
-
-    #[test]
-    fn retention_deletes_only_old_terminal_sync_jobs() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        let insert_job = |job_id: &str, state: &str, ts: &str, finished_at: Option<&str>| {
-            db.conn
-                .execute(
-                    "INSERT INTO sync_jobs (job_id, operation_type, peer, state, phase,
-                        roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
-                        attempt_count, max_attempts, last_error, result_json,
-                        created_at, updated_at, finished_at)
-                     VALUES (?1,'remote_execute',NULL,?2,'done',
-                        x'5b5d',x'5b5d',x'5b5d',x'5b5d',
-                        1,1,NULL,NULL,?3,?3,?4)",
-                    rusqlite::params![job_id, state, ts, finished_at],
-                )
-                .unwrap();
-        };
-        let insert_attempt = |attempt_id: &str, job_id: &str, ts: &str| {
-            db.conn
-                .execute(
-                    "INSERT INTO sync_job_attempts (attempt_id, job_id, attempt_number,
-                        worker_id, state, phase, started_at, updated_at, finished_at, error, result_json)
-                     VALUES (?1,?2,1,'w','completed','done',?3,?3,?3,NULL,NULL)",
-                    rusqlite::params![attempt_id, job_id, ts],
-                )
-                .unwrap();
-        };
-
-        // Old terminal job (+ attempt), a recent terminal job, and an active job.
-        insert_job(
-            "old",
-            "completed",
-            "2026-01-01T00:00:00Z",
-            Some("2026-01-01T00:00:00Z"),
-        );
-        insert_attempt("old-a", "old", "2026-01-01T00:00:00Z");
-        insert_job(
-            "recent",
-            "failed",
-            "2026-06-30T00:00:00Z",
-            Some("2026-06-30T00:00:00Z"),
-        );
-        insert_job("active", "running", "2026-01-01T00:00:00Z", None);
-
-        let (jobs, attempts) = db
-            .delete_terminal_sync_jobs_before("2026-03-01T00:00:00Z")
-            .unwrap();
-        assert_eq!(jobs, 1, "only the old terminal job is retired");
-        assert_eq!(attempts, 1, "the old job's attempt is cascaded");
-
-        assert!(db.get_sync_job("old").unwrap().is_none());
-        assert!(db.get_sync_job("recent").unwrap().is_some(), "recent kept");
-        assert!(
-            db.get_sync_job("active").unwrap().is_some(),
-            "active job never retired even though old"
-        );
-        assert!(db.list_sync_job_attempts("old").unwrap().is_empty());
-    }
 
     #[test]
     fn open_creates_projection_db() {
@@ -1488,6 +1150,17 @@ mod tests {
         assert!(tables.contains(&"projection_meta".to_string()));
         assert!(tables.contains(&"threads".to_string()));
         assert!(tables.contains(&"thread_usage_latest".to_string()));
+        for operational_table in [
+            "cas_entries",
+            "admission_attestations",
+            "sync_jobs",
+            "sync_job_attempts",
+        ] {
+            assert!(
+                !tables.iter().any(|table| table == operational_table),
+                "replaceable projection must not own {operational_table}"
+            );
+        }
 
         assert_eq!(
             stored_projection_schema_epoch(db.connection()).unwrap(),
@@ -1498,7 +1171,207 @@ mod tests {
             .connection()
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(synchronous, 1, "projection DB must use synchronous=NORMAL");
+        assert_eq!(synchronous, 2, "projection DB must use synchronous=FULL");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_projection_open_rejects_symlink_database_and_lease() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let real_path = tempdir.path().join("real.sqlite3");
+        drop(ProjectionDb::open(&real_path).unwrap());
+
+        let linked_path = tempdir.path().join("linked.sqlite3");
+        symlink(&real_path, &linked_path).unwrap();
+        assert!(ProjectionDb::open_selected_current(&linked_path).is_err());
+
+        let lease_path = projection_instance_lease_path(&real_path);
+        std::fs::remove_file(&lease_path).unwrap();
+        let other_lease = tempdir.path().join("other.lease");
+        std::fs::write(&other_lease, b"").unwrap();
+        symlink(&other_lease, &lease_path).unwrap();
+        assert!(ProjectionDb::open_selected_current(&real_path).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_selected_open_does_not_rebind_after_runtime_replacement() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let runtime = tempdir.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let original_runtime = lillux::PinnedDirectory::open(&runtime)
+            .unwrap()
+            .expect("runtime exists");
+        let name = std::ffi::OsStr::new("projection.instance.sqlite3");
+
+        let original = ProjectionDb::create_in_directory(&original_runtime, name).unwrap();
+        original
+            .connection()
+            .execute(
+                "INSERT INTO projection_meta (
+                    chain_root_id, indexed_chain_state_hash, updated_at
+                 ) VALUES ('original', 'original-hash', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        original.close_durable().unwrap();
+
+        let displaced = tempdir.path().join("runtime.displaced");
+        std::fs::rename(&runtime, &displaced).unwrap();
+        std::fs::create_dir(&runtime).unwrap();
+        let replacement_runtime = lillux::PinnedDirectory::open(&runtime)
+            .unwrap()
+            .expect("replacement runtime exists");
+        let replacement = ProjectionDb::create_in_directory(&replacement_runtime, name).unwrap();
+        replacement
+            .connection()
+            .execute(
+                "INSERT INTO projection_meta (
+                    chain_root_id, indexed_chain_state_hash, updated_at
+                 ) VALUES ('replacement', 'replacement-hash', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        replacement.close_durable().unwrap();
+
+        let selected =
+            ProjectionDb::open_selected_current_in_directory(&original_runtime, name, true)
+                .unwrap();
+        let selected_root: String = selected
+            .connection()
+            .query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(selected_root, "original");
+
+        let replacement =
+            ProjectionDb::open_selected_current_in_directory(&replacement_runtime, name, true)
+                .unwrap();
+        let replacement_root: String = replacement
+            .connection()
+            .query_row("SELECT chain_root_id FROM projection_meta", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(replacement_root, "replacement");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_selected_open_never_creates_a_missing_database() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let directory = lillux::PinnedDirectory::open(tempdir.path())
+            .unwrap()
+            .expect("temporary directory exists");
+        let name = std::ffi::OsStr::new("projection.missing.sqlite3");
+        let lease_name = std::ffi::OsStr::new("projection.missing.sqlite3.lease");
+        drop(
+            directory
+                .open_regular_create(lease_name, true, true, 0o600)
+                .unwrap(),
+        );
+
+        assert!(ProjectionDb::open_selected_current_in_directory(&directory, name, true).is_err());
+        assert!(directory.open_regular(name, false).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_rejects_symlink_sidecar_before_moving_main_file() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let target = tempdir.path().join("outside-wal");
+        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        std::fs::write(&path, b"db").unwrap();
+        std::fs::write(&target, b"outside").unwrap();
+        symlink(&target, &wal).unwrap();
+
+        assert!(reset_projection_files(&path, 0, projection_schema_epoch()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"db");
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn close_durable_checkpoints_and_leaves_no_live_wal() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO projection_meta (
+                    chain_root_id, indexed_chain_state_hash, updated_at
+                 ) VALUES ('T-root', 'hash', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        db.close_durable().unwrap();
+
+        let wal_path = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        assert!(
+            !wal_path.exists() || wal_path.metadata().unwrap().len() == 0,
+            "durably closed projection must not retain live WAL data"
+        );
+        let reopened = ProjectionDb::open_selected_current(&path).unwrap();
+        let rows: i64 = reopened
+            .connection()
+            .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn close_durable_rejects_a_busy_incomplete_checkpoint() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        db.connection()
+            .busy_timeout(std::time::Duration::ZERO)
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO projection_meta (
+                    chain_root_id, indexed_chain_state_hash, updated_at
+                 ) VALUES ('T-before', 'before', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.connection()
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO projection_meta (
+                    chain_root_id, indexed_chain_state_hash, updated_at
+                 ) VALUES ('T-after', 'after', '2026-01-01T00:00:01Z')",
+                [],
+            )
+            .unwrap();
+
+        let error = db.close_durable().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("projection WAL checkpoint was incomplete"),
+            "unexpected error: {error:#}"
+        );
+        let wal_path = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        assert!(
+            wal_path.metadata().unwrap().len() != 0,
+            "failed close must not erase WAL data that could not be checkpointed"
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
@@ -1554,7 +1427,7 @@ mod tests {
             .connection()
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(synchronous, 1, "reopened projection DB must use NORMAL");
+        assert_eq!(synchronous, 2, "reopened projection DB must use FULL");
         assert!(reset_backups(&path).is_empty());
     }
 
@@ -1587,8 +1460,8 @@ mod tests {
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            synchronous, 1,
-            "post-epoch-reset projection DB must use NORMAL"
+            synchronous, 2,
+            "post-epoch-reset projection DB must use FULL"
         );
         assert!(!table_exists(opened.db.connection(), "sentinel"));
         assert_eq!(reset_backups(&path).len(), 1);
@@ -1758,835 +1631,6 @@ mod tests {
     }
 
     #[test]
-    fn record_cas_entry_preserves_first_seen_and_updates_state() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        let hash = "ab".repeat(32);
-
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 128,
-            source_principal: Some("fp:source".to_string()),
-            source_peer: Some("peer-a".to_string()),
-            job_id: Some("job-a".to_string()),
-            state: CasEntryState::Staged,
-        })
-        .unwrap();
-
-        let first = db
-            .get_cas_entry(CasEntryKind::Object, &hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.hash, hash);
-        assert_eq!(first.entry_kind, CasEntryKind::Object);
-        assert_eq!(first.bytes, 128);
-        assert_eq!(first.state, CasEntryState::Staged);
-        assert_eq!(first.source_principal.as_deref(), Some("fp:source"));
-
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 256,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Accepted,
-        })
-        .unwrap();
-
-        let updated = db
-            .get_cas_entry(CasEntryKind::Object, &hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated.first_seen_at, first.first_seen_at);
-        assert_eq!(updated.bytes, 256);
-        assert_eq!(updated.state, CasEntryState::Accepted);
-        assert_eq!(updated.source_principal.as_deref(), Some("fp:source"));
-        assert_eq!(updated.source_peer.as_deref(), Some("peer-a"));
-        assert_eq!(updated.job_id.as_deref(), Some("job-a"));
-
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 512,
-            source_principal: Some("fp:untrusted".to_string()),
-            source_peer: Some("peer-untrusted".to_string()),
-            job_id: Some("job-untrusted".to_string()),
-            state: CasEntryState::Staged,
-        })
-        .unwrap();
-
-        let still_accepted = db
-            .get_cas_entry(CasEntryKind::Object, &hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(still_accepted.bytes, 256);
-        assert_eq!(still_accepted.state, CasEntryState::Accepted);
-
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 1024,
-            source_principal: Some("fp:rejected".to_string()),
-            source_peer: Some("peer-rejected".to_string()),
-            job_id: Some("job-rejected".to_string()),
-            state: CasEntryState::Rejected,
-        })
-        .unwrap();
-
-        let not_downgraded = db
-            .get_cas_entry(CasEntryKind::Object, &hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(not_downgraded.bytes, 256);
-        assert_eq!(not_downgraded.state, CasEntryState::Accepted);
-
-        let rejected_hash = "ac".repeat(32);
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: rejected_hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 10,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Staged,
-        })
-        .unwrap();
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: rejected_hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 20,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Rejected,
-        })
-        .unwrap();
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: rejected_hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 30,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Staged,
-        })
-        .unwrap();
-        let stays_rejected = db
-            .get_cas_entry(CasEntryKind::Object, &rejected_hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(stays_rejected.bytes, 20);
-        assert_eq!(stays_rejected.state, CasEntryState::Rejected);
-    }
-
-    #[test]
-    fn cas_entry_state_queries_are_deterministic() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        let staged_hash = "cd".repeat(32);
-        let mirrored_hash = "ef".repeat(32);
-
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: staged_hash.clone(),
-            entry_kind: CasEntryKind::Blob,
-            bytes: 11,
-            source_principal: None,
-            source_peer: Some("peer-b".to_string()),
-            job_id: Some("job-b".to_string()),
-            state: CasEntryState::Staged,
-        })
-        .unwrap();
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: mirrored_hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 22,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Mirrored,
-        })
-        .unwrap();
-        db.set_cas_entry_state(CasEntryKind::Blob, &staged_hash, CasEntryState::Accepted)
-            .unwrap();
-
-        let accepted = db
-            .list_cas_entries_by_state(CasEntryState::Accepted)
-            .unwrap();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].hash, staged_hash);
-        assert_eq!(accepted[0].entry_kind, CasEntryKind::Blob);
-
-        let summary = db.cas_entries_by_state_summary().unwrap();
-        assert_eq!(summary.len(), 2);
-        assert_eq!(summary[0].state, CasEntryState::Accepted);
-        assert_eq!(summary[0].count, 1);
-        assert_eq!(summary[0].total_bytes, 11);
-        assert_eq!(summary[1].state, CasEntryState::Mirrored);
-        assert_eq!(summary[1].count, 1);
-        assert_eq!(summary[1].total_bytes, 22);
-    }
-
-    #[test]
-    fn cas_entry_lookup_is_keyed_by_kind_and_hash() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        let hash = "99".repeat(32);
-
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: hash.clone(),
-            entry_kind: CasEntryKind::Object,
-            bytes: 10,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Local,
-        })
-        .unwrap();
-        db.record_cas_entry(&NewCasEntryAttribution {
-            hash: hash.clone(),
-            entry_kind: CasEntryKind::Blob,
-            bytes: 20,
-            source_principal: None,
-            source_peer: None,
-            job_id: None,
-            state: CasEntryState::Staged,
-        })
-        .unwrap();
-
-        db.set_cas_entry_state(CasEntryKind::Blob, &hash, CasEntryState::Accepted)
-            .unwrap();
-
-        let object = db
-            .get_cas_entry(CasEntryKind::Object, &hash)
-            .unwrap()
-            .unwrap();
-        let blob = db
-            .get_cas_entry(CasEntryKind::Blob, &hash)
-            .unwrap()
-            .unwrap();
-        assert_eq!(object.bytes, 10);
-        assert_eq!(object.state, CasEntryState::Local);
-        assert_eq!(blob.bytes, 20);
-        assert_eq!(blob.state, CasEntryState::Accepted);
-    }
-
-    #[test]
-    fn admission_attestation_index_is_queryable_by_subject_and_policy() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        let subject = "11".repeat(32);
-        let attestation = "22".repeat(32);
-
-        db.record_admission_attestation(&NewAdmissionAttestationRecord {
-            attestation_hash: attestation.clone(),
-            subject_hash: subject.clone(),
-            policy: "local-node-v1".to_string(),
-            claim: "accepted".to_string(),
-            issuer: "fp:issuer".to_string(),
-            issued_at: "2026-05-30T00:00:00Z".to_string(),
-            expires_at: None,
-            head_ref_path: Some(format!("admissions/local-node-v1/{subject}/head")),
-            state: AdmissionAttestationState::Accepted,
-        })
-        .unwrap();
-
-        let by_subject = db
-            .list_admission_attestations_for_subject(&subject, None)
-            .unwrap();
-        assert_eq!(by_subject.len(), 1);
-        assert_eq!(by_subject[0].attestation_hash, attestation);
-        assert_eq!(by_subject[0].policy, "local-node-v1");
-        assert_eq!(by_subject[0].state, AdmissionAttestationState::Accepted);
-
-        let by_policy = db
-            .list_admission_attestations_for_subject(&subject, Some("local-node-v1"))
-            .unwrap();
-        assert_eq!(by_policy.len(), 1);
-
-        db.record_admission_attestation(&NewAdmissionAttestationRecord {
-            attestation_hash: "33".repeat(32),
-            subject_hash: subject.clone(),
-            policy: "local-node-v1".to_string(),
-            claim: "accepted".to_string(),
-            issuer: "fp:other-issuer".to_string(),
-            issued_at: "2026-05-30T00:01:00Z".to_string(),
-            expires_at: None,
-            head_ref_path: Some(format!("admissions/local-node-v1/{subject}/head")),
-            state: AdmissionAttestationState::Accepted,
-        })
-        .unwrap();
-        let multi_issuer = db
-            .list_admission_attestations_for_subject(&subject, Some("local-node-v1"))
-            .unwrap();
-        assert_eq!(multi_issuer.len(), 2);
-
-        let other_policy = db
-            .list_admission_attestations_for_subject(&subject, Some("other-policy"))
-            .unwrap();
-        assert!(other_policy.is_empty());
-    }
-
-    #[test]
-    fn record_cas_entry_rejects_invalid_hash() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        let err = db
-            .record_cas_entry(&NewCasEntryAttribution {
-                hash: "not-a-hash".to_string(),
-                entry_kind: CasEntryKind::Object,
-                bytes: 1,
-                source_principal: None,
-                source_peer: None,
-                job_id: None,
-                state: CasEntryState::Local,
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("invalid CAS entry hash"));
-
-        let err = db
-            .record_cas_entry(&NewCasEntryAttribution {
-                hash: "AB".repeat(32),
-                entry_kind: CasEntryKind::Object,
-                bytes: 1,
-                source_principal: None,
-                source_peer: None,
-                job_id: None,
-                state: CasEntryState::Local,
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("invalid CAS entry hash"));
-    }
-
-    #[test]
-    fn sync_job_lifecycle_is_persisted() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-        let root_hash = "11".repeat(32);
-        let head_hash = "22".repeat(32);
-        let uploaded_hash = "33".repeat(32);
-        let fetched_hash = "44".repeat(32);
-
-        let created = db
-            .create_sync_job(&NewSyncJob {
-                job_id: "job:alpha".to_string(),
-                operation_type: "mirror_pull".to_string(),
-                peer: Some("node-a".to_string()),
-                roots: vec![root_hash.clone()],
-                heads: vec![head_hash.clone()],
-                max_attempts: 3,
-            })
-            .unwrap();
-
-        assert_eq!(created.job_id, "job:alpha");
-        assert_eq!(created.operation_type, "mirror_pull");
-        assert_eq!(created.peer.as_deref(), Some("node-a"));
-        assert_eq!(created.state, SyncJobState::Planned);
-        assert_eq!(created.phase, "planned");
-        assert_eq!(created.roots, vec![root_hash]);
-        assert_eq!(created.heads, vec![head_hash]);
-        assert_eq!(created.attempt_count, 0);
-        assert_eq!(created.max_attempts, 3);
-        assert!(created.finished_at.is_none());
-
-        db.update_sync_job(
-            "job:alpha",
-            &SyncJobUpdate {
-                state: SyncJobState::Running,
-                phase: "fetching_closure".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![uploaded_hash.clone()],
-                fetched_hashes: vec![fetched_hash.clone()],
-                last_error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-
-        let running = db.get_sync_job("job:alpha").unwrap().unwrap();
-        assert_eq!(running.state, SyncJobState::Running);
-        assert_eq!(running.phase, "fetching_closure");
-        assert_eq!(running.uploaded_hashes, vec![uploaded_hash]);
-        assert_eq!(running.fetched_hashes, vec![fetched_hash]);
-        assert_eq!(running.attempt_count, 0);
-        assert!(running.finished_at.is_none());
-
-        db.update_sync_job(
-            "job:alpha",
-            &SyncJobUpdate {
-                state: SyncJobState::Completed,
-                phase: "done".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: running.uploaded_hashes,
-                fetched_hashes: running.fetched_hashes,
-                last_error: None,
-                result: Some(serde_json::json!({"accepted": true})),
-            },
-        )
-        .unwrap();
-
-        let completed = db.get_sync_job("job:alpha").unwrap().unwrap();
-        assert_eq!(completed.state, SyncJobState::Completed);
-        assert_eq!(completed.phase, "done");
-        assert_eq!(completed.attempt_count, 0);
-        assert_eq!(
-            completed.result,
-            Some(serde_json::json!({"accepted": true}))
-        );
-        assert!(completed.finished_at.is_some());
-
-        let completed_jobs = db
-            .list_sync_jobs_by_state(Some(SyncJobState::Completed), 10)
-            .unwrap();
-        assert_eq!(completed_jobs.len(), 1);
-        assert_eq!(completed_jobs[0].job_id, "job:alpha");
-        assert_eq!(db.count_active_sync_jobs().unwrap(), 0);
-    }
-
-    #[test]
-    fn sync_job_attempt_lifecycle_is_persisted() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job:attempts".to_string(),
-            operation_type: "remote_execute".to_string(),
-            peer: Some("node-a".to_string()),
-            roots: vec![],
-            heads: vec![],
-            max_attempts: 2,
-        })
-        .unwrap();
-
-        let first = db
-            .create_sync_job_attempt(&NewSyncJobAttempt {
-                attempt_id: "attempt:one".to_string(),
-                job_id: "job:attempts".to_string(),
-                worker_id: Some("worker-a".to_string()),
-                phase: "pushing".to_string(),
-            })
-            .unwrap();
-        assert_eq!(first.attempt_number, 1);
-        assert_eq!(first.state, SyncJobAttemptState::Running);
-        assert_eq!(first.phase, "pushing");
-        assert_eq!(first.worker_id.as_deref(), Some("worker-a"));
-        assert!(first.finished_at.is_none());
-        assert_eq!(
-            db.get_sync_job("job:attempts")
-                .unwrap()
-                .unwrap()
-                .attempt_count,
-            1
-        );
-
-        let err = db
-            .create_sync_job_attempt(&NewSyncJobAttempt {
-                attempt_id: "attempt:concurrent".to_string(),
-                job_id: "job:attempts".to_string(),
-                worker_id: None,
-                phase: "pushing".to_string(),
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("already has a running attempt"));
-
-        db.finish_sync_job_attempt(
-            "attempt:one",
-            &FinishSyncJobAttempt {
-                state: SyncJobAttemptState::Failed,
-                phase: "push_failed".to_string(),
-                error: Some("network".to_string()),
-                result: Some(serde_json::json!({"retryable": true})),
-            },
-        )
-        .unwrap();
-        let finished = db.get_sync_job_attempt("attempt:one").unwrap().unwrap();
-        assert_eq!(finished.state, SyncJobAttemptState::Failed);
-        assert_eq!(finished.phase, "push_failed");
-        assert_eq!(finished.error.as_deref(), Some("network"));
-        assert_eq!(
-            finished.result,
-            Some(serde_json::json!({"retryable": true}))
-        );
-        assert!(finished.finished_at.is_some());
-
-        let err = db
-            .finish_sync_job_attempt(
-                "attempt:one",
-                &FinishSyncJobAttempt {
-                    state: SyncJobAttemptState::Completed,
-                    phase: "done".to_string(),
-                    error: None,
-                    result: None,
-                },
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("already terminal"));
-
-        let second = db
-            .create_sync_job_attempt(&NewSyncJobAttempt {
-                attempt_id: "attempt:two".to_string(),
-                job_id: "job:attempts".to_string(),
-                worker_id: Some("worker-b".to_string()),
-                phase: "retrying".to_string(),
-            })
-            .unwrap();
-        assert_eq!(second.attempt_number, 2);
-        let err = db
-            .update_sync_job(
-                "job:attempts",
-                &SyncJobUpdate {
-                    state: SyncJobState::Completed,
-                    phase: "done".to_string(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: vec![],
-                    fetched_hashes: vec![],
-                    last_error: None,
-                    result: None,
-                },
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("attempt(s) are still running"));
-        assert_eq!(
-            db.list_sync_job_attempts("job:attempts")
-                .unwrap()
-                .into_iter()
-                .map(|attempt| attempt.attempt_id)
-                .collect::<Vec<_>>(),
-            vec!["attempt:one".to_string(), "attempt:two".to_string()]
-        );
-    }
-
-    #[test]
-    fn sync_job_attempt_completion_must_match_parent_job() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        for job_id in ["job:attempt-owner-a", "job:attempt-owner-b"] {
-            db.create_sync_job(&NewSyncJob {
-                job_id: job_id.to_string(),
-                operation_type: "remote_execute".to_string(),
-                peer: None,
-                roots: vec![],
-                heads: vec![],
-                max_attempts: 1,
-            })
-            .unwrap();
-        }
-        db.create_sync_job_attempt(&NewSyncJobAttempt {
-            attempt_id: "attempt:owner".to_string(),
-            job_id: "job:attempt-owner-a".to_string(),
-            worker_id: None,
-            phase: "running".to_string(),
-        })
-        .unwrap();
-
-        let err = db
-            .finish_sync_job_attempt_and_update_job(
-                "attempt:owner",
-                &FinishSyncJobAttempt {
-                    state: SyncJobAttemptState::Completed,
-                    phase: "done".to_string(),
-                    error: None,
-                    result: None,
-                },
-                "job:attempt-owner-b",
-                &SyncJobUpdate {
-                    state: SyncJobState::Completed,
-                    phase: "done".to_string(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: vec![],
-                    fetched_hashes: vec![],
-                    last_error: None,
-                    result: None,
-                },
-            )
-            .unwrap_err();
-        assert!(err.to_string().contains("belongs to job"));
-
-        let attempt = db.get_sync_job_attempt("attempt:owner").unwrap().unwrap();
-        assert_eq!(attempt.state, SyncJobAttemptState::Running);
-        let wrong_job = db.get_sync_job("job:attempt-owner-b").unwrap().unwrap();
-        assert_eq!(wrong_job.state, SyncJobState::Planned);
-    }
-
-    #[test]
-    fn sync_job_attempts_respect_parent_limits_and_state() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job:limited".to_string(),
-            operation_type: "remote_execute".to_string(),
-            peer: None,
-            roots: vec![],
-            heads: vec![],
-            max_attempts: 1,
-        })
-        .unwrap();
-        db.create_sync_job_attempt(&NewSyncJobAttempt {
-            attempt_id: "attempt:limited:one".to_string(),
-            job_id: "job:limited".to_string(),
-            worker_id: None,
-            phase: "running".to_string(),
-        })
-        .unwrap();
-        db.finish_sync_job_attempt(
-            "attempt:limited:one",
-            &FinishSyncJobAttempt {
-                state: SyncJobAttemptState::Failed,
-                phase: "failed".to_string(),
-                error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-        let err = db
-            .create_sync_job_attempt(&NewSyncJobAttempt {
-                attempt_id: "attempt:limited:two".to_string(),
-                job_id: "job:limited".to_string(),
-                worker_id: None,
-                phase: "retrying".to_string(),
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("has exhausted attempts"));
-
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job:terminal".to_string(),
-            operation_type: "remote_execute".to_string(),
-            peer: None,
-            roots: vec![],
-            heads: vec![],
-            max_attempts: 1,
-        })
-        .unwrap();
-        db.update_sync_job(
-            "job:terminal",
-            &SyncJobUpdate {
-                state: SyncJobState::Running,
-                phase: "running".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![],
-                fetched_hashes: vec![],
-                last_error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-        db.update_sync_job(
-            "job:terminal",
-            &SyncJobUpdate {
-                state: SyncJobState::Completed,
-                phase: "done".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![],
-                fetched_hashes: vec![],
-                last_error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-        let err = db
-            .create_sync_job_attempt(&NewSyncJobAttempt {
-                attempt_id: "attempt:terminal".to_string(),
-                job_id: "job:terminal".to_string(),
-                worker_id: None,
-                phase: "too_late".to_string(),
-            })
-            .unwrap_err();
-        assert!(err.to_string().contains("cannot create attempt"));
-    }
-
-    #[test]
-    fn active_sync_job_count_only_includes_non_terminal_jobs() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job-running".to_string(),
-            operation_type: "mirror_pull".to_string(),
-            peer: None,
-            roots: vec![],
-            heads: vec![],
-            max_attempts: 3,
-        })
-        .unwrap();
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job-completed".to_string(),
-            operation_type: "mirror_pull".to_string(),
-            peer: None,
-            roots: vec![],
-            heads: vec![],
-            max_attempts: 3,
-        })
-        .unwrap();
-        db.update_sync_job(
-            "job-completed",
-            &SyncJobUpdate {
-                state: SyncJobState::Running,
-                phase: "running".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![],
-                fetched_hashes: vec![],
-                last_error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-        db.update_sync_job(
-            "job-completed",
-            &SyncJobUpdate {
-                state: SyncJobState::Completed,
-                phase: "done".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![],
-                fetched_hashes: vec![],
-                last_error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(db.count_active_sync_jobs().unwrap(), 1);
-    }
-
-    #[test]
-    fn sync_job_rejects_illegal_and_terminal_transitions() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        db.create_sync_job(&NewSyncJob {
-            job_id: "job-transition".to_string(),
-            operation_type: "mirror_pull".to_string(),
-            peer: None,
-            roots: vec![],
-            heads: vec![],
-            max_attempts: 3,
-        })
-        .unwrap();
-
-        let err = db
-            .update_sync_job(
-                "job-transition",
-                &SyncJobUpdate {
-                    state: SyncJobState::Completed,
-                    phase: "done".to_string(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: vec![],
-                    fetched_hashes: vec![],
-                    last_error: None,
-                    result: None,
-                },
-            )
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("invalid sync job state transition"));
-
-        db.update_sync_job(
-            "job-transition",
-            &SyncJobUpdate {
-                state: SyncJobState::Running,
-                phase: "running".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![],
-                fetched_hashes: vec![],
-                last_error: None,
-                result: None,
-            },
-        )
-        .unwrap();
-        db.update_sync_job(
-            "job-transition",
-            &SyncJobUpdate {
-                state: SyncJobState::Failed,
-                phase: "failed".to_string(),
-                roots: None,
-                heads: None,
-                uploaded_hashes: vec![],
-                fetched_hashes: vec![],
-                last_error: Some("boom".to_string()),
-                result: None,
-            },
-        )
-        .unwrap();
-
-        let err = db
-            .update_sync_job(
-                "job-transition",
-                &SyncJobUpdate {
-                    state: SyncJobState::Running,
-                    phase: "reactivated".to_string(),
-                    roots: None,
-                    heads: None,
-                    uploaded_hashes: vec![],
-                    fetched_hashes: vec![],
-                    last_error: None,
-                    result: None,
-                },
-            )
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("invalid sync job state transition"));
-    }
-
-    #[test]
-    fn sync_job_rejects_invalid_hashes() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("projection.db");
-        let db = ProjectionDb::open(&path).unwrap();
-
-        let err = db
-            .create_sync_job(&NewSyncJob {
-                job_id: "job-invalid".to_string(),
-                operation_type: "mirror_pull".to_string(),
-                peer: None,
-                roots: vec!["not-a-hash".to_string()],
-                heads: vec![],
-                max_attempts: 1,
-            })
-            .unwrap_err();
-
-        assert!(err.to_string().contains("invalid sync job root/head hash"));
-
-        let err = db
-            .create_sync_job(&NewSyncJob {
-                job_id: "job-uppercase".to_string(),
-                operation_type: "mirror_pull".to_string(),
-                peer: None,
-                roots: vec!["AA".repeat(32)],
-                heads: vec![],
-                max_attempts: 1,
-            })
-            .unwrap_err();
-
-        assert!(err.to_string().contains("invalid sync job root/head hash"));
-    }
-
-    #[test]
     fn project_thread_snapshot_succeeds() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
@@ -2606,6 +1650,34 @@ mod tests {
     }
 
     #[test]
+    fn project_thread_snapshot_propagates_edge_lookup_failure() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+        db.connection()
+            .execute_batch("DROP TABLE thread_edges")
+            .unwrap();
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-child",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .upstream_thread_id(Some("T-root".to_string()))
+        .build();
+
+        let error = project_thread_snapshot(&db, &snapshot, "T-root").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to check for an existing derived thread edge"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn project_snapshot_writes_result_row_for_outcome_code_only_terminal() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
@@ -2622,6 +1694,9 @@ mod tests {
             "directive-runtime",
         )
         .status(ThreadStatus::Completed)
+        .created_at("2026-01-01T00:00:00Z".to_string())
+        .updated_at("2026-01-01T00:00:01Z".to_string())
+        .finished_at(Some("2026-01-01T00:00:01Z".to_string()))
         .outcome_code(Some("success".to_string()))
         .build();
 
@@ -2655,6 +1730,9 @@ mod tests {
             "directive-runtime",
         )
         .status(ThreadStatus::Failed)
+        .created_at("2026-01-01T00:00:00Z".to_string())
+        .updated_at("2026-01-01T00:00:01Z".to_string())
+        .finished_at(Some("2026-01-01T00:00:01Z".to_string()))
         .outcome_code(Some("required_secret_missing".to_string()))
         .error(Some(err.clone()))
         .build();
@@ -2738,5 +1816,80 @@ mod tests {
         };
         assert_eq!(field_val("thread_id"), Some("T-trace"));
         assert_eq!(field_val("event_type"), Some("test_event"));
+    }
+
+    #[test]
+    fn replaying_event_derived_rows_is_semantically_idempotent() {
+        use crate::objects::thread_event::NewEvent;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = ProjectionDb::open(&tempdir.path().join("projection.db")).unwrap();
+        let artifact = NewEvent::new("T-root", "T-root", crate::event_types::ARTIFACT_PUBLISHED)
+            .chain_seq(1)
+            .thread_seq(1)
+            .payload(serde_json::json!({
+                "artifact_type": "report",
+                "metadata": {"name": "answer"}
+            }))
+            .build_with_ts("2026-04-22T00:00:01Z".to_string());
+        let edge = NewEvent::new("T-root", "T-root", crate::event_types::CHILD_THREAD_SPAWNED)
+            .chain_seq(2)
+            .thread_seq(2)
+            .payload(serde_json::json!({
+                "child_thread_id": "T-child",
+                "spawn_reason": "dispatch"
+            }))
+            .build_with_ts("2026-04-22T00:00:02Z".to_string());
+
+        for _ in 0..2 {
+            project_event(&db, &artifact).unwrap();
+            project_event(&db, &edge).unwrap();
+        }
+
+        let artifacts: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let edges: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_edges WHERE source_event_hash IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifacts, 1);
+        assert_eq!(edges, 1);
+    }
+
+    #[test]
+    fn event_sequence_conflict_never_derives_rows() {
+        use crate::objects::thread_event::NewEvent;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let db = ProjectionDb::open(&tempdir.path().join("projection.db")).unwrap();
+        let existing = NewEvent::new("T-root", "T-root", "existing")
+            .chain_seq(1)
+            .thread_seq(1)
+            .build_with_ts("2026-04-22T00:00:01Z".to_string());
+        let authoritative =
+            NewEvent::new("T-root", "T-root", crate::event_types::ARTIFACT_PUBLISHED)
+                .chain_seq(1)
+                .thread_seq(1)
+                .payload(serde_json::json!({"artifact_type": "report"}))
+                .build_with_ts("2026-04-22T00:00:02Z".to_string());
+
+        project_event(&db, &existing).unwrap();
+        let error = project_event(&db, &authoritative).unwrap_err();
+        assert!(error.is::<ProjectionEventConflict>());
+        let artifacts: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM thread_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(artifacts, 0);
     }
 }

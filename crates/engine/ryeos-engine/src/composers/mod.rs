@@ -28,18 +28,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ryeos_handler_protocol::{
-    ComposeInput, ComposeItemContext, ComposeRequest, ComposeSuccess, HandlerRequest,
-    HandlerResponse, ResolutionStepNameWire, TrustClassWire,
+    ComposeInput, ComposeItemContext, ComposeRequest, ComposeSuccess, ComposerFieldRequirement,
+    ComposerFieldSemantics, HandlerRequest, HandlerResponse, ResolutionStepNameWire,
+    TrustClassWire,
 };
 use serde_json::Value;
 
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
-use crate::kind_registry::KindRegistry;
+use crate::kind_registry::{KindRegistry, KindSchema};
 use crate::resolution::{
-    KindComposedView, ResolutionError, ResolutionFailureClass, ResolutionStepName,
-    ResolvedAncestor, TrustClass,
+    KindComposedView, ResolutionError, ResolutionFailureClass, ResolutionStepDecl,
+    ResolutionStepName, ResolvedAncestor, TrustClass,
 };
 
 const COMPOSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,6 +58,7 @@ const COMPOSE_TIMEOUT: Duration = Duration::from_secs(30);
 struct BoundComposer {
     handler: Arc<VerifiedHandler>,
     config: Value,
+    field_requirements: Vec<ComposerFieldRequirement>,
 }
 
 /// Registry of kind composers, one per kind name.
@@ -122,6 +124,7 @@ impl ComposerRegistry {
                         BoundComposer {
                             handler: Arc::new(handler.clone()),
                             config: schema.composer_config.clone(),
+                            field_requirements: field_requirements_for_schema(schema),
                         },
                     );
                 }
@@ -169,13 +172,20 @@ impl ComposerRegistry {
         })
     }
 
-    /// Test-only registration for synthetic kinds. Production code has no
-    /// constructor that can attach a composer without the registry's immutable
-    /// node sandbox snapshot.
+    /// Test-only registration for synthetic cross-registry fixtures.
+    /// Production has no registration escape hatch: every bound composer and
+    /// exact-value requirement comes from the verified kind registry and every
+    /// production registry retains the immutable node sandbox snapshot.
     #[cfg(test)]
     pub(crate) fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
-        self.composers
-            .insert(kind.to_string(), BoundComposer { handler, config });
+        self.composers.insert(
+            kind.to_string(),
+            BoundComposer {
+                handler,
+                config,
+                field_requirements: Vec::new(),
+            },
+        );
     }
 
     /// True iff a composer is bound for `kind`.
@@ -258,7 +268,16 @@ impl ComposerRegistry {
         .map_err(engine_to_resolution_error)?;
 
         match resp {
-            HandlerResponse::ComposeOk(success) => Ok(success_to_view(success)),
+            HandlerResponse::ComposeOk(success) => {
+                validate_composed_field_requirements(
+                    kind,
+                    &bound.field_requirements,
+                    root_parsed,
+                    ancestor_parsed,
+                    &success.composed,
+                )?;
+                Ok(success_to_view(success))
+            }
             HandlerResponse::ComposeErr { step, reason } => Err(ResolutionError::StepFailed {
                 step: wire_step_to_engine(step),
                 class: ResolutionFailureClass::InvalidDefinition,
@@ -274,6 +293,70 @@ impl ComposerRegistry {
             }),
         }
     }
+}
+
+/// Derive exact-value composer requirements from one verified kind schema.
+///
+/// The contract is entirely schema-shaped: no kind name, item ref, composer
+/// handler, or handler-private strategy appears here.
+pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<ComposerFieldRequirement> {
+    let Some(declaration) = schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.history_policy.as_ref())
+    else {
+        return Vec::new();
+    };
+    let semantics = if schema
+        .resolution
+        .iter()
+        .any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. }))
+    {
+        ComposerFieldSemantics::InheritOrReplace
+    } else {
+        ComposerFieldSemantics::RootVerbatim
+    };
+    vec![ComposerFieldRequirement {
+        field: declaration.composed_path.clone(),
+        semantics,
+    }]
+}
+
+/// Defense in depth after every compose: verify the handler actually emitted
+/// the exact value it acknowledged at boot. This catches handler regressions
+/// independently of config validation and keeps destructive policy fields from
+/// being partially merged or reinterpreted at runtime.
+fn validate_composed_field_requirements(
+    kind: &str,
+    requirements: &[ComposerFieldRequirement],
+    root: &Value,
+    ancestors: &[Value],
+    composed: &Value,
+) -> Result<(), ResolutionError> {
+    for requirement in requirements {
+        let expected = match requirement.semantics {
+            ComposerFieldSemantics::RootVerbatim => root.get(&requirement.field),
+            ComposerFieldSemantics::InheritOrReplace => {
+                root.get(&requirement.field).or_else(|| {
+                    ancestors
+                        .iter()
+                        .rev()
+                        .find_map(|ancestor| ancestor.get(&requirement.field))
+                })
+            }
+        };
+        let actual = composed.get(&requirement.field);
+        if actual != expected {
+            return Err(ResolutionError::StepFailed {
+                step: ResolutionStepName::PipelineInit,
+                reason: format!(
+                    "composer for kind `{kind}` violated {:?} semantics for exact-value field `{}`",
+                    requirement.semantics, requirement.field
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Default for ComposerRegistry {
@@ -515,5 +598,44 @@ composer: {composer}
             msg.contains("handler:totally/made/up") && msg.contains("alpha"),
             "expected unknown-handler error naming both kind and handler, got: {msg}"
         );
+    }
+
+    #[test]
+    fn exact_value_guard_rejects_partial_merge_and_preserves_null() {
+        let requirements = vec![ComposerFieldRequirement {
+            field: "policy".into(),
+            semantics: ComposerFieldSemantics::InheritOrReplace,
+        }];
+        let root = json!({"other": true});
+        let ancestors = vec![
+            json!({"policy": {"base": true}}),
+            json!({"policy": {"nearest": true}}),
+        ];
+        validate_composed_field_requirements(
+            "synthetic",
+            &requirements,
+            &root,
+            &ancestors,
+            &json!({"policy": {"nearest": true}}),
+        )
+        .unwrap();
+        assert!(validate_composed_field_requirements(
+            "synthetic",
+            &requirements,
+            &root,
+            &ancestors,
+            &json!({"policy": {"base": true, "nearest": true}}),
+        )
+        .is_err());
+
+        let root_null = json!({"policy": null});
+        validate_composed_field_requirements(
+            "synthetic",
+            &requirements,
+            &root_null,
+            &ancestors,
+            &json!({"policy": null}),
+        )
+        .unwrap();
     }
 }

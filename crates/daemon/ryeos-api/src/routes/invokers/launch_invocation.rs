@@ -92,6 +92,44 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(project_path_str)
             .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
+        let preflight = crate::routes::launch::preflight_dispatch_launch(
+            &ctx.state,
+            &item_ref,
+            &project_path,
+            &parameters,
+            &ref_bindings,
+            &principal_id,
+            &principal_scopes,
+            None,
+            "inline",
+            false,
+            None,
+            None,
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
+        })?;
+        if !preflight.class.persists_pre_minted_root() {
+            return Err(RouteDispatchError::BadRequest(
+                "background launch requires execution that persists a pre-minted thread root"
+                    .to_string(),
+            ));
+        }
+        let root_admission = preflight.root_admission.ok_or_else(|| {
+            RouteDispatchError::Internal(
+                "threaded dispatch preflight returned no root admission".to_string(),
+            )
+        })?;
+        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+            root_admission,
+            ref_bindings,
+        )
+        .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "validated launch contract rejected at dispatch boundary: {error:#}"
+                ))
+            })?;
+
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 
         let route_id: String = ctx.route_id.to_string();
@@ -104,29 +142,19 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         );
 
         let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_path.as_path().to_path_buf(),
+            launch_options.project_path().to_path_buf(),
             ctx.state.engine.clone(),
         );
         let (mut handle, ready) =
             crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
-            project_path,
             parameters,
             principal_id.clone(),
             principal_scopes,
             thread_id.clone(),
             launch_provenance,
-            crate::routes::launch::DispatchLaunchOptions {
-                ref_bindings,
-                launch_mode: "inline".to_string(),
-                target_site_id: None,
-                validate_only: false,
-                usage_subject: None,
-                usage_subject_asserted_by: None,
-                call: None,
-                previous_thread_id: None,
-            },
+            launch_options,
         );
 
         let ready_thread_id = tokio::select! {

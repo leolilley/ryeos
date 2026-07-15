@@ -111,7 +111,6 @@ fn pre_spawn_dispatch_error(
         keep_alive_secs,
     })
 }
-
 static GATEWAY_CONTRACT: RouteInvocationContract = RouteInvocationContract {
     output: RouteInvocationOutput::Stream,
     principal: PrincipalPolicy::Optional,
@@ -143,6 +142,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             )
         {
             return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
+        }
+        if req.validate_only {
+            return Err(RouteDispatchError::BadRequest(
+                "validate_only is not supported by a pre-minted event stream launch".to_string(),
+            ));
         }
 
         let item_ref =
@@ -236,44 +240,32 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // The dispatch-launch stream is a fire-and-tail-until-terminal
         // contract. Non-inline launches can return before the thread is
         // terminal, and validate-only dispatch can complete without a
-        // lifecycle thread at all. Reject both before spawning work so they
-        // don't degrade into misleading `thread_not_terminal` stream errors.
+        // lifecycle thread at all. Reject both before admission and id minting.
         if req.launch_mode != "inline" {
-            return Ok(pre_spawn_stream_error(
-                self.keep_alive_secs,
-                "stream_launch_mode_unsupported".to_string(),
-                format!(
-                    "/execute/stream supports launch_mode='inline' only; got '{}'",
-                    req.launch_mode
-                ),
-            ));
+            return Err(RouteDispatchError::BadRequest(format!(
+                "/execute/stream supports launch_mode='inline' only; got '{}'",
+                req.launch_mode
+            )));
         }
 
         if req.validate_only {
-            return Ok(pre_spawn_stream_error(
-                self.keep_alive_secs,
-                "stream_validate_only_unsupported".to_string(),
-                "validate_only is not supported on /execute/stream; use POST /execute for validation".to_string(),
+            return Err(RouteDispatchError::BadRequest(
+                "validate_only is not supported on /execute/stream; use POST /execute for validation"
+                    .to_string(),
             ));
         }
 
         // ── Target-site guard ───────────────────────────────────────
-        // Streaming target-site forwarding is not implemented.
-        // Non-local target_site_id returns a clear stream_error so
-        // callers know the feature is coming but not ready.
+        // v1: streaming target-site forwarding is not yet implemented.
+        // Non-local target_site_id is rejected before admission and id minting.
         if let Some(ref target_site_id) = req.target_site_id {
             let current_site_id = ctx.state.threads.site_id();
             if target_site_id != current_site_id {
-                let tsid = target_site_id.clone();
-                return Ok(pre_spawn_stream_error(
-                    self.keep_alive_secs,
-                    "target_site_stream_unsupported".to_string(),
-                    format!(
-                        "target-site streaming is not yet supported on /execute/stream \
-                         (target_site_id: '{tsid}'); unary target-site forwarding is currently \
-                         inline-only via POST /execute"
-                    ),
-                ));
+                return Err(RouteDispatchError::BadRequest(format!(
+                    "target-site streaming is not yet supported on /execute/stream \
+                         (target_site_id: '{target_site_id}'); unary target-site forwarding is \
+                         currently inline-only via POST /execute"
+                )));
             }
             // Self-target: normalize to local (fall through).
             tracing::debug!(
@@ -294,123 +286,51 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .map(|p| p.scopes.clone())
             .unwrap_or_default();
 
-        // Reconstruct the same execution context the background launcher will
-        // use, resolve and verify the primary item, then run generic launch
-        // contract admission before allocating the accepted lifecycle id.
-        let site_id = ctx.state.threads.site_id().to_string();
-        let plan_ctx = ryeos_engine::contracts::PlanContext {
-            requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
-                ryeos_engine::contracts::Principal {
-                    fingerprint: principal_id.clone(),
-                    scopes: principal_scopes.clone(),
-                },
-            ),
-            project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
-                path: project_path.as_path().to_path_buf(),
-            },
-            current_site_id: site_id.clone(),
-            origin_site_id: site_id,
-            execution_hints: Default::default(),
-            validate_only: false,
-        };
-        let exec_ctx = ryeos_executor::executor::ExecutionContext {
-            principal_fingerprint: principal_id.clone(),
-            caller_scopes: principal_scopes.clone(),
-            engine: ctx.state.engine.clone(),
-            plan_ctx,
-            requested_call: req.call.clone(),
-        };
-        let root_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
-            .map_err(|error| RouteDispatchError::BadRequest(format!("invalid item_ref: {error}")))?;
-        let primary = match exec_ctx.engine.resolve(&exec_ctx.plan_ctx, &root_canonical) {
-            Ok(resolved) => match exec_ctx.engine.verify(&exec_ctx.plan_ctx, resolved) {
-                Ok(verified) => verified.resolved,
-                Err(error) => {
-                    return Ok(pre_spawn_dispatch_error(
-                        self.keep_alive_secs,
-                        ryeos_executor::dispatch_error::DispatchError::InvalidRef(
-                            req.item_ref.clone(),
-                            format!("verification failed: {error}"),
-                        ),
-                    ));
-                }
-            },
-            Err(error) => {
-                return Ok(pre_spawn_dispatch_error(
-                    self.keep_alive_secs,
-                    ryeos_executor::dispatch_error::DispatchError::InvalidRef(
-                        req.item_ref.clone(),
-                        format!("resolution failed: {error}"),
-                    ),
-                ));
-            }
-        };
-        let roots = exec_ctx
-            .engine
-            .resolution_roots(Some(project_path.as_path().to_path_buf()));
-        let parsers = exec_ctx
-            .engine
-            .effective_parser_dispatcher(Some(project_path.as_path()))
-            .map_err(|error| {
-                RouteDispatchError::Internal(format!("preflight parser dispatcher: {error}"))
-            })?;
-        if let Err(
-            ryeos_engine::resolution::ResolutionError::ComposedValueContractViolation {
-                item_ref,
-                report,
-                ..
-            },
-        ) = ryeos_engine::resolution::run_resolution_pipeline(
-            &root_canonical,
-            &exec_ctx.engine.kinds,
-            &parsers,
-            &roots,
-            &exec_ctx.engine.trust_store,
-            &exec_ctx.engine.composers,
-        ) {
-            let error_count = report.errors.len();
-            let warning_count = report.warnings.len();
-            return Ok(pre_spawn_dispatch_error(
-                self.keep_alive_secs,
-                ryeos_executor::dispatch_error::DispatchError::ComposedValueContractViolation {
-                    canonical_ref: item_ref,
-                    error_count,
-                    warning_count,
-                    details: ryeos_executor::dispatch_error::ContractViolationDetails::from_report(
-                        &report,
-                    ),
-                },
-            ));
-        }
-        let applicability = match ryeos_executor::dispatch::launch_contract_applicability(
-            &req.item_ref,
-            &exec_ctx,
-        ) {
-            Ok(applicability) => applicability,
-            Err(error) => {
-                return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
-            }
-        };
-        if matches!(
-            &applicability,
-            ryeos_executor::dispatch::LaunchContractApplicability::NonEnvelope { .. }
-        ) {
-            return Ok(pre_spawn_stream_error(
-                self.keep_alive_secs,
-                "stream_launch_class_unsupported".to_string(),
-                "stream launch requires a managed-envelope lifecycle handoff".to_string(),
-            ));
-        }
-        if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
-            &applicability,
-            &primary,
-            &req.ref_bindings,
-            project_path.as_path(),
-            &exec_ctx,
+        // Resolve the actual persisted root (including wrapper targets), verify
+        // it, and capture its policy before exposing an id to the stream.
+        let preflight = crate::routes::launch::preflight_dispatch_launch(
             &ctx.state,
-        ) {
-            return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
+            &item_ref,
+            &project_path,
+            &req.parameters,
+            &req.ref_bindings,
+            &principal_id,
+            &principal_scopes,
+            req.call.clone(),
+            &req.launch_mode,
+            req.validate_only,
+            usage_subject.as_ref(),
+            usage_subject_asserted_by.as_deref(),
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("stream root launch admission failed: {error}"))
+        })?;
+        if !preflight.class.persists_pre_minted_root() {
+            return Err(RouteDispatchError::BadRequest(
+                "stream launch requires execution that persists a pre-minted thread root"
+                    .to_string(),
+            ));
         }
+        let root_admission = preflight.root_admission.ok_or_else(|| {
+            RouteDispatchError::Internal(
+                "threaded dispatch preflight returned no root admission".to_string(),
+            )
+        })?;
+        let mut options = crate::routes::launch::DispatchLaunchOptions::admitted(
+            root_admission,
+            req.ref_bindings,
+        )
+        .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "validated stream contract rejected at dispatch boundary: {error:#}"
+                ))
+            })?;
+        options.launch_mode = req.launch_mode;
+        options.target_site_id = req.target_site_id;
+        options.validate_only = req.validate_only;
+        options.usage_subject = usage_subject;
+        options.usage_subject_asserted_by = usage_subject_asserted_by;
+        options.call = req.call;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 
@@ -428,27 +348,14 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
-        // Build launch options before moving `req` fields.
-        let options = crate::routes::launch::DispatchLaunchOptions {
-            ref_bindings: req.ref_bindings,
-            launch_mode: req.launch_mode,
-            target_site_id: req.target_site_id,
-            validate_only: req.validate_only,
-            usage_subject,
-            usage_subject_asserted_by,
-            call: req.call,
-            previous_thread_id: None,
-        };
-
         let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_path.as_path().to_path_buf(),
+            options.project_path().to_path_buf(),
             ctx.state.engine.clone(),
         );
         let (mut launch_handle, ready) =
             crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
-            project_path,
             req.parameters,
             principal_id,
             principal_scopes,

@@ -29,7 +29,7 @@ fn default_remote() -> String {
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     config::validate_remote_project_path(&req.remote_project)?;
     let local = config::canonical_local_project_path(&req.project)?;
-    let local_key = local.to_string_lossy().to_string();
+    let local_key = config::local_project_identity(&local)?.to_owned();
     let app_root = state.config.runtime_root();
 
     let mut remotes = config::load_remotes(app_root.as_path())?;

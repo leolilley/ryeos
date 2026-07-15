@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use ryeos_handler_protocol::{ComposeRequest, ComposeSuccess, ResolutionStepNameWire};
+use ryeos_handler_protocol::{
+    ComposeRequest, ComposeSuccess, ComposerFieldRequirement, ComposerFieldSemantics,
+    ResolutionStepNameWire,
+};
 use serde_json::Value;
 
 pub fn validate_config(config: &Value) -> Result<(), String> {
@@ -16,6 +19,27 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
             value_type(other)
         )),
     }
+}
+
+/// Validate exact-value composition requirements for the identity composer.
+///
+/// Identity returns the root parsed value unchanged, so it can promise root
+/// preservation but cannot promise ancestor inheritance.
+pub fn validate_field_requirements(
+    requirements: &[ComposerFieldRequirement],
+) -> Result<(), String> {
+    for requirement in requirements {
+        if requirement.field.is_empty() {
+            return Err("identity composer field requirement must not be empty".to_string());
+        }
+        if requirement.semantics != ComposerFieldSemantics::RootVerbatim {
+            return Err(format!(
+                "identity composer cannot provide {:?} semantics for field `{}`; it only preserves root fields verbatim",
+                requirement.semantics, requirement.field
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn compose(
@@ -116,5 +140,20 @@ mod tests {
     fn validate_config_rejects_string() {
         let err = validate_config(&json!("nope")).unwrap_err();
         assert!(err.contains("string"), "got: {err}");
+    }
+
+    #[test]
+    fn exact_field_requirements_are_root_only() {
+        validate_field_requirements(&[ComposerFieldRequirement {
+            field: "policy".into(),
+            semantics: ComposerFieldSemantics::RootVerbatim,
+        }])
+        .unwrap();
+        let error = validate_field_requirements(&[ComposerFieldRequirement {
+            field: "policy".into(),
+            semantics: ComposerFieldSemantics::InheritOrReplace,
+        }])
+        .unwrap_err();
+        assert!(error.contains("only preserves root fields verbatim"));
     }
 }

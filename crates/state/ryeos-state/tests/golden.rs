@@ -81,31 +81,78 @@ fn golden_thread_event_canonical_json() {
 fn golden_thread_snapshot_canonical_json() {
     let cases = [
         json!({
-            "schema": 1,
+            "schema": 2,
             "kind": "thread_snapshot",
-            "thread_id": "T-snap-001",
-            "parent_thread_id": null,
+            "thread_id": "T-root-001",
             "chain_root_id": "T-root-001",
+            "status": "running",
+            "kind_name": "directive",
             "item_ref": "directive:agent/core/base",
             "executor_ref": "native:directive-runtime",
-            "status": "running",
-            "ts": "2026-04-21T12:00:00Z",
-            "checkpoint": null
+            "launch_mode": "inline",
+            "current_site_id": "site:host",
+            "origin_site_id": "site:host",
+            "upstream_thread_id": null,
+            "requested_by": "user:alice",
+            "project_root": null,
+            "captured_history_policy": {
+                "retention": { "mode": "durable" },
+                "canonical_item_ref": "directive:agent/core/base",
+                "item_content_hash": "11".repeat(32),
+                "item_signer_fingerprint": "22".repeat(32),
+                "item_trust_class": "trusted",
+                "kind_schema_content_hash": "33".repeat(32),
+                "resolved_from": {
+                    "node_default": { "node_policy": "missing_config" }
+                }
+            },
+            "base_project_snapshot_hash": null,
+            "result_project_snapshot_hash": null,
+            "created_at": "2026-04-21T12:00:00Z",
+            "updated_at": "2026-04-21T12:00:00Z",
+            "started_at": "2026-04-21T12:00:00Z",
+            "finished_at": null,
+            "result": null,
+            "outcome_code": null,
+            "error": null,
+            "budget": null,
+            "artifacts": [],
+            "facets": {},
+            "last_event_hash": null,
+            "last_chain_seq": 1,
+            "last_thread_seq": 1
         }),
         json!({
-            "schema": 1,
+            "schema": 2,
             "kind": "thread_snapshot",
             "thread_id": "T-snap-002",
-            "parent_thread_id": "T-root-001",
             "chain_root_id": "T-root-001",
+            "status": "completed",
+            "kind_name": "tool",
             "item_ref": "tool:ryeos/bash/bash",
             "executor_ref": "native:subprocess",
-            "status": "completed",
-            "ts": "2026-04-21T12:00:05Z",
-            "checkpoint": {
-                "step": 3,
-                "label": "post-exec"
-            }
+            "launch_mode": "inline",
+            "current_site_id": "site:host",
+            "origin_site_id": "site:host",
+            "upstream_thread_id": "T-root-001",
+            "requested_by": null,
+            "project_root": null,
+            "captured_history_policy": null,
+            "base_project_snapshot_hash": null,
+            "result_project_snapshot_hash": null,
+            "created_at": "2026-04-21T12:00:01Z",
+            "updated_at": "2026-04-21T12:00:05Z",
+            "started_at": "2026-04-21T12:00:01Z",
+            "finished_at": "2026-04-21T12:00:05Z",
+            "result": { "exit_code": 0 },
+            "outcome_code": "success",
+            "error": null,
+            "budget": null,
+            "artifacts": [],
+            "facets": {},
+            "last_event_hash": null,
+            "last_chain_seq": 2,
+            "last_thread_seq": 1
         }),
     ];
 
@@ -118,7 +165,7 @@ fn golden_thread_snapshot_canonical_json() {
             "case {}: invalid kind",
             i
         );
-        assert_eq!(object["schema"], 1, "case {}: invalid schema", i);
+        assert_eq!(object["schema"], 2, "case {}: invalid schema", i);
 
         let hash2 = lillux::sha256_hex(lillux::canonical_json(object).unwrap().as_bytes());
         assert_eq!(hash, hash2, "case {}: hash not stable", i);

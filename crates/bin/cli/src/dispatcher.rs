@@ -42,7 +42,12 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     let body_project_path = cli
         .project
         .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|path| {
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                CliError::ProjectResolution("project path is not valid UTF-8".to_string())
+            })
+        })
+        .transpose()?;
 
     // 2. App root
     let app_root = discover_app_root();
@@ -181,13 +186,29 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         body["launch_mode"] = Value::String("accepted".to_string());
     }
     if let Some(project_path) = &resolved.project_path {
-        body["project_path"] = Value::String(project_path.to_string_lossy().into_owned());
+        body["project_path"] = Value::String(
+            project_path
+                .to_str()
+                .ok_or_else(|| {
+                    CliError::ProjectResolution(
+                        "canonical project path is not valid UTF-8".to_string(),
+                    )
+                })?
+                .to_owned(),
+        );
     }
     if resolved.debug_raw {
         body["debug_raw"] = Value::Bool(true);
     }
     if let Some(state_root) = &resolved.state_root {
-        body["state_root"] = Value::String(state_root.to_string_lossy().into_owned());
+        body["state_root"] = Value::String(
+            state_root
+                .to_str()
+                .ok_or_else(|| {
+                    CliError::ProjectResolution("state root is not valid UTF-8".to_string())
+                })?
+                .to_owned(),
+        );
     }
     // Method dispatch: a `--method`/`--args` selector lands in `call`, the
     // control-plane block distinct from data-plane `parameters`.

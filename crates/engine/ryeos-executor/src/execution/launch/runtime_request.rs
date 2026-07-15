@@ -132,17 +132,23 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     let sandbox_daemon_socket_path =
         callback_ipc_requested.then_some(callback.socket_path.as_path());
 
+    let callback_socket_path = callback
+        .socket_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("runtime callback socket path is not valid UTF-8"))?
+        .to_owned();
+    let project_path_string = project_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("runtime project path is not valid UTF-8"))?
+        .to_owned();
     let callback_bindings = ryeos_engine::protocols::CallbackBindings {
-        socket_path: callback.socket_path.to_string_lossy().to_string(),
+        socket_path: callback_socket_path,
         token: callback.token.clone(),
     };
     let build_request = ryeos_engine::protocols::BuildRequest {
         item_ref,
         binary_path: Path::new(binary),
-        args: &[
-            "--project-path".to_string(),
-            project_path.to_string_lossy().to_string(),
-        ],
+        args: &["--project-path".to_string(), project_path_string],
         cwd: project_path,
         project_path,
         callback_project_path: state_root.unwrap_or(project_path),
@@ -172,9 +178,12 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     });
     let mut protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
     if let Some(checkpoint_dir) = checkpoint_dir {
+        let checkpoint_dir = checkpoint_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("runtime checkpoint path is not valid UTF-8"))?;
         protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
             "RYEOS_CHECKPOINT_DIR",
-            checkpoint_dir.display().to_string(),
+            checkpoint_dir,
             ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
         ));
         if is_resume {
@@ -204,7 +213,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         .with_typed_bindings(protocol_bindings)?
         .build();
 
-    let request = super::super::lillux_bridge::to_lillux_request(&spec);
+    let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
     let sandbox_item_ref = item_ref.to_string();
     let request = sandbox
         .apply(

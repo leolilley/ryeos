@@ -54,7 +54,12 @@ async fn scheduler_register_and_list() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "3600",
+            "params": {},
             "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -91,6 +96,12 @@ async fn scheduler_register_update_existing() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "60",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -106,6 +117,12 @@ async fn scheduler_register_update_existing() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "120",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -130,6 +147,12 @@ async fn scheduler_pause_and_resume() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "60",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -176,6 +199,12 @@ async fn scheduler_show_fires_empty() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "86400",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -209,6 +238,12 @@ async fn scheduler_deregister_removes_schedule() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "60",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -250,9 +285,12 @@ async fn scheduler_register_cron_schedule() {
             "ref_bindings": {},
             "schedule_type": "cron",
             "expression": "0 0 * * * *",
+            "params": {},
             "timezone": "America/New_York",
             "overlap_policy": "cancel_previous",
             "misfire_policy": "fire_once_now",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -278,6 +316,12 @@ async fn scheduler_register_rejects_bad_expression() {
             "ref_bindings": {},
             "schedule_type": "cron",
             "expression": "not a cron expression",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "skip",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -300,6 +344,12 @@ async fn scheduler_register_rejects_past_at() {
             "ref_bindings": {},
             "schedule_type": "at",
             "expression": "2020-01-01T00:00:00Z",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "skip",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -374,6 +424,12 @@ async fn scheduler_at_schedule_fires() {
             "ref_bindings": {},
             "schedule_type": "at",
             "expression": fire_at_str,
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "skip",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -426,6 +482,12 @@ async fn scheduler_interval_schedule_fires() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -496,6 +558,12 @@ async fn scheduler_interval_fires_twice() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -532,6 +600,12 @@ async fn scheduler_pause_prevents_fires() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -580,6 +654,12 @@ async fn scheduler_deregister_stops_fires() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -639,6 +719,12 @@ async fn scheduler_reuse_blocked_after_deregister() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -670,6 +756,12 @@ async fn scheduler_reuse_blocked_after_deregister() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "120",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -703,6 +795,12 @@ async fn scheduler_survives_restart() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -761,6 +859,12 @@ async fn scheduler_fire_id_deterministic() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "2",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -815,6 +919,12 @@ async fn scheduler_registered_at_preserved_on_update() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "60",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -835,6 +945,12 @@ async fn scheduler_registered_at_preserved_on_update() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "120",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;
@@ -852,6 +968,12 @@ async fn scheduler_registered_at_preserved_on_update() {
             "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "180",
+            "params": {},
+            "timezone": "UTC",
+            "misfire_policy": "fire_once_now",
+            "overlap_policy": "skip",
+            "lateness_grace_secs": 60,
+            "enabled": true,
         }),
     )
     .await;

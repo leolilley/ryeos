@@ -37,7 +37,7 @@ use ryeos_app::launch_metadata::{
     PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
 };
 use ryeos_app::state::AppState;
-use ryeos_app::thread_lifecycle::new_thread_id;
+use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::events::RuntimeEventType;
@@ -67,8 +67,9 @@ pub async fn spawn_detached_child(
 ) -> Result<Value> {
     let parent_thread_id = cap.thread_id.clone();
 
-    // Parent thread row → chain root + launch identity (launch_mode, site ids).
-    // Never trust the caller for these.
+    // Parent thread row → chain root + site identity. Never trust the caller
+    // for these. This launch's mode is the daemon-selected detached mode below,
+    // not the mode under which the parent itself was launched.
     let parent = state
         .threads
         .get_thread(&parent_thread_id)?
@@ -154,8 +155,36 @@ pub async fn spawn_detached_child(
     // records via `parent_execution_context`, not a shared chain root.
     let requested_by = EffectivePrincipal::Local(Principal {
         fingerprint: thread_auth.acting_principal.clone(),
-        scopes: thread_auth.caller_scopes.clone(),
+        scopes: cap.effective_caps.clone(),
     });
+    let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
+        ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+            engine: child_engine,
+            node_history_policy: &state.node_history_policy,
+            site_id: &parent.current_site_id,
+            project_path: child_provenance.effective_path(),
+            item_ref: child_item_ref,
+            launch_mode: "detached",
+            parameters: child_parameters.clone(),
+            ref_bindings: child_ref_bindings.clone(),
+            requested_by: thread_auth.acting_principal.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            caller_scopes: cap.effective_caps.clone(),
+            validate_only: false,
+            creates_chain_root: true,
+        },
+    )
+    .context("detach: verified child history-policy preflight")?;
+    let child_root_admission = child_preflight.root_admission;
+    let child_execution = child_root_admission.execution_request(
+        child_executor_ref.clone(),
+        "detached".to_string(),
+        child_parameters.clone(),
+    )?;
+    let sealed_root_request =
+        SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref.clone())?;
+
     // Build the complete immutable launch identity and authoritative generic
     // launch authority before minting any observable row. `effective_caps`
     // carries the PARENT's caps — the bounding authority handed to
@@ -164,7 +193,7 @@ pub async fn spawn_detached_child(
         kind: child_thread_profile.clone(),
         item_ref: child_item_ref.to_string(),
         ref_bindings: child_ref_bindings.clone(),
-        launch_mode: parent.launch_mode.clone(),
+        launch_mode: "detached".to_string(),
         parameters: child_parameters.clone(),
         // Resume identity derives from validated server-side provenance, never
         // the request body — same rule as follow.
@@ -188,7 +217,8 @@ pub async fn spawn_detached_child(
         effective_caps: cap.effective_caps.clone(),
         executor_ref: Some(child_executor_ref.clone()),
         runtime_ref: Some(child_runtime_ref.clone()),
-    });
+    })
+    .with_sealed_root_request(sealed_root_request);
     let launch_parent_context = crate::dispatch::ParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
@@ -333,7 +363,6 @@ pub async fn spawn_detached_child(
     // A non-queued launch is acknowledged only once the runtime spawn task owns
     // the prepared authority and secrets. The outer task remains detached for
     // the runtime's lifetime, but preparation and pre-handoff failures are
-    // returned to this callback instead of being hidden in a log line.
     if !queued {
         let launch_state = state.clone();
         let launch_child_id = child_thread_id.clone();

@@ -1,7 +1,10 @@
 //! Overlap policy evaluation.
 //!
 //! Three policies: allow, skip, cancel_previous.
-//! Default: skip.
+//! Every schedule authors one explicitly; invalid or absent policy holds the
+//! schedule rather than selecting behavior in Rust.
+
+use anyhow::{Context, Result};
 
 use super::types::ScheduleSpecRecord;
 use crate::SchedulerContext;
@@ -14,37 +17,44 @@ pub enum OverlapPolicy {
     CancelPrevious,
 }
 
-pub fn resolve_overlap_policy(spec: &ScheduleSpecRecord) -> OverlapPolicy {
-    match spec.overlap_policy.as_str() {
-        "allow" => OverlapPolicy::Allow,
-        "cancel_previous" => OverlapPolicy::CancelPrevious,
-        "skip" | "" => OverlapPolicy::Skip,
-        _ => OverlapPolicy::Skip,
+pub fn parse_overlap_policy(raw: &str) -> Result<OverlapPolicy> {
+    match raw {
+        "allow" => Ok(OverlapPolicy::Allow),
+        "cancel_previous" => Ok(OverlapPolicy::CancelPrevious),
+        "skip" => Ok(OverlapPolicy::Skip),
+        _ => anyhow::bail!("invalid overlap_policy: {raw}"),
     }
 }
 
+pub fn resolve_overlap_policy(spec: &ScheduleSpecRecord) -> Result<OverlapPolicy> {
+    parse_overlap_policy(&spec.overlap_policy)
+}
+
 /// Check overlap for a schedule. Returns `true` if the fire should proceed.
-pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx) -> bool {
-    let policy = resolve_overlap_policy(spec);
+/// Store/command failures are fatal to the timer rather than permission to
+/// double-run work whose prior state could not be established.
+pub async fn check_overlap<Ctx: SchedulerContext>(
+    spec: &ScheduleSpecRecord,
+    ctx: &Ctx,
+) -> Result<bool> {
+    let policy = resolve_overlap_policy(spec)?;
 
     let last_fire = match ctx
         .scheduler_db()
         .get_inflight_for_schedule(&spec.schedule_id)
     {
         Ok(Some(f)) => f,
-        Ok(None) => return true, // no in-flight fire
-        Err(e) => {
-            tracing::error!(schedule_id = %spec.schedule_id, error = %e, "overlap check failed — proceeding");
-            return true;
-        }
+        Ok(None) => return Ok(true), // no in-flight fire
+        Err(error) => return Err(error),
     };
+    last_fire.validate()?;
 
-    let previous_thread_id = match &last_fire.thread_id {
-        Some(id) => id.clone(),
-        None => return true, // no thread to check
-    };
+    let previous_thread_id = last_fire
+        .thread_id
+        .clone()
+        .context("validated dispatched fire lost its deterministic thread id")?;
 
-    match policy {
+    let proceed = match policy {
         OverlapPolicy::Allow => true,
 
         OverlapPolicy::Skip => match ctx.get_thread_status(&previous_thread_id) {
@@ -72,7 +82,7 @@ pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx
                 );
                 false
             }
-            Err(_) => true,
+            Err(error) => return Err(error),
         },
 
         OverlapPolicy::CancelPrevious => match ctx.get_thread_status(&previous_thread_id) {
@@ -84,7 +94,7 @@ pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx
                     overlap = "cancel_previous",
                     "cancelling previous fire"
                 );
-                let _ = ctx.submit_cancel(&previous_thread_id);
+                ctx.submit_cancel(&previous_thread_id)?;
                 true
             }
             // Thread row not visible yet (detached dispatch in flight):
@@ -100,13 +110,14 @@ pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx
                 );
                 false
             }
-            Err(_) => true,
+            Err(error) => return Err(error),
         },
-    }
+    };
+    Ok(proceed)
 }
 
 pub fn thread_is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled")
+    crate::thread_status_is_terminal(status)
 }
 
 #[cfg(test)]
@@ -127,8 +138,8 @@ mod tests {
             lateness_grace_secs: 60,
             enabled: true,
             project_root: None,
-            signer_fingerprint: "fp:test".to_string(),
-            spec_hash: "abc".to_string(),
+            signer_fingerprint: "11".repeat(32),
+            spec_hash: "22".repeat(32),
             registered_at: 0,
             requester_fingerprint: "fp:test".to_string(),
             capabilities: vec!["ryeos.execute.*".to_string()],
@@ -138,7 +149,7 @@ mod tests {
     #[test]
     fn resolve_allow() {
         assert_eq!(
-            resolve_overlap_policy(&make_spec("allow")),
+            resolve_overlap_policy(&make_spec("allow")).unwrap(),
             OverlapPolicy::Allow
         );
     }
@@ -146,7 +157,7 @@ mod tests {
     #[test]
     fn resolve_skip() {
         assert_eq!(
-            resolve_overlap_policy(&make_spec("skip")),
+            resolve_overlap_policy(&make_spec("skip")).unwrap(),
             OverlapPolicy::Skip
         );
     }
@@ -154,46 +165,35 @@ mod tests {
     #[test]
     fn resolve_cancel_previous() {
         assert_eq!(
-            resolve_overlap_policy(&make_spec("cancel_previous")),
+            resolve_overlap_policy(&make_spec("cancel_previous")).unwrap(),
             OverlapPolicy::CancelPrevious
         );
     }
 
     #[test]
-    fn resolve_empty_defaults_to_skip() {
-        assert_eq!(resolve_overlap_policy(&make_spec("")), OverlapPolicy::Skip);
+    fn empty_policy_is_rejected() {
+        assert!(resolve_overlap_policy(&make_spec("")).is_err());
     }
 
     #[test]
-    fn resolve_unknown_defaults_to_skip() {
-        assert_eq!(
-            resolve_overlap_policy(&make_spec("invalid")),
-            OverlapPolicy::Skip
-        );
+    fn unknown_policy_is_rejected() {
+        assert!(resolve_overlap_policy(&make_spec("invalid")).is_err());
     }
 
     #[test]
-    fn thread_is_terminal_completed() {
-        assert!(thread_is_terminal("completed"));
-    }
-
-    #[test]
-    fn thread_is_terminal_failed() {
-        assert!(thread_is_terminal("failed"));
-    }
-
-    #[test]
-    fn thread_is_terminal_cancelled() {
-        assert!(thread_is_terminal("cancelled"));
-    }
-
-    #[test]
-    fn thread_is_not_terminal_running() {
-        assert!(!thread_is_terminal("running"));
-    }
-
-    #[test]
-    fn thread_is_not_terminal_pending() {
-        assert!(!thread_is_terminal("pending"));
+    fn overlap_terminal_classification_delegates_to_canonical_vocabulary() {
+        for status in [
+            "completed",
+            "failed",
+            "cancelled",
+            "killed",
+            "timed_out",
+            "continued",
+        ] {
+            assert!(thread_is_terminal(status));
+        }
+        for status in ["created", "running", "pending", ""] {
+            assert!(!thread_is_terminal(status));
+        }
     }
 }

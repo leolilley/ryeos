@@ -1,6 +1,8 @@
 //! `scheduler.register` — create or update a schedule spec.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -13,7 +15,7 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_scheduler::crontab;
 use ryeos_scheduler::projection;
-use ryeos_scheduler::types::ScheduleSpecRecord;
+use ryeos_scheduler::types::{ScheduleExecution, ScheduleManagedBy, ScheduleSourceRecord};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,28 +25,14 @@ pub struct Request {
     pub ref_bindings: BTreeMap<String, String>,
     pub schedule_type: String,
     pub expression: String,
-    #[serde(default = "default_params")]
     pub params: Value,
-    #[serde(default)]
-    pub timezone: Option<String>,
-    #[serde(default)]
-    pub misfire_policy: Option<String>,
-    #[serde(default)]
-    pub overlap_policy: Option<String>,
-    #[serde(default)]
-    pub lateness_grace_secs: Option<i64>,
-    #[serde(default = "default_true")]
+    pub timezone: String,
+    pub misfire_policy: String,
+    pub overlap_policy: String,
+    pub lateness_grace_secs: i64,
     pub enabled: bool,
     #[serde(default)]
     pub project_root: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_params() -> Value {
-    serde_json::json!({})
 }
 
 pub async fn handle(
@@ -60,32 +48,30 @@ pub async fn handle(
     crontab::validate_schedule_id(&req.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
         .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
-    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
-        .with_context(|| "invalid ref_bindings")?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)?;
     crontab::validate_expression(&req.schedule_type, &req.expression)?;
 
-    let timezone = req.timezone.as_deref().unwrap_or("UTC");
-    crontab::validate_timezone(timezone)?;
+    crontab::validate_timezone(&req.timezone)?;
 
     // All overlap policies ship day 1: allow, skip, cancel_previous.
-    if let Some(ref p) = req.overlap_policy {
-        if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
-            bail!("invalid overlap_policy: {}", p);
-        }
-    }
+    ryeos_scheduler::overlap::parse_overlap_policy(&req.overlap_policy)?;
     // All misfire policies ship day 1: skip, fire_once_now, catch_up_bounded:N, catch_up_within_secs:S.
-    if let Some(ref p) = req.misfire_policy {
-        if !is_valid_misfire_policy(p) {
-            bail!("invalid misfire_policy: {}", p);
-        }
-    }
-    if let Some(secs) = req.lateness_grace_secs {
-        if secs <= 0 {
-            bail!("lateness_grace_secs must be positive, got: {}", secs);
-        }
+    ryeos_scheduler::misfire::parse_misfire_policy(&req.misfire_policy)?;
+    if req.lateness_grace_secs <= 0 {
+        bail!(
+            "lateness_grace_secs must be positive, got: {}",
+            req.lateness_grace_secs
+        );
     }
     if !req.params.is_object() {
         bail!("params must be a JSON object");
+    }
+    if req
+        .project_root
+        .as_deref()
+        .is_some_and(|project_root| project_root.trim().is_empty())
+    {
+        bail!("project_root must be non-empty when present");
     }
 
     if req.schedule_type == "at"
@@ -115,25 +101,40 @@ pub async fn handle(
         .join("state")
         .join("schedules")
         .join(&req.schedule_id);
-    if fires_dir.exists() && existing_spec.is_none() {
-        bail!(
-            "schedule_id '{}' reuse not allowed: fire history exists at {} — \
-             deregister with purge_history=true to clear it (scheduler/deregister), \
-             or use a different ID",
-            req.schedule_id,
-            fires_dir.display()
-        );
+    if existing_spec.is_none() {
+        match std::fs::symlink_metadata(&fires_dir) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+                bail!(
+                    "schedule_id '{}' reuse not allowed: fire history exists at {} — \
+                         deregister with purge_history=true to clear it (scheduler/deregister), \
+                         or use a different ID",
+                    req.schedule_id,
+                    fires_dir.display()
+                );
+            }
+            Ok(_) => bail!(
+                "schedule history path must be a real directory: {}",
+                fires_dir.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
 
-    let existing_body = if existing_spec.is_some() {
-        read_existing_schedule_body(state.as_ref(), &req.schedule_id)?
-    } else {
-        None
-    };
-    if existing_body
-        .as_ref()
-        .is_some_and(is_project_managed_schedule)
-    {
+    let source_mutation = ScheduleSourceMutation::acquire(
+        state.as_ref(),
+        &req.schedule_id,
+        existing_spec.as_ref().map(|spec| spec.spec_hash.as_str()),
+    )?;
+    let existing_source = source_mutation.verified.as_ref();
+    if existing_spec.is_none() && existing_source.is_some() {
+        bail!(
+            "schedule_id '{}' has signed node YAML but no scheduler projection; rebuild the projection or remove the node item before registering",
+            req.schedule_id
+        );
+    }
+    let existing_record = existing_source.map(|source| &source.record);
+    if existing_record.is_some_and(is_project_managed_schedule) {
         bail!(
             "schedule_id '{}' is project-managed; update it through project sync or deregister first",
             req.schedule_id
@@ -144,49 +145,12 @@ pub async fn handle(
     // The YAML body is the canonical source of truth for registered_at.
     // We read it from the existing file (not DB) so repeated updates don't drift the anchor.
     let registered_at = if existing_spec.is_some() {
-        existing_body
-            .as_ref()
-            .and_then(|body| body.get("registered_at").and_then(|v| v.as_i64()))
-            .unwrap_or_else(|| {
-                existing_spec
-                    .as_ref()
-                    .map(|s| s.registered_at)
-                    .unwrap_or_else(lillux::time::timestamp_millis)
-            })
+        existing_record
+            .context("existing schedule projection has no signed source file")?
+            .registered_at
     } else {
         lillux::time::timestamp_millis()
     };
-    let mut body = serde_json::json!({
-        "spec_version": 1,
-        "schedule_id": req.schedule_id,
-        "item_ref": req.item_ref,
-        "ref_bindings": req.ref_bindings,
-        "schedule_type": req.schedule_type,
-        "expression": req.expression,
-        "timezone": timezone,
-        "enabled": req.enabled,
-        "registered_at": registered_at,
-    });
-    body["params"] = req.params.clone();
-    // Normalize misfire_policy: resolve default so YAML and DB always have
-    // the same resolved value (no empty strings that behave differently
-    // in projection vs live paths).
-    let normalized_misfire = match req.misfire_policy.as_deref() {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => match req.schedule_type.as_str() {
-            "interval" => "fire_once_now".to_string(),
-            _ => "skip".to_string(),
-        },
-    };
-    body["misfire_policy"] = Value::String(normalized_misfire.clone());
-    let lateness_grace_secs = req
-        .lateness_grace_secs
-        .or_else(|| existing_spec.as_ref().map(|spec| spec.lateness_grace_secs))
-        .unwrap_or(60);
-    body["lateness_grace_secs"] = Value::Number(lateness_grace_secs.into());
-    if let Some(ref p) = req.overlap_policy {
-        body["overlap_policy"] = Value::String(p.clone());
-    }
     // Determine execution authority from caller context.
     // The service executor injects _ctx from ExecutionContext before
     // dispatching the handler. Fail-closed: if injection didn't happen,
@@ -214,64 +178,35 @@ pub async fn handle(
         caller_fingerprint
     };
 
-    if let Some(ref p) = req.project_root {
-        body["project_root"] = Value::String(p.clone());
-    }
-
-    // Persist execution authority in YAML body — survives restart, rebuildable.
-    body["execution"] = serde_json::json!({
-        "requester_fingerprint": requester_fingerprint,
-        "capabilities": capabilities,
-    });
-
-    // Write signed YAML
-    let node_dir = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node");
-    let spec_path = writer::write_signed_node_item(
-        &node_dir,
-        "schedules",
-        &req.schedule_id,
-        &body,
-        &state.identity,
-    )?;
-
-    // Extract signer fingerprint
-    let content = std::fs::read_to_string(&spec_path)?;
-    let signer_fingerprint = projection::parse_signer_fingerprint_from_str(&content)
-        .unwrap_or_else(|| state.identity.fingerprint().to_string());
-
-    // Compute hash
-    let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
-    // Use registered_at as the scheduling anchor — immutable across updates.
-    // This ensures the timer always fires at the same intervals regardless of
-    // when the schedule was last modified.
-    let registered_at_db = registered_at;
-
-    // Upsert projection
-    let was_existing = existing_spec.is_some();
-    let overlap_policy = req.overlap_policy.unwrap_or_else(|| "skip".to_string());
-    let rec = ScheduleSpecRecord {
+    let source_record = ScheduleSourceRecord {
+        spec_version: 1,
         schedule_id: req.schedule_id.clone(),
         item_ref: req.item_ref.clone(),
         ref_bindings: req.ref_bindings.clone(),
-        params: serde_json::to_string(&req.params)?,
         schedule_type: req.schedule_type.clone(),
         expression: req.expression.clone(),
-        timezone: timezone.to_string(),
-        misfire_policy: normalized_misfire.clone(),
-        overlap_policy: overlap_policy.clone(),
-        lateness_grace_secs,
+        params: req.params.clone(),
+        timezone: req.timezone.clone(),
+        misfire_policy: req.misfire_policy.clone(),
+        overlap_policy: req.overlap_policy.clone(),
+        lateness_grace_secs: req.lateness_grace_secs,
         enabled: req.enabled,
         project_root: req.project_root.clone(),
-        signer_fingerprint,
-        spec_hash,
-        registered_at: registered_at_db,
-        requester_fingerprint,
-        capabilities,
+        registered_at,
+        execution: ScheduleExecution {
+            requester_fingerprint,
+            capabilities,
+        },
+        managed_by: None,
     };
+    source_record.validate(Some(&req.schedule_id))?;
+    let body = serde_json::to_value(&source_record)?;
+
+    // Write signed YAML through the same pinned source transaction used for
+    // the verified existing-source read.
+    let (spec_path, verified) = source_mutation.publish(&body, &state.identity)?;
+    let rec = verified.to_spec_record()?;
+    let was_existing = existing_spec.is_some();
     state.scheduler_db.upsert_spec(&rec)?;
 
     // Ping timer loop
@@ -289,56 +224,202 @@ pub async fn handle(
         "ref_bindings": req.ref_bindings,
         "schedule_type": req.schedule_type,
         "expression": req.expression,
-        "timezone": timezone,
-        "misfire_policy": normalized_misfire,
-        "overlap_policy": overlap_policy,
-        "lateness_grace_secs": lateness_grace_secs,
+        "timezone": req.timezone,
+        "misfire_policy": req.misfire_policy,
+        "overlap_policy": req.overlap_policy,
+        "lateness_grace_secs": req.lateness_grace_secs,
         "enabled": req.enabled,
         "spec_path": spec_path.display().to_string(),
         "created": !was_existing,
     }))
 }
 
-fn is_valid_misfire_policy(p: &str) -> bool {
-    match p {
-        "skip" | "fire_once_now" => true,
-        s if s.starts_with("catch_up_bounded:") => s
-            .strip_prefix("catch_up_bounded:")
-            .and_then(|n| n.parse::<usize>().ok())
-            .is_some(),
-        s if s.starts_with("catch_up_within_secs:") => s
-            .strip_prefix("catch_up_within_secs:")
-            .and_then(|n| n.parse::<u64>().ok())
-            .is_some(),
-        _ => false,
-    }
-}
-
-fn read_existing_schedule_body(state: &AppState, schedule_id: &str) -> Result<Option<Value>> {
-    let existing_yaml_path = state
-        .config
-        .app_root
+pub(super) fn canonical_schedule_source_path(
+    app_root: &Path,
+    schedule_id: &str,
+) -> Result<PathBuf> {
+    crontab::validate_schedule_id(schedule_id)?;
+    let schedules_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
-        .join("schedules")
-        .join(schedule_id)
-        .with_extension("yaml");
-    if !existing_yaml_path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&existing_yaml_path)
-        .with_context(|| format!("read schedule YAML {}", existing_yaml_path.display()))?;
-    let body_str = lillux::signature::strip_signature_lines(&content);
-    let body = serde_yaml::from_str(&body_str)
-        .with_context(|| format!("parse schedule YAML {}", existing_yaml_path.display()))?;
-    Ok(Some(body))
+        .join("schedules");
+    let _ = projection::canonical_schedule_source_paths(&schedules_dir)?;
+    Ok(schedules_dir.join(format!("{schedule_id}.yaml")))
 }
 
-fn is_project_managed_schedule(body: &Value) -> bool {
-    body.get("managed_by")
-        .and_then(|managed_by| managed_by.get("type"))
-        .and_then(|managed_type| managed_type.as_str())
-        == Some("project_ai_sync")
+pub(super) fn load_existing_schedule_source(
+    state: &AppState,
+    schedule_id: &str,
+    expected_spec_hash: Option<&str>,
+) -> Result<Option<projection::VerifiedScheduleSource>> {
+    let source = canonical_schedule_source_path(&state.config.app_root, schedule_id)?;
+    match std::fs::symlink_metadata(&source) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect schedule source {}", source.display()));
+        }
+    }
+    let verified = projection::load_verified_schedule_source(&source, &state.engine.trust_store)?;
+    if let Some(expected) = expected_spec_hash {
+        if verified.spec_hash != expected {
+            bail!(
+                "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
+                schedule_id,
+                expected,
+                verified.spec_hash,
+            );
+        }
+    }
+    Ok(Some(verified))
+}
+
+/// One directory-locked, inode-pinned schedule mutation. The verified source
+/// and conditional replacement are bound to the same directory descriptor and
+/// exact file handle, so a path swap cannot redirect an authorized update.
+struct ScheduleSourceMutation<'a> {
+    directory: lillux::PinnedDirectory,
+    _directory_lock: lillux::PinnedDirectoryLock,
+    path: PathBuf,
+    name: std::ffi::OsString,
+    current_file: Option<std::fs::File>,
+    verified: Option<projection::VerifiedScheduleSource>,
+    trust_store: &'a ryeos_engine::trust::TrustStore,
+}
+
+impl<'a> ScheduleSourceMutation<'a> {
+    fn acquire(
+        state: &'a AppState,
+        schedule_id: &str,
+        expected_spec_hash: Option<&str>,
+    ) -> Result<Self> {
+        crontab::validate_schedule_id(schedule_id)?;
+        let node_path = state
+            .config
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node");
+        let node_directory = lillux::PinnedDirectory::open_or_create(&node_path)?;
+        let directory =
+            node_directory.open_or_create_child(std::ffi::OsStr::new("schedules"), 0o777)?;
+        let directory_lock = directory.lock_exclusive()?;
+        let name = std::ffi::OsString::from(format!("{schedule_id}.yaml"));
+        let path = directory.path().join(&name);
+        let current_file = directory.open_regular(&name, false)?;
+        let verified = if let Some(file) = current_file.as_ref() {
+            let mut content = String::new();
+            file.try_clone()?.read_to_string(&mut content)?;
+            Some(projection::verify_schedule_source_content(
+                &path,
+                &content,
+                &state.engine.trust_store,
+            )?)
+        } else {
+            None
+        };
+        if let (Some(expected), Some(verified)) = (expected_spec_hash, verified.as_ref()) {
+            if verified.spec_hash != expected {
+                bail!(
+                    "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
+                    schedule_id,
+                    expected,
+                    verified.spec_hash,
+                );
+            }
+        } else if expected_spec_hash.is_some() && verified.is_none() {
+            bail!("existing schedule projection has no signed source file");
+        }
+        Ok(Self {
+            directory,
+            _directory_lock: directory_lock,
+            path,
+            name,
+            current_file,
+            verified,
+            trust_store: &state.engine.trust_store,
+        })
+    }
+
+    fn publish(
+        &self,
+        body: &Value,
+        identity: &ryeos_app::identity::NodeIdentity,
+    ) -> Result<(PathBuf, projection::VerifiedScheduleSource)> {
+        let schedule_id = self
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("schedule source filename must be UTF-8")?;
+        let bytes = writer::render_signed_node_item("schedules", schedule_id, body, identity)?;
+        self.directory.atomic_write_if_same(
+            &self.name,
+            self.current_file.as_ref(),
+            &bytes,
+            0o600,
+        )?;
+        let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
+        let verified =
+            projection::verify_schedule_source_content(&self.path, &content, self.trust_store)?;
+        Ok((self.path.clone(), verified))
+    }
+}
+
+fn is_project_managed_schedule(record: &ScheduleSourceRecord) -> bool {
+    matches!(
+        &record.managed_by,
+        Some(ScheduleManagedBy::ProjectAiSync { .. })
+    )
+}
+
+pub(super) fn verify_schedule_enabled(
+    state: &AppState,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+    enabled: bool,
+) -> Result<()> {
+    let source =
+        load_existing_schedule_source(state, &current.schedule_id, Some(&current.spec_hash))?
+            .with_context(|| {
+                format!(
+                    "schedule projection {} has no trusted source",
+                    current.schedule_id
+                )
+            })?;
+    if source.record.enabled != enabled {
+        bail!(
+            "schedule {} source enabled state diverges from its projection",
+            current.schedule_id
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn rewrite_schedule_enabled(
+    state: &AppState,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+    enabled: bool,
+) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
+    let mutation =
+        ScheduleSourceMutation::acquire(state, &current.schedule_id, Some(&current.spec_hash))?;
+    let source = mutation.verified.as_ref().with_context(|| {
+        format!(
+            "schedule projection {} has no trusted source",
+            current.schedule_id
+        )
+    })?;
+    let mut record = source.record.clone();
+    record.enabled = enabled;
+    record.validate(Some(&current.schedule_id))?;
+
+    let body = serde_json::to_value(&record)?;
+    let (_path, verified) = mutation.publish(&body, &state.identity)?;
+    if verified.record.enabled != enabled {
+        bail!(
+            "rewritten schedule {} did not retain requested enabled state",
+            current.schedule_id
+        );
+    }
+    verified.to_spec_record()
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

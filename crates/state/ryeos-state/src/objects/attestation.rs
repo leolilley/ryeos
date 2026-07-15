@@ -181,9 +181,10 @@ impl Attestation {
                 self.kind
             );
         }
-        if !lillux::valid_hash(&self.subject_hash) {
-            anyhow::bail!("invalid subject_hash: {}", self.subject_hash);
-        }
+        crate::objects::thread_snapshot::validate_canonical_hash(
+            "subject_hash",
+            &self.subject_hash,
+        )?;
         if self.claim.is_empty() {
             anyhow::bail!("claim must not be empty");
         }
@@ -367,6 +368,10 @@ mod tests {
 
         fn fingerprint(&self) -> &str {
             &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
         }
     }
 

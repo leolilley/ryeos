@@ -3,20 +3,23 @@
 //! Handles the ingest-locally → upload-blobs → push-head pipeline
 //! for pushing project content to a remote node.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine as _;
 
 use lillux::cas::{sha256_hex, CasStore};
 use ryeos_state::ignore::IgnoreMatcher;
-use ryeos_state::objects::SourceManifest;
+use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
 use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SURFACES};
+use ryeos_state::{CasMutationGuard, PinnedStateAuthority, StagedCasRootLease};
 
-use crate::remote::client::{BlobUpload, RemoteClient};
+use crate::remote::client::{BlobUpload, ObjectsPutResponse, RemoteClient};
 use ryeos_app::state::AppState;
+
+const OBJECTS_PUT_BODY_BUDGET_BYTES: usize = 900 * 1024;
 
 /// Result of pushing a project to a remote.
 #[derive(Debug)]
@@ -50,6 +53,7 @@ pub struct PushResult {
 pub async fn push_project_ai_only(
     client: &RemoteClient,
     state: &Arc<AppState>,
+    authority: &PinnedStateAuthority,
     local_project_path: &Path,
     remote_project_path_for_ref: &str,
     remote_ignore: Option<&IgnoreMatcher>,
@@ -57,61 +61,109 @@ pub async fn push_project_ai_only(
     let app_root = &state.config.app_root;
     refuse_walking_root(local_project_path, app_root)?;
 
-    let local_cas_root = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("objects");
-    let local_cas = CasStore::new(local_cas_root);
-
-    let mut items: HashMap<String, String> = HashMap::new();
-    ingest_project_ai_for_push(&local_cas, local_project_path, &mut items, remote_ignore)?;
-
-    let manifest = SourceManifest {
-        item_source_hashes: items,
+    let local_cas = authority.cas_store()?;
+    let recovery = authority.require_recovery()?;
+    let mut staged_roots = {
+        let guard = authority.acquire_shared_guard()?;
+        recovery.begin_staged_cas_roots_admitted(&guard, "remote-push-ai")?
     };
-    ryeos_state::project_sync::validate_project_manifest_paths(
-        &manifest,
-        ProjectSyncScope::AiOnly,
-        remote_ignore,
-    )?;
-    let manifest_hash = local_cas.store_object(&manifest.to_value())?;
 
-    let snapshot = ryeos_state::objects::ProjectSnapshot {
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
-        message: None,
-        project_sync_scope: ProjectSyncScope::AiOnly,
-        parent_hashes: Vec::new(),
-        created_at: lillux::time::iso8601_now(),
-        source: "remote_ai_sync".to_string(),
-    };
-    let snapshot_hash = local_cas.store_object(&snapshot.to_value())?;
+    let operation = async {
+        let mut items: HashMap<String, String> = HashMap::new();
+        let manifest_hash;
+        let manifest;
+        {
+            let guard = authority.acquire_shared_guard()?;
+            let mut staging = StagedCasWriter::new(&mut staged_roots, &guard);
+            ingest_project_ai_for_push(
+                &local_cas,
+                local_project_path,
+                &mut items,
+                remote_ignore,
+                Some(&mut staging),
+            )?;
 
-    let all_hashes = collect_snapshot_hashes(
-        &local_cas,
-        &manifest,
-        None,
-        None,
-        &manifest_hash,
-        &snapshot_hash,
-    );
-    let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes).await?;
+            manifest = SourceManifest {
+                item_source_hashes: items,
+            };
+            ryeos_state::project_sync::validate_project_manifest_paths(
+                &manifest,
+                ProjectSyncScope::AiOnly,
+                remote_ignore,
+            )?;
+            manifest_hash = staging.store_object(&local_cas, &manifest.to_value())?;
+        }
 
-    client
-        .push_head(remote_project_path_for_ref, &snapshot_hash)
+        let upload_session = client
+            .objects_put(None, remote_project_path_for_ref, &[], &[])
+            .await?;
+
+        let snapshot = ryeos_state::objects::ProjectSnapshot {
+            project_manifest_hash: manifest_hash.clone(),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ProjectSyncScope::AiOnly,
+            parent_hashes: upload_session
+                .expected_previous_hash
+                .iter()
+                .cloned()
+                .collect(),
+            created_at: lillux::time::iso8601_now(),
+            source: "remote_ai_sync".to_string(),
+        };
+        let (snapshot_hash, upload_closure) = {
+            let guard = authority.acquire_shared_guard()?;
+            let snapshot_hash =
+                staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
+            let upload_closure = collect_snapshot_hashes(
+                &local_cas,
+                &manifest,
+                None,
+                None,
+                &manifest_hash,
+                &snapshot_hash,
+            )?;
+            staged_roots.protect_cas_closure_admitted(
+                &guard,
+                upload_closure.object_hashes.iter().map(String::as_str),
+                upload_closure.blob_hashes.iter().map(String::as_str),
+            )?;
+            (snapshot_hash, upload_closure)
+        };
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
+            &snapshot_hash,
+            remote_project_path_for_ref,
+            upload_session,
+        )
         .await?;
 
-    let manifest_entries = manifest.item_source_hashes.len();
-    Ok(PushResult {
-        snapshot_hash,
-        manifest_hash,
-        manifest,
-        manifest_entries,
-        blobs_uploaded,
-        blobs_skipped,
-        user_manifest_hash: None,
-        user_manifest: None,
-    })
+        client
+            .push_head(
+                remote_project_path_for_ref,
+                &snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+
+        let manifest_entries = manifest.item_source_hashes.len();
+        Ok(PushResult {
+            snapshot_hash,
+            manifest_hash,
+            manifest,
+            manifest_entries,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+            user_manifest_hash: None,
+            user_manifest: None,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
 }
 
 /// Push a project directory to a remote node.
@@ -119,8 +171,8 @@ pub async fn push_project_ai_only(
 /// 1. Apply the remote's ingest ignore rules to build the manifest
 /// 2. Ingest locally into CAS
 /// 3. Build manifest + snapshot
-/// 4. Check which blobs the remote already has
-/// 5. Upload missing blobs + manifest + snapshot
+/// 4. Check which typed objects and blobs the remote already has
+/// 5. Upload missing blobs and objects, including manifest + snapshot
 /// 6. Call push-head to write the HEAD ref
 ///
 /// The `remote_ignore` matcher is the **only** ignore policy used: the
@@ -130,6 +182,7 @@ pub async fn push_project_ai_only(
 pub async fn push_project(
     client: &RemoteClient,
     state: &Arc<AppState>,
+    authority: &PinnedStateAuthority,
     project_path: &Path,
     project_path_for_ref: &str,
     remote_ignore: &IgnoreMatcher,
@@ -146,67 +199,145 @@ pub async fn push_project(
     refuse_walking_root(project_path, app_root)?;
 
     // 1. Ingest project directory into local CAS using remote's ignore rules.
-    let local_cas_root = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("objects");
-    let local_cas = CasStore::new(local_cas_root);
-
-    let mut items: HashMap<String, String> = HashMap::new();
-    ingest_for_push(
-        &local_cas,
-        project_path,
-        project_path,
-        &mut items,
-        remote_ignore,
-    )?;
-
-    // 2. Build project manifest
-    let manifest = SourceManifest {
-        item_source_hashes: items,
+    let local_cas = authority.cas_store()?;
+    let recovery = authority.require_recovery()?;
+    let mut staged_roots = {
+        let guard = authority.acquire_shared_guard()?;
+        recovery.begin_staged_cas_roots_admitted(&guard, "remote-push-project")?
     };
-    let manifest_hash = local_cas.store_object(&manifest.to_value())?;
 
-    // 3. Build snapshot
-    let snapshot = ryeos_state::objects::ProjectSnapshot {
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
-        message: None,
-        project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
-        parent_hashes: Vec::new(),
-        created_at: lillux::time::iso8601_now(),
-        source: "push".to_string(),
-    };
-    let snapshot_hash = local_cas.store_object(&snapshot.to_value())?;
+    let operation = async {
+        let mut items: HashMap<String, String> = HashMap::new();
+        let manifest_hash;
+        let manifest;
+        {
+            let guard = authority.acquire_shared_guard()?;
+            let mut staging = StagedCasWriter::new(&mut staged_roots, &guard);
+            ingest_for_push(
+                &local_cas,
+                project_path,
+                project_path,
+                &mut items,
+                remote_ignore,
+                Some(&mut staging),
+            )?;
 
-    // 4. Collect all object hashes we need the remote to have
-    let all_hashes = collect_snapshot_hashes(
-        &local_cas,
-        &manifest,
-        None,
-        None,
-        &manifest_hash,
-        &snapshot_hash,
-    );
+            manifest = SourceManifest {
+                item_source_hashes: items,
+            };
+            manifest_hash = staging.store_object(&local_cas, &manifest.to_value())?;
+        }
 
-    let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes).await?;
+        let upload_session = client
+            .objects_put(None, project_path_for_ref, &[], &[])
+            .await?;
 
-    // 7. Call push-head
-    client
-        .push_head(project_path_for_ref, &snapshot_hash)
+        let snapshot = ryeos_state::objects::ProjectSnapshot {
+            project_manifest_hash: manifest_hash.clone(),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            parent_hashes: upload_session
+                .expected_previous_hash
+                .iter()
+                .cloned()
+                .collect(),
+            created_at: lillux::time::iso8601_now(),
+            source: "push".to_string(),
+        };
+        let (snapshot_hash, upload_closure) = {
+            let guard = authority.acquire_shared_guard()?;
+            let snapshot_hash =
+                staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
+            let upload_closure = collect_snapshot_hashes(
+                &local_cas,
+                &manifest,
+                None,
+                None,
+                &manifest_hash,
+                &snapshot_hash,
+            )?;
+            staged_roots.protect_cas_closure_admitted(
+                &guard,
+                upload_closure.object_hashes.iter().map(String::as_str),
+                upload_closure.blob_hashes.iter().map(String::as_str),
+            )?;
+            (snapshot_hash, upload_closure)
+        };
+
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
+            &snapshot_hash,
+            project_path_for_ref,
+            upload_session,
+        )
         .await?;
 
-    let manifest_entries = manifest.item_source_hashes.len();
-    Ok(PushResult {
-        snapshot_hash,
-        manifest_hash,
-        manifest,
-        manifest_entries,
-        blobs_uploaded,
-        blobs_skipped,
-        user_manifest_hash: None,
-        user_manifest: None,
-    })
+        client
+            .push_head(
+                project_path_for_ref,
+                &snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+
+        let manifest_entries = manifest.item_source_hashes.len();
+        Ok(PushResult {
+            snapshot_hash,
+            manifest_hash,
+            manifest,
+            manifest_entries,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+            user_manifest_hash: None,
+            user_manifest: None,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
+}
+
+struct StagedCasWriter<'a> {
+    roots: &'a mut StagedCasRootLease,
+    guard: &'a CasMutationGuard,
+}
+
+impl<'a> StagedCasWriter<'a> {
+    fn new(roots: &'a mut StagedCasRootLease, guard: &'a CasMutationGuard) -> Self {
+        Self { roots, guard }
+    }
+
+    fn store_object(&mut self, cas: &CasStore, value: &serde_json::Value) -> Result<String> {
+        self.roots.store_object_admitted(self.guard, cas, value)
+    }
+
+    fn store_blob(&mut self, cas: &CasStore, bytes: &[u8]) -> Result<String> {
+        self.roots.store_blob_admitted(self.guard, cas, bytes)
+    }
+}
+
+pub(crate) fn finish_staged_roots<T>(
+    authority: &PinnedStateAuthority,
+    staged_roots: &mut StagedCasRootLease,
+    operation: Result<T>,
+) -> Result<T> {
+    let guard = authority.acquire_shared_guard()?;
+    let finish = staged_roots.finish_admitted(&guard);
+    match (operation, finish) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SnapshotCasClosure {
+    pub object_hashes: Vec<String>,
+    pub blob_hashes: Vec<String>,
 }
 
 pub(crate) fn collect_snapshot_hashes(
@@ -216,68 +347,278 @@ pub(crate) fn collect_snapshot_hashes(
     user_manifest_hash: Option<&str>,
     manifest_hash: &str,
     snapshot_hash: &str,
-) -> Vec<String> {
-    let mut all_hashes: Vec<String> = Vec::new();
-    collect_manifest_hashes(cas, manifest, &mut all_hashes);
+) -> Result<SnapshotCasClosure> {
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
+    let stored_manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        cas,
+        manifest_hash,
+        limits.max_object_bytes,
+    )?;
+    if stored_manifest != manifest.to_value() {
+        anyhow::bail!("project manifest hash does not identify the supplied manifest");
+    }
+    let snapshot_value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        cas,
+        snapshot_hash,
+        limits.max_object_bytes,
+    )?;
+    let snapshot = ProjectSnapshot::from_value(&snapshot_value)?;
+    if snapshot.project_manifest_hash != manifest_hash
+        || snapshot.user_manifest_hash.as_deref() != user_manifest_hash
+    {
+        anyhow::bail!("snapshot manifest links do not match the supplied upload closure");
+    }
+    let mut object_hashes = BTreeSet::new();
+    let mut blob_hashes = BTreeSet::new();
+    collect_manifest_hashes(cas, manifest, &mut object_hashes, &mut blob_hashes)?;
     if let Some(um) = user_manifest {
-        collect_manifest_hashes(cas, um, &mut all_hashes);
+        let user_hash = user_manifest_hash
+            .ok_or_else(|| anyhow::anyhow!("user manifest was supplied without its CAS hash"))?;
+        let stored_user_manifest = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            cas,
+            user_hash,
+            limits.max_object_bytes,
+        )?;
+        if stored_user_manifest != um.to_value() {
+            anyhow::bail!("user manifest hash does not identify the supplied manifest");
+        }
+        collect_manifest_hashes(cas, um, &mut object_hashes, &mut blob_hashes)?;
+    } else if user_manifest_hash.is_some() {
+        anyhow::bail!("user manifest hash was supplied without the typed manifest");
     }
     if let Some(umh) = user_manifest_hash {
-        all_hashes.push(umh.to_string());
+        object_hashes.insert(umh.to_string());
     }
-    all_hashes.push(manifest_hash.to_string());
-    all_hashes.push(snapshot_hash.to_string());
-    all_hashes.sort();
-    all_hashes.dedup();
-    all_hashes
+    object_hashes.insert(manifest_hash.to_string());
+    object_hashes.insert(snapshot_hash.to_string());
+    Ok(SnapshotCasClosure {
+        object_hashes: object_hashes.into_iter().collect(),
+        blob_hashes: blob_hashes.into_iter().collect(),
+    })
 }
 
 fn collect_manifest_hashes(
     cas: &CasStore,
     manifest: &SourceManifest,
-    all_hashes: &mut Vec<String>,
-) {
-    for obj_hash in manifest.item_source_hashes.values() {
-        all_hashes.push(obj_hash.clone());
-        if let Ok(Some(item_obj)) = cas.get_object(obj_hash) {
-            if let Some(blob_hash) = item_obj.get("content_blob_hash").and_then(|v| v.as_str()) {
-                all_hashes.push(blob_hash.to_string());
-            }
+    object_hashes: &mut BTreeSet<String>,
+    blob_hashes: &mut BTreeSet<String>,
+) -> Result<()> {
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
+    for (path, obj_hash) in &manifest.item_source_hashes {
+        object_hashes.insert(obj_hash.clone());
+        let item_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            cas,
+            obj_hash,
+            limits.max_object_bytes,
+        )?;
+        let item = ItemSource::from_value(&item_obj)?;
+        if item.item_ref != *path {
+            anyhow::bail!(
+                "manifest path '{}' does not match item_source identity '{}'",
+                path,
+                item.item_ref
+            );
         }
+        ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+            cas,
+            &item.content_blob_hash,
+            limits.max_blob_bytes,
+        )?;
+        if item.integrity != item.content_blob_hash {
+            anyhow::bail!(
+                "item_source '{}' integrity does not match its content blob hash",
+                path
+            );
+        }
+        blob_hashes.insert(item.content_blob_hash);
     }
+    Ok(())
+}
+
+pub(crate) struct StagedUploadResult {
+    pub staging_id: String,
+    pub expected_previous_hash: Option<String>,
+    pub uploaded: usize,
+    pub skipped: usize,
 }
 
 pub(crate) async fn upload_missing(
     client: &RemoteClient,
     local_cas: &CasStore,
-    all_hashes: &[String],
-) -> Result<(usize, usize)> {
-    let has_resp = client.objects_has(all_hashes).await?;
-    let skipped = has_resp.found.len();
-    let missing: Vec<String> = has_resp.missing;
+    upload_closure: &SnapshotCasClosure,
+    publication_root_hash: &str,
+    project_path_for_ref: &str,
+    upload_session: ObjectsPutResponse,
+) -> Result<StagedUploadResult> {
+    if !upload_closure
+        .object_hashes
+        .iter()
+        .any(|hash| hash == publication_root_hash)
+    {
+        anyhow::bail!(
+            "publication root {publication_root_hash} is absent from the typed object closure"
+        );
+    }
+    let has_resp = client
+        .objects_has(&upload_closure.object_hashes, &upload_closure.blob_hashes)
+        .await?;
+    let skipped = has_resp.found_object_hashes.len() + has_resp.found_blob_hashes.len();
+    let missing_objects = has_resp.missing_object_hashes;
+    let missing_blobs = has_resp.missing_blob_hashes;
+    let uploaded = missing_objects.len() + missing_blobs.len();
 
-    let uploaded = if !missing.is_empty() {
-        let mut blobs = Vec::new();
-        let mut objects = Vec::new();
+    let mut blobs = Vec::new();
+    let mut objects = Vec::new();
+    let mut publication_root_staged = false;
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
 
-        for hash in &missing {
-            if let Ok(Some(data)) = local_cas.get_blob(hash) {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-                blobs.push(BlobUpload { data: encoded });
-            } else if let Ok(Some(value)) = local_cas.get_object(hash) {
-                objects.push(value);
-            }
+    for hash in &missing_blobs {
+        let data = ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+            local_cas,
+            hash,
+            limits.max_blob_bytes,
+        )?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        blobs.push((hash.clone(), BlobUpload { data: encoded }));
+    }
+    for hash in &missing_objects {
+        let value = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            local_cas,
+            hash,
+            limits.max_object_bytes,
+        )?;
+        publication_root_staged |= hash == publication_root_hash;
+        objects.push((hash.clone(), value));
+    }
+
+    // The final publication root must itself be bound to the server-issued
+    // capability even when the remote already had a deduplicated copy.
+    if !publication_root_staged {
+        let root = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+            local_cas,
+            publication_root_hash,
+            limits.max_object_bytes,
+        )?;
+        objects.push((publication_root_hash.to_string(), root));
+    }
+    blobs.sort_by(|left, right| left.0.cmp(&right.0));
+    objects.sort_by(|left, right| left.0.cmp(&right.0));
+    objects.dedup_by(|left, right| left.0 == right.0);
+
+    let staging_id = upload_session.staging_id;
+    let expected_previous_hash = upload_session.expected_previous_hash;
+    validate_upload_response(&upload_session.blob_hashes, &[], "initial blob")?;
+    validate_upload_response(&upload_session.object_hashes, &[], "initial object")?;
+
+    for batch in chunk_blob_uploads(&blobs) {
+        let expected = batch
+            .iter()
+            .map(|(hash, _)| hash.clone())
+            .collect::<Vec<_>>();
+        let values = batch
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        let response = client
+            .objects_put(Some(&staging_id), project_path_for_ref, &values, &[])
+            .await?;
+        validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
+        validate_upload_response(&response.blob_hashes, &expected, "blob")?;
+        validate_upload_response(&response.object_hashes, &[], "object")?;
+    }
+    for batch in chunk_object_uploads(&objects)? {
+        let expected = batch
+            .iter()
+            .map(|(hash, _)| hash.clone())
+            .collect::<Vec<_>>();
+        let values = batch
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        let response = client
+            .objects_put(Some(&staging_id), project_path_for_ref, &[], &values)
+            .await?;
+        validate_upload_session(&response, &staging_id, expected_previous_hash.as_deref())?;
+        validate_upload_response(&response.blob_hashes, &[], "blob")?;
+        validate_upload_response(&response.object_hashes, &expected, "object")?;
+    }
+
+    Ok(StagedUploadResult {
+        staging_id,
+        expected_previous_hash,
+        uploaded,
+        skipped,
+    })
+}
+
+fn chunk_blob_uploads(entries: &[(String, BlobUpload)]) -> Vec<&[(String, BlobUpload)]> {
+    chunk_upload_entries(entries, |(_, upload)| upload.data.len().saturating_add(64))
+}
+
+fn chunk_object_uploads(
+    entries: &[(String, serde_json::Value)],
+) -> Result<Vec<&[(String, serde_json::Value)]>> {
+    let mut encoded_sizes = Vec::with_capacity(entries.len());
+    for (_, value) in entries {
+        encoded_sizes.push(
+            lillux::canonical_json(value)
+                .context("failed to canonicalize object upload entry")?
+                .len()
+                .saturating_add(64),
+        );
+    }
+    let mut index = 0;
+    Ok(chunk_upload_entries(entries, |_| {
+        let size = encoded_sizes[index];
+        index += 1;
+        size
+    }))
+}
+
+fn chunk_upload_entries<T, F>(entries: &[T], mut encoded_size: F) -> Vec<&[T]>
+where
+    F: FnMut(&T) -> usize,
+{
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut size = 256;
+    for (index, entry) in entries.iter().enumerate() {
+        let entry_size = encoded_size(entry);
+        if index > start && size.saturating_add(entry_size) > OBJECTS_PUT_BODY_BUDGET_BYTES {
+            chunks.push(&entries[start..index]);
+            start = index;
+            size = 256;
         }
+        size = size.saturating_add(entry_size);
+    }
+    if start < entries.len() {
+        chunks.push(&entries[start..]);
+    }
+    chunks
+}
 
-        if !blobs.is_empty() || !objects.is_empty() {
-            client.objects_put(&blobs, &objects).await?;
-        }
-        blobs.len() + objects.len()
-    } else {
-        0
-    };
+fn validate_upload_session(
+    response: &ObjectsPutResponse,
+    staging_id: &str,
+    expected_previous_hash: Option<&str>,
+) -> Result<()> {
+    if response.staging_id != staging_id
+        || response.expected_previous_hash.as_deref() != expected_previous_hash
+    {
+        anyhow::bail!("objects/put response changed the durable upload session contract");
+    }
+    Ok(())
+}
 
-    Ok((uploaded, skipped))
+fn validate_upload_response(actual: &[String], expected: &[String], kind: &str) -> Result<()> {
+    if actual != expected {
+        anyhow::bail!(
+            "objects/put {kind} hash response mismatch: expected {:?}, got {:?}",
+            expected,
+            actual
+        );
+    }
+    Ok(())
 }
 
 /// Reject project paths that would walk the entire home directory
@@ -287,16 +628,15 @@ pub(crate) async fn upload_missing(
 /// message names the offending path so the operator can copy-paste a
 /// corrected `-p` flag.
 fn refuse_walking_root(project_path: &Path, app_root: &Path) -> Result<()> {
-    // Canonicalise both so symlinks and `.` aren't false negatives.
-    // If canonicalisation fails (e.g. path doesn't exist), skip the
-    // check — the upstream walk will fail with its own clearer error.
-    let proj = match project_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return Ok(()),
-    };
+    // Canonicalise both so symlinks and `.` cannot bypass the protected-root
+    // checks. This gate fails closed; a path we cannot identify exactly is not
+    // safe to walk recursively.
+    let proj = project_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize project path {}", project_path.display()))?;
     let app_root_canon = app_root
         .canonicalize()
-        .unwrap_or_else(|_| app_root.to_path_buf());
+        .with_context(|| format!("canonicalize app root {}", app_root.display()))?;
 
     // Reject filebundle root
     if proj.parent().is_none() {
@@ -313,7 +653,9 @@ fn refuse_walking_root(project_path: &Path, app_root: &Path) -> Result<()> {
     // env var is stable on every platform ryeos targets (Linux,
     // macOS). If $HOME is unset we just skip this check.
     if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-        let home = home.canonicalize().unwrap_or(home);
+        let home = home
+            .canonicalize()
+            .with_context(|| format!("canonicalize HOME {}", home.display()))?;
         if proj == home {
             anyhow::bail!(
                 "refusing to push {} — that's your home directory. \
@@ -350,6 +692,7 @@ fn ingest_project_ai_for_push(
     project_root: &Path,
     items: &mut HashMap<String, String>,
     remote_ignore: Option<&IgnoreMatcher>,
+    mut staging: Option<&mut StagedCasWriter<'_>>,
 ) -> Result<()> {
     for surface in PROJECT_AI_SURFACES
         .iter()
@@ -361,13 +704,37 @@ fn ingest_project_ai_for_push(
                 tracing::warn!(path = %abs.display(), "skipping symlinked project AI sync root");
                 continue;
             }
-            Ok(md) if md.is_dir() => {
-                ingest_project_ai_dir_for_push(cas, project_root, &abs, items, remote_ignore)?
-            }
+            Ok(md) if md.is_dir() => ingest_project_ai_dir_for_push(
+                cas,
+                project_root,
+                &abs,
+                items,
+                remote_ignore,
+                staging.as_deref_mut(),
+            )?,
             _ => continue,
         }
     }
     Ok(())
+}
+
+fn exact_relative_project_path(root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root).with_context(|| {
+        format!(
+            "project path '{}' escaped root '{}'",
+            path.display(),
+            root.display()
+        )
+    })?;
+    Ok(relative
+        .to_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project-relative path '{}' is not valid UTF-8",
+                relative.display()
+            )
+        })?
+        .replace('\\', "/"))
 }
 
 fn ingest_project_ai_dir_for_push(
@@ -376,6 +743,7 @@ fn ingest_project_ai_dir_for_push(
     dir: &Path,
     items: &mut HashMap<String, String>,
     remote_ignore: Option<&IgnoreMatcher>,
+    mut staging: Option<&mut StagedCasWriter<'_>>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -391,29 +759,31 @@ fn ingest_project_ai_dir_for_push(
         let path = entry.path();
         if ft.is_dir() {
             if let Some(matcher) = remote_ignore {
-                let rel_dir = path
-                    .strip_prefix(project_root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let rel_dir = exact_relative_project_path(project_root, &path)?;
                 if matcher.is_ignored(&rel_dir) {
                     continue;
                 }
             }
-            ingest_project_ai_dir_for_push(cas, project_root, &path, items, remote_ignore)?;
+            ingest_project_ai_dir_for_push(
+                cas,
+                project_root,
+                &path,
+                items,
+                remote_ignore,
+                staging.as_deref_mut(),
+            )?;
         } else if ft.is_file() {
-            let rel = path
-                .strip_prefix(project_root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = exact_relative_project_path(project_root, &path)?;
             if let Some(matcher) = remote_ignore {
                 if matcher.is_ignored(&rel) {
                     continue;
                 }
             }
             let bytes = std::fs::read(&path)?;
-            let blob_hash = cas.store_blob(&bytes)?;
+            let blob_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_blob(cas, &bytes)?,
+                None => cas.store_blob(&bytes)?,
+            };
             let integrity = sha256_hex(&bytes);
             let item_source = ryeos_state::objects::ItemSource {
                 item_ref: rel.clone(),
@@ -422,7 +792,11 @@ fn ingest_project_ai_dir_for_push(
                 signature_info: None,
                 mode: executable_mode(&path),
             };
-            let obj_hash = cas.store_object(&item_source.to_value())?;
+            let item_value = item_source.to_value();
+            let obj_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_object(cas, &item_value)?,
+                None => cas.store_object(&item_value)?,
+            };
             items.insert(rel, obj_hash);
         }
     }
@@ -435,7 +809,7 @@ fn executable_mode(path: &Path) -> Option<u32> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path)
             .ok()
-            .map(|m| m.permissions().mode())
+            .map(|m| m.permissions().mode() & 0o7777)
             .filter(|m| m & 0o111 != 0)
     }
     #[cfg(not(unix))]
@@ -452,6 +826,7 @@ fn ingest_for_push(
     dir: &Path,
     items: &mut HashMap<String, String>,
     ignore: &IgnoreMatcher,
+    mut staging: Option<&mut StagedCasWriter<'_>>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -461,11 +836,7 @@ fn ingest_for_push(
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
+        let rel = exact_relative_project_path(root, &path)?;
 
         // Skip state/ directory
         if rel.starts_with("state/") || rel == "state" {
@@ -478,10 +849,13 @@ fn ingest_for_push(
         }
 
         if path.is_dir() {
-            ingest_for_push(cas, root, &path, items, ignore)?;
+            ingest_for_push(cas, root, &path, items, ignore, staging.as_deref_mut())?;
         } else if path.is_file() {
             let bytes = std::fs::read(&path)?;
-            let blob_hash = cas.store_blob(&bytes)?;
+            let blob_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_blob(cas, &bytes)?,
+                None => cas.store_blob(&bytes)?,
+            };
             let integrity = sha256_hex(&bytes);
 
             let item_source = ryeos_state::objects::ItemSource {
@@ -491,7 +865,11 @@ fn ingest_for_push(
                 signature_info: None,
                 mode: None,
             };
-            let obj_hash = cas.store_object(&item_source.to_value())?;
+            let item_value = item_source.to_value();
+            let obj_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_object(cas, &item_value)?,
+                None => cas.store_object(&item_value)?,
+            };
             items.insert(rel, obj_hash);
         }
     }
@@ -524,7 +902,7 @@ mod project_ai_ingest_tests {
         .unwrap();
 
         let mut items = HashMap::new();
-        ingest_project_ai_for_push(&cas, project.path(), &mut items, None).unwrap();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items, None, None).unwrap();
 
         assert!(items.contains_key(".ai/config/schedules/snap-track.yaml"));
         assert!(!items.contains_key(".ai/node/schedules/runtime.yaml"));
@@ -650,7 +1028,7 @@ mod ingest_symlink_tests {
         std::fs::write(project.path().join("src/index.ts"), "app").unwrap();
 
         let mut items = HashMap::new();
-        ingest_project_ai_for_push(&cas, project.path(), &mut items, None).unwrap();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items, None, None).unwrap();
 
         assert!(items.contains_key(".ai/directives/ok.md"));
         assert!(
@@ -686,7 +1064,7 @@ mod ingest_symlink_tests {
         std::os::unix::fs::symlink(outside.path().join("secret"), tools.join("leak.sh")).unwrap();
 
         let mut items = HashMap::new();
-        ingest_project_ai_for_push(&cas, project.path(), &mut items, None).unwrap();
+        ingest_project_ai_for_push(&cas, project.path(), &mut items, None, None).unwrap();
         assert!(items.contains_key(".ai/tools/run.sh"));
         assert!(!items.contains_key(".ai/tools/leak.sh"));
 

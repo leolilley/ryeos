@@ -1,12 +1,17 @@
 //! Scheduler reconciliation — crash recovery.
 //!
 //! Follows the existing thread reconciler pattern:
-//! 1. Rebuild projection from CAS (YAML + JSONL)
+//! 1. Synchronize signed schedule specs and validate persisted scheduler state
 //! 2. Recover in-flight fires (check thread status)
 //! 3. Evaluate misfire gaps
 //! 4. Collect intents to dispatch after listeners are bound
+//!
+//! A normal restart with a current projection never replays historical fire
+//! JSONL. Durable SQLite supplies indexed in-flight rows and scheduling
+//! cursors. Full journal replay is reserved for a fresh or explicitly
+//! invalidated projection.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::misfire;
 use super::planning;
@@ -35,36 +40,44 @@ pub struct ResumeIntent {
 pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeIntent>> {
     tracing::info!("scheduler: starting reconciliation");
 
-    // Step 1: Rebuild projection from CAS
+    // Step 1: synchronize the small signed-spec set. This is proportional to
+    // live schedules, not retained fire history.
     let schedules_dir = ctx
         .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("schedules");
-    let fires_dir = ctx
-        .app_root()
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("schedules");
+    let runtime_state_dir = ctx.app_root().join(ryeos_engine::AI_DIR).join("state");
+    let fires_dir = runtime_state_dir.join("schedules");
 
     let db = ctx.scheduler_db();
-    let live_ids =
-        projection::rebuild_specs_from_dir(&schedules_dir, &db, Some(ctx.trust_store()))?;
-
-    // Delete projections for removed YAML files
-    let live_refs: Vec<&str> = live_ids.iter().map(|s| s.as_str()).collect();
-    let removed = db.delete_stale_specs(&live_refs)?;
-    if removed > 0 {
-        tracing::info!(removed, "scheduler: removed stale spec projections");
+    let drained = db.drain_fire_outbox(&runtime_state_dir)?;
+    if drained > 0 {
+        tracing::info!(drained, "scheduler: recovered durable fire-journal outbox");
     }
+    let live_ids = projection::rebuild_specs_from_dir(&schedules_dir, &db, ctx.trust_store())?;
 
-    projection::rebuild_fires_from_dir(&fires_dir, &db)?;
-    let rebuilt_specs = db.list_specs(false, None)?;
-    db.rebuild_cursors_for_specs(&rebuilt_specs, lillux::time::timestamp_millis())?;
-    tracing::info!(
-        specs = live_ids.len(),
-        "scheduler: projection rebuilt from CAS"
-    );
+    let specs = db.list_specs(false, None)?;
+    let now = lillux::time::timestamp_millis();
+    if db.fire_projection_is_current()? {
+        let repaired = db.reconcile_cursors_for_specs(&specs, now)?;
+        tracing::info!(
+            specs = live_ids.len(),
+            cursors_repaired = repaired,
+            "scheduler: persisted projection reconciled incrementally"
+        );
+    } else {
+        tracing::warn!(
+            path = %fires_dir.display(),
+            "scheduler: fire projection is fresh or invalid; replaying retained journals"
+        );
+        projection::rebuild_fires_from_dir(&fires_dir, &db)?;
+        db.rebuild_cursors_for_specs(&specs, now)?;
+        tracing::info!(
+            specs = live_ids.len(),
+            "scheduler: fire projection rebuilt from retained journals"
+        );
+    }
 
     // Step 2: Recover in-flight fires
     let mut intents = recover_inflight_fires(ctx).await?;
@@ -78,10 +91,21 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     let now = lillux::time::timestamp_millis();
 
     for spec in &specs {
-        let last_fire = db.get_last_fire(&spec.schedule_id)?;
-        let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
+        let cursor = db.get_cursor(&spec.schedule_id)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "scheduler cursor missing after startup reconciliation for {}",
+                spec.schedule_id
+            )
+        })?;
+        if cursor.spec_hash != spec.spec_hash {
+            anyhow::bail!(
+                "scheduler cursor/spec mismatch after startup reconciliation for {}",
+                spec.schedule_id
+            );
+        }
+        let plan = planning::plan_schedule_from_cursor(spec, cursor.last_scheduled_at, now);
         let horizon = plan.misfire_horizon_exclusive.unwrap_or(now);
-        let pending = misfire::evaluate_misfires_before(spec, ctx, horizon, now).await;
+        let pending = misfire::evaluate_misfires_before(spec, ctx, horizon, now).await?;
         for p in pending {
             intents.push(ResumeIntent {
                 fire_id: p.fire_id,
@@ -109,9 +133,9 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
         match &fire.thread_id {
             Some(thread_id) => {
                 match ctx.get_thread_status(thread_id) {
-                    Ok(Some(status)) => match status.as_str() {
-                        "completed" => {
-                            let result_outcome = match ctx.get_thread_result_outcome(thread_id) {
+                    Ok(Some(status)) if crate::thread_status_is_terminal(&status) => {
+                        let result_outcome = if status == "completed" {
+                            match ctx.get_thread_result_outcome(thread_id) {
                                 Ok(outcome) => outcome,
                                 Err(e) => {
                                     tracing::warn!(
@@ -122,49 +146,34 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                                     );
                                     None
                                 }
-                            };
-                            let outcome = super::completed_fire_outcome(result_outcome.as_ref());
-                            update_fire_completed(ctx, fire, thread_id, "completed", outcome)
-                                .await?;
-                            tracing::info!(
-                                fire_id = %fire.fire_id,
-                                thread_id = %thread_id,
-                                "recovered: thread completed during downtime"
-                            );
-                        }
-                        "failed" => {
-                            update_fire_completed(ctx, fire, thread_id, "failed", "thread_failed")
-                                .await?;
-                            tracing::info!(
-                                fire_id = %fire.fire_id,
-                                thread_id = %thread_id,
-                                "recovered: thread failed during downtime"
-                            );
-                        }
-                        "cancelled" => {
-                            update_fire_completed(
-                                ctx,
-                                fire,
-                                thread_id,
-                                "cancelled",
-                                "thread_cancelled",
-                            )
-                            .await?;
-                            tracing::info!(
-                                fire_id = %fire.fire_id,
-                                thread_id = %thread_id,
-                                "recovered: thread cancelled during downtime"
-                            );
-                        }
-                        status => {
-                            tracing::warn!(
-                                fire_id = %fire.fire_id,
-                                thread_id = %thread_id,
-                                status = %status,
-                                "recovered: thread in non-terminal status — existing reconciler handles"
-                            );
-                        }
-                    },
+                            }
+                        } else {
+                            None
+                        };
+                        let fire_status = crate::fire_status_for_thread_status(&status);
+                        let outcome = crate::fire_outcome_for_terminal(
+                            &status,
+                            result_outcome.as_ref(),
+                            None,
+                        );
+                        update_fire_completed(ctx, fire, thread_id, fire_status, &outcome).await?;
+                        tracing::info!(
+                            fire_id = %fire.fire_id,
+                            thread_id = %thread_id,
+                            thread_status = %status,
+                            fire_status,
+                            fire_outcome = %outcome,
+                            "recovered: terminal thread classified during downtime"
+                        );
+                    }
+                    Ok(Some(status)) => {
+                        tracing::warn!(
+                            fire_id = %fire.fire_id,
+                            thread_id = %thread_id,
+                            status = %status,
+                            "recovered: thread in non-terminal status — existing reconciler handles"
+                        );
+                    }
                     Ok(None) => {
                         // Thread row gone — try to redispatch if schedule exists
                         let spec = db.get_spec(&fire.schedule_id)?;
@@ -192,13 +201,7 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            fire_id = %fire.fire_id,
-                            error = %e,
-                            "recovered: error checking thread status"
-                        );
-                    }
+                    Err(error) => return Err(error),
                 }
             }
             None => {
@@ -258,40 +261,26 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
     outcome: &str,
 ) -> Result<()> {
     let now = lillux::time::timestamp_millis();
+    if let Some(thread_id) = thread_id {
+        if fire.thread_id.as_deref() != Some(thread_id) {
+            anyhow::bail!("terminal fire update changed deterministic thread identity");
+        }
+    }
+    let fired_at = fire.fired_at.context("dispatched fire has no fired_at")?;
 
     let rec = FireRecord {
         status: status.to_string(),
         outcome: Some(outcome.to_string()),
-        fired_at: Some(fire.fired_at.unwrap_or(now)),
-        completed_at: Some(now),
+        fired_at: Some(fired_at),
+        completed_at: Some(now.max(fired_at)),
         ..fire.clone()
     };
 
-    let entry = serde_json::json!({
-        "entry_type": status,
-        "status": status,
-        "fire_id": fire.fire_id,
-        "schedule_id": fire.schedule_id,
-        "scheduled_at": fire.scheduled_at,
-        "fired_at": fire.fired_at.unwrap_or(now),
-        "thread_id": thread_id,
-        "completed_at": now,
-        "trigger_reason": fire.trigger_reason,
-        "outcome": outcome,
-        "signer_fingerprint": fire.signer_fingerprint,
-    });
-    let fires_path = ctx
-        .app_root()
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("schedules")
-        .join(&fire.schedule_id)
-        .join("fires.jsonl");
+    let app_root = ctx.app_root().to_path_buf();
 
     let db = ctx.scheduler_db();
     tokio::task::spawn_blocking(move || -> Result<()> {
-        projection::append_jsonl_entry(&fires_path, &entry)?;
-        db.upsert_fire(&rec)?;
+        projection::persist_fire_snapshot(&app_root, &db, &rec)?;
         Ok(())
     })
     .await
@@ -379,25 +368,26 @@ mod tests {
     #[tokio::test]
     async fn recover_completed_fire_uses_result_failed_outcome() {
         let ctx = MockContext::new();
+        let thread_id = crate::types::thread_id_from_fire("sched@1000");
         let fire = FireRecord {
             fire_id: "sched@1000".to_string(),
             schedule_id: "sched".to_string(),
             scheduled_at: 1000,
             fired_at: Some(1001),
             completed_at: None,
-            thread_id: Some("T-test".to_string()),
+            thread_id: Some(thread_id.clone()),
             status: "dispatched".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: None,
-            signer_fingerprint: Some("fp".to_string()),
+            signer_fingerprint: "11".repeat(32),
         };
         ctx.db.upsert_fire(&fire).unwrap();
         ctx.statuses
             .lock()
             .unwrap()
-            .insert("T-test".to_string(), "completed".to_string());
+            .insert(thread_id.clone(), "completed".to_string());
         ctx.outcomes.lock().unwrap().insert(
-            "T-test".to_string(),
+            thread_id,
             ThreadResultOutcome::ResultFailed {
                 reason: Some("boom".to_string()),
             },
@@ -409,5 +399,43 @@ mod tests {
         let updated = ctx.db.get_fire("sched@1000").unwrap().unwrap();
         assert_eq!(updated.status, "completed");
         assert_eq!(updated.outcome.as_deref(), Some("result_failed"));
+    }
+
+    #[tokio::test]
+    async fn current_projection_startup_does_not_replay_fire_jsonl() {
+        let ctx = MockContext::new();
+        ctx.db.begin_fire_projection_rebuild().unwrap();
+        ctx.db.finish_fire_projection_rebuild().unwrap();
+
+        let retained = FireRecord {
+            fire_id: "persisted@1000".to_string(),
+            schedule_id: "persisted".to_string(),
+            scheduled_at: 1_000,
+            fired_at: Some(1_001),
+            completed_at: Some(1_002),
+            thread_id: Some(crate::types::thread_id_from_fire("persisted@1000")),
+            status: "completed".to_string(),
+            trigger_reason: "normal".to_string(),
+            outcome: Some("success".to_string()),
+            signer_fingerprint: "11".repeat(32),
+        };
+        ctx.db.upsert_fire(&retained).unwrap();
+
+        let journal_dir = ctx
+            .app_root()
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("schedules")
+            .join("persisted");
+        std::fs::create_dir_all(&journal_dir).unwrap();
+        std::fs::write(
+            journal_dir.join("fires.jsonl"),
+            "{this would be ignored only by incremental startup}\n",
+        )
+        .unwrap();
+
+        let intents = reconcile(&ctx).await.unwrap();
+        assert!(intents.is_empty());
+        assert!(ctx.db.get_fire("persisted@1000").unwrap().is_some());
     }
 }

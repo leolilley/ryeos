@@ -490,8 +490,19 @@ impl CompiledResponseMode for CompiledExecuteMode {
                             .into_response());
                     }
                 };
-                let canonical_project =
-                    std::fs::canonicalize(&project_path).unwrap_or_else(|_| project_path.clone());
+                let canonical_project = match std::fs::canonicalize(&project_path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": format!(
+                                "project source '{}' could not be canonicalized: {error}",
+                                project_path.display()
+                            ) })),
+                        )
+                            .into_response());
+                    }
+                };
                 if canonical_state.starts_with(&canonical_project) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
@@ -760,40 +771,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 )
                     .into_response());
             }
-            // Existence + trust gate: resolve + trust-verify the root item so
-            // invalid refs and trust violations fail before a thread_id is
-            // minted. This does NOT demand a terminal `executor_id` — which
-            // executor runs (a terminal subprocess for tools, or a
-            // runtime-registry runtime for directive/graph) is decided by
-            // `dispatch::dispatch` in the spawned task below. Required caps
-            // and secrets are enforced here from the resolved metadata.
-            let accepted_resolved = match ryeos_app::thread_lifecycle::preflight_root_execution(
-                ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-                    engine: &project_ctx.request_engine,
-                    site_id,
-                    project_path: &project_ctx.effective_path,
-                    item_ref,
-                    ref_bindings: request.ref_bindings.clone(),
-                    launch_mode: "inline",
-                    parameters: request.parameters.clone(),
-                    requested_by: Some(caller_principal_id.clone()),
-                    usage_subject: usage_subject.clone(),
-                    usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    caller_scopes: caller_scopes.clone(),
-                    validate_only: false,
-                },
-            ) {
-                Ok(resolved) => resolved,
-                Err(err) => {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(json!({
-                            "error": format!("accepted launch preflight failed: {err}"),
-                        })),
-                    )
-                        .into_response());
-                }
-            };
             // Route preflight: walk the dispatch chain and run the cheap
             // route-level checks dispatch makes before creating the thread
             // row (terminal `executor_id` + tool `requires` declaration,
@@ -803,57 +780,30 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // leaf dispatch + the launch finalize-on-error net, not here.
             // In-process service kinds run synchronously and never thread a
             // pre-minted id, so they are not eligible for accepted launch.
-            match ryeos_executor::dispatch::preflight_root_dispatch(
+            let accepted_preflight = match ryeos_executor::dispatch::preflight_root_dispatch(
                 item_ref,
                 root_canonical.kind.as_str(),
                 &request.parameters,
+                &request.ref_bindings,
+                usage_subject.as_ref(),
+                usage_subject_asserted_by.as_deref(),
                 &exec_ctx,
                 &state,
             ) {
-                Ok(ryeos_executor::dispatch::RootDispatchClass::InProcess) => {
+                Ok(preflight) if !preflight.class.persists_pre_minted_root() => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
                         axum::Json(json!({
-                            "error": "launch_mode='accepted' is not supported for in-process kinds; they execute synchronously — call execute without --async",
+                            "error": "launch_mode='accepted' requires execution that persists a pre-minted thread root — call execute without --async",
                         })),
                     )
                         .into_response());
                 }
-                Ok(_) => {}
+                Ok(preflight) => preflight,
                 Err(e) => return Ok(dispatch_error_response(e)),
-            }
-            let applicability = match ryeos_executor::dispatch::launch_contract_applicability(
-                item_ref,
-                &exec_ctx,
-            ) {
-                Ok(applicability) => applicability,
-                Err(error) => return Ok(dispatch_error_response(error)),
             };
-            if matches!(
-                &applicability,
-                ryeos_executor::dispatch::LaunchContractApplicability::NonEnvelope { .. }
-            ) {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({
-                        "code": "accepted_launch_class_unsupported",
-                        "error": "accepted launch requires a managed-envelope lifecycle handoff",
-                    })),
-                )
-                    .into_response());
-            }
-            if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
-                &applicability,
-                &accepted_resolved,
-                &request.ref_bindings,
-                &project_ctx.effective_path,
-                &exec_ctx,
-                &state,
-            ) {
-                return Ok(dispatch_error_response(error));
-            }
             let required_caps = ryeos_app::service_registry::extract_required_caps(
-                &accepted_resolved.metadata.extra,
+                &accepted_preflight.requested_subject.resolved.metadata.extra,
             );
             if !required_caps.is_empty() {
                 let cap_refs = required_caps.iter().map(String::as_str).collect::<Vec<_>>();
@@ -869,10 +819,43 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         .into_response());
                 }
             }
-            let accepted_project_path = crate::routes::abs_path::AbsolutePathBuf::try_new(
-                project_ctx.effective_path.clone(),
+            let dotenv_dirs =
+                ryeos_app::vault::dotenv_search_dirs(Some(provenance.original_project_path()));
+            if let Err(err) = ryeos_app::vault::read_required_secrets(
+                state.vault.as_ref(),
+                &caller_principal_id,
+                &accepted_preflight
+                    .requested_subject
+                    .resolved
+                    .metadata
+                    .required_secrets,
+                &dotenv_dirs,
+            ) {
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({
+                        "error": format!("accepted launch secret preflight failed: {err}"),
+                    })),
+                )
+                    .into_response());
+            }
+            let accepted_root_admission = accepted_preflight.root_admission.ok_or_else(|| {
+                RouteDispatchError::Internal(
+                    "threaded dispatch preflight returned no root admission".to_string(),
+                )
+            })?;
+            let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+                accepted_root_admission,
+                request.ref_bindings.clone(),
             )
-            .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
+            .map_err(|error| {
+                        RouteDispatchError::Internal(format!(
+                    "validated accepted-launch policy rejected at dispatch boundary: {error:#}"
+                ))
+                    })?;
+            launch_options.usage_subject = usage_subject.clone();
+            launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
+            launch_options.call = request.call().cloned();
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             let response_thread_id = thread_id.clone();
 
@@ -880,22 +863,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_item_ref,
-                accepted_project_path,
                 request.parameters.clone(),
                 caller_principal_id.clone(),
                 caller_scopes.clone(),
                 thread_id.clone(),
                 provenance.clone(),
-                crate::routes::launch::DispatchLaunchOptions {
-                    ref_bindings: request.ref_bindings.clone(),
-                    launch_mode: "inline".to_string(),
-                    target_site_id: None,
-                    validate_only: false,
-                    usage_subject: usage_subject.clone(),
-                    usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    call: request.call().cloned(),
-                    previous_thread_id: None,
-                },
+                launch_options,
             );
             // No-project execution uses a request-owned scratch workspace.
             // Keep its guard alive until the accepted background launch has
@@ -1109,6 +1082,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id: None,
+            root_admission: None,
             parent_execution_context: None,
         };
 

@@ -1,7 +1,9 @@
 //! BundleEventObject — immutable bundle fact stored in CAS.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use super::thread_snapshot::parse_canonical_timestamp;
 use super::{validate_object_kind, SCHEMA_VERSION};
 
 pub const BUNDLE_EVENT_KIND: &str = "bundle_event";
@@ -81,16 +83,17 @@ impl BundleEventObject {
         if let Some(hash) = &self.prev_chain_event_hash {
             validate_canonical_hash("prev_chain_event_hash", hash)?;
         }
-        if self.created_at.is_empty() {
-            anyhow::bail!("created_at must not be empty");
-        }
+        parse_canonical_timestamp(&self.created_at)
+            .map_err(|error| anyhow::anyhow!("invalid bundle event created_at: {error}"))?;
         if let Some(key) = &self.idempotency_key {
             validate_idempotency_key(key)?;
         }
         if let Some(hash) = &self.request_fingerprint {
             validate_canonical_hash("request_fingerprint", hash)?;
         }
-        let serialized_bytes = lillux::canonical_json(&self.to_value()).len();
+        let serialized_bytes = lillux::canonical_json(&self.to_value())
+            .context("failed to canonicalize bundle event")?
+            .len();
         if serialized_bytes > MAX_BUNDLE_EVENT_SERIALIZED_BYTES {
             anyhow::bail!(
                 "bundle event is {} serialized bytes (max {})",

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:473a6011fb31cd9d302c2cd967f6b96aa09b6a9c02faf7aa9bd8e4c6b0940ff1:JlJA+ZIuSUK5IpVLPdn+qPpVytg2aAUSxkGkBMK8n7ZIDmd86MqyABKyPRyKl4QU7SBUhBFwr8wj7FI2wpS0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T23:18:43Z:af33c8d652281da34b4fa042dcdbf11f790b62eb25df3fa093ba75d53a830f1f:lUlblOz5wWFINE2AXnSLy3XFY45StHMTXiY9NJjGTWvCURL+e5/qDgSmmLEpXfwUL/F3kASTCmzXYLIH3co3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, objects, cas]
@@ -10,7 +10,9 @@ description: CAS object service reference.
 
 Invariant: object services expose explicit CAS get/put/has operations and fail closed when requested hashes are absent.
 
-- `objects/has` checks whether a hash exists.
+- `objects/has` checks object and blob namespaces independently. Requests and
+  responses preserve the required CAS kind even when both namespaces contain
+  the same digest.
 - `objects/get` returns object bytes/metadata for a hash.
 - `objects/put` writes supplied content into CAS.
 

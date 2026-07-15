@@ -1,7 +1,0 @@
-# ryeos:signed:2026-06-19T05:40:59Z:0001429f9039bd56b1ef4e363554cab092e75f41e03005d80c1bc620b17f52d4:VijOR0u2WYk6b+NxNqxMjaf9z+Th4m7VtFX0HKHwHWupRt3oX5lpphrO0/eV0RS/7i0iPCLys4AFeoEEU0V0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-tokens:
-- rebuild
-description: Rebuild the daemon's projection database
-dispatch:
-  kind: execute_ref
-  execute: service:rebuild

@@ -38,7 +38,7 @@ use ryeos_app::launch_metadata::{
 use ryeos_app::runtime_db::{follow_child_spec_hash, follow_phase, NewFollowWaiter};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
-use ryeos_app::thread_lifecycle::new_thread_id;
+use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::authorizer::{canonical_cap, AuthorizationPolicy};
@@ -146,9 +146,26 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         None
     };
 
+    let follow_key = format!(
+        "{parent_thread_id}/{}/{}/{}",
+        params.graph_run_id, params.follow_node, params.step_count
+    );
+
+    let spec_hashes: Vec<String> = children
+        .iter()
+        .map(|child| {
+            follow_child_spec_hash(
+                &child.item_ref,
+                &child.ref_bindings,
+                &child.parameters,
+                child.facets.as_ref(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     // ── Admission (authorize before resource resolution; before any mutation) ─
-    let mut child_refs = Vec::with_capacity(children.len());
-    for child in &children {
+    let mut resolved_children = Vec::with_capacity(children.len());
+    for (item_index, child) in children.iter().enumerate() {
         crate::execution::launch_preparation::validate_ref_bindings(&child.ref_bindings)?;
         let child_ref = CanonicalRef::parse(&child.item_ref)
             .with_context(|| format!("follow: invalid child item_ref '{}'", child.item_ref))?;
@@ -190,30 +207,88 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 );
             }
         }
-        child_refs.push(child_ref);
+        let item_index = u32::try_from(item_index).context("follow: too many children")?;
+        let sealed_root_request = if let Some(slot) = state
+            .state_store
+            .get_follow_child(&follow_key, item_index)?
+        {
+            if slot.item_ref != child.item_ref || slot.spec_hash != spec_hashes[item_index as usize]
+            {
+                bail!("follow: persisted child conflicts at index {item_index}");
+            }
+            slot.sealed_root_request
+        } else {
+            // A new slot captures the complete verified request before any root
+            // row is created. Re-drives consume this value from the slot and do
+            // not reinterpret mutable item, kind, runtime, or policy source.
+            let child_runtime = cap
+                .provenance
+                .request_engine()
+                .runtimes
+                .resolve_for_launch(None, &child_ref.kind)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "follow: child kind '{}' has no managed runtime — a follow child must be a \
+                         managed runtime execution: {e}",
+                        child_ref.kind
+                    )
+                })?;
+            let child_executor_ref = format!(
+                "native:{}",
+                crate::dispatch::strip_binary_ref_prefix(&child_runtime.yaml.binary_ref)
+                    .map_err(|e| anyhow::anyhow!("follow: {e}"))?
+            );
+            let child_runtime_ref = child_runtime.canonical_ref.to_string();
+            let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
+                ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+                    engine: cap.provenance.request_engine(),
+                    node_history_policy: &state.node_history_policy,
+                    site_id: &parent.current_site_id,
+                    project_path: cap.provenance.effective_path(),
+                    item_ref: &child.item_ref,
+                    launch_mode: "detached",
+                    parameters: child.parameters.clone(),
+                    ref_bindings: child.ref_bindings.clone(),
+                    requested_by: thread_auth.acting_principal.clone(),
+                    usage_subject: None,
+                    usage_subject_asserted_by: None,
+                    caller_scopes: cap.effective_caps.clone(),
+                    validate_only: false,
+                    creates_chain_root: true,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "follow: verified history-policy preflight for child '{}'",
+                    child.item_ref
+                )
+            })?;
+            let child_execution = child_preflight.root_admission.execution_request(
+                child_executor_ref,
+                "detached".to_string(),
+                child.parameters.clone(),
+            )?;
+            SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref)?
+        };
+        let restored = sealed_root_request.restore(cap.provenance.request_engine())?;
+        if restored.item_ref != child.item_ref
+            || restored.ref_bindings != child.ref_bindings
+            || restored.parameters != child.parameters
+            || restored.launch_mode != "detached"
+            || restored.current_site_id != parent.current_site_id
+            || restored.origin_site_id != parent.origin_site_id
+            || restored.requested_by.as_deref() != Some(thread_auth.acting_principal.as_str())
+            || restored.plan_context.project_context
+                != (ProjectContext::LocalPath {
+                    path: cap.provenance.effective_path().to_path_buf(),
+                })
+        {
+            bail!("follow: sealed child authority conflicts at index {item_index}");
+        }
+        resolved_children.push(sealed_root_request);
     }
 
     // ── Ordered spawn sequence, idempotent by follow_key ────────────────────
-    let follow_key = format!(
-        "{parent_thread_id}/{}/{}/{}",
-        params.graph_run_id, params.follow_node, params.step_count
-    );
-
-    // Normalize and validate the complete immutable cohort before persistence or
-    // any idempotent return. A re-drive may not silently adopt a changed count,
-    // ref, or spec, and non-JCS values must not leave a reserved waiter behind.
-    let spec_hashes: Vec<String> = children
-        .iter()
-        .map(|child| {
-            follow_child_spec_hash(
-                &child.item_ref,
-                &child.ref_bindings,
-                &child.parameters,
-                child.facets.as_ref(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-
     // 1. Reserve the waiter. ALWAYS go through `reserve_follow` (never a pre-read):
     //    it is the get-or-create primitive AND validates that an existing row's
     //    seed matches this request, so a duplicate follow_key with conflicting seed
@@ -267,7 +342,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // Augmentations, checkpoint paths, audit, metadata, and the eventual root
     // commit must all name the same child ID.
     let mut reserved_child_ids = std::collections::BTreeMap::new();
-    for (item_index, child) in children.iter().enumerate() {
+    for (item_index, (child, sealed_root_request)) in
+        children.iter().zip(resolved_children.iter()).enumerate()
+    {
         let spec_hash = &spec_hashes[item_index];
         let child_thread_id = match state
             .state_store
@@ -291,6 +368,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     spec_hash,
                     &child_id,
                     &child_id,
+                    sealed_root_request,
                 )?;
                 child_id
             }
@@ -340,6 +418,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             || resume.ref_bindings != child_spec.ref_bindings
             || resume.parameters != child_spec.parameters
             || resume.launch_mode != "detached"
+            || serde_json::to_value(&metadata.sealed_root_request)?
+                != serde_json::to_value(resolved_children.get(item_index))?
             || metadata.follow_parent_context.as_ref() != Some(&expected_parent_context)
             || metadata.follow_launch_window != expected_launch_window
         {
@@ -386,7 +466,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // in-memory values own secret material and are consumed exactly once.
     let requested_by = EffectivePrincipal::Local(Principal {
         fingerprint: thread_auth.acting_principal.clone(),
-        scopes: thread_auth.caller_scopes.clone(),
+        scopes: cap.effective_caps.clone(),
     });
     let persisted_parent_context = expected_parent_context.clone();
     let launch_provenance = cap.provenance.clone_for_borrowed_child();
@@ -395,55 +475,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
     };
-    let child_engine = cap.provenance.request_engine();
-    let mut resolved_children = std::collections::BTreeMap::new();
-    for (item_index, child_ref) in child_refs.iter().enumerate() {
-        if !fresh_indices.contains(&item_index) {
-            // Existing rows carry their immutable runtime/executor identity in
-            // persisted launch metadata. Do not replace it from today's kind
-            // registry merely because the waiter still says `reserved`.
-            continue;
-        }
-        // Managed-runtime children only: a child kind served by a registered
-        // runtime resolves here; a leaf tool/service kind does not. Duplicate
-        // rows that are already running, terminal, or queued never consult the
-        // current registry because they need no new launch authority.
-        let child_runtime = child_engine
-            .runtimes
-            .resolve_for_launch(None, &child_ref.kind)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "follow: child kind '{}' has no managed runtime — a follow child must be a \
-                     managed runtime execution: {e}",
-                    child_ref.kind
-                )
-            })?;
-        let child_executor_ref = format!(
-            "native:{}",
-            crate::dispatch::strip_binary_ref_prefix(&child_runtime.yaml.binary_ref)
-                .map_err(|e| anyhow::anyhow!("follow: {e}"))?
-        );
-        let child_runtime_ref = child_runtime.canonical_ref.to_string();
-
-        // The thread row carries the child kind's thread profile, not the item
-        // kind, matching ordinary launches and continuation policy lookup.
-        let child_thread_profile = child_engine
-            .kinds
-            .get(&child_ref.kind)
-            .and_then(|schema| schema.execution())
-            .and_then(|exec| exec.thread_profile.as_ref())
-            .map(|profile| profile.name.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "follow: child kind '{}' has no execution.thread_profile",
-                    child_ref.kind
-                )
-            })?;
-        resolved_children.insert(
-            item_index,
-            (child_thread_profile, child_executor_ref, child_runtime_ref),
-        );
-    }
     let mut child_metadata = std::collections::BTreeMap::new();
     let mut prepared_children = std::collections::BTreeMap::new();
     for (item_index, child) in children.iter().enumerate() {
@@ -461,13 +492,14 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     )
                 })?
         } else {
-            let (child_thread_profile, child_executor_ref, child_runtime_ref) = resolved_children
-                .get(&item_index)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("follow: missing child resolution at index {item_index}")
-                })?;
-            let mut meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-                kind: child_thread_profile.clone(),
+            let sealed_root_request = resolved_children.get(item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing sealed child authority at index {item_index}")
+            })?;
+            let child_execution =
+                sealed_root_request.restore(cap.provenance.request_engine())?;
+            let mut meta = RuntimeLaunchMetadata::default()
+                .with_resume_context(ResumeContext {
+                kind: child_execution.kind.clone(),
                 item_ref: child.item_ref.clone(),
                 ref_bindings: child.ref_bindings.clone(),
                 launch_mode: "detached".to_string(),
@@ -486,9 +518,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 requested_by: requested_by.clone(),
                 execution_hints: ExecutionHints::default(),
                 effective_caps: cap.effective_caps.clone(),
-                executor_ref: Some(child_executor_ref.clone()),
-                runtime_ref: Some(child_runtime_ref.clone()),
-            });
+                executor_ref: Some(child_execution.executor_ref.clone()),
+                runtime_ref: Some(sealed_root_request.runtime_ref().to_string()),
+            })
+                .with_sealed_root_request(sealed_root_request.clone());
             meta.follow_parent_context = Some(persisted_parent_context.clone());
             meta.follow_launch_window = expected_launch_window.clone();
             meta
@@ -577,8 +610,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     anyhow::anyhow!(
                         "follow: child {child_thread_id} has no authoritative launch metadata"
                     )
-                })?;
+            })?;
             if persisted.resume_context != meta.resume_context
+                || serde_json::to_value(&persisted.sealed_root_request)?
+                    != serde_json::to_value(&meta.sealed_root_request)?
                 || persisted.follow_parent_context != meta.follow_parent_context
                 || persisted.follow_launch_window != meta.follow_launch_window
             {
@@ -595,8 +630,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     anyhow::anyhow!(
                         "follow: child {child_thread_id} has no authoritative launch metadata"
                     )
-                })?;
+            })?;
             if persisted.resume_context != expected.resume_context
+                || serde_json::to_value(&persisted.sealed_root_request)?
+                    != serde_json::to_value(&expected.sealed_root_request)?
                 || persisted.follow_parent_context != expected.follow_parent_context
                 || persisted.follow_launch_window != expected.follow_launch_window
             {
@@ -785,6 +822,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                                 .map(std::path::PathBuf::from),
                             usage_subject: None,
                             usage_subject_asserted_by: None,
+                            captured_history_policy: None,
                         },
                         &parent_thread_id,
                         &parent.chain_root_id,

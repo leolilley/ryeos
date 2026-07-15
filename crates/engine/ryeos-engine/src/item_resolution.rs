@@ -371,6 +371,7 @@ mod tests {
                 terminator: None,
                 delegate: None,
                 thread_profile: None,
+                history_policy: None,
                 method_dispatch: None,
                 methods: std::collections::BTreeMap::new(),
                 launch_augmentations: Vec::new(),

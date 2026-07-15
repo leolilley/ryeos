@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use super::{project_event, ProjectionDb, ProjectionMeta};
+use super::{project_event, refresh_chain_retention, ProjectionDb, ProjectionMeta};
 
 /// Project a thread snapshot into the projection database.
 ///
@@ -24,6 +24,14 @@ pub fn project_thread_snapshot(
         .project_root
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
+    let captured_history_policy_json = snapshot
+        .captured_history_policy
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()?
+        .map(|value| lillux::canonical_json(&value))
+        .transpose()
+        .context("failed to canonicalize captured history policy")?;
 
     db.connection()
         .execute(
@@ -31,8 +39,8 @@ pub fn project_thread_snapshot(
             thread_id, chain_root_id, kind, status,
             item_ref, executor_ref, launch_mode,
             current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
-            created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            captured_history_policy_json, created_at, updated_at, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 &snapshot.thread_id,
                 chain_root_id,
@@ -46,6 +54,7 @@ pub fn project_thread_snapshot(
                 &snapshot.upstream_thread_id,
                 &snapshot.requested_by,
                 project_root,
+                captured_history_policy_json,
                 &snapshot.created_at,
                 &snapshot.updated_at,
                 &snapshot.started_at,
@@ -69,13 +78,17 @@ pub fn project_thread_snapshot(
         let result_blob = snapshot
             .result
             .as_ref()
-            .map(|v| serde_json::to_vec(v).unwrap_or_default());
+            .map(serde_json::to_vec)
+            .transpose()
+            .with_context(|| format!("serialize result for thread {}", snapshot.thread_id))?;
         // Store the error as JSON text so a structured error round-trips back
         // into the same shape on read (a string error stays a JSON string).
         let error_text = snapshot
             .error
             .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_default());
+            .map(serde_json::to_string)
+            .transpose()
+            .with_context(|| format!("serialize error for thread {}", snapshot.thread_id))?;
         db.connection()
             .execute(
                 "INSERT OR REPLACE INTO thread_results (
@@ -97,27 +110,34 @@ pub fn project_thread_snapshot(
     // Derive edge from upstream_thread_id (CAS-truth derived projection)
     if let Some(ref upstream_id) = snapshot.upstream_thread_id {
         // Avoid duplicate edges — only insert if not already present
-        let exists: bool = db.connection().query_row(
-            "SELECT COUNT(*) > 0 FROM thread_edges WHERE parent_thread_id = ? AND child_thread_id = ? AND chain_root_id = ?",
-            rusqlite::params![upstream_id, &snapshot.thread_id, chain_root_id],
-            |row| row.get(0),
-        ).unwrap_or(false);
+        let exists: bool = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM thread_edges WHERE parent_thread_id = ? AND child_thread_id = ? AND chain_root_id = ?",
+                rusqlite::params![upstream_id, &snapshot.thread_id, chain_root_id],
+                |row| row.get(0),
+            )
+            .context("failed to check for an existing derived thread edge")?;
 
         if !exists {
-            db.connection().execute(
-                "INSERT INTO thread_edges (
-                    chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason, created_at
-                ) VALUES (?, ?, ?, NULL, 'spawned', ?)",
-                rusqlite::params![
-                    chain_root_id,
-                    upstream_id,
-                    &snapshot.thread_id,
-                    &snapshot.created_at,
-                ],
-            )
-            .context("failed to project derived thread edge")?;
+            db.connection()
+                .execute(
+                    "INSERT INTO thread_edges (
+                    chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
+                    spawn_reason, source_event_hash, created_at
+                ) VALUES (?, ?, ?, NULL, 'spawned', NULL, ?)",
+                    rusqlite::params![
+                        chain_root_id,
+                        upstream_id,
+                        &snapshot.thread_id,
+                        &snapshot.created_at,
+                    ],
+                )
+                .context("failed to project derived thread edge")?;
         }
     }
+
+    refresh_chain_retention(db, chain_root_id)?;
 
     Ok(())
 }

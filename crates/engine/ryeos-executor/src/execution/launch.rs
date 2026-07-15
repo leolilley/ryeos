@@ -7,6 +7,7 @@ use rand::Rng;
 use serde_json::{json, Value};
 
 use super::arch_check;
+use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
 use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
@@ -2061,9 +2062,13 @@ async fn run_claimed_thread_row_inner(
     // of P3b.2 hang). `spawn_blocking` moves the wait onto Tokio's
     // dedicated blocking pool so async workers stay free to service
     // UDS callbacks.
-    let binary_path = materialized_binary.path.to_string_lossy().to_string();
+    let materialized_binary_path = materialized_binary.path;
+    let binary_path = materialized_binary_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("materialized runtime path is not valid UTF-8"))?
+        .to_owned();
     let sandbox_verified_command = ryeos_engine::sandbox::SandboxVerifiedCode {
-        source_path: materialized_binary.path,
+        source_path: materialized_binary_path,
         content_hash: materialized_binary.content_hash,
     };
     let project_owned = project_path.to_path_buf();
@@ -2110,7 +2115,7 @@ async fn run_claimed_thread_row_inner(
     let runtime_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
         &state.config.app_root,
-    );
+    )?;
     let sandbox = state.sandbox.clone();
     let sandbox_project_authority = provenance.sandbox_project_authority();
     let sandbox_state_root = provenance
@@ -2329,13 +2334,6 @@ async fn run_claimed_thread_row_inner(
     })
 }
 
-/// Lease duration for a successor launch claim. Generous enough to cover the
-/// create→`running` window (the subprocess marks running early in its run); the
-/// thread's own status is the authoritative guard against relaunching a live
-/// successor — the claim just prevents two launchers racing the same `created`
-/// row and lets a crashed launcher's claim be reclaimed after it expires.
-const SUCCESSOR_LAUNCH_LEASE_MS: i64 = 300_000;
-
 /// Outcome of a successor launch attempt.
 ///
 /// `Launched` ran the successor to terminal. `Skipped` is a **benign no-op** —
@@ -2345,6 +2343,17 @@ const SUCCESSOR_LAUNCH_LEASE_MS: i64 = 300_000;
 /// not error. A real launch defect is still `Err`.
 pub enum SuccessorLaunchOutcome {
     Launched(NativeLaunchResult),
+    Skipped(&'static str),
+}
+
+/// Startup recovery preparation result.
+///
+/// `Enqueued` means this daemon first persisted the launch claim and then moved
+/// that owned claim into a detached runtime task. `Skipped` is a classified
+/// benign no-op; no unowned in-memory work is reported as queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryLaunchOutcome {
+    Enqueued,
     Skipped(&'static str),
 }
 
@@ -2569,6 +2578,36 @@ async fn prepare_follow_child_launch_inner(
     // reconstruction first could consult the daemon's current engine or create
     // a second snapshot checkout, neither of which is the admitted child source.
     let engine = provenance.request_engine();
+    let admitted_request = launch_metadata
+        .sealed_root_request
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("follow-child launch metadata has no sealed root request"))?
+        .restore(engine)
+        .context("restore follow-child sealed root request")?;
+    if admitted_request.kind != resume.kind
+        || admitted_request.item_ref != resume.item_ref
+        || admitted_request.launch_mode != resume.launch_mode
+        || admitted_request.parameters != resume.parameters
+        || admitted_request.ref_bindings != resume.ref_bindings
+        || admitted_request.current_site_id != resume.current_site_id
+        || admitted_request.origin_site_id != resume.origin_site_id
+        || admitted_request.requested_by != resume.requested_by_name()
+        || admitted_request.plan_context.requested_by != resume.requested_by
+        || admitted_request.plan_context.project_context != resume.project_context
+        || admitted_request.plan_context.execution_hints != resume.execution_hints
+        || resume.executor_ref.as_deref()
+            != Some(admitted_request.executor_ref.as_str())
+        || resume.runtime_ref.as_deref()
+            != launch_metadata
+                .sealed_root_request
+                .as_ref()
+                .map(|sealed| sealed.runtime_ref())
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-child launch envelope does not match its sealed root request for {}",
+            resume.item_ref
+        )));
+    }
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&resume.item_ref)
         .map_err(|error| anyhow::anyhow!("child launch: invalid item ref {}: {error}", resume.item_ref))?;
     let plan_context = ryeos_engine::contracts::PlanContext {
@@ -2653,6 +2692,7 @@ async fn prepare_follow_child_launch_inner(
             ref_bindings: resume.ref_bindings.clone(),
             resolved_item,
             plan_context,
+            root_admission: admitted_request.root_admission,
         },
         acting_principal,
         vault_bindings: HashMap::new(),
@@ -2996,6 +3036,68 @@ pub async fn launch_prepared_machine_successor(
     .await
 }
 
+/// Persist ownership of a stranded MACHINE successor and enqueue its terminal
+/// launch work. Unlike [`launch_successor`], this recovery boundary returns as
+/// soon as the owned claim has been transferred into the detached task.
+pub fn prepare_and_spawn_successor_recovery(
+    state: AppState,
+    successor_id: &str,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    prepare_and_spawn_successor_recovery_inner(state, successor_id, SuccessorMode::Machine)
+}
+
+/// Operator-continuation counterpart of
+/// [`prepare_and_spawn_successor_recovery`]. The detached run still injects the
+/// persisted operator stimulus and retains the live API's terminal semantics.
+pub fn prepare_and_spawn_operator_successor_recovery(
+    state: AppState,
+    successor_id: &str,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    prepare_and_spawn_successor_recovery_inner(state, successor_id, SuccessorMode::Operator)
+}
+
+fn prepare_and_spawn_successor_recovery_inner(
+    state: AppState,
+    successor_id: &str,
+    mode: SuccessorMode,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    let claim = match ThreadLaunchClaim::acquire(&state, successor_id)? {
+        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
+        }
+    };
+    let successor_id = successor_id.to_string();
+    tokio::spawn(async move {
+        if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
+            return;
+        }
+        match launch_successor_inner_with_claim(
+            state,
+            &successor_id,
+            mode,
+            None,
+            None,
+            Some(claim),
+        )
+        .await
+        {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
+                thread_id = %successor_id,
+                reason,
+                "prepared successor recovery skipped"
+            ),
+            Err(error) => tracing::error!(
+                thread_id = %successor_id,
+                error = %error,
+                "prepared successor recovery failed"
+            ),
+        }
+    });
+    Ok(RecoveryLaunchOutcome::Enqueued)
+}
+
 async fn launch_successor_inner(
     state: AppState,
     successor_id: &str,
@@ -3003,23 +3105,38 @@ async fn launch_successor_inner(
     launch_handoff: Option<&LaunchHandoff>,
     prepared_successor: Option<PreparedSuccessorLaunch>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    launch_successor_inner_with_claim(
+        state,
+        successor_id,
+        mode,
+        launch_handoff,
+        prepared_successor,
+        None,
+    )
+    .await
+}
+
+async fn launch_successor_inner_with_claim(
+    state: AppState,
+    successor_id: &str,
+    mode: SuccessorMode,
+    launch_handoff: Option<&LaunchHandoff>,
+    prepared_successor: Option<PreparedSuccessorLaunch>,
+    prepared_claim: Option<ThreadLaunchClaim>,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     // Claim the launch FIRST — the sole authorization to spawn, and the
     // serialization point for the status + budget guards below.
-    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let claimed_by = format!("daemon:{}", std::process::id());
-    match state.state_store.claim_thread_launch(
-        successor_id,
-        &claim_id,
-        &claimed_by,
-        SUCCESSOR_LAUNCH_LEASE_MS,
-    )? {
-        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
-        // Another launcher (live dispatch or a concurrent reconcile) owns the
-        // window. Benign no-op — must NOT burn the attempt budget or finalize.
-        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
-            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
-        }
-    }
+    let _claim = match prepared_claim {
+        Some(claim) => claim,
+        None => match ThreadLaunchClaim::acquire(&state, successor_id)? {
+            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            // Another launcher (live dispatch or a concurrent reconcile) owns the
+            // window. Benign no-op — must NOT burn the attempt budget or finalize.
+            ThreadLaunchClaimOutcome::AlreadyClaimed => {
+                return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+            }
+        },
+    };
 
     // Status guard under the claim: ONLY a `created` row is launchable. A
     // successor already `running`/terminal (a duplicate trigger, or a stale-lease
@@ -3028,30 +3145,16 @@ async fn launch_successor_inner(
     let successor = match state.threads.get_thread(successor_id) {
         Ok(Some(s)) => s,
         Ok(None) => {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(successor_id, &claim_id);
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "launch_successor: thread not found: {successor_id}"
             )));
         }
-        Err(e) => {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(successor_id, &claim_id);
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
     if successor.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(successor_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
     }
     if let Some(reason) = attached_identity_launch_blocker(&state, &successor)? {
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(successor_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped(reason));
     }
 
@@ -3066,16 +3169,10 @@ async fn launch_successor_inner(
             .is_follow_resume_successor(source, successor_id)
         {
             Ok(true) => {
-                let _ = state
-                    .state_store
-                    .release_thread_launch_claim(successor_id, &claim_id);
                 return Ok(SuccessorLaunchOutcome::Skipped("follow_resume_successor"));
             }
             Ok(false) => {}
             Err(e) => {
-                let _ = state
-                    .state_store
-                    .release_thread_launch_claim(successor_id, &claim_id);
                 tracing::warn!(
                     successor_id,
                     error = %e,
@@ -3104,12 +3201,7 @@ async fn launch_successor_inner(
     if mode == SuccessorMode::Machine {
         let attempts = match state.state_store.get_resume_attempts(successor_id) {
             Ok(n) => n,
-            Err(e) => {
-                let _ = state
-                    .state_store
-                    .release_thread_launch_claim(successor_id, &claim_id);
-                return Err(e.into());
-            }
+            Err(e) => return Err(e.into()),
         };
         let max = ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS;
         if attempts >= max {
@@ -3121,27 +3213,19 @@ async fn launch_successor_inner(
                     "error": format!("continuation auto-launch budget exhausted ({attempts}/{max})")
                 }),
             ) {
-                let _ = state
-                    .state_store
-                    .release_thread_launch_claim(successor_id, &claim_id);
                 return Err(BuildAndLaunchError::Internal(error.context(
                     "finalize continuation after auto-launch budget exhaustion",
                 )));
             }
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(successor_id, &claim_id);
             return Ok(SuccessorLaunchOutcome::Skipped("budget_exhausted"));
         }
         if let Err(e) = state.state_store.bump_resume_attempts(successor_id) {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(successor_id, &claim_id);
             return Err(e.into());
         }
     }
 
-    // Rebuild + run under the held claim; always release it afterwards.
+    // Rebuild + run while the owned claim guard remains in this future. It is
+    // released on every return, including cancellation and panic unwind.
     let result = launch_claimed_successor(
         &state,
         successor,
@@ -3150,9 +3234,6 @@ async fn launch_successor_inner(
         prepared_successor,
     )
     .await;
-    let _ = state
-        .state_store
-        .release_thread_launch_claim(successor_id, &claim_id);
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
@@ -3412,36 +3493,67 @@ pub async fn launch_existing_native_resume(
     state: AppState,
     thread_id: &str,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let claimed_by = format!("daemon:{}", std::process::id());
-    match state.state_store.claim_thread_launch(
-        thread_id,
-        &claim_id,
-        &claimed_by,
-        SUCCESSOR_LAUNCH_LEASE_MS,
-    )? {
-        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
-        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
-            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+    launch_existing_native_resume_with_claim(state, thread_id, None).await
+}
+
+/// Persist ownership of a managed same-thread resume and enqueue its terminal
+/// runtime work. The returned `Enqueued` boundary is safe for startup readiness:
+/// the detached future owns the SQLite claim before this function returns.
+pub fn prepare_and_spawn_existing_native_resume_recovery(
+    state: AppState,
+    thread_id: &str,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    let claim = match ThreadLaunchClaim::acquire(&state, thread_id)? {
+        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
-    }
+    };
+    let thread_id = thread_id.to_string();
+    tokio::spawn(async move {
+        if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
+            return;
+        }
+        match launch_existing_native_resume_with_claim(state, &thread_id, Some(claim)).await {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
+                thread_id = %thread_id,
+                reason,
+                "prepared managed native resume skipped"
+            ),
+            Err(error) => tracing::error!(
+                thread_id = %thread_id,
+                error = %error,
+                "prepared managed native resume failed"
+            ),
+        }
+    });
+    Ok(RecoveryLaunchOutcome::Enqueued)
+}
+
+async fn launch_existing_native_resume_with_claim(
+    state: AppState,
+    thread_id: &str,
+    prepared_claim: Option<ThreadLaunchClaim>,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let _claim = match prepared_claim {
+        Some(claim) => claim,
+        None => match ThreadLaunchClaim::acquire(&state, thread_id)? {
+            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::AlreadyClaimed => {
+                return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+            }
+        },
+    };
 
     let thread = match state.threads.get_thread(thread_id) {
         Ok(Some(t)) => t,
         Ok(None) => {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(thread_id, &claim_id);
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "native resume: thread not found: {thread_id}"
             )));
         }
-        Err(e) => {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(thread_id, &claim_id);
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
 
     // A terminal thread is already done (a duplicate trigger or a stale-lease
@@ -3450,18 +3562,12 @@ pub async fn launch_existing_native_resume(
     if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
         .is_some_and(|s| s.is_terminal())
     {
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(thread_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
     }
 
     // Any attached identity blocks or is exact-cleared before relaunch,
     // regardless of lifecycle status (`created` can already be attached).
     if let Some(reason) = attached_identity_launch_blocker(&state, &thread)? {
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(thread_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped(reason));
     }
 
@@ -3471,9 +3577,6 @@ pub async fn launch_existing_native_resume(
     // too, not left for the next restart.
     let child_chain_root_id = thread.chain_root_id.clone();
     let result = launch_claimed_native_resume(&state, thread).await;
-    let _ = state
-        .state_store
-        .release_thread_launch_claim(thread_id, &claim_id);
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
@@ -3542,6 +3645,9 @@ async fn launch_claimed_follow_child(
                 hard_limits: p.hard_limits,
                 depth: p.depth,
             });
+    let sealed_root_request = metadata.sealed_root_request.ok_or_else(|| {
+        anyhow::anyhow!("follow child: {thread_id} has no sealed root execution request")
+    })?;
     let identity = metadata.resume_context.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
     })?;
@@ -3574,16 +3680,16 @@ async fn launch_claimed_follow_child(
                             "follow child: {thread_id} has no persisted parent context"
                         )
                     })?;
-                let mut params = crate::execution::runner::execution_params_from_resume_context(
-                    state, &identity,
-                )?;
-
-                // Recovery rebuilds from the durable identity. A live caller may
-                // still supply its borrowed-child provenance when no precomputed
-                // authority was available.
-                if let Some(provenance) = provenance_override {
-                    params.provenance = provenance;
-                }
+                // Recovery reconstructs the exact admitted root identity from
+                // the sealed request. A live caller may still override only the
+                // borrowed workspace provenance.
+                let params =
+                    crate::execution::runner::execution_params_from_sealed_root_request(
+                        state,
+                        &identity,
+                        &sealed_root_request,
+                        provenance_override,
+                    )?;
                 (params, parent_context, None, false)
             }
         };
@@ -3658,11 +3764,12 @@ pub async fn launch_follow_child(
     // documented reconcile limit shared with every native-resume child.
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    launch_follow_child_inner(
+    launch_follow_child_with_claim(
         state,
         child_id,
         provenance_override,
         parent_context,
+        None,
         None,
         None,
     )
@@ -3678,13 +3785,14 @@ pub async fn launch_prepared_follow_child(
     prepared: PreparedFollowChildLaunch,
     launch_handoff: &LaunchHandoff,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    let result = launch_follow_child_inner(
+    let result = launch_follow_child_with_claim(
         state,
         child_id,
         None,
         None,
         Some(launch_handoff),
         Some(prepared),
+        None,
     )
     .await;
     match &result {
@@ -3710,44 +3818,89 @@ pub async fn launch_prepared_follow_child(
     result
 }
 
-async fn launch_follow_child_inner(
+/// Persist ownership of a stranded follow child and enqueue the reconcile-parity
+/// launch (captured provenance and parent execution context, no live overrides).
+pub fn prepare_and_spawn_follow_child_recovery(
+    state: AppState,
+    child_id: &str,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    prepare_and_spawn_follow_child(state, child_id, None, None)
+}
+
+/// Claim and detach a follow-child launch while preserving any live borrowed
+/// provenance and parent ceiling. This is the durable handoff used by both the
+/// callback hot path and the no-override recovery wrapper above.
+pub fn prepare_and_spawn_follow_child(
+    state: AppState,
+    child_id: &str,
+    provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
+    parent_context: Option<crate::dispatch::ParentExecutionContext>,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    let claim = match ThreadLaunchClaim::acquire(&state, child_id)? {
+        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
+        }
+    };
+    let child_id = child_id.to_string();
+    tokio::spawn(async move {
+        if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
+            return;
+        }
+        match launch_follow_child_with_claim(
+            state,
+            &child_id,
+            provenance_override,
+            parent_context,
+            None,
+            None,
+            Some(claim),
+        )
+        .await
+        {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
+                child_thread_id = %child_id,
+                reason,
+                "prepared follow-child recovery skipped"
+            ),
+            Err(error) => tracing::error!(
+                child_thread_id = %child_id,
+                error = %error,
+                "prepared follow-child recovery failed"
+            ),
+        }
+    });
+    Ok(RecoveryLaunchOutcome::Enqueued)
+}
+
+async fn launch_follow_child_with_claim(
     state: AppState,
     child_id: &str,
     provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
     launch_handoff: Option<&LaunchHandoff>,
     prepared_child: Option<PreparedFollowChildLaunch>,
+    prepared_claim: Option<ThreadLaunchClaim>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let claimed_by = format!("daemon:{}", std::process::id());
-    match state.state_store.claim_thread_launch(
-        child_id,
-        &claim_id,
-        &claimed_by,
-        SUCCESSOR_LAUNCH_LEASE_MS,
-    )? {
-        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
-        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
-            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
-        }
-    }
+    let _claim = match prepared_claim {
+        Some(claim) => claim,
+        None => match ThreadLaunchClaim::acquire(&state, child_id)? {
+            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::AlreadyClaimed => {
+                return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+            }
+        },
+    };
 
     let thread = match state.threads.get_thread(child_id) {
         Ok(Some(t)) => t,
         Ok(None) => {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(child_id, &claim_id);
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "follow child: thread not found: {child_id}"
             )));
         }
-        Err(e) => {
-            let _ = state
-                .state_store
-                .release_thread_launch_claim(child_id, &claim_id);
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
 
     // Cancellation tombstones are checked after claiming, so admission and an
@@ -3772,9 +3925,6 @@ async fn launch_follow_child_inner(
                     final_cost: None,
                     summary_json: None,
                 });
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(child_id, &claim_id);
         cancelled?;
         state.state_store.discard_window_member(&chain_root)?;
         kick_follow_resume_if_ready(&state, &chain_root);
@@ -3786,17 +3936,20 @@ async fn launch_follow_child_inner(
     if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
         .is_some_and(|s| s.is_terminal())
     {
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(child_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
     }
 
+    // Exact process identity supersedes the old pgid-only liveness check and
+    // covers the created-but-already-attached launch window as well.
     if let Some(reason) = attached_identity_launch_blocker(&state, &thread)? {
-        let _ = state
-            .state_store
-            .release_thread_launch_claim(child_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped(reason));
+    }
+
+    // This entry point owns only the never-launched created-root window. Once a
+    // child has started, ordinary native-resume recovery owns it; replaying the
+    // opening stimulus here would turn a crash resume into a second fresh run.
+    if thread.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
+        return Ok(SuccessorLaunchOutcome::Skipped("already_started"));
     }
 
     let result = launch_claimed_follow_child(
@@ -3808,9 +3961,6 @@ async fn launch_follow_child_inner(
         prepared_child,
     )
     .await;
-    let _ = state
-        .state_store
-        .release_thread_launch_claim(child_id, &claim_id);
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
@@ -3869,22 +4019,23 @@ pub(crate) fn global_live_fanout_limit() -> Option<u32> {
     GLOBAL_LIVE_FANOUT_LIMIT.get().copied().flatten()
 }
 
-/// Launch a window-admitted child on the reconcile-parity path: identity
-/// reconstructed from its seeded launch metadata (`launch_follow_child`
-/// with no provenance override / parent clamp), detached from the caller
-/// so no finalize path blocks on a launch.
+/// Launch a window-admitted child on the reconcile-parity path. Preparation
+/// persists the claim before detaching, so releasing/admitting a window member
+/// never leaves only an unclaimed in-memory spawn request behind.
 pub(crate) fn launch_admitted_window_member(state: &AppState, child_thread_id: &str) {
-    let launch_state = state.clone();
-    let id = child_thread_id.to_string();
-    tokio::spawn(async move {
-        if let Err(e) = launch_follow_child(launch_state, &id, None, None).await {
-            tracing::error!(
-                child_thread_id = %id,
-                error = %e,
-                "window-admitted child launch failed",
-            );
-        }
-    });
+    match prepare_and_spawn_follow_child_recovery(state.clone(), child_thread_id) {
+        Ok(RecoveryLaunchOutcome::Enqueued) => {}
+        Ok(RecoveryLaunchOutcome::Skipped(reason)) => tracing::debug!(
+            child_thread_id,
+            reason,
+            "window-admitted child launch skipped"
+        ),
+        Err(error) => tracing::error!(
+            child_thread_id,
+            error = %error,
+            "window-admitted child launch preparation failed"
+        ),
+    }
 }
 
 /// Whether a chain has settled for good: walk `continued` links to the tip
@@ -4017,6 +4168,59 @@ pub fn sweep_launch_windows(state: &AppState) {
     }
 }
 
+/// Strict startup counterpart to [`sweep_launch_windows`].
+///
+/// The periodic live sweep is deliberately best-effort, but startup must not
+/// publish Ready until every launch-window mutation and admitted launch has
+/// either acquired durable ownership or returned a benign classification.
+/// Consequently this variant propagates every listing, terminality, admission,
+/// and claim error to the startup coordinator.
+pub fn prepare_launch_window_recovery(
+    state: &AppState,
+) -> Result<Vec<(String, RecoveryLaunchOutcome)>> {
+    let now_ms = lillux::time::timestamp_millis();
+    let mut outcomes = Vec::new();
+
+    for chain_root_id in state.state_store.launch_window_launched_members()? {
+        if !chain_tip_hard_terminal(state, &chain_root_id)? {
+            continue;
+        }
+        let admitted = state.state_store.launch_window_release(
+            &chain_root_id,
+            global_live_fanout_limit(),
+            now_ms,
+        )?;
+        for child_thread_id in admitted {
+            let outcome = prepare_and_spawn_follow_child_recovery(state.clone(), &child_thread_id)
+                .with_context(|| {
+                    format!(
+                    "prepare launch-window child {child_thread_id} admitted after {chain_root_id}"
+                )
+                })?;
+            outcomes.push((child_thread_id, outcome));
+        }
+    }
+
+    for window_key in state.state_store.launch_window_keys_with_queue()? {
+        let admitted = state.state_store.launch_window_admit(
+            &window_key,
+            global_live_fanout_limit(),
+            now_ms,
+        )?;
+        for child_thread_id in admitted {
+            let outcome = prepare_and_spawn_follow_child_recovery(state.clone(), &child_thread_id)
+                .with_context(|| {
+                    format!(
+                        "prepare launch-window child {child_thread_id} admitted from {window_key}"
+                    )
+                })?;
+            outcomes.push((child_thread_id, outcome));
+        }
+    }
+
+    Ok(outcomes)
+}
+
 /// If `child_chain_root_id`'s just-recorded terminal flipped a follow waiter to
 /// `ready`, fire the parent-resume launch NOW (claim-guarded; a no-op otherwise).
 /// Called from EVERY live finalize path a follow child can reach — the self-finalize
@@ -4048,19 +4252,16 @@ pub fn kick_follow_resume_if_ready(state: &AppState, child_chain_root_id: &str) 
     if waiter.phase != ryeos_app::runtime_db::follow_phase::READY {
         return;
     }
-    let st = state.clone();
     let follow_key = waiter.follow_key;
-    tokio::spawn(async move {
-        match launch_follow_resume_successor(st, &follow_key).await {
-            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
-            Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
-                tracing::debug!(follow_key = %follow_key, reason, "follow-resume kick skipped");
-            }
-            Err(err) => {
-                tracing::error!(follow_key = %follow_key, error = %err, "follow-resume kick failed");
-            }
+    match prepare_and_spawn_follow_resume_recovery(state.clone(), &follow_key) {
+        Ok(RecoveryLaunchOutcome::Enqueued) => {}
+        Ok(RecoveryLaunchOutcome::Skipped(reason)) => {
+            tracing::debug!(follow_key = %follow_key, reason, "follow-resume kick skipped");
         }
-    });
+        Err(error) => {
+            tracing::error!(follow_key = %follow_key, error = %error, "follow-resume kick failed");
+        }
+    }
 }
 
 /// Validate that `successor` really is the graph-follow-resume successor of
@@ -4120,6 +4321,79 @@ pub async fn launch_follow_resume_successor(
     state: AppState,
     follow_key: &str,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    launch_follow_resume_successor_with_claim(state, follow_key, None).await
+}
+
+/// Persist ownership of a ready follow-resume successor and enqueue the splice
+/// and terminal launch. A waiter that is no longer ready is classified before
+/// enqueue; `Enqueued` always transfers an owned SQLite claim into the task.
+pub fn prepare_and_spawn_follow_resume_recovery(
+    state: AppState,
+    follow_key: &str,
+) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
+    use ryeos_app::runtime_db::follow_phase;
+
+    let waiter = state
+        .state_store
+        .get_follow_waiter_by_key(follow_key)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: waiter not found: {follow_key}"
+            ))
+        })?;
+    if waiter.phase != follow_phase::READY && waiter.phase != follow_phase::RESUMING {
+        return Ok(RecoveryLaunchOutcome::Skipped("not_ready"));
+    }
+    let successor_id = waiter.parent_successor_thread_id.clone().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: waiter {follow_key} has no parent successor"
+        ))
+    })?;
+    let claim = match ThreadLaunchClaim::acquire(&state, &successor_id)? {
+        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+            // Preserve the live launcher's waiter-cleanup semantics: if this is
+            // provably the right successor and it already advanced, the owning
+            // launcher has durably consumed the waiter even though we did not
+            // win its claim.
+            if let Some(successor) = state.threads.get_thread(&successor_id)? {
+                if follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &successor)
+                    .is_none()
+                    && successor.status != ryeos_state::objects::ThreadStatus::Created.as_str()
+                {
+                    let _ = state.state_store.clear_follow_waiter(follow_key);
+                }
+            }
+            return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
+        }
+    };
+    let follow_key = follow_key.to_string();
+    tokio::spawn(async move {
+        if !ryeos_app::recovery_execution_gate::wait_if_armed().await {
+            return;
+        }
+        match launch_follow_resume_successor_with_claim(state, &follow_key, Some(claim)).await {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
+                follow_key = %follow_key,
+                reason,
+                "prepared follow-resume recovery skipped"
+            ),
+            Err(error) => tracing::error!(
+                follow_key = %follow_key,
+                error = %error,
+                "prepared follow-resume recovery failed"
+            ),
+        }
+    });
+    Ok(RecoveryLaunchOutcome::Enqueued)
+}
+
+async fn launch_follow_resume_successor_with_claim(
+    state: AppState,
+    follow_key: &str,
+    prepared_claim: Option<ThreadLaunchClaim>,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     use ryeos_app::runtime_db::follow_phase;
 
     let waiter = state
@@ -4144,48 +4418,41 @@ pub async fn launch_follow_resume_successor(
 
     // Claim the successor launch — the serialization point (concurrent reconcile +
     // live drives) and the sole authorization to run it.
-    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let claimed_by = format!("daemon:{}", std::process::id());
-    match state.state_store.claim_thread_launch(
-        &successor_id,
-        &claim_id,
-        &claimed_by,
-        SUCCESSOR_LAUNCH_LEASE_MS,
-    )? {
-        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
-        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
-            // Another launcher holds the claim. Retire the waiter ONLY if the
-            // successor is a VALID follow-resume successor of THIS parent (upstream +
-            // marker) that has already advanced past `created` (the resume ran) — so
-            // it does not sit `resuming` until a future restart. Fail closed: a
-            // stale/corrupt waiter pointing at an unrelated claimed row is never
-            // cleared blindly. Still `created` → a concurrent follow launcher is
-            // mid-splice/launch and owns the clear.
-            match state.threads.get_thread(&successor_id) {
-                Ok(Some(s)) => {
-                    if follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &s)
-                        .is_none()
-                        && s.status != ryeos_state::objects::ThreadStatus::Created.as_str()
-                    {
-                        let _ = state.state_store.clear_follow_waiter(follow_key);
+    let _claim = match prepared_claim {
+        Some(claim) => claim,
+        None => match ThreadLaunchClaim::acquire(&state, &successor_id)? {
+            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::AlreadyClaimed => {
+                // Another launcher holds the claim. Retire the waiter ONLY if the
+                // successor is a VALID follow-resume successor of THIS parent (upstream +
+                // marker) that has already advanced past `created` (the resume ran) — so
+                // it does not sit `resuming` until a future restart. Fail closed: a
+                // stale/corrupt waiter pointing at an unrelated claimed row is never
+                // cleared blindly. Still `created` → a concurrent follow launcher is
+                // mid-splice/launch and owns the clear.
+                match state.threads.get_thread(&successor_id) {
+                    Ok(Some(s)) => {
+                        if follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &s)
+                            .is_none()
+                            && s.status != ryeos_state::objects::ThreadStatus::Created.as_str()
+                        {
+                            let _ = state.state_store.clear_follow_waiter(follow_key);
+                        }
                     }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(
+                        follow_key,
+                        successor_id,
+                        error = %e,
+                        "follow-resume: claim held; failed to inspect successor for waiter cleanup"
+                    ),
                 }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
-                    follow_key,
-                    successor_id,
-                    error = %e,
-                    "follow-resume: claim held; failed to inspect successor for waiter cleanup"
-                ),
+                return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
             }
-            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
-        }
-    }
+        },
+    };
 
     let result = launch_follow_resume_claimed(&state, &waiter, &successor_id).await;
-    let _ = state
-        .state_store
-        .release_thread_launch_claim(&successor_id, &claim_id);
 
     match result {
         Ok(SuccessorLaunchOutcome::Launched(native)) => {
