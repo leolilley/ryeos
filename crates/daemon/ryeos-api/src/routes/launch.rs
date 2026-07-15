@@ -175,11 +175,7 @@ pub(crate) fn preflight_dispatch_launch(
         state,
     )
 }
-/// Spawn the kind-agnostic dispatch-launch task on the global tokio
-/// runtime. Returns the join handle so callers that need to observe
-/// task completion (the SSE source) can await it; callers that don't
-/// (the unary ack mode) drop the handle and let the task run to
-/// completion in the background.
+/// Spawn the kind-agnostic dispatch-launch task on the global tokio runtime.
 ///
 /// This helper does not pattern-match on the canonical ref's kind
 /// name. Whether the launched item is root-executable is the engine's
@@ -196,30 +192,6 @@ pub(crate) fn preflight_dispatch_launch(
 // Execution plumbing: each argument is a distinct leg of the launch's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_dispatch_launch(
-    state: &AppState,
-    item_ref: crate::routes::parsed_ref::ParsedItemRef,
-    parameters: Value,
-    principal_id: String,
-    principal_scopes: Vec<String>,
-    pre_minted_thread_id: String,
-    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
-    options: DispatchLaunchOptions,
-) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
-    spawn_dispatch_launch_inner(
-        state,
-        item_ref,
-        parameters,
-        principal_id,
-        principal_scopes,
-        pre_minted_thread_id,
-        provenance,
-        options,
-        None,
-    )
-}
-
 /// Spawn an acknowledged managed launch. The receiver resolves only after the
 /// durable launch authority has been handed to the scheduled spawn task.
 #[allow(clippy::too_many_arguments)]

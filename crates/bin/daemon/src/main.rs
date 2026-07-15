@@ -309,7 +309,7 @@ async fn main() -> Result<()> {
             );
 
             // ── Two-phase node-config bootstrap ──
-            let (engine, node_config_snapshot) =
+            let (engine, node_config_snapshot, sandbox) =
                 bootstrap::load_node_config_two_phase(&config, Arc::clone(&sandbox))?;
             let node_history_policy = {
                 let roots = engine.resolution_roots(Some(config.app_root.clone()));
@@ -1884,7 +1884,7 @@ async fn run_service_standalone(
     );
 
     // Two-phase node-config bootstrap (same as daemon-start path)
-    let (engine, node_config_snapshot) =
+    let (engine, node_config_snapshot, sandbox) =
         bootstrap::load_node_config_two_phase(config, Arc::clone(&sandbox))?;
     let node_history_policy = {
         let roots = engine.resolution_roots(Some(config.app_root.clone()));

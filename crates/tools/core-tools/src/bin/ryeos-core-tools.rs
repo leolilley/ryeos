@@ -1846,11 +1846,8 @@ fn read_stdin_json() -> anyhow::Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
-    use std::sync::Mutex;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     struct InstalledFixture {
         _tmp: tempfile::TempDir,

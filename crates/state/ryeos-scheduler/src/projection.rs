@@ -4,6 +4,7 @@
 //! Fire history lives as JSONL in `.ai/state/schedules/*/fires.jsonl`.
 //! The projection DB indexes both. Nuke the DB → rebuild from these files.
 
+#[cfg(test)]
 use std::fs;
 use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -532,7 +533,6 @@ fn rebuild_fire_projection_with_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
     const TEST_KEY: [u8; 32] = [42; 32];

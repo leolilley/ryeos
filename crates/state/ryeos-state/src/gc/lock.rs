@@ -204,11 +204,11 @@ mod tests {
         let _lock1 = GcLock::acquire(&runtime_state_dir, "node-1").unwrap();
 
         let result = GcLock::acquire(&runtime_state_dir, "node-2");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("failed to acquire GC lock"));
+        let error = match result {
+            Ok(_) => panic!("concurrent GC lock acquisition must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("failed to acquire GC lock"));
     }
 
     #[test]

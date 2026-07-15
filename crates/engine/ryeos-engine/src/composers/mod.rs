@@ -349,6 +349,7 @@ fn validate_composed_field_requirements(
         if actual != expected {
             return Err(ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "composer for kind `{kind}` violated {:?} semantics for exact-value field `{}`",
                     requirement.semantics, requirement.field

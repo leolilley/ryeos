@@ -1643,7 +1643,7 @@ async fn run_claimed_thread_row_inner(
         executor_ref,
         checkpoint_dir,
         is_resume,
-        launch_metadata,
+        launch_metadata: _,
         pending_project_snapshot,
     } = authority;
     let engine = provenance.request_engine();
@@ -2591,7 +2591,7 @@ async fn prepare_follow_child_launch_inner(
         || admitted_request.ref_bindings != resume.ref_bindings
         || admitted_request.current_site_id != resume.current_site_id
         || admitted_request.origin_site_id != resume.origin_site_id
-        || admitted_request.requested_by != resume.requested_by_name()
+        || admitted_request.requested_by.as_deref() != Some(resume.principal_identifier())
         || admitted_request.plan_context.requested_by != resume.requested_by
         || admitted_request.plan_context.project_context != resume.project_context
         || admitted_request.plan_context.execution_hints != resume.execution_hints
@@ -2632,9 +2632,7 @@ async fn prepare_follow_child_launch_inner(
     let executor_ref = resume.executor_ref.clone().ok_or_else(|| {
         anyhow::anyhow!("child launch: {} has no captured executor identity", resume.item_ref)
     })?;
-    let acting_principal = resume
-        .requested_by_name()
-        .unwrap_or_else(|| "fp:follow-child".to_string());
+    let acting_principal = resume.principal_identifier().to_string();
     let caller_scopes = match &resume.requested_by {
         ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
             principal.scopes.clone()
@@ -2685,7 +2683,7 @@ async fn prepare_follow_child_launch_inner(
             current_site_id: resume.current_site_id.clone(),
             origin_site_id: resume.origin_site_id.clone(),
             target_site_id: None,
-            requested_by: resume.requested_by_name(),
+            requested_by: Some(resume.principal_identifier().to_string()),
             usage_subject: None,
             usage_subject_asserted_by: None,
             parameters: resume.parameters.clone(),
@@ -2753,21 +2751,22 @@ async fn prepare_follow_child_launch_inner(
 fn map_follow_child_resolution_error(
     phase: &'static str,
     item_ref: &str,
-    error: ryeos_engine::resolution::ResolutionError,
+    error: ryeos_engine::error::EngineError,
 ) -> DispatchError {
-    use ryeos_engine::resolution::{ResolutionError, ResolutionFailureClass};
+    use ryeos_engine::error::EngineError;
 
     let detail = error.to_string();
     match error {
-        ResolutionError::MissingItem { .. } => DispatchError::LaunchResourceNotFound {
+        EngineError::ItemNotFound { .. }
+        | EngineError::PinnedVersionNotFound { .. }
+        | EngineError::EffectiveItemNotFound { .. } => DispatchError::LaunchResourceNotFound {
             code: "follow_child_item_not_found".to_owned(),
             message: format!("follow-child {phase} item `{item_ref}` was not found"),
             binding: None,
         },
-        ResolutionError::StepFailed {
-            class: ResolutionFailureClass::DependencyUnavailable,
-            ..
-        } => DispatchError::LaunchPreparationFailed {
+        EngineError::ItemResolutionUnavailable { .. }
+        | EngineError::ProjectContextMaterializationFailed { .. }
+        | EngineError::BundleDiscoveryFailed { .. } => DispatchError::LaunchPreparationFailed {
             code: "follow_child_resolution_failed".to_owned(),
             message: format!(
                 "follow-child {phase} resolution dependency is unavailable for `{item_ref}`: {detail}"
@@ -2776,31 +2775,7 @@ fn map_follow_child_resolution_error(
             binding: None,
             details: BTreeMap::new(),
         },
-        ResolutionError::StepFailed {
-            class: ResolutionFailureClass::InternalInvariant,
-            ..
-        } => DispatchError::LaunchPreparationFailed {
-            code: "follow_child_resolution_failed".to_owned(),
-            message: format!(
-                "follow-child {phase} resolution invariant failed for `{item_ref}`: {detail}"
-            ),
-            classification: "internal".to_owned(),
-            binding: None,
-            details: BTreeMap::new(),
-        },
-        ResolutionError::StepFailed {
-            class: ResolutionFailureClass::InvalidDefinition,
-            ..
-        }
-        | ResolutionError::CycleDetected { .. }
-        | ResolutionError::MaxDepthExceeded { .. }
-        | ResolutionError::AliasMaxDepthExceeded { .. }
-        | ResolutionError::AliasCycle { .. }
-        | ResolutionError::UnknownAlias { .. }
-        | ResolutionError::IntegrityFailure { .. }
-        | ResolutionError::MetadataAnchoringFailed { .. }
-        | ResolutionError::KindNotExecutable { .. }
-        | ResolutionError::ComposedValueContractViolation { .. } => {
+        _ => {
             DispatchError::LaunchPreparationFailed {
                 code: "follow_child_resolution_failed".to_owned(),
                 message: format!(

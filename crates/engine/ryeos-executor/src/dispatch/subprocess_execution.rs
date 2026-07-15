@@ -678,6 +678,7 @@ async fn dispatch_streaming_subprocess(
                 previous_thread_id,
                 &resolved_stream,
                 Some("chained_resume"),
+                Vec::new(),
             )
         } else {
             state

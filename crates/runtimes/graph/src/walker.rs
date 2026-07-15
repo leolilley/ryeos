@@ -6506,7 +6506,7 @@ config:
         assert_eq!(request.graph_run_id, "gr-fan");
         assert_eq!(request.follow_node, "fan");
         assert_eq!(request.launch_window_width, Some(2));
-        let children = request.children.as_ref().expect("cohort children");
+        let children = &request.children;
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].item_ref, "directive:alpha");
         assert_eq!(children[0].parameters, json!({"value":1,"run":"gr-fan"}));
@@ -6532,7 +6532,7 @@ config:
             "per-item templates must not fail before binding: {result:?}"
         );
         assert_eq!(
-            rec.recorded_follow_requests()[0].children.as_ref().unwrap()[0].item_ref,
+            rec.recorded_follow_requests()[0].children[0].item_ref,
             "directive:bound"
         );
     }
@@ -6560,7 +6560,7 @@ config:
         assert_eq!(request.graph_run_id, "gr-fan");
         assert_eq!(request.follow_node, "fan");
         assert_eq!(
-            request.children.as_ref().unwrap()[0].item_ref,
+            request.children[0].item_ref,
             "directive:original"
         );
     }

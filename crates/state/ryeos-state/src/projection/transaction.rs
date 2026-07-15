@@ -78,7 +78,7 @@ mod tests {
         let db = ProjectionDb::open_transient().unwrap();
 
         let error = db
-            .immediate_transaction("rollback reporting", || {
+            .immediate_transaction("rollback reporting", || -> anyhow::Result<()> {
                 db.connection().execute_batch("ROLLBACK")?;
                 anyhow::bail!("projection operation failed")
             })
