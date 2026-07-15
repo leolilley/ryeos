@@ -161,6 +161,7 @@ async fn post_execute_with_extras(
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let mut body = serde_json::json!({
         "item_ref": item_ref,
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": parameters,
     });

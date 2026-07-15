@@ -453,6 +453,7 @@ impl ExpressionFailureEffects {
 
 pub(super) struct FollowSuspendOutcome {
     pub(super) item_id: String,
+    pub(super) ref_bindings: BTreeMap<String, String>,
     pub(super) params: Value,
 }
 

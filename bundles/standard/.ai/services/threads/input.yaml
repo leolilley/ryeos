@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:06Z:be8168140c5088296b7c33dd763eefd8eb6c047cac0188504441e40cd2764074:jPIvGu6sQJITDJk2EC13HnkPOxJIEkwIPbcb2V/ubd/gBbx1pDzUhDRUxUUCLb4ZvITV5yTt45GQD9SQ4rEpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:46Z:3c9011fab5fbbd487e3e3e13a6797db19ef339c8ce9b772337de0df157c003b1:qyEq5x18+Vh0OT2H7ZMuGUlkkQs6OthT3YyfOoeaCrM+YvgWk+xTNgsFcJGIKq9UL7aZOEOGS38zLfpJ+/JcAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "threads"
 name: "input"
 kind: service
@@ -6,7 +6,6 @@ endpoint: threads.input
 required_caps: ["ryeos.execute.service.threads/input"]
 schema:
   input: string
-  thread: string?
-  directive: string?
-  project_path: string?
-description: "Deliver operator input to a directive thread chain (settled -> chained-resume launch; live -> refused until runtime-command delivery lands)"
+  target: object
+  intent: string?
+description: "Deliver operator input to a fresh execution identity or an existing thread target"

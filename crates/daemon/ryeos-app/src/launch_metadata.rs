@@ -11,6 +11,7 @@
 //! Persisted as a JSON blob in `runtime_db.thread_runtime.launch_metadata`
 //! so the struct can be extended without schema migrations.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ryeos_engine::contracts::{
@@ -20,10 +21,21 @@ use ryeos_engine::contracts::{
 use serde::{Deserialize, Serialize};
 
 use crate::execution_provenance::ExecutionProvenance;
+use crate::thread_lifecycle::SealedRootExecutionRequest;
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// Version tag for the JSON payload persisted into
 /// `runtime_db.thread_runtime.launch_metadata`. Bump when an
-/// incompatible shape change ships; readers MUST decode loudly so a
+/// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
 pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
@@ -67,33 +79,30 @@ pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeLaunchMetadata {
-    /// Persisted schema version. Defaults via serde to the current
-    /// `LAUNCH_METADATA_SCHEMA_VERSION` so rows written before this
-    /// field existed deserialize without error. A loud decode failure
-    /// (see `runtime_db::get_runtime_info`) is the signal that an
-    /// incompatible payload was written.
+    /// Exact persisted schema version. Missing or older shapes fail decoding;
+    /// there is no compatibility/default reader.
     pub schema_version: u32,
 
     /// Cancellation policy resolved at decorate-spec time and snapshotted
     /// here so the daemon can route cancellation without re-loading the spec.
     /// `None` = use the default 3s graceful shutdown.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cancellation_mode: Option<CancellationMode>,
 
     /// Resume policy carried over from `SubprocessSpec.execution.native_resume`.
     /// Presence ⇒ this thread is replay-aware. The daemon allocates
     /// `checkpoint_dir`, injects `RYEOS_CHECKPOINT_DIR` into the spawn
     /// env, and on restart consults `reconcile.rs` for auto-resume.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub native_resume: Option<NativeResumeSpec>,
 
     /// Per-thread checkpoint directory (`<thread_state_dir>/checkpoints/`).
     /// Allocated by the daemon at spawn time when `native_resume` is set.
     /// Carried in the manifest so reconcile/resume paths can find it
     /// without rederiving paths.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub checkpoint_dir: Option<PathBuf>,
 
     /// Minimum context required to reconstruct the thread's launch identity —
@@ -101,22 +110,28 @@ pub struct RuntimeLaunchMetadata {
     /// daemon restart, and for a continuation/follow-resume successor to
     /// relaunch it. Populated at managed launch time for continuation-capable
     /// OR native-resume launches. `None` for threads that are neither.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub resume_context: Option<ResumeContext>,
 
     /// Immutable source identity for a continuation runtime seed. Present only
     /// while/after a successor is created from a settled source and used by
     /// startup reconciliation to reject thread-id collisions.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub continuation_source_thread_id: Option<String>,
+
+    /// Complete sealed fresh-root request used only while a created child has
+    /// not crossed its first-launch boundary. Recovery consumes this exact
+    /// authority and never re-resolves the item source.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub sealed_root_request: Option<SealedRootExecutionRequest>,
 
     /// Validated parent execution seed used when a detached follow child is
     /// admitted later, after the live callback context is gone.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub follow_parent_context: Option<PersistedParentExecutionContext>,
 
     /// Durable launch-window policy for crash repair before admission.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub follow_launch_window: Option<FollowLaunchWindow>,
 }
 
@@ -144,6 +159,7 @@ impl Default for RuntimeLaunchMetadata {
             checkpoint_dir: None,
             resume_context: None,
             continuation_source_thread_id: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
         }
@@ -205,6 +221,9 @@ impl OriginalPushedHeadRef {
 pub struct ResumeContext {
     pub kind: String,
     pub item_ref: String,
+    /// Complete canonical secondary execution identity. Required on disk;
+    /// absence is a schema error, never an empty-map fallback.
+    pub ref_bindings: BTreeMap<String, String>,
     pub launch_mode: String,
     pub parameters: serde_json::Value,
     /// Full engine `ProjectContext` from the original `PlanContext`.
@@ -217,7 +236,7 @@ pub struct ResumeContext {
     /// the original LocalPath so resume targets the pinned project
     /// version, not the current head. `None` when the original spawn
     /// went through the live-FS path with no allocated snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub original_snapshot_hash: Option<String>,
     /// Pushed-head identity captured at original spawn time — set iff the
     /// spawn's provenance was `RootPushedHead`. The resume path uses it to
@@ -225,14 +244,14 @@ pub struct ResumeContext {
     /// resolving against the daemon's live engine. `None` for LocalPath
     /// spawns. NOT interchangeable with `original_snapshot_hash`, which is
     /// the LocalPath native-resume pin allocated by the runner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub original_pushed_head_ref: Option<OriginalPushedHeadRef>,
     /// Deliberate runtime state-root override captured at original spawn
     /// time (`/execute` `state_root`). Re-applied to the rebuilt provenance
     /// on resume so a crashed overridden run keeps writing its state — and
     /// advertising its callback identity — under the override instead of
     /// silently reverting into the source project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub state_root: Option<std::path::PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
@@ -242,7 +261,6 @@ pub struct ResumeContext {
     pub requested_by: EffectivePrincipal,
     /// `ExecutionHints` from the original `PlanContext`. Carried
     /// verbatim so executor-specific flags survive resume.
-    #[serde(default = "default_execution_hints")]
     pub execution_hints: ExecutionHints,
     /// Composed `effective_caps` captured at original spawn time. The
     /// reconciler re-mints a callback token for the resumed subprocess and
@@ -254,7 +272,6 @@ pub struct ResumeContext {
     /// launcher feeds to `CapabilityPolicy::FollowChildHybrid`. The child's
     /// own composed caps overwrite it in launch metadata once the child is
     /// launched and policy resolution succeeds.
-    #[serde(default)]
     pub effective_caps: Vec<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
@@ -262,26 +279,23 @@ pub struct ResumeContext {
     /// reconstructs its launch identity from this. Captured at fresh managed
     /// launch; preferred over re-deriving from the registry so a later default
     /// change cannot silently switch runtimes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub executor_ref: Option<String>,
     /// Persisted canonical ref (`runtime:<name>`) of the runtime that launched
     /// this thread, so a successor reattaches by-ref rather than re-resolving
     /// the default for the kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub runtime_ref: Option<String>,
 }
 
-fn default_execution_hints() -> ExecutionHints {
-    ExecutionHints::default()
-}
-
 impl ResumeContext {
-    /// Extract a fingerprint string for the daemon's
-    /// `requested_by: Option<String>` thread-record column.
-    pub fn requested_by_name(&self) -> Option<String> {
+    /// Return the exact captured principal identifier for resumed planning and
+    /// row authority. The captured `EffectivePrincipal` is exhaustive, so a
+    /// resume never needs to invent a fallback identity.
+    pub fn principal_identifier(&self) -> &str {
         match &self.requested_by {
-            EffectivePrincipal::Local(Principal { fingerprint, .. }) => Some(fingerprint.clone()),
-            EffectivePrincipal::Delegated(d) => Some(d.caller_fingerprint.clone()),
+            EffectivePrincipal::Local(Principal { fingerprint, .. }) => fingerprint,
+            EffectivePrincipal::Delegated(delegated) => &delegated.caller_fingerprint,
         }
     }
 
@@ -384,6 +398,7 @@ impl RuntimeLaunchMetadata {
             checkpoint_dir: None,
             resume_context: None,
             continuation_source_thread_id: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
         }
@@ -399,6 +414,7 @@ impl RuntimeLaunchMetadata {
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
             && self.continuation_source_thread_id.is_none()
+            && self.sealed_root_request.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
     }
@@ -426,6 +442,11 @@ impl RuntimeLaunchMetadata {
 
     pub fn with_continuation_source(mut self, source_thread_id: impl Into<String>) -> Self {
         self.continuation_source_thread_id = Some(source_thread_id.into());
+        self
+    }
+
+    pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
+        self.sealed_root_request = Some(request);
         self
     }
 
@@ -475,6 +496,7 @@ mod tests {
         ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "tool:test/run".to_string(),
+            ref_bindings: BTreeMap::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({}),
             project_context,
@@ -531,6 +553,7 @@ mod tests {
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
             continuation_source_thread_id: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
         };
@@ -642,6 +665,7 @@ mod tests {
         let ctx = ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "ns/foo".to_string(),
+            ref_bindings: BTreeMap::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),

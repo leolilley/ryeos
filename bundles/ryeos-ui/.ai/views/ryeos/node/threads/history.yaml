@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T10:47:02Z:fabc1e43071e66c1c8c90431c31690838ee6fe8d943989d1134776638e030482:1mL1K7KPcLiHefRav5o3cZysBd7sU+naZ2TyL+Hk9Nscfhkn82VzED3rRc4PJ6UAYFAkHegQ4HTocRJI9I6EDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:07d81419bee07c6b2521f41e9c5a542ccf2edf5024cd20fbeddb50f3c47f19cb:2Y9T7fyzGAxdlbjYfpOstMoIu75bUF4km1nQtPuqe0lxYjPPeWNFmkrfyJkFDi//658RkaARqUHcpJhy7tcXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
 title: Node Threads
 version: "1.0.0"
@@ -24,21 +24,23 @@ projections:
       field: thread_id
     - label: kind
       field: kind
-    # Leaf-first: the segment that names the thing survives a narrow
-    # cell; the raw canonical ref rides beside it as `id`.
+      present: words
+    # The table carries the readable leaf; the full canonical ref remains in
+    # expanded detail.
     - label: item
       field: item_ref
-      present: tail_first
-    - label: id
-      field: item_ref
+      present: leaf
     - label: project
       field: project.name
+      fallback: node
     - label: status
       field: status
-    - label: source
-      field: requested_by
-    - label: follow
-      field: follow.role
+      present: words
+    # Sparse by design: ordinary threads stay blank, while graph-follow rows
+    # expose their operator-facing lineage state instead of an internal role.
+    - label: lineage
+      field: follow.display_state
+      present: words
       tone:
         field: follow.display_state
         map:
@@ -47,8 +49,9 @@ projections:
           resumed: good
     - label: created
       field: created_at
+      present: time_date
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at, current_node.node, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected, error]
   tone:
     field: status
     map:
@@ -86,6 +89,16 @@ affordances:
         thread: "{record.follow.child_thread_id}"
         chain_root: "{record.follow.child_chain_root_id}"
       open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: tree
+    label: Tree
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/tree
       drill: true
   - id: inspect
     label: Inspect

@@ -375,6 +375,7 @@ async fn thread_tail_descriptor_denied_for_non_owner() {
     // descriptor is issued — 404, not a leak of existence.
     let body = serde_json::json!({
         "item_ref": "service:threads/tail",
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": { "thread_id": thread_id },
     });

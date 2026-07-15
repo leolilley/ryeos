@@ -167,7 +167,23 @@ impl RemoteConfig {
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote '{}' vault_fingerprint must not be empty", self.name);
         }
-        for binding in self.project_bindings.values() {
+        for (local_project_path, binding) in &self.project_bindings {
+            let canonical = canonical_local_project_path(Path::new(local_project_path))
+                .with_context(|| {
+                    format!(
+                        "remote '{}' has invalid local project binding key '{}'",
+                        self.name, local_project_path
+                    )
+                })?;
+            let canonical_identity = local_project_identity(&canonical)?;
+            if canonical_identity != local_project_path {
+                anyhow::bail!(
+                    "remote '{}' local project binding key '{}' is not canonical; expected '{}'",
+                    self.name,
+                    local_project_path,
+                    canonical_identity
+                );
+            }
             validate_remote_project_path(&binding.remote_project_path)?;
         }
         Ok(())
@@ -456,14 +472,25 @@ pub fn canonical_local_project_path(project_path: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Exact UTF-8 representation used as the project-binding identity. Paths
+/// that cannot be represented losslessly are not valid binding authorities.
+pub fn local_project_identity(project_path: &Path) -> Result<&str> {
+    project_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "canonical local project path '{}' is not valid UTF-8",
+            project_path.display()
+        )
+    })
+}
+
 /// Resolve a configured local->remote project binding.
 pub fn resolve_project_binding(
     remote: &RemoteConfig,
     local_project_path: &Path,
 ) -> Result<ResolvedProjectBinding> {
     let canonical = canonical_local_project_path(local_project_path)?;
-    let key = canonical.to_string_lossy().to_string();
-    let binding = remote.project_bindings.get(&key).ok_or_else(|| {
+    let key = local_project_identity(&canonical)?;
+    let binding = remote.project_bindings.get(key).ok_or_else(|| {
         anyhow::anyhow!(
             "remote '{}' has no project binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope ai_only`",
             remote.name,

@@ -2482,6 +2482,10 @@ mod kind_contract_regressions {
                 ("offline_execute", ft_string()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
+                (
+                    "state_access",
+                    ft_string_enum(&["read_write", "read_only_existing"]),
+                ),
                 ("schema", ft_mapping()),
             ],
         )
@@ -2802,7 +2806,7 @@ pub struct ResolvedSourceFormat {
 
 /// The resolution space where an item was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ItemSpace {
     Project,
     Bundle,

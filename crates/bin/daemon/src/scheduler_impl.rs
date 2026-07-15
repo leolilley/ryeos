@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_scheduler::db::SchedulerDb;
@@ -83,6 +83,10 @@ impl SchedulerContext for AppSchedulerContext {
         Ok(())
     }
 
+    async fn wait_for_recovery_execution_release(&self) -> bool {
+        ryeos_app::recovery_execution_gate::wait_if_armed().await
+    }
+
     async fn dispatch_scheduled_item(
         &self,
         spec: &ScheduleSpecRecord,
@@ -92,38 +96,26 @@ impl SchedulerContext for AppSchedulerContext {
         _trigger_reason: &str,
     ) -> Result<()> {
         let params: serde_json::Value = serde_json::from_str(&spec.params)?;
-        let project_path =
-            spec.project_root.as_deref().unwrap_or_else(|| {
-                self.0.config.app_root.to_str().expect(
-                    "app_root must be valid UTF-8 — it is configured from a known directory",
-                )
-            });
+        let project_path = match spec.project_root.as_deref() {
+            Some(project_path) => project_path,
+            None => self
+                .0
+                .config
+                .app_root
+                .to_str()
+                .context("scheduler app root is not valid UTF-8")?,
+        };
         let project_path_buf = std::path::PathBuf::from(project_path);
         let original_root_kind = CanonicalRef::parse(&spec.item_ref)
-            .map(|ref_| ref_.kind)
-            .unwrap_or_else(|_| "item".to_string());
+            .with_context(|| format!("invalid scheduled item ref `{}`", spec.item_ref))?
+            .kind;
 
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_path_buf.clone(),
             self.0.engine.clone(),
         );
 
-        let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-            launch_mode: "inline",
-            target_site_id: None,
-            validate_only: false,
-            params,
-            acting_principal: &spec.requester_fingerprint,
-            project_path: std::path::Path::new(project_path),
-            provenance,
-            original_root_kind: &original_root_kind,
-            pre_minted_thread_id: Some(thread_id.to_string()),
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            previous_thread_id: None,
-            parent_execution_context: None,
-        };
-
+        let site_id = self.0.threads.site_id().to_string();
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: spec.requester_fingerprint.clone(),
             caller_scopes: spec.capabilities.clone(),
@@ -132,18 +124,58 @@ impl SchedulerContext for AppSchedulerContext {
                 requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                     ryeos_engine::contracts::Principal {
                         fingerprint: spec.requester_fingerprint.clone(),
-                        scopes: vec![],
+                        scopes: spec.capabilities.clone(),
                     },
                 ),
                 project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
                     path: project_path_buf,
                 },
-                current_site_id: "site:local".into(),
-                origin_site_id: "site:local".into(),
+                current_site_id: site_id.clone(),
+                origin_site_id: site_id,
                 execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
                 validate_only: false,
             },
             requested_call: None,
+        };
+
+        let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
+            &spec.item_ref,
+            &original_root_kind,
+            &params,
+            &spec.ref_bindings,
+            None,
+            None,
+            &exec_ctx,
+            &self.0,
+        )?;
+        if !preflight.class.persists_pre_minted_root() {
+            anyhow::bail!(
+                "scheduled item `{}` resolves to execution that cannot persist its pre-minted root",
+                spec.item_ref
+            );
+        }
+        let root_admission = preflight.root_admission.ok_or_else(|| {
+            anyhow::anyhow!(
+                "scheduled item `{}` has no verified root admission",
+                spec.item_ref
+            )
+        })?;
+        let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
+            launch_mode: "inline",
+            target_site_id: None,
+            validate_only: false,
+            params,
+            ref_bindings: spec.ref_bindings.clone(),
+            acting_principal: &spec.requester_fingerprint,
+            project_path: std::path::Path::new(project_path),
+            provenance,
+            original_root_kind: &original_root_kind,
+            pre_minted_thread_id: Some(thread_id.to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            previous_thread_id: None,
+            root_admission: Some(root_admission),
+            parent_execution_context: None,
         };
 
         ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0)

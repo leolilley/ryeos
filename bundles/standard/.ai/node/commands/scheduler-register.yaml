@@ -1,8 +1,12 @@
-# ryeos:signed:2026-06-19T05:40:59Z:7853da58122e73183c156acfa36ef545b8f563e9aaedee311d413b140b174101:3le8JvjCwsGMqWdNQcwxL7908BSq+S4QejnLS0KW/xGBfAtmPJgB48Jw8j/RI7T2XUFOn5kOT/yq0e6dXVdfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:30:43Z:2b9c765e56f52dd0da78d1e803f42cb6fd8682a112d4bbd14293f8c6a6e5ccf3:qRBFPRvD9TSte5rZKNMk34CoJlM7xgK/Tl2x6SgjLcYhtC7KmLlUmXsfDbowcqUa0jYy84rz026tMS6MPtV1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - register
-description: Create or update a schedule spec
+description: >-
+  Create or update a schedule spec. The input object must explicitly provide
+  schedule_id, item_ref, ref_bindings, schedule_type, expression, params, timezone,
+  misfire_policy, overlap_policy, lateness_grace_secs, and enabled;
+  project_root is optional.
 arguments:
 - name: params
   kind: json
@@ -14,6 +18,8 @@ parameter_binding:
   input_flag: input
   single_json_object_arg: true
   flag_key_normalization: hyphen_to_underscore
+defaults:
+  ref_bindings: {}
 dispatch:
   kind: execute_ref
   execute: service:scheduler/register

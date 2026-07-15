@@ -111,51 +111,6 @@ ryeos_status_quick() {
     ryeos_user 10 node status 2>/dev/null || true
 }
 
-# Print projection-rebuild progress while the daemon restarts — ONLY when a
-# rebuild is actually happening.
-#
-# A projection schema-epoch bump makes the first restart rebuild
-# projection.sqlite3 from the event log before the daemon is ready — minutes of
-# silence on a large store that otherwise reads as a hang. The daemon marks a
-# real rebuild by renaming the outgoing database to
-# `projection.sqlite3.reset.<from>-to-<to>.<ts>.<pid>`; a fresh reset file is
-# the detection signal, and its own row count is the progress denominator (the
-# rebuild reprojects the same corpus plus the new tail, hence the `~`). A
-# restart with no epoch bump produces no reset file and stays silent.
-# Strictly best-effort: no `sqlite3` or no readable databases just means no
-# progress lines — errexit and pipefail are disabled here so a probe failure
-# never touches the install.
-report_projection_rebuild() {
-    set +e
-    local state_dir="$1"
-    local db="$state_dir/projection.sqlite3"
-    command -v sqlite3 >/dev/null 2>&1 || return 0
-    local started_at reset_file="" total="" last="" n pct
-    started_at="$(date +%s)"
-    while :; do
-        sleep 10
-        if [[ -z "$reset_file" ]]; then
-            reset_file="$(find "$state_dir" -maxdepth 1 \
-                -name 'projection.sqlite3.reset.*' -newermt "@$started_at" 2>/dev/null | head -1)"
-            [[ -z "$reset_file" ]] && continue
-            echo "[install-local-direct]   projection schema epoch changed — one-time" \
-                 "rebuild from the event log (minutes on a large store)"
-            total="$(sqlite3 -readonly "$reset_file" 'SELECT count(*) FROM events;' 2>/dev/null)"
-        fi
-        n="$(sqlite3 -readonly "$db" 'SELECT count(*) FROM events;' 2>/dev/null)"
-        [[ -z "$n" ]] && continue
-        [[ "$n" == "$last" ]] && continue   # no forward motion — stay quiet
-        last="$n"
-        if [[ -n "$total" && "$total" -gt 0 ]]; then
-            pct=$(( n * 100 / total ))
-            [[ "$pct" -gt 100 ]] && pct=100
-            echo "[install-local-direct]   projection rebuild: $n/~$total events (${pct}%)"
-        else
-            echo "[install-local-direct]   projection rebuild: $n events"
-        fi
-    done
-}
-
 bundle_payload_bins() {
     case "$1" in
         core)
@@ -169,6 +124,7 @@ bundle_payload_bins() {
         standard)
             printf '%s\n' \
                 ryeos-directive-runtime \
+                ryeos-directive-launch-preparer \
                 ryeos-graph-runtime \
                 ryeos-knowledge-runtime \
                 rye-composer-extends-chain \
@@ -647,6 +603,7 @@ stale_bins=(
     ryeos-core-tools
     ryeos-tui
     ryeos-directive-runtime
+    ryeos-directive-launch-preparer
     ryeos-graph-runtime
     ryeos-knowledge-runtime
     rye-parser-yaml-document
@@ -874,22 +831,12 @@ fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "[install-local-direct] restarting daemon"
-    # An incompatible projection schema epoch bump can make the first restart
-    # rebuild projection.sqlite3 from CAS/refs before readiness. The reporter
-    # announces the rebuild and its progress ONLY when one is detected, so the
-    # wait neither reads as a hang nor cries wolf on an ordinary restart.
-    # `ryeos start` output is kept (not sunk to /dev/null) so the CLI's own
-    # readiness diagnostic surfaces too. The 930s timeout stays slightly above
-    # ryeos start's internal wait.
-    state_dir="${init_app_root:-$invoking_user_home/.local/share/ryeos}/.ai/state"
-    report_projection_rebuild "$state_dir" &
-    rebuild_reporter_pid=$!
+    # `ryeos start` consumes the daemon's lifecycle stream directly, including
+    # current-generation rebuild and journal-replay progress. Keep its output
+    # visible and retain a small wrapper margin above the CLI's own wait.
     if ! ryeos_user 930 start; then
-        kill "$rebuild_reporter_pid" 2>/dev/null || true
         die "daemon did not restart cleanly"
     fi
-    kill "$rebuild_reporter_pid" 2>/dev/null || true
-    wait "$rebuild_reporter_pid" 2>/dev/null || true
     ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 

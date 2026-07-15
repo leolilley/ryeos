@@ -1,7 +1,20 @@
-# ryeos:signed:2026-06-11T21:03:06Z:41ed3d8228d36d174e0d90a5499a1d93d40c86118afdc32bf376614b2e174f1f:hRiq/5B4/3a/1Cb83CbVwVtHrKCh2NKl1n022R8MehxInQjx45FdkQL0jF7EDDRlkR2Bi9VTgeVWKvyHfthhBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:30:43Z:aedf05a3445a9510cea2d062ecede96504e1ea7538e181e0c6a9dd245e5b7f4d:8dATcsuctsxDqfRuXjmRByxLlbhMQkE3H+mwE//I9uyGkFH1ZVc9TvTm9Q2xqPwJHob8rhf7BO8HJOCiLqkbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "register"
 kind: service
 endpoint: scheduler.register
 required_caps: ["ryeos.execute.service.scheduler/register"]
+schema:
+  schedule_id: string
+  item_ref: string
+  ref_bindings: object
+  schedule_type: string
+  expression: string
+  params: object
+  timezone: string
+  misfire_policy: string
+  overlap_policy: string
+  lateness_grace_secs: integer
+  enabled: boolean
+  project_root: string?
 description: "Create or update a schedule spec"

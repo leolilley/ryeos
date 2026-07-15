@@ -1,0 +1,17 @@
+[package]
+name = "ryeos-directive-core"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Directive-owned model, provider, and launch-preparation domain logic"
+
+[lib]
+name = "ryeos_directive_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+lillux = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

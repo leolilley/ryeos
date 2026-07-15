@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::callback::{CallbackError, ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
@@ -298,6 +298,7 @@ impl CallbackClient {
         follow_node: &str,
         step_count: i64,
         child_item_ref: &str,
+        ref_bindings: std::collections::BTreeMap<String, String>,
         child_parameters: Value,
         frontier_id: Option<String>,
         completion: TerminalCompletion,
@@ -314,9 +315,12 @@ impl CallbackClient {
             graph_run_id: graph_run_id.to_string(),
             follow_node: follow_node.to_string(),
             step_count,
-            child_item_ref: Some(child_item_ref.to_string()),
-            child_parameters,
-            children: None,
+            children: vec![crate::callback::FollowChildSpec {
+                item_ref: child_item_ref.to_string(),
+                ref_bindings,
+                parameters: child_parameters,
+                facets: None,
+            }],
             launch_window_width: None,
             frontier_id,
             completion,
@@ -347,9 +351,7 @@ impl CallbackClient {
                 graph_run_id: graph_run_id.to_string(),
                 follow_node: follow_node.to_string(),
                 step_count,
-                child_item_ref: None,
-                child_parameters: Value::Null,
-                children: Some(children),
+                children,
                 launch_window_width,
                 frontier_id,
                 completion,
@@ -485,6 +487,18 @@ impl CallbackClient {
             .author_item(&self.thread_id, request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub async fn project_snapshot(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback project_snapshot called without an inner UDS client (socket missing)"
+            )
+        })?;
+        client
+            .project_snapshot(&self.thread_id, request)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -781,6 +795,7 @@ impl CallbackClient {
     /// payload. The daemon persists this so resumed threads can reseed
     /// BudgetTracker and Harness.
     pub async fn emit_thread_usage(&self, usage: &ryeos_state::ThreadUsage) -> Result<()> {
+        usage.validate().context("invalid thread usage")?;
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback emit_thread_usage called without an inner UDS client \
@@ -1221,6 +1236,7 @@ mod tests {
             project_path: "/project".to_string(),
             action: ActionPayload {
                 item_id: "my/tool".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
                 thread: "inline".to_string(),
                 call: None,

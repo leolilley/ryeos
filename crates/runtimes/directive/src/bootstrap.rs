@@ -5,7 +5,7 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::directive::*;
 use ryeos_engine::resolution::KindComposedView;
-use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
+use ryeos_directive_core::ResolvedProviderSnapshot;
 use ryeos_runtime::verified_loader::VerifiedLoader;
 
 /// Conventional `derive_as` name on the directive kind's
@@ -54,7 +54,6 @@ pub fn bootstrap(
 
     tracing::info!(
         directive_name = ?header.name.as_deref(),
-        has_model = header.model.is_some(),
         has_limits = header.limits.is_some(),
         context_position_count = header.context.as_ref().map(|c| c.len()).unwrap_or(0),
         hooks_count = header.hooks.as_ref().map(|h| h.len()).unwrap_or(0),
@@ -85,14 +84,15 @@ pub fn bootstrap(
         "directive runtime: typed config metadata"
     );
 
-    // Provider config is consumed from the daemon-resolved snapshot
+    // Provider config is consumed from the launch-preparer snapshot
     // — the runtime never re-reads provider YAML from disk.
     tracing::info!(
         provider_id = %provider_snapshot.provider_id,
         model_name = %provider_snapshot.model_name,
         context_window = provider_snapshot.context_window,
         matched_profile = ?provider_snapshot.matched_profile,
-        source_root = %provider_snapshot.source_root,
+        config_value_digest = %provider_snapshot.config_value_digest,
+        config_source_count = provider_snapshot.config_sources.len(),
         config_hash = %provider_snapshot.config_hash,
         "directive runtime: provider snapshot resolved"
     );
@@ -235,8 +235,6 @@ pub fn bootstrap(
     Ok(BootstrapOutput {
         config: BootstrapConfig {
             execution,
-            model_routing: None, // snapshot replaces runtime re-resolution
-            provider: Some(resolved.provider.clone()),
             tools,
             system_prompt,
             user_prompt,
@@ -254,7 +252,7 @@ pub fn bootstrap(
         provider_id: resolved.provider_id.clone(),
         model_name: resolved.model_name.clone(),
         context_window: resolved.context_window,
-        sampling: header.model.as_ref().and_then(|m| m.sampling.clone()),
+        sampling: resolved.sampling.clone(),
     })
 }
 

@@ -43,16 +43,22 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
             bail!("stale daemon metadata: {}", diagnostics.message)
         }
         LifecycleStatus::Running { .. } => {}
-        // Busy-but-alive: proceed with the normal stop flow. SIGTERM may not
-        // complete coordinated shutdown before the deadline, after which the
-        // force path below applies.
+        // Busy-but-alive: proceed with the normal stop flow — the graceful
+        // shutdown call may itself time out, after which the deadline/force
+        // path below applies.
         LifecycleStatus::Unresponsive { .. } => {}
-        LifecycleStatus::Starting { pid, .. } => {
+        LifecycleStatus::Starting {
+            control_available: true,
+            ..
+        }
+        | LifecycleStatus::Failed { .. } => {}
+        LifecycleStatus::Starting { ref metadata, .. } => {
             // No authenticated daemon socket exists yet, so the signal path
             // cannot pin and verify the live peer. Booting clears on its own.
             bail!(
-                "a daemon (pid {pid}) is starting up and has no control socket yet; \
-                 wait for it to finish booting, then stop it"
+                "a daemon (pid {}) is starting but its control socket is not available yet; \
+                 wait briefly, then retry stop",
+                metadata.pid.unwrap_or_default(),
             )
         }
     }
@@ -82,7 +88,8 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
             }
             LifecycleStatus::Running { .. }
             | LifecycleStatus::Unresponsive { .. }
-            | LifecycleStatus::Starting { .. } => {}
+            | LifecycleStatus::Starting { .. }
+            | LifecycleStatus::Failed { .. } => {}
         }
 
         if Instant::now() >= deadline {

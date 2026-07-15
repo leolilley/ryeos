@@ -4,6 +4,7 @@ mod control;
 pub mod init;
 pub mod init_check;
 pub mod lifecycle_marker;
+pub mod lifecycle_wire;
 pub mod metadata;
 pub mod start;
 pub mod status;
@@ -18,9 +19,13 @@ use serde::{Deserialize, Serialize};
 
 pub use init::{run_init, InitOptions, InitReport};
 pub use init_check::{require_initialized, InitDiagnostics, InitState};
+pub use lifecycle_wire::{
+    LifecycleIdentity, LifecycleResponse, LifecycleWireState, StartupPhase, StartupSnapshot,
+    LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION,
+};
 pub use metadata::DaemonMetadata;
 pub use start::{LifecycleStartLock, StartReport};
-pub use status::{LifecycleStatus, StaleDiagnostics};
+pub use status::{is_ready, LifecycleStatus, StaleDiagnostics};
 pub use stop::{StopOptions, StopReport};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,10 +232,9 @@ impl LifecycleController {
     }
 
     pub async fn start(&self) -> Result<StartReport> {
-        // First startup after an incompatible projection schema epoch bump may
-        // rebuild projection.sqlite3 from CAS/refs before the daemon opens its
-        // lifecycle socket. Keep this longer than ordinary process startup so
-        // a healthy one-time rebuild is not reported as a failed `ryeos start`.
+        // First startup after a recovery generation/schema epoch bump may build
+        // a new selected projection instance from CAS/refs. The lifecycle
+        // socket remains responsive and reports progress throughout.
         start::start(&self.env, Duration::from_secs(900)).await
     }
 

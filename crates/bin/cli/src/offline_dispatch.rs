@@ -1255,9 +1255,12 @@ mod tests {
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
                 "integrity": format!("sha256:{content_blob_hash}"),
+                "signature_info": {
+                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
+                },
                 "mode": 0o755,
             });
-            let sidecar_body = lillux::cas::canonical_json(&item_source);
+            let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
             let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
             std::fs::write(
                 bin_path.with_file_name(format!("{name}.item_source.json")),

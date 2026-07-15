@@ -33,7 +33,11 @@ fn malicious_path_binary_not_resolved() {
         "mode": 0o755,
         "integrity": format!("sha256:{}", "aa".repeat(32)),
     });
-    let is_hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&item_source).as_bytes());
+    let is_hash = lillux::cas::sha256_hex(
+        lillux::cas::canonical_json(&item_source)
+            .unwrap()
+            .as_bytes(),
+    );
 
     // Fake CAS: item_source is available, blob is NOT
     let mut manifest_hashes = HashMap::new();
@@ -70,7 +74,11 @@ fn wrong_triple_not_found() {
         "mode": 0o755,
         "integrity": format!("sha256:{}", "aa".repeat(32)),
     });
-    let is_hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&item_source).as_bytes());
+    let is_hash = lillux::cas::sha256_hex(
+        lillux::cas::canonical_json(&item_source)
+            .unwrap()
+            .as_bytes(),
+    );
 
     let mut manifest_hashes = HashMap::new();
     manifest_hashes.insert(

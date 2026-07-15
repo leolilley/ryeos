@@ -1,0 +1,8 @@
+# ryeos:signed:2026-07-14T23:18:48Z:d80d2dfda7b225e433afeb741ef7bf2682020a59c65a348a2867f955c9254bef:wzLgPuyQkFmWOhGUf34yHnHlC7heoRpTQWLo3k8uA7f26t2aBffnxiae/qDNO8OZFaDpu2yjqBFb5OlJwG/VDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- projection
+- rebuild
+description: Rebuild and strictly verify the selected projection from trusted signed heads and CAS
+dispatch:
+  kind: execute_ref
+  execute: service:projection/rebuild

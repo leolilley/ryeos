@@ -87,6 +87,10 @@ pub struct AppState {
     pub service_descriptors: &'static [ServiceDescriptor],
     /// Node-config snapshot loaded at startup.
     pub node_config: Arc<NodeConfigSnapshot>,
+    /// Signed node-wide history authority resolved once at boot. Execution
+    /// resolves every new root against this typed snapshot before creation;
+    /// projects and item overlays cannot replace it.
+    pub node_history_policy: Arc<ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy>,
     /// Operator-secret store. Read at request-build time and merged
     /// into the spawned subprocess env via the `vault_bindings`
     /// pipeline (see `thread_lifecycle::spawn_item`). The daemon stays
@@ -147,27 +151,24 @@ pub struct StatusResponse {
     pub sandbox: SandboxStatus,
     pub active_threads: i64,
     pub thread_projection: ThreadProjectionHealthSnapshot,
+    pub pending_head_transitions: crate::state_store::PendingHeadTransitionStatus,
 }
 
 impl AppState {
-    /// CAS store rooted at this node's state. Shared shorthand for the
-    /// `cas_root()? -> CasStore::new` pair repeated across handlers.
-    pub fn cas_store(&self) -> anyhow::Result<lillux::cas::CasStore> {
-        Ok(lillux::cas::CasStore::new(self.state_store.cas_root()?))
+    /// Acquire one descriptor-bound CAS read capability. The shared guard is
+    /// retained for the lifetime of the store so a concurrent sweep cannot
+    /// remove objects between traversal and payload reads.
+    pub fn acquire_cas_read(&self) -> anyhow::Result<PinnedCasRead> {
+        let authority = self.state_store.with_state_db(|db| db.pinned_authority())?;
+        let guard = authority.acquire_shared_guard()?;
+        let cas = authority.cas_store()?;
+        Ok(PinnedCasRead { _guard: guard, cas })
     }
 
-    /// CAS store plus the refs root, for handlers that read or advance
-    /// signed refs alongside object access.
-    pub fn cas_and_refs(&self) -> anyhow::Result<(lillux::cas::CasStore, std::path::PathBuf)> {
-        Ok((
-            lillux::cas::CasStore::new(self.state_store.cas_root()?),
-            self.state_store.refs_root()?,
-        ))
-    }
-
-    pub fn status(&self) -> StatusResponse {
+    pub fn status(&self) -> anyhow::Result<StatusResponse> {
         let build = build_info::get();
-        StatusResponse {
+        let pending_head_transitions = self.state_store.pending_head_transition_status()?;
+        Ok(StatusResponse {
             version: build.version.to_string(),
             revision: build.revision.to_string(),
             build_date: build.build_date.to_string(),
@@ -184,6 +185,18 @@ impl AppState {
             },
             active_threads: self.state_store.active_thread_count().unwrap_or(0),
             thread_projection: self.state_store.projection_health_snapshot(),
-        }
+            pending_head_transitions,
+        })
+    }
+}
+
+pub struct PinnedCasRead {
+    _guard: ryeos_state::CasMutationGuard,
+    cas: lillux::CasStore,
+}
+
+impl PinnedCasRead {
+    pub fn cas(&self) -> &lillux::CasStore {
+        &self.cas
     }
 }

@@ -35,6 +35,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         state
             .callback_tokens
             .validate(&params.callback_token, &params.thread_id, &project_path)?;
+    crate::execution::launch_preparation::validate_ref_bindings(&params.action.ref_bindings)?;
 
     // V5.5 P2 — daemon-enforced callback caps. The token carries the
     // composed `effective_caps` minted at launch time; the runtime is
@@ -45,6 +46,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &cap.effective_caps,
         &state.authorizer,
     )?;
+    for binding_ref in params.action.ref_bindings.values() {
+        enforce_callback_caps(binding_ref, &cap.effective_caps, &state.authorizer)?;
+    }
 
     let child_provenance = cap.provenance.clone_for_borrowed_child();
 
@@ -351,6 +355,7 @@ async fn handle_execute(
             cap,
             child_provenance,
             &params.action.item_id,
+            &params.action.ref_bindings,
             &params.action.params,
             params.action.facets.as_ref(),
             params.action.launch_window.as_ref(),
@@ -450,7 +455,7 @@ async fn handle_execute(
             &cap.hard_limits,
             cap.depth,
             callback_root_item_ref,
-        );
+        )?;
         match state
             .state_store
             .reserve_hook_dispatch(&seed)
@@ -485,6 +490,7 @@ async fn handle_execute(
         target_site_id: None,
         validate_only: false,
         params: params.action.params.clone(),
+        ref_bindings: params.action.ref_bindings.clone(),
         acting_principal: caller_principal_id.as_str(),
         project_path: project_path.as_path(),
         provenance: child_provenance,
@@ -493,6 +499,7 @@ async fn handle_execute(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        root_admission: None,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),
     };
 
@@ -560,7 +567,7 @@ fn hook_dispatch_ledger_seed(
     hard_limits: &Value,
     depth: u32,
     callback_root_item_ref: &str,
-) -> (ryeos_app::state_store::NewHookDispatch, String) {
+) -> Result<(ryeos_app::state_store::NewHookDispatch, String)> {
     let mut effective_caps = effective_caps.to_vec();
     effective_caps.sort();
     let dispatch_identity = serde_json::json!({
@@ -568,9 +575,12 @@ fn hook_dispatch_ledger_seed(
         "occurrence": &identity.occurrence,
         "hook_id": &identity.hook_id,
     });
-    let dispatch_key = lillux::sha256_hex(
-        lillux::canonical_json(&dispatch_identity).as_bytes(),
-    );
+    let canonical_dispatch_identity = lillux::canonical_json(&dispatch_identity).map_err(|error| {
+        hook_integrity(format!(
+            "hook dispatch identity cannot be represented as canonical JSON: {error}"
+        ))
+    })?;
+    let dispatch_key = lillux::sha256_hex(canonical_dispatch_identity.as_bytes());
     let request_identity = serde_json::json!({
         "hook_dispatch": identity,
         "action": action,
@@ -582,8 +592,12 @@ fn hook_dispatch_ledger_seed(
         "depth": depth,
         "callback_root_item_ref": callback_root_item_ref,
     });
-    let request_hash =
-        lillux::sha256_hex(lillux::canonical_json(&request_identity).as_bytes());
+    let canonical_request_identity = lillux::canonical_json(&request_identity).map_err(|error| {
+        hook_integrity(format!(
+            "hook dispatch request cannot be represented as canonical JSON: {error}"
+        ))
+    })?;
+    let request_hash = lillux::sha256_hex(canonical_request_identity.as_bytes());
     let seed = ryeos_app::state_store::NewHookDispatch {
         dispatch_key,
         chain_root_id: chain_root_id.to_string(),
@@ -592,7 +606,7 @@ fn hook_dispatch_ledger_seed(
         hook_id: identity.hook_id.clone(),
         request_hash: request_hash.clone(),
     };
-    (seed, request_hash)
+    Ok((seed, request_hash))
 }
 
 fn parent_execution_context_from_capability(
@@ -707,6 +721,7 @@ mod tests {
         };
         let action = ryeos_runtime::callback::ActionPayload {
             item_id: "tool:test/audit".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             params: serde_json::json!({"value": 1}),
             thread: "inline".to_string(),
             call: None,
@@ -724,7 +739,8 @@ mod tests {
             &serde_json::json!({"turns": 4}),
             2,
             "graph:test/fixture",
-        );
+        )
+        .unwrap();
         let (seed_b, request_b) = hook_dispatch_ledger_seed(
             &identity,
             &action,
@@ -736,7 +752,8 @@ mod tests {
             &serde_json::json!({"turns": 4}),
             2,
             "graph:test/fixture",
-        );
+        )
+        .unwrap();
         assert_eq!(seed_a.dispatch_key, seed_b.dispatch_key);
         assert_eq!(request_a, request_b);
 
@@ -753,7 +770,8 @@ mod tests {
             &serde_json::json!({"turns": 4}),
             2,
             "graph:test/fixture",
-        );
+        )
+        .unwrap();
         assert_eq!(seed_a.dispatch_key, changed_seed.dispatch_key);
         assert_ne!(request_a, changed_request);
     }
@@ -772,6 +790,7 @@ mod tests {
         };
         let action = ryeos_runtime::callback::ActionPayload {
             item_id: "tool:test/audit".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             params: serde_json::json!({}),
             thread: "inline".to_string(),
             call: None,

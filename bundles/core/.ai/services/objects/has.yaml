@@ -1,7 +1,8 @@
-# ryeos:signed:2026-06-11T05:13:13Z:07ef3cf7be953abc2ca56edae30b0839af55dd6d4d4103d1bf819a62f1159353:/rpD8ghsohHSYXRxCNsVXj1rWdyYXvM3TsLtZlwrx5UVG3XJv6IfC7Kv2OAhkoMYXFJCz+hoDYcx4x08KY47CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:e391853c08f720fa585fe52dd7d01dc0f99fd01b4d7a248293b21c9faa12cbe3:lbjCcaJTttN8SbMtVuiKeEiEmHnd4DCuQq21IgPHNOzWy0SKhWeDPa4QRMNp6r1BtY04uouZPUMYdQL4YG9gCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.has
 required_caps: ["ryeos.execute.service.objects/has"]
 schema:
-  hash: string
-description: "Check whether a CAS object exists"
+  object_hashes: array
+  blob_hashes: array
+description: "Check object and blob CAS namespaces independently"

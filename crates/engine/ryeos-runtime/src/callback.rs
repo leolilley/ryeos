@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Re-export so callback/graph/runtime callers reference one method-call type
 /// without each taking a direct `ryeos-engine` dependency.
@@ -143,13 +144,8 @@ pub struct SpawnFollowChildRequest {
     pub graph_run_id: String,
     pub follow_node: String,
     pub step_count: i64,
-    /// Canonical ref of the child item to launch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_item_ref: Option<String>,
-    #[serde(default)]
-    pub child_parameters: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<FollowChildSpec>>,
+    /// Required non-empty cohort. Single-child callers emit one element.
+    pub children: Vec<FollowChildSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_window_width: Option<u32>,
     /// Optional graph frontier id, recorded on the waiter for diagnostics.
@@ -164,6 +160,7 @@ pub struct SpawnFollowChildRequest {
 #[serde(deny_unknown_fields)]
 pub struct FollowChildSpec {
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     #[serde(default)]
     pub parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,6 +226,7 @@ impl<'de> Deserialize<'de> for TerminalCompletion {
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
     pub item_id: String,
+    pub ref_bindings: BTreeMap<String, String>,
     #[serde(default)]
     pub params: Value,
     pub thread: String,
@@ -272,6 +270,7 @@ struct AuthoredHookAction {
     #[serde(default)]
     primary: Option<HookActionPrimary>,
     item_id: String,
+    ref_bindings: BTreeMap<String, String>,
     #[serde(default)]
     params: Value,
     #[serde(default = "inline_thread")]
@@ -290,14 +289,16 @@ fn inline_thread() -> String {
 
 /// Parse the one canonical hook-action shape shared by every runtime.
 ///
-/// Missing/empty `item_id`, empty `thread`, unknown fields, an unsupported
-/// `primary`, and malformed typed blocks all fail before any callback occurs.
+/// Missing/empty `item_id`, missing `ref_bindings`, empty `thread`, unknown
+/// fields, an unsupported `primary`, and malformed typed blocks all fail before
+/// any callback occurs.
 pub fn parse_hook_action(action: Value) -> Result<ActionPayload, String> {
     let authored: AuthoredHookAction =
         serde_json::from_value(action).map_err(|error| format!("invalid hook action: {error}"))?;
     let AuthoredHookAction {
         primary: _primary,
         item_id,
+        ref_bindings,
         params,
         thread,
         call,
@@ -312,6 +313,7 @@ pub fn parse_hook_action(action: Value) -> Result<ActionPayload, String> {
     }
     Ok(ActionPayload {
         item_id,
+        ref_bindings,
         params,
         thread,
         call,
@@ -336,6 +338,7 @@ pub struct LaunchWindow {
 /// `facets` once shipped unresolved.
 pub mod action_keys {
     pub const ITEM_ID: &str = "item_id";
+    pub const REF_BINDINGS: &str = "ref_bindings";
     pub const PARAMS: &str = "params";
     pub const THREAD: &str = "thread";
     pub const CALL: &str = "call";
@@ -344,9 +347,9 @@ pub mod action_keys {
 
     /// Keys whose values may carry `${…}` templates and are rendered by
     /// `CompiledActionTemplate`. `THREAD` stays literal (a dispatch mode,
-    /// never a template); the callback-owned `CALL` block may contain
-    /// templates, so the whole block is included.
-    pub const INTERPOLATED: &[&str] = &[ITEM_ID, PARAMS, CALL, FACETS];
+    /// never a template); the callback-owned ref bindings and `CALL` block may
+    /// contain templates, so those complete values are included.
+    pub const INTERPOLATED: &[&str] = &[ITEM_ID, REF_BINDINGS, PARAMS, CALL, FACETS];
 }
 
 /// Runtime-owned control keys carried in dispatch/launch params — parent budget,
@@ -471,6 +474,16 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         )))
     }
 
+    async fn project_snapshot(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.project_snapshot callback is not implemented by this client"
+        )))
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Report a claimed command as `completed` or `rejected`. `command_id` is the
@@ -530,6 +543,7 @@ mod tests {
     fn action_payload_omits_call_when_none() {
         let payload = ActionPayload {
             item_id: "tool:t/echo".to_string(),
+            ref_bindings: BTreeMap::new(),
             params: json!({}),
             thread: "inline".to_string(),
             call: None,
@@ -547,6 +561,7 @@ mod tests {
     fn action_payload_round_trips_call() {
         let wire = json!({
             "item_id": "knowledge:arc/resources",
+            "ref_bindings": {},
             "params": {},
             "thread": "inline",
             "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
@@ -560,7 +575,11 @@ mod tests {
     #[test]
     fn action_payload_defaults_call_to_none() {
         // A wire payload with no `call` (the common case) deserializes fine.
-        let wire = json!({ "item_id": "tool:t/echo", "thread": "inline" });
+        let wire = json!({
+            "item_id": "tool:t/echo",
+            "ref_bindings": {},
+            "thread": "inline"
+        });
         let payload: ActionPayload = serde_json::from_value(wire).unwrap();
         assert!(payload.call.is_none());
     }
@@ -570,6 +589,7 @@ mod tests {
         let payload = parse_hook_action(json!({
             "primary": "execute",
             "item_id": "tool:t/echo",
+            "ref_bindings": {},
             "params": {"message": "hi"}
         }))
         .unwrap();
@@ -581,11 +601,12 @@ mod tests {
     #[test]
     fn hook_action_rejects_drift_and_malformed_required_fields() {
         for invalid in [
-            json!({"item_id": ""}),
-            json!({"params": {}}),
-            json!({"item_id": "tool:t/echo", "thread": ""}),
-            json!({"primary": "dispatch", "item_id": "tool:t/echo"}),
-            json!({"item_id": "tool:t/echo", "legacy": true}),
+            json!({"item_id": "tool:t/echo"}),
+            json!({"item_id": "", "ref_bindings": {}}),
+            json!({"params": {}, "ref_bindings": {}}),
+            json!({"item_id": "tool:t/echo", "ref_bindings": {}, "thread": ""}),
+            json!({"primary": "dispatch", "item_id": "tool:t/echo", "ref_bindings": {}}),
+            json!({"item_id": "tool:t/echo", "ref_bindings": {}, "legacy": true}),
         ] {
             assert!(parse_hook_action(invalid).is_err());
         }
@@ -627,6 +648,7 @@ mod tests {
             project_path: "/project".to_string(),
             action: ActionPayload {
                 item_id: "tool:test/hook".to_string(),
+                ref_bindings: BTreeMap::new(),
                 params: json!({"audit": true}),
                 thread: "inline".to_string(),
                 call: None,

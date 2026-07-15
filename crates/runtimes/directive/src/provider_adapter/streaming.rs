@@ -1485,7 +1485,7 @@ pub fn build_request_body(
     let template = provider.body_template.as_ref().unwrap_or_else(|| {
         unreachable!(
             "ProviderConfig::validate() rejects providers without body_template \
-              at config-load time (preflight_resolve → bootstrap, launch). \
+              during launch preparation before bootstrap and provider launch. \
              If this fires, either:\n  \
              1. validate() was not called on the path that produced this config, OR\n  \
              2. a code path constructed ProviderConfig directly without validation.\n  \
@@ -2460,7 +2460,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     // ── Real golden-wire tests ────────────────────────────────────────
     //
     // These tests load the ACTUAL signed bundled provider YAML through
-    // VerifiedLoader, resolve the matching profile via preflight_resolve,
+    // VerifiedLoader, resolve the matching profile from the prepared provider snapshot,
     // and build the request body. They catch:
     //   - Bundled YAML signature / parse failures
     //   - Profile-match resolution regressions
@@ -2470,7 +2470,9 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     //
     // If a bundle YAML edit breaks one of these, CI catches it here.
 
-    use ryeos_runtime::model_resolution::{preflight_resolve, DirectiveModelHeader, ModelSpec};
+    use ryeos_directive_core::{
+        ProviderConfigSource, ResolvedProviderSnapshot, SnapshotItemSpace, SnapshotTrustClass,
+    };
     use ryeos_runtime::verified_loader::VerifiedLoader;
 
     /// Path to the bundled standard root in the workspace.
@@ -2512,25 +2514,45 @@ owner = "ryeos-dev"
         )
     }
 
-    /// Resolve a provider+model through the real loader + preflight chain.
-    fn resolve(provider: &str, model: &str) -> ryeos_runtime::ResolvedProviderSnapshot {
+    /// Resolve a provider+model through the real strict loader for adapter fixtures.
+    fn resolve(provider: &str, model: &str) -> ResolvedProviderSnapshot {
         let loader = loader_for_bundle();
-        let header = DirectiveModelHeader {
-            model: Some(ModelSpec {
-                tier: None,
-                provider: Some(provider.to_string()),
-                name: Some(model.to_string()),
-                context_window: Some(128_000),
-                sampling: None,
-            }),
-        };
-        preflight_resolve(&header, &loader)
-            .unwrap_or_else(|e| panic!("preflight_resolve failed for {provider}/{model}: {e:#}"))
+        let config_id = format!("ryeos-runtime/model-providers/{provider}");
+        let base = loader
+            .load_config_strict::<ProviderConfig>(&config_id)
+            .unwrap_or_else(|e| panic!("provider load failed for {provider}/{model}: {e:#}"))
+            .unwrap_or_else(|| panic!("provider config missing for {provider}"));
+        let matched_profile = base
+            .matched_profile(model)
+            .map(|profile| profile.name.clone());
+        let resolved = base.resolve_for_model(model);
+        resolved
+            .validate(&format!(" for test model {model}"))
+            .unwrap_or_else(|e| panic!("provider validation failed for {provider}/{model}: {e:#}"));
+        let config_hash = ResolvedProviderSnapshot::compute_hash(&resolved)
+            .expect("resolved provider config is serializable");
+        ResolvedProviderSnapshot {
+            provider_id: provider.to_string(),
+            model_name: model.to_string(),
+            context_window: 128_000,
+            sampling: None,
+            matched_profile,
+            config_value_digest: "0".repeat(64),
+            config_sources: vec![ProviderConfigSource {
+                space: SnapshotItemSpace::Bundle,
+                root_label: "bundle:standard".to_string(),
+                canonical_id: config_id,
+                content_digest: "0".repeat(64),
+                trust_class: SnapshotTrustClass::TrustedBundle,
+            }],
+            config_hash,
+            provider: resolved,
+        }
     }
 
     /// Helper: build the full request body from a resolved snapshot.
     fn build_golden_body(
-        snapshot: &ryeos_runtime::ResolvedProviderSnapshot,
+        snapshot: &ResolvedProviderSnapshot,
         messages: &[ProviderMessage],
         tools: &[ToolSchema],
     ) -> Value {

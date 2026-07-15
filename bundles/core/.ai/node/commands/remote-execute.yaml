@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-19T05:40:59Z:827145fd5d997fe3f003452360aec7df12b9709702146a9bf00074d97949dc55:z2rQxZDGUOLT1eBQ7LaB7NWIWn8emnwfyykDTLZWdF3+DpumV0YJCfuahtLnpluWIbqQaq+8fddMmPRzf3+XCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:45Z:88c613eab686d8b214ecc727def7ccb4cb22c167218349b9adcd92955450c749:j3Ynz8kKyxt1hkv9R1ebRJv92Dw0RPfOPmF+Pyb/trxEJJQXfY8iqfK1T8pwOXDbb+wzqAjJiqJwF5fzcAFtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - execute
@@ -15,6 +15,8 @@ project:
   resolution: optional
   bind_parameter: project
   no_project_flag: true
+defaults:
+  ref_bindings: {}
 dispatch:
   kind: execute_ref
   execute: service:remote/execute

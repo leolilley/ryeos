@@ -1164,6 +1164,7 @@ impl Runner {
                                             project_path: self.callback.project_path().to_string(),
                                             action: ryeos_runtime::callback::ActionPayload {
                                                 item_id: dispatch_result.canonical_ref.clone(),
+                                                ref_bindings: std::collections::BTreeMap::new(),
                                                 params: dispatch_result.arguments.clone(),
                                                 thread: "inline".to_string(),
                                                 // Directive tool-calls dispatch
@@ -1878,7 +1879,7 @@ impl Runner {
         } else {
             match (pricing.input_per_million, pricing.output_per_million) {
                 (Some(i), Some(o)) => (
-                    ryeos_runtime::model_resolution::ModelPricing {
+                    ryeos_directive_core::ModelPricing {
                         input_per_million: i,
                         output_per_million: o,
                     },
@@ -1944,7 +1945,7 @@ mod tests {
     use crate::harness::Harness;
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
-    use ryeos_runtime::model_resolution::ModelPricing;
+    use ryeos_directive_core::ModelPricing;
     use std::path::PathBuf;
 
     fn make_callback_env() -> EnvelopeCallback {

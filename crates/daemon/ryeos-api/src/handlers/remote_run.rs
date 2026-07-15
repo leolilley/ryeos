@@ -1,5 +1,6 @@
 //! `remote/run` — execute an item against a configured remote project.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub struct Request {
     pub remote: String,
     /// Item to execute (canonical ref).
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     /// Local project path used to resolve the configured remote binding.
     pub project: PathBuf,
     /// Parameters for the item.
@@ -31,7 +33,12 @@ fn default_remote() -> String {
     "default".to_string()
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> HandlerResult<Value> {
+    authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
     let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))
         .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
@@ -44,6 +51,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let remote_result = client
         .execute(
             &req.item_ref,
+            &req.ref_bindings,
             &binding.remote_project_path,
             &req.parameters,
             "live_fs",
@@ -60,15 +68,43 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }))
 }
 
+fn authorize_execution_refs(
+    item_ref: &str,
+    ref_bindings: &BTreeMap<String, String>,
+    ctx: &crate::handler_context::HandlerContext,
+    state: &AppState,
+) -> HandlerResult<()> {
+    ctx.require_verified()?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(ref_bindings)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid ref_bindings: {error}")))?;
+    for (label, value) in std::iter::once(("item_ref", item_ref))
+        .chain(ref_bindings.iter().map(|(name, value)| (name.as_str(), value.as_str())))
+    {
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(value)
+            .map_err(|error| HandlerError::BadRequest(format!("invalid {label}: {error}")))?;
+        let required = ryeos_runtime::authorizer::canonical_cap(
+            &canonical.kind,
+            &canonical.bare_id,
+            "execute",
+        );
+        let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(&required);
+        state
+            .authorizer
+            .authorize(&ctx.scopes, &policy)
+            .map_err(|_| HandlerError::Forbidden(format!("missing required capability: {required}")))?;
+    }
+    Ok(())
+}
+
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/run",
     endpoint: "remote.run",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/admin"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

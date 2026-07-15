@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use tokio::sync::mpsc;
 
 use super::misfire;
@@ -24,7 +25,16 @@ use super::types::{self, FireRecord, PendingFire, ReloadSignal, ScheduleSpecReco
 use crate::SchedulerContext;
 
 /// Start the timer loop. Call after listeners are bound.
-pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receiver<ReloadSignal>) {
+pub async fn run<Ctx, Shutdown>(
+    ctx: Arc<Ctx>,
+    mut reload: mpsc::Receiver<ReloadSignal>,
+    shutdown: Shutdown,
+) -> anyhow::Result<()>
+where
+    Ctx: SchedulerContext,
+    Shutdown: std::future::Future<Output = ()>,
+{
+    tokio::pin!(shutdown);
     let mut specs = Vec::new();
     let mut last_repair = lillux::time::timestamp_millis();
 
@@ -36,39 +46,49 @@ pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receive
             let Ok(_runtime_guard) = runtime_gate.try_read_owned() else {
                 tracing::debug!("scheduler: runtime mutation in progress; timer cycle paused");
                 tokio::select! {
+                    _ = &mut shutdown => return Ok(()),
                     _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
                     Some(_) = reload.recv() => {}
                 }
                 continue;
             };
 
-            specs = load_specs_or_log(&ctx);
+            if !ctx
+                .scheduler_db()
+                .fire_projection_is_current()
+                .context("scheduler fire projection validity check failed")?
+            {
+                anyhow::bail!("scheduler fire projection became incomplete after daemon readiness");
+            }
+
+            specs = load_specs(&ctx)?;
             let now = lillux::time::timestamp_millis();
 
             // Periodic repair sweep: every 30 seconds, finalize stale dispatched fires
             if now - last_repair >= 30_000 {
-                repair_stale_fires(&ctx).await;
+                repair_stale_fires(&ctx).await?;
                 last_repair = now;
             }
 
             // Collect all specs that are due right now using the same planner
             // consumed by diagnostics and recovery.
-            let due_specs: Vec<ScheduleSpecRecord> = specs
-                .iter()
-                .filter(|s| spec_is_due(s, &ctx, now))
-                .cloned()
-                .collect();
+            let mut due_specs = Vec::new();
+            for spec in &specs {
+                if spec_is_due(spec, &ctx, now)? {
+                    due_specs.push(spec.clone());
+                }
+            }
 
             // Process each due spec sequentially (ordering matters for overlap)
             for spec in &due_specs {
-                process_spec(spec, &ctx).await;
+                process_spec(spec, &ctx).await?;
             }
 
             // Reload for next iteration
-            specs = load_specs_or_log(&ctx);
+            specs = load_specs(&ctx)?;
 
             let now = lillux::time::timestamp_millis();
-            let next_fire = compute_soonest_fire(&specs, &ctx, now);
+            let next_fire = compute_soonest_fire(&specs, &ctx, now)?;
 
             match next_fire {
                 Some(at) if at > now => std::time::Duration::from_millis((at - now) as u64),
@@ -77,6 +97,7 @@ pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receive
         };
 
         tokio::select! {
+            _ = &mut shutdown => return Ok(()),
             _ = tokio::time::sleep(sleep_duration) => {}
             Some(_) = reload.recv() => {
                 tracing::debug!("scheduler: reload requested");
@@ -88,101 +109,66 @@ pub async fn run<Ctx: SchedulerContext>(ctx: Arc<Ctx>, mut reload: mpsc::Receive
 
 /// Repair sweep: finalize dispatched fires whose threads have completed.
 /// Catches cases where the finalize hook failed or the daemon crashed.
-async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
+async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> anyhow::Result<()> {
     let db = ctx.scheduler_db();
-    let stale = match db.find_stale_dispatched_fires(30) {
-        Ok(fires) => fires,
-        Err(e) => {
-            tracing::error!(error = %e, "scheduler: repair sweep failed to query stale fires");
-            return;
-        }
-    };
+    let stale = db
+        .find_stale_dispatched_fires(30)
+        .context("scheduler repair sweep failed to query stale fires")?;
 
     for fire in &stale {
+        fire.validate()
+            .with_context(|| format!("invalid stale scheduler fire {}", fire.fire_id))?;
         if let Some(ref thread_id) = fire.thread_id {
-            match ctx.get_thread_status(thread_id) {
-                Ok(Some(status)) => {
-                    if overlap::thread_is_terminal(&status) {
-                        let fire_status = match status.as_str() {
-                            "completed" => "completed",
-                            "cancelled" => "cancelled",
-                            _ => "failed",
-                        };
+            match ctx
+                .get_thread_status(thread_id)
+                .with_context(|| format!("inspect thread {thread_id} for stale scheduler fire"))?
+            {
+                Some(status) => {
+                    if crate::thread_status_is_terminal(&status) {
+                        let fire_status = crate::fire_status_for_thread_status(&status);
                         let result_outcome = if fire_status == "completed" {
-                            match ctx.get_thread_result_outcome(thread_id) {
-                                Ok(outcome) => outcome,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        fire_id = %fire.fire_id,
-                                        thread_id = %thread_id,
-                                        error = %e,
-                                        "scheduler: repair sweep failed to inspect completed thread result"
-                                    );
-                                    None
-                                }
-                            }
+                            ctx.get_thread_result_outcome(thread_id).with_context(|| {
+                                format!(
+                                    "inspect completed thread result for scheduler fire {}",
+                                    fire.fire_id
+                                )
+                            })?
                         } else {
                             None
                         };
-                        let outcome = match fire_status {
-                            "completed" => super::completed_fire_outcome(result_outcome.as_ref()),
-                            "cancelled" => "thread_cancelled",
-                            _ => "thread_failed",
-                        };
+                        let outcome = crate::fire_outcome_for_terminal(
+                            &status,
+                            result_outcome.as_ref(),
+                            None,
+                        );
                         let now = lillux::time::timestamp_millis();
                         let rec = FireRecord {
                             status: fire_status.to_string(),
-                            outcome: Some(outcome.to_string()),
+                            outcome: Some(outcome.clone()),
                             completed_at: Some(now),
                             ..fire.clone()
                         };
-                        let entry = serde_json::json!({
-                            "entry_type": "repaired",
-                            "status": fire_status,
-                            "fire_id": fire.fire_id,
-                            "schedule_id": fire.schedule_id,
-                            "scheduled_at": fire.scheduled_at,
-                            "fired_at": fire.fired_at.unwrap_or(now),
-                            "thread_id": thread_id,
-                            "completed_at": now,
-                            "outcome": outcome,
-                            "trigger_reason": fire.trigger_reason,
-                            "signer_fingerprint": fire.signer_fingerprint,
-                        });
-                        let fires_path = ctx
-                            .app_root()
-                            .join(ryeos_engine::AI_DIR)
-                            .join("state")
-                            .join("schedules")
-                            .join(&fire.schedule_id)
-                            .join("fires.jsonl");
+                        let app_root = ctx.app_root().to_path_buf();
                         let db = ctx.scheduler_db();
                         let fire_id_owned = fire.fire_id.clone();
-                        let fire_id_log = fire.fire_id.clone();
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                                tracing::error!(fire_id = %fire_id_owned, error = %e,
-                                    "repair sweep: failed to append JSONL entry");
-                            }
-                            if let Err(e) = db.upsert_fire(&rec) {
-                                tracing::error!(fire_id = %fire_id_owned, error = %e,
-                                    "scheduler: repair sweep failed to finalize fire");
-                            }
+                            projection::persist_fire_snapshot(&app_root, &db, &rec).with_context(
+                                || format!("finalize stale scheduler fire {fire_id_owned}"),
+                            )
                         })
                         .await
-                        .unwrap_or_else(|e| {
-                            tracing::error!(fire_id = %fire_id_log, error = %e,
-                                "repair sweep: spawn_blocking failed");
-                        });
+                        .context("scheduler repair persistence task stopped")??;
                         tracing::info!(
                             fire_id = %fire.fire_id,
                             thread_id = %thread_id,
-                            status = %fire_status,
+                            thread_status = %status,
+                            fire_status,
+                            fire_outcome = %outcome,
                             "scheduler: repair sweep finalized stale fire"
                         );
                     }
                 }
-                Ok(None) => {
+                None => {
                     // Thread gone — mark as failed
                     let now = lillux::time::timestamp_millis();
                     let rec = FireRecord {
@@ -191,143 +177,102 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                         completed_at: Some(now),
                         ..fire.clone()
                     };
-                    let entry = serde_json::json!({
-                        "entry_type": "repaired",
-                        "status": "failed",
-                        "fire_id": fire.fire_id,
-                        "schedule_id": fire.schedule_id,
-                        "scheduled_at": fire.scheduled_at,
-                        "fired_at": fire.fired_at.unwrap_or(now),
-                        "thread_id": thread_id,
-                        "completed_at": now,
-                        "outcome": "thread_lost",
-                        "trigger_reason": fire.trigger_reason,
-                        "signer_fingerprint": fire.signer_fingerprint,
-                    });
-                    let fires_path = ctx
-                        .app_root()
-                        .join(ryeos_engine::AI_DIR)
-                        .join("state")
-                        .join("schedules")
-                        .join(&fire.schedule_id)
-                        .join("fires.jsonl");
+                    let app_root = ctx.app_root().to_path_buf();
                     let db = ctx.scheduler_db();
                     let fire_id_owned = fire.fire_id.clone();
-                    let fire_id_log = fire.fire_id.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                            tracing::error!(fire_id = %fire_id_owned, error = %e,
-                                "repair sweep: failed to append thread_lost JSONL entry");
-                        }
-                        if let Err(e) = db.upsert_fire(&rec) {
-                            tracing::error!(fire_id = %fire_id_owned, error = %e,
-                                "repair sweep: failed to upsert thread_lost fire record");
-                        }
+                        projection::persist_fire_snapshot(&app_root, &db, &rec).with_context(|| {
+                            format!("classify lost thread for scheduler fire {fire_id_owned}")
+                        })
                     })
                     .await
-                    .unwrap_or_else(|e| {
-                        tracing::error!(fire_id = %fire_id_log, error = %e,
-                            "repair sweep: spawn_blocking failed for thread_lost");
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        fire_id = %fire.fire_id,
-                        error = %e,
-                        "scheduler: repair sweep failed to check thread"
-                    );
+                    .context("scheduler lost-thread persistence task stopped")??;
                 }
             }
         }
     }
+    Ok(())
 }
 
-/// Load enabled specs from DB. On failure, return empty vec and log error.
-///
-/// Empty vec causes the timer to temporarily pause — no schedules appear due,
-/// so no fires are dispatched. On the next successful load cycle (1s sleep),
-/// real schedules reappear. This prevents cascading failures when the DB is
-/// temporarily unavailable.
-fn load_specs_or_log<Ctx: SchedulerContext>(ctx: &Arc<Ctx>) -> Vec<ScheduleSpecRecord> {
-    match ctx.scheduler_db().load_enabled_specs() {
-        Ok(specs) => specs,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "scheduler: failed to load enabled specs — timer paused until next load cycle"
-            );
-            Vec::new()
-        }
+fn load_specs<Ctx: SchedulerContext>(ctx: &Arc<Ctx>) -> anyhow::Result<Vec<ScheduleSpecRecord>> {
+    let specs = ctx
+        .scheduler_db()
+        .load_enabled_specs()
+        .context("scheduler failed to load enabled specs")?;
+    for spec in &specs {
+        types::validate_schedule_spec_record(spec).with_context(|| {
+            format!(
+                "scheduler projection contains invalid spec {}",
+                spec.schedule_id
+            )
+        })?;
     }
+    Ok(specs)
 }
 
 /// Check if a spec is due using the shared planner.
-fn spec_is_due<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx, now: i64) -> bool {
+fn spec_is_due<Ctx: SchedulerContext>(
+    spec: &ScheduleSpecRecord,
+    ctx: &Ctx,
+    now: i64,
+) -> anyhow::Result<bool> {
     let db = ctx.scheduler_db();
-    let last_fire = match db.get_last_fire(&spec.schedule_id) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!(
-                schedule_id = %spec.schedule_id,
-                error = %e,
-                "spec_is_due: failed to query last fire — treating as not due"
-            );
-            return false;
-        }
-    };
+    let last_fire = db
+        .get_last_fire(&spec.schedule_id)
+        .with_context(|| format!("query last fire for schedule {}", spec.schedule_id))?;
+    if let Some(fire) = &last_fire {
+        fire.validate()
+            .with_context(|| format!("invalid last fire for schedule {}", spec.schedule_id))?;
+    }
 
-    planning::plan_schedule(spec, last_fire.as_ref(), now)
+    Ok(planning::plan_schedule(spec, last_fire.as_ref(), now)
         .current_due_at
-        .is_some()
+        .is_some())
 }
 
 fn compute_soonest_fire<Ctx: SchedulerContext>(
     specs: &[ScheduleSpecRecord],
     ctx: &Ctx,
     now: i64,
-) -> Option<i64> {
+) -> anyhow::Result<Option<i64>> {
     let db = ctx.scheduler_db();
-    specs
-        .iter()
-        .filter_map(|spec| {
-            let last_fire = match db.get_last_fire(&spec.schedule_id) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::error!(
-                        schedule_id = %spec.schedule_id,
-                        error = %e,
-                        "compute_soonest_fire: failed to query last fire — skipping"
-                    );
-                    return None;
-                }
-            };
-            let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
-            plan.current_due_at.or(plan.next_fire_at)
-        })
-        .min()
+    let mut soonest = None;
+    for spec in specs {
+        let last_fire = db
+            .get_last_fire(&spec.schedule_id)
+            .with_context(|| format!("query next fire boundary for {}", spec.schedule_id))?;
+        if let Some(fire) = &last_fire {
+            fire.validate()
+                .with_context(|| format!("invalid last fire for schedule {}", spec.schedule_id))?;
+        }
+        let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
+        if let Some(candidate) = plan.current_due_at.or(plan.next_fire_at) {
+            soonest = Some(soonest.map_or(candidate, |current: i64| current.min(candidate)));
+        }
+    }
+    Ok(soonest)
 }
 
-async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Arc<Ctx>) {
+async fn process_spec<Ctx: SchedulerContext>(
+    spec: &ScheduleSpecRecord,
+    ctx: &Arc<Ctx>,
+) -> anyhow::Result<()> {
     let now = lillux::time::timestamp_millis();
 
     // Get last fire for this schedule to compute scheduled_at
     let db = ctx.scheduler_db();
-    let last_fire = match db.get_last_fire(&spec.schedule_id) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!(
-                schedule_id = %spec.schedule_id,
-                error = %e,
-                "process_spec: failed to query last fire — treating as no prior fire"
-            );
-            None
-        }
-    };
+    let last_fire = db
+        .get_last_fire(&spec.schedule_id)
+        .with_context(|| format!("query dispatch boundary for schedule {}", spec.schedule_id))?;
+    if let Some(fire) = &last_fire {
+        fire.validate()
+            .with_context(|| format!("invalid dispatch boundary for {}", spec.schedule_id))?;
+    }
 
     let plan = planning::plan_schedule(spec, last_fire.as_ref(), now);
     let scheduled_at = match plan.current_due_at {
         Some(at) => at,
-        None => return,
+        None => return Ok(()),
     };
 
     let fid = types::fire_id(&spec.schedule_id, scheduled_at);
@@ -339,7 +284,7 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ar
     let current_within_grace = plan.current_due_within_grace.unwrap_or(false);
     let misfire_horizon = plan.misfire_horizon_exclusive.unwrap_or(now);
     let misfire_fires =
-        misfire::evaluate_misfires_before(spec, ctx.as_ref(), misfire_horizon, now).await;
+        misfire::evaluate_misfires_before(spec, ctx.as_ref(), misfire_horizon, now).await?;
 
     // ── Build one ordered fire list (chronological) ──────────
     // Each fire gets its own overlap check before dispatch.
@@ -355,7 +300,7 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ar
 
     // ── Process each fire with overlap check ─────────────────
     for pending in all_fires {
-        let overlap_ok = overlap::check_overlap(spec, ctx.as_ref()).await;
+        let overlap_ok = overlap::check_overlap(spec, ctx.as_ref()).await?;
         if !overlap_ok {
             // Skip this fire and all subsequent fires
             record_skip(
@@ -365,7 +310,7 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ar
                 pending.scheduled_at,
                 "overlap_policy_skip",
             )
-            .await;
+            .await?;
             break; // stop processing this batch, later fires reappear next tick
         }
         dispatch_fire(
@@ -376,8 +321,18 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ar
             pending.reason,
             false,
         )
-        .await;
+        .await
+        .with_context(|| format!("admit scheduler fire {}", pending.fire_id))?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FireDispatchOutcome {
+    Enqueued,
+    AlreadyClaimed,
+    AlreadyClassified,
+    ClassifiedFailure,
 }
 
 pub async fn dispatch_fire<Ctx: SchedulerContext>(
@@ -387,7 +342,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
     scheduled_at: i64,
     trigger_reason: &str,
     skip_claim: bool,
-) {
+) -> anyhow::Result<FireDispatchOutcome> {
     // Fail-closed: never dispatch with empty capabilities.
     // If capabilities are empty, the schedule is corrupted or misconfigured.
     if spec.capabilities.is_empty() {
@@ -399,20 +354,6 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
         );
         let now = lillux::time::timestamp_millis();
         let thread_id = types::thread_id_from_fire(fire_id);
-        let fail_entry = serde_json::json!({
-            "entry_type": "failed",
-            "status": "failed",
-            "fire_id": fire_id,
-            "schedule_id": spec.schedule_id,
-            "scheduled_at": scheduled_at,
-            "fired_at": now,
-            "thread_id": thread_id,
-            "completed_at": now,
-            "trigger_reason": trigger_reason,
-            "outcome": "dispatch_skipped",
-            "error": "empty capabilities",
-            "signer_fingerprint": spec.signer_fingerprint,
-        });
         let fail_rec = types::FireRecord {
             fire_id: fire_id.to_string(),
             schedule_id: spec.schedule_id.clone(),
@@ -423,114 +364,90 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
             status: "failed".to_string(),
             trigger_reason: trigger_reason.to_string(),
             outcome: Some("dispatch_skipped".to_string()),
-            signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+            signer_fingerprint: spec.signer_fingerprint.clone(),
         };
         let db = ctx.scheduler_db();
-        let fires_path = ctx
-            .app_root()
-            .join(ryeos_engine::AI_DIR)
-            .join("state")
-            .join("schedules")
-            .join(&spec.schedule_id)
-            .join("fires.jsonl");
+        let app_root = ctx.app_root().to_path_buf();
         let fire_id_owned = fire_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
-                tracing::error!(fire_id = %fire_id_owned, path = %fires_path.display(), error = %e,
-                    "empty-caps failure: failed to append JSONL entry");
-            }
-            if let Err(e) = db.upsert_fire(&fail_rec) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e,
-                    "empty-caps failure: failed to upsert fire record");
-            }
-        }).await.unwrap_or_else(|e| {
-            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking failed for empty-caps failure record");
-        });
-        return;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            projection::persist_fire_snapshot(&app_root, &db, &fail_rec).with_context(|| {
+                format!("persist empty-capability failure for fire {fire_id_owned}")
+            })?;
+            Ok(())
+        })
+        .await
+        .context("empty-capability failure persistence task stopped")??;
+        return Ok(FireDispatchOutcome::ClassifiedFailure);
     }
 
-    let now = lillux::time::timestamp_millis();
     let thread_id = types::thread_id_from_fire(fire_id);
+    let recovery_record = if skip_claim {
+        Some(
+            ctx.scheduler_db()
+                .get_fire(fire_id)?
+                .with_context(|| format!("recovery fire {fire_id} disappeared"))?,
+        )
+    } else {
+        None
+    };
+    if recovery_record
+        .as_ref()
+        .and_then(|record| record.thread_id.as_deref())
+        .is_some_and(|persisted| persisted != thread_id.as_str())
+    {
+        anyhow::bail!("recovery fire {fire_id} has non-deterministic thread identity");
+    }
+    let dispatched_at = recovery_record
+        .as_ref()
+        .and_then(|record| record.fired_at)
+        .unwrap_or_else(lillux::time::timestamp_millis);
+    let trigger_reason = recovery_record.as_ref().map_or_else(
+        || trigger_reason.to_owned(),
+        |record| record.trigger_reason.clone(),
+    );
 
-    // ── Record dispatched to JSONL + DB (blocking I/O) ───────
-    let entry = serde_json::json!({
-        "entry_type": "dispatched",
-        "status": "dispatched",
-        "fire_id": fire_id,
-        "schedule_id": spec.schedule_id,
-        "scheduled_at": scheduled_at,
-        "fired_at": now,
-        "thread_id": thread_id,
-        "trigger_reason": trigger_reason,
-        "signer_fingerprint": spec.signer_fingerprint,
-    });
-    let fires_path = ctx
-        .app_root()
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("schedules")
-        .join(&spec.schedule_id)
-        .join("fires.jsonl");
+    // ── Record dispatched through DB + durable outbox ─────────
+    let app_root = ctx.app_root().to_path_buf();
     let rec = FireRecord {
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
         scheduled_at,
-        fired_at: Some(now),
+        fired_at: Some(dispatched_at),
         completed_at: None,
         thread_id: Some(thread_id.clone()),
         status: "dispatched".to_string(),
-        trigger_reason: trigger_reason.to_string(),
+        trigger_reason: trigger_reason.clone(),
         outcome: None,
-        signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+        signer_fingerprint: spec.signer_fingerprint.clone(),
     };
 
     if !skip_claim {
-        let fires_path = fires_path.clone();
+        let app_root = app_root.clone();
         let db = ctx.scheduler_db();
         let fire_id_owned = fire_id.to_string();
-        let claimed = tokio::task::spawn_blocking(move || {
+        let claimed = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             // Atomic claim: only proceed if this fire_id doesn't exist yet.
             // This prevents duplicate dispatch when recovery and timer race.
-            match db.claim_fire(&rec) {
-                Ok(true) => {
-                    // Claimed — append to JSONL
-                    if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                        tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append dispatched entry");
-                    }
-                    true
+            match projection::claim_fire_snapshot(&app_root, &db, &rec)? {
+                true => {
+                    Ok(true)
                 }
-                Ok(false) => {
+                false => {
                     tracing::debug!(fire_id = %fire_id_owned, "fire already claimed — skipping dispatch");
-                    false
-                }
-                Err(e) => {
-                    tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to claim fire — aborting dispatch");
-                    false
+                    Ok(false)
                 }
             }
-        }).await.unwrap_or_else(|e| {
-            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (dispatch claim)");
-            false
-        });
+        })
+        .await
+        .context("scheduler dispatch-claim task stopped")??;
 
         if !claimed {
-            return;
+            return Ok(FireDispatchOutcome::AlreadyClaimed);
         }
     } else {
-        // Recovery path: fire already reclaimed, just update JSONL + DB
-        let fires_path = fires_path.clone();
-        let db = ctx.scheduler_db();
-        let fire_id_owned = fire_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append recovery dispatch entry");
-            }
-            if let Err(e) = db.upsert_fire(&rec) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to upsert recovery dispatch fire");
-            }
-        }).await.unwrap_or_else(|e| {
-            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (recovery dispatch)");
-        });
+        // Recovery redispatch uses the already-durable immutable dispatch
+        // snapshot; it does not mint a second dispatch identity.
+        rec.validate()?;
     }
 
     // ── Dispatch via SchedulerContext (DETACHED) ─────────────
@@ -545,8 +462,16 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
     let ctx = Arc::clone(ctx);
     let spec = spec.clone();
     let fire_id = fire_id.to_string();
-    let trigger_reason = trigger_reason.to_string();
+    let trigger_reason = trigger_reason;
     tokio::spawn(async move {
+        if !ctx.wait_for_recovery_execution_release().await {
+            tracing::info!(
+                fire_id = %fire_id,
+                thread_id = %thread_id,
+                "abandoned recovered scheduler dispatch after startup cancellation"
+            );
+            return;
+        }
         match ctx
             .dispatch_scheduled_item(&spec, &fire_id, &thread_id, scheduled_at, &trigger_reason)
             .await
@@ -561,43 +486,28 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
                 );
             }
             Err(err) => {
-                let now = lillux::time::timestamp_millis();
-                let fail_entry = serde_json::json!({
-                    "entry_type": "failed",
-                    "status": "failed",
-                    "fire_id": fire_id,
-                    "schedule_id": spec.schedule_id,
-                    "scheduled_at": scheduled_at,
-                    "fired_at": now,
-                    "thread_id": thread_id,
-                    "completed_at": now,
-                    "trigger_reason": trigger_reason,
-                    "outcome": "dispatch_failed",
-                    "error": err.to_string(),
-                    "signer_fingerprint": spec.signer_fingerprint,
-                });
+                let completed_at = lillux::time::timestamp_millis();
                 let fail_rec = FireRecord {
                     fire_id: fire_id.to_string(),
                     schedule_id: spec.schedule_id.clone(),
                     scheduled_at,
-                    fired_at: Some(now),
-                    completed_at: Some(now),
+                    fired_at: Some(dispatched_at),
+                    completed_at: Some(completed_at),
                     thread_id: Some(thread_id),
                     status: "failed".to_string(),
                     trigger_reason: trigger_reason.to_string(),
                     outcome: Some("dispatch_failed".to_string()),
-                    signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+                    signer_fingerprint: spec.signer_fingerprint.clone(),
                 };
                 {
+                    let _runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
                     let db = ctx.scheduler_db();
-                    let fires_path = fires_path.clone();
+                    let app_root = ctx.app_root().to_path_buf();
                     let fire_id_log = fire_id.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
-                            tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
-                                "dispatch failure: failed to append JSONL entry");
-                        }
-                        if let Err(e) = db.upsert_fire(&fail_rec) {
+                        if let Err(e) =
+                            projection::persist_fire_snapshot(&app_root, &db, &fail_rec)
+                        {
                             tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
                                 "dispatch failure: failed to upsert fire record");
                         }
@@ -615,6 +525,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
             }
         }
     });
+    Ok(FireDispatchOutcome::Enqueued)
 }
 
 /// Dispatch a recovery fire (from reconciler).
@@ -622,11 +533,30 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
 pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
     ctx: Arc<Ctx>,
     intent: super::reconcile::ResumeIntent,
-) {
+) -> anyhow::Result<FireDispatchOutcome> {
     let _runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
 
+    dispatch_recovery_fire_inner(ctx, intent).await
+}
+
+/// Persist and enqueue one recovery fire while the daemon still owns the
+/// scheduler startup gate's exclusive side. Requiring the owned write guard by
+/// reference makes the pre-Ready call site explicit and avoids attempting to
+/// reacquire this same gate through [`dispatch_recovery_fire`].
+pub async fn dispatch_recovery_fire_under_startup_guard<Ctx: SchedulerContext>(
+    ctx: Arc<Ctx>,
+    intent: super::reconcile::ResumeIntent,
+    _startup_guard: &tokio::sync::OwnedRwLockWriteGuard<()>,
+) -> anyhow::Result<FireDispatchOutcome> {
+    dispatch_recovery_fire_inner(ctx, intent).await
+}
+
+async fn dispatch_recovery_fire_inner<Ctx: SchedulerContext>(
+    ctx: Arc<Ctx>,
+    intent: super::reconcile::ResumeIntent,
+) -> anyhow::Result<FireDispatchOutcome> {
     if matches!(intent.kind, super::reconcile::ResumeIntentKind::DispatchNew) {
-        dispatch_fire(
+        return dispatch_fire(
             &ctx,
             &intent.fire_id,
             &intent.spec,
@@ -635,28 +565,33 @@ pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
             false,
         )
         .await;
-        return;
     }
 
     // Attempt to reclaim the fire for redispatch.
     // This handles the case where fire was persisted but thread was never created.
     let fire_id = intent.fire_id.clone();
     let db = ctx.scheduler_db();
+    let app_root = ctx.app_root().to_path_buf();
     let can_reclaim = tokio::task::spawn_blocking(move || {
-        db.reclaim_fire(&fire_id).unwrap_or(false)
+        projection::reclaim_fire_snapshot(&app_root, &db, &fire_id)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!(fire_id = %intent.fire_id, error = %e, "reclaim spawn_blocking failed");
-        false
-    });
+    .context("scheduler fire-reclaim task stopped")??;
 
     if !can_reclaim {
-        tracing::warn!(
-            fire_id = %intent.fire_id,
-            "fire not reclaim-safe — skipping recovery dispatch"
+        let record = ctx.scheduler_db().get_fire(&intent.fire_id)?;
+        if record.as_ref().is_some_and(|record| {
+            matches!(
+                record.status.as_str(),
+                "completed" | "failed" | "cancelled" | "skipped"
+            )
+        }) {
+            return Ok(FireDispatchOutcome::AlreadyClassified);
+        }
+        anyhow::bail!(
+            "recovered fire {} could neither be reclaimed nor shown terminal",
+            intent.fire_id
         );
-        return;
     }
 
     dispatch_fire(
@@ -667,7 +602,7 @@ pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
         intent.trigger_reason,
         true,
     )
-    .await;
+    .await
 }
 
 async fn record_skip<Ctx: SchedulerContext>(
@@ -676,30 +611,10 @@ async fn record_skip<Ctx: SchedulerContext>(
     spec: &ScheduleSpecRecord,
     scheduled_at: i64,
     reason: &str,
-) {
+) -> anyhow::Result<()> {
     let now = lillux::time::timestamp_millis();
 
-    let entry = serde_json::json!({
-        "entry_type": "skipped",
-        "status": "skipped",
-        "fire_id": fire_id,
-        "schedule_id": spec.schedule_id,
-        "scheduled_at": scheduled_at,
-        "fired_at": now,
-        "completed_at": now,
-        "thread_id": null,
-        "trigger_reason": reason,
-        "skipped_reason": reason,
-        "outcome": reason,
-        "signer_fingerprint": spec.signer_fingerprint,
-    });
-    let fires_path = ctx
-        .app_root()
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("schedules")
-        .join(&spec.schedule_id)
-        .join("fires.jsonl");
+    let app_root = ctx.app_root().to_path_buf();
     let rec = FireRecord {
         fire_id: fire_id.to_string(),
         schedule_id: spec.schedule_id.clone(),
@@ -710,22 +625,19 @@ async fn record_skip<Ctx: SchedulerContext>(
         status: "skipped".to_string(),
         trigger_reason: reason.to_string(),
         outcome: Some(reason.to_string()),
-        signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+        signer_fingerprint: spec.signer_fingerprint.clone(),
     };
     {
         let db = ctx.scheduler_db();
         let fire_id_owned = fire_id.to_string();
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = projection::append_jsonl_entry(&fires_path, &entry) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to append skip entry");
-            }
-            if let Err(e) = db.upsert_fire(&rec) {
-                tracing::error!(fire_id = %fire_id_owned, error = %e, "failed to upsert skipped fire");
-            }
-        }).await.unwrap_or_else(|e| {
-            tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (skip persist)");
-        });
+            projection::persist_fire_snapshot(&app_root, &db, &rec)
+                .with_context(|| format!("persist skipped scheduler fire {fire_id_owned}"))
+        })
+        .await
+        .context("scheduler skip persistence task stopped")??;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -821,6 +733,7 @@ mod tests {
         ScheduleSpecRecord {
             schedule_id: schedule_id.to_string(),
             item_ref: "directive:test/job".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             params: "{}".to_string(),
             schedule_type: "cron".to_string(),
             expression: "* * * * * *".to_string(),
@@ -830,12 +743,27 @@ mod tests {
             lateness_grace_secs: 60,
             enabled: true,
             project_root: None,
-            signer_fingerprint: "fp:test".to_string(),
-            spec_hash: "abc".to_string(),
+            signer_fingerprint: "11".repeat(32),
+            spec_hash: "22".repeat(32),
             registered_at: 0,
             requester_fingerprint: "fp:test".to_string(),
             capabilities: vec!["ryeos.execute.*".to_string()],
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_fire_projection_terminates_timer() {
+        let ctx = Arc::new(MockContext::new());
+        ctx.db.begin_fire_projection_rebuild().unwrap();
+        let (_reload_tx, reload_rx) = tokio::sync::mpsc::channel(1);
+
+        let error = run(ctx, reload_rx, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("fire projection became incomplete"));
     }
 
     /// A long-running scheduled job must not hold the timer or the
@@ -860,7 +788,8 @@ mod tests {
                 dispatch_fire(&ctx, &fire_id, &spec, scheduled_at, "normal", false),
             )
             .await
-            .expect("dispatch_fire must return while the job is still running");
+            .expect("dispatch_fire must return while the job is still running")
+            .expect("fire admission must succeed");
         }
 
         // The job actually started (and is parked).
@@ -893,22 +822,24 @@ mod tests {
         let ctx = MockContext::new();
         for policy in ["skip", "cancel_previous"] {
             let spec = make_spec(&format!("race-{policy}"), policy);
+            let fire_id = types::fire_id(&spec.schedule_id, 1000);
+            let thread_id = types::thread_id_from_fire(&fire_id);
             let fire = FireRecord {
-                fire_id: types::fire_id(&spec.schedule_id, 1000),
+                fire_id,
                 schedule_id: spec.schedule_id.clone(),
                 scheduled_at: 1000,
                 fired_at: Some(lillux::time::timestamp_millis()),
                 completed_at: None,
-                thread_id: Some("T-not-yet-created".to_string()),
+                thread_id: Some(thread_id),
                 status: "dispatched".to_string(),
                 trigger_reason: "normal".to_string(),
                 outcome: None,
-                signer_fingerprint: Some("fp".to_string()),
+                signer_fingerprint: "11".repeat(32),
             };
             ctx.db.upsert_fire(&fire).unwrap();
-            // No status entry for T-not-yet-created → get_thread_status None.
+            // No status entry for the deterministic thread → get_thread_status None.
             assert!(
-                !overlap::check_overlap(&spec, &ctx).await,
+                !overlap::check_overlap(&spec, &ctx).await.unwrap(),
                 "policy {policy}: in-flight fire with invisible thread must hold the boundary"
             );
         }
@@ -917,31 +848,32 @@ mod tests {
     #[tokio::test]
     async fn repair_stale_completed_fire_uses_result_failed_outcome() {
         let ctx = MockContext::new();
+        let thread_id = types::thread_id_from_fire("sched@1000");
         let fire = FireRecord {
             fire_id: "sched@1000".to_string(),
             schedule_id: "sched".to_string(),
             scheduled_at: 1000,
             fired_at: Some(lillux::time::timestamp_millis() - 60_000),
             completed_at: None,
-            thread_id: Some("T-test".to_string()),
+            thread_id: Some(thread_id.clone()),
             status: "dispatched".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: None,
-            signer_fingerprint: Some("fp".to_string()),
+            signer_fingerprint: "11".repeat(32),
         };
         ctx.db.upsert_fire(&fire).unwrap();
         ctx.statuses
             .lock()
             .unwrap()
-            .insert("T-test".to_string(), "completed".to_string());
+            .insert(thread_id.clone(), "completed".to_string());
         ctx.outcomes.lock().unwrap().insert(
-            "T-test".to_string(),
+            thread_id,
             ThreadResultOutcome::ResultFailed {
                 reason: Some("boom".to_string()),
             },
         );
 
-        repair_stale_fires(&ctx).await;
+        repair_stale_fires(&ctx).await.unwrap();
 
         let updated = ctx.db.get_fire("sched@1000").unwrap().unwrap();
         assert_eq!(updated.status, "completed");

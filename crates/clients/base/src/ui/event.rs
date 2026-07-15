@@ -99,6 +99,7 @@ pub enum RyeOsUiIntent {
     },
     ExecuteItem {
         item_ref: String,
+        ref_bindings: std::collections::BTreeMap<String, String>,
         parameters: serde_json::Value,
     },
     /// Steer the route's head thread via `service:commands/submit`
@@ -271,6 +272,11 @@ pub enum RyeOsUiEvent {
     /// never carry row identity.
     ExpandSelectedRow {
         expand: bool,
+    },
+    /// Fold/unfold the selected hierarchy row's descendants. The reducer
+    /// resolves the stable authored hierarchy id; renderers never send it.
+    SetTreeRowCollapsed {
+        collapsed: bool,
     },
     ActivateFocused,
     /// Step back up the execution-drill stack: restore the view a step-in left

@@ -1,9 +1,12 @@
-# ryeos:signed:2026-06-11T05:13:14Z:a269193e46951211d18e440533881123f7ff5d256f8f92c57265f2edf66deff5:gVNaaAWAexaxkZALdvbTifPnwvSLmpy7fe4nEw+fqGwJ2JZI9IKklvy98XzSPXVn1MrgU0142Fngw3Exzrc7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:e13342086517cef181bf34c793822211a349da97b686fc9a7040923a19a2f757:FAKo9EUy+jDZNxZr0Mq4hzeYaMBmvu7/VO4G6a5EKQflq/f1SGoUyCKXwoYJOmgnJxNkZzFqNiVcuYPaYPWbCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: system.push-head
 required_caps: ["ryeos.execute.service.system/push-head"]
 schema:
+  staging_id: string
   project_path: string
   snapshot_hash: string
-description: "Write a principal-scoped project HEAD ref"
+  # Required: explicit null for first publication, otherwise the observed hash.
+  expected_previous_hash: json
+description: "Write a principal-scoped project HEAD ref using an explicit nullable expected_previous_hash"

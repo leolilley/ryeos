@@ -74,13 +74,35 @@ impl Walker {
             self.record_node_cost(current, step, item_id, c.clone());
         }
 
+        let result_hash = match hash_json_value(result) {
+            Ok(hash) => hash,
+            Err(error) => {
+                let message = format!("failed to canonicalize action result: {error}");
+                return self
+                    .commit_terminal(CommitTerminalInput {
+                        graph_run_id,
+                        steps: step,
+                        state,
+                        suppressed_errors,
+                        base_status: GraphRunStatus::Error,
+                        error: Some(&message),
+                        output: None,
+                        guard,
+                        current_node_id: current,
+                        inputs,
+                        execution,
+                    })
+                    .await;
+            }
+        };
+
         // Receipt
         let receipt = NodeReceipt {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
             definition_hash: self.graph.definition_hash.clone(),
-            result_hash: Some(hash_json_value(result)),
+            result_hash: Some(result_hash),
             cache_hit,
             elapsed_ms,
             error: None,

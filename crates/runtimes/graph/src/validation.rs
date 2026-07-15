@@ -599,7 +599,7 @@ config:
       node_type: return
     orphan:
       node_type: action
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
@@ -745,7 +745,7 @@ config:
   hooks:
     - id: obs
       event: graph_completed
-      action: {item_id: "tool:test/echo", params: {}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {}}
   nodes:
     done:
       node_type: return
@@ -773,7 +773,7 @@ config:
   hooks:
     - id: typo
       event: graph_finishd
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
   nodes:
     done:
       node_type: return
@@ -822,7 +822,7 @@ config:
     - id: bad
       event: graph_completed
       when: something
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
   nodes:
     done:
       node_type: return
@@ -842,7 +842,7 @@ config:
   start: nonexistent
   nodes:
     step1:
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
@@ -865,7 +865,7 @@ config:
     iterate:
       node_type: foreach
       over: "${state.items}"
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       collect: "results"
       next:
         type: unconditional
@@ -1142,7 +1142,7 @@ config:
       over: "${state.items}"
       as: "results"
       collect: "results"
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       next:
         type: unconditional
         to: done
@@ -1175,7 +1175,7 @@ config:
       parallel: true
       collect: results
       max_concurrency: 3
-      action: {item_id: "directive:child", params: {value: "${item}"}}
+      action: {item_id: "directive:child", ref_bindings: {}, params: {value: "${item}"}}
     done: {node_type: return}
 "#;
         assert!(validate_graph(&make_graph(base)).errors.is_empty());
@@ -1202,8 +1202,8 @@ config:
                 "between 1 and 256",
             ),
             (
-                "      action: {item_id: \"directive:child\", params: {value: \"${item}\"}}\n",
-                "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\"}\n",
+                "      action: {item_id: \"directive:child\", ref_bindings: {}, params: {value: \"${item}\"}}\n",
+                "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\", ref_bindings: {}}\n",
                 "cannot combine 'retry' and 'follow'",
             ),
         ];
@@ -1263,7 +1263,7 @@ config:
   start: recall
   nodes:
     recall:
-      action: {item_id: "tool:recall"}
+      action: {item_id: "tool:recall", ref_bindings: {}}
       assign:
         found: "${result.found}"
       next:
@@ -1305,7 +1305,7 @@ config:
   start: recall
   nodes:
     recall:
-      action: {item_id: "tool:recall"}
+      action: {item_id: "tool:recall", ref_bindings: {}}
       assign:
         found: "${result.found}"
       next:
@@ -1381,7 +1381,7 @@ config:
       declared: {type: string}
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {a: "${inputs.declared}", b: "${inputs.missing}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {a: "${inputs.declared}", b: "${inputs.missing}"}}
       next:
         type: unconditional
         to: done
@@ -1409,7 +1409,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {a: "${inputs.anything}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {a: "${inputs.anything}"}}
       next:
         type: unconditional
         to: done
@@ -1490,7 +1490,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:x"}
+      action: {item_id: "tool:x", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -1516,7 +1516,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:x"}
+      action: {item_id: "tool:x", ref_bindings: {}}
       follow: true
       cache_result: true
       next: {type: unconditional, to: done}
@@ -1543,7 +1543,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:x"}
+      action: {item_id: "tool:x", ref_bindings: {}}
       follow: true
       parallel: true
       next: {type: unconditional, to: done}
@@ -1609,7 +1609,7 @@ config:
     #[test]
     fn validate_graph_accepts_valid_retry_on_action() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result.errors.is_empty(),
@@ -1621,7 +1621,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_attempts_out_of_range() {
         let too_many = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             too_many
@@ -1632,7 +1632,7 @@ config:
             too_many.errors
         );
         let zero = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
         assert!(zero
             .errors
@@ -1643,7 +1643,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_zero_backoff() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result
@@ -1676,7 +1676,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_max_below_backoff() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result
@@ -1706,7 +1706,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_plus_follow() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result
@@ -1721,7 +1721,7 @@ config:
     #[test]
     fn validate_graph_accepts_retry_on_foreach() {
         let result = validate_graph(&retry_graph(
-            "      node_type: foreach\n      over: \"${state.items}\"\n      as: item\n      action: {item_id: \"tool:x\"}\n      retry: {attempts: 2, backoff_ms: 50}\n      next: {type: unconditional, to: done}",
+            "      node_type: foreach\n      over: \"${state.items}\"\n      as: item\n      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 2, backoff_ms: 50}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             !result
@@ -1749,7 +1749,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       next:
         type: unconditional
         to: done

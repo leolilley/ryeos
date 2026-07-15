@@ -1529,7 +1529,7 @@ mod tests {
         let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
-        assert_eq!(record.control_flags.len(), 7, "expected 7 control flags");
+        assert_eq!(record.control_flags.len(), 8, "expected 8 control flags");
     }
 
     struct BundleLayout {
@@ -1717,7 +1717,7 @@ name: fixed-parser
 kind: handler
 serves: parser
 binary_ref: {bin_rel}
-abi_version: "v1"
+abi_version: "v3"
 required_caps: []
 description: "fixed parser handler for preflight tests"
 "#
@@ -1737,7 +1737,7 @@ description: "fixed parser handler for preflight tests"
                 "integrity": format!("sha256:{blob_hash}"),
                 "mode": 0o755,
             });
-            let sidecar_body = lillux::cas::canonical_json(&item_source);
+            let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
             let sidecar =
                 lillux::signature::sign_content(&sidecar_body, &self.signing_key, "#", None);
             fs::write(

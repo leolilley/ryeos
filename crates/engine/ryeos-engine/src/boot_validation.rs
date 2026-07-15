@@ -19,7 +19,7 @@
 //! the first failure. Callers that want hard-fail boot semantics should
 //! treat *any* returned `Vec<BootIssue>` as fatal.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,17 +31,27 @@ use std::time::Duration;
 const VALIDATION_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::canonical_ref::CanonicalRef;
-use crate::composers::ComposerRegistry;
+use crate::composers::{field_requirements_for_schema, ComposerRegistry};
 use crate::contracts::{field_type_covers, ContractViolation, ShapeType, ValueShape};
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
-use crate::handlers::{HandlerRegistry, HandlerServes};
+use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 use crate::kind_registry::KindRegistry;
+use crate::launch_preparers::LaunchPreparerRunner;
 use crate::parsers::{DuplicateRef, ParserRegistry};
 use crate::protocols::builder::{build_subprocess_spec, BuildRequest, CallbackBindings};
 use crate::protocols::ProtocolRegistry;
+use crate::resolution::TrustClass;
+use crate::runtime_registry::{
+    ConfigMergeMode, LaunchConfigInputDecl, LaunchItemSpace, LaunchPreparationDecl,
+    RuntimeFactKind, RuntimeRegistry,
+};
 use ryeos_handler_protocol::{
-    HandlerRequest, HandlerResponse, ValidateComposerConfigRequest, ValidateParserConfigRequest,
+    ConfigMergeModeWire, HandlerRequest, HandlerResponse, ItemSpaceWire,
+    LaunchConfigInputDeclWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
+    RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
+    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    ValidateParserConfigRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +131,59 @@ pub enum BootIssue {
     ProtocolBuilderRejected {
         protocol_ref: String,
         reason: String,
+    },
+    /// A runtime kind item's terminator declares a `protocol_ref`
+    /// that doesn't match the expected protocol for its kind.
+    RuntimeProtocolMismatch {
+        kind: String,
+        protocol_ref: String,
+        expected: String,
+    },
+    /// A streaming_tool kind item's terminator declares a
+    /// `protocol_ref` that doesn't match the expected streaming
+    /// protocol.
+    StreamingToolProtocolMismatch {
+        kind: String,
+        protocol_ref: String,
+        expected: String,
+    },
+    /// A runtime launch contract names a handler that is not registered.
+    UnknownLaunchPreparerHandler {
+        runtime_ref: String,
+        handler_id: String,
+    },
+    /// A runtime launch contract names a registered handler serving another
+    /// role. Handler roles are closed and never inferred from the binary.
+    LaunchPreparerRoleMismatch {
+        runtime_ref: String,
+        handler_id: String,
+        actual: HandlerServes,
+    },
+    /// Launch-preparer handlers must have a resolved executable at boot.
+    LaunchPreparerUnresolved {
+        runtime_ref: String,
+        handler_id: String,
+        reason: String,
+    },
+    /// Only immutable bundle handlers may prepare launch authority.
+    LaunchPreparerUntrusted {
+        runtime_ref: String,
+        handler_id: String,
+        trust_class: TrustClass,
+    },
+    /// The launch-preparer rejected its signed handler config or normalized
+    /// launch contract.
+    InvalidLaunchPreparerConfig {
+        runtime_ref: String,
+        handler_id: String,
+        code: String,
+        reason: String,
+    },
+    /// The launch-preparer could not complete its boot-time validation call.
+    LaunchPreparerHandlerUnusable {
+        runtime_ref: String,
+        handler_id: String,
+        detail: String,
     },
     /// A kind schema declares a subprocess protocol that is absent from the
     /// verified protocol registry.
@@ -288,14 +351,18 @@ pub fn validate_boot(
                 }
             };
 
+        let field_requirements = field_requirements_for_schema(schema);
+
         // Cache key: (handler_ref, JSON config) so two kinds that
-        // bind the same handler with identical configs only spawn
-        // once. Different configs spawn independently because the
-        // handler's verdict depends on the config bytes.
+        // bind the same handler with identical configs and exact-value field
+        // contracts only spawn once. Different requirements must validate
+        // independently because the same config may be safe for one field and
+        // unsafe for another.
         let cache_key = format!(
-            "{}|{}",
+            "{}|{}|{}",
             schema.composer,
-            serde_json::to_string(&schema.composer_config).unwrap_or_default()
+            serde_json::to_string(&schema.composer_config).unwrap_or_default(),
+            serde_json::to_string(&field_requirements).unwrap_or_default()
         );
         if composer_config_checked.contains_key(&cache_key) {
             continue;
@@ -304,6 +371,7 @@ pub fn validate_boot(
 
         let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
             composer_config: schema.composer_config.clone(),
+            field_requirements: field_requirements.clone(),
         });
         match run_handler_subprocess(
             handler,
@@ -311,7 +379,29 @@ pub fn validate_boot(
             VALIDATION_SUBPROCESS_TIMEOUT,
             handler_registry.launch_runtime(),
         ) {
-            Ok(HandlerResponse::ValidateOk) => {}
+            Ok(HandlerResponse::ValidateComposerOk {
+                field_requirements: acknowledged,
+            }) if acknowledged == field_requirements => {}
+            Ok(HandlerResponse::ValidateComposerOk {
+                field_requirements: acknowledged,
+            }) => {
+                issues.push(BootIssue::InvalidComposerConfig {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    reason: format!(
+                        "composer acknowledged different field requirements: expected {field_requirements:?}, got {acknowledged:?}"
+                    ),
+                });
+            }
+            Ok(HandlerResponse::ValidateOk) => {
+                issues.push(BootIssue::InvalidComposerConfig {
+                    kind: kind.to_string(),
+                    handler_id: schema.composer.clone(),
+                    reason: format!(
+                        "composer returned parser-only validation success without acknowledging field requirements {field_requirements:?}"
+                    ),
+                });
+            }
             Ok(HandlerResponse::ValidateErr { message }) => {
                 issues.push(BootIssue::InvalidComposerConfig {
                     kind: kind.to_string(),
@@ -352,12 +442,22 @@ pub fn validate_boot(
             Err(EngineError::HandlerBinaryMissing {
                 handler, reason, ..
             }) => {
-                tracing::warn!(
-                    handler = %handler,
-                    reason = %reason,
-                    "skipping boot-time subprocess validation for unresolved composer handler; \
-                     invocation will hard-error if the handler is ever called"
-                );
+                if field_requirements.is_empty() {
+                    tracing::warn!(
+                        handler = %handler,
+                        reason = %reason,
+                        "skipping boot-time subprocess validation for unresolved composer handler; \
+                         invocation will hard-error if the handler is ever called"
+                    );
+                } else {
+                    issues.push(BootIssue::ComposerHandlerUnusable {
+                        kind: kind.to_string(),
+                        handler_id: schema.composer.clone(),
+                        detail: format!(
+                            "handler binary is required to validate exact-value field semantics {field_requirements:?}: {reason}"
+                        ),
+                    });
+                }
             }
             Err(other) => {
                 issues.push(BootIssue::ComposerHandlerUnusable {
@@ -390,6 +490,263 @@ pub fn validate_boot(
         Ok(())
     } else {
         Err(issues)
+    }
+}
+
+/// Validate every runtime→launch-preparer edge after both registries have
+/// loaded. A launch preparer can mint runtime data and symbolic secret
+/// requirements, so the edge is stricter than parser/composer lookup: the
+/// handler must be resolved, serve exactly `launch_preparer`, and originate
+/// from an immutable trusted bundle.
+pub fn validate_runtime_launch_handlers(
+    runtimes: &RuntimeRegistry,
+    handlers: &HandlerRegistry,
+    runner: &LaunchPreparerRunner,
+) -> Result<(), Vec<BootIssue>> {
+    let mut issues = Vec::new();
+    let mut sorted_runtimes: Vec<_> = runtimes.all().collect();
+    sorted_runtimes.sort_by_key(|runtime| runtime.canonical_ref.to_string());
+
+    for runtime in sorted_runtimes {
+        let (handler_id, handler_config) = match &runtime.yaml.launch_contract.preparation {
+            LaunchPreparationDecl::None => continue,
+            LaunchPreparationDecl::Handler { handler, config } => (handler, config),
+        };
+        let runtime_ref = runtime.canonical_ref.to_string();
+
+        let handler = match handlers.get(handler_id) {
+            Some(handler) => handler,
+            None => {
+                issues.push(BootIssue::UnknownLaunchPreparerHandler {
+                    runtime_ref,
+                    handler_id: handler_id.clone(),
+                });
+                continue;
+            }
+        };
+
+        if handler.descriptor().serves != HandlerServes::LaunchPreparer {
+            issues.push(BootIssue::LaunchPreparerRoleMismatch {
+                runtime_ref,
+                handler_id: handler_id.clone(),
+                actual: handler.descriptor().serves,
+            });
+            continue;
+        }
+
+        let mut usable = true;
+        if handler.trust_class() != TrustClass::TrustedBundle {
+            issues.push(BootIssue::LaunchPreparerUntrusted {
+                runtime_ref: runtime_ref.clone(),
+                handler_id: handler_id.clone(),
+                trust_class: handler.trust_class(),
+            });
+            usable = false;
+        }
+        if let VerifiedHandler::Unresolved { reason, .. } = handler {
+            issues.push(BootIssue::LaunchPreparerUnresolved {
+                runtime_ref: runtime_ref.clone(),
+                handler_id: handler_id.clone(),
+                reason: reason.clone(),
+            });
+            usable = false;
+        }
+        if !usable {
+            continue;
+        }
+
+        let request = HandlerRequest::ValidateLaunchPreparerConfig(
+            launch_preparer_validation_request(runtime, handler_config),
+        );
+        match runner.run_launch_preparer_subprocess(handler, &request) {
+            Ok(HandlerResponse::ValidateLaunchPreparerConfig {
+                response: ValidateLaunchPreparerConfigResponse::Valid { .. },
+            }) => {}
+            Ok(HandlerResponse::ValidateLaunchPreparerConfig {
+                response: ValidateLaunchPreparerConfigResponse::Invalid { code, message },
+            }) => {
+                issues.push(BootIssue::InvalidLaunchPreparerConfig {
+                    runtime_ref,
+                    handler_id: handler_id.clone(),
+                    code,
+                    reason: message,
+                });
+            }
+            Ok(other) => {
+                issues.push(BootIssue::LaunchPreparerHandlerUnusable {
+                    runtime_ref,
+                    handler_id: handler_id.clone(),
+                    detail: format!("unexpected response: {other:?}"),
+                });
+            }
+            Err(error) => {
+                issues.push(BootIssue::LaunchPreparerHandlerUnusable {
+                    runtime_ref,
+                    handler_id: handler_id.clone(),
+                    detail: error.to_string(),
+                });
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues)
+    }
+}
+
+fn launch_preparer_validation_request(
+    runtime: &crate::runtime_registry::VerifiedRuntime,
+    handler_config: &serde_json::Value,
+) -> ValidateLaunchPreparerConfigRequest {
+    let contract = &runtime.yaml.launch_contract;
+    let ref_bindings: BTreeMap<String, RefBindingDeclWire> = contract
+        .ref_bindings
+        .iter()
+        .map(|(name, binding)| {
+            (
+                name.clone(),
+                RefBindingDeclWire {
+                    required: binding.required,
+                    allowed_kinds: binding.allowed_kinds.clone(),
+                    allowed_spaces: binding
+                        .allowed_spaces
+                        .iter()
+                        .copied()
+                        .map(item_space_wire)
+                        .collect(),
+                    allowed_trust: binding
+                        .allowed_trust
+                        .iter()
+                        .copied()
+                        .map(trust_class_wire)
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    let config_inputs: BTreeMap<String, LaunchConfigInputDeclWire> = contract
+        .config_inputs
+        .iter()
+        .map(|(name, input)| {
+            let wire = match input {
+                LaunchConfigInputDecl::Item {
+                    id,
+                    required,
+                    merge,
+                    allowed_spaces,
+                    allowed_trust,
+                } => LaunchConfigInputDeclWire::Item {
+                    id: id.clone(),
+                    required: *required,
+                    merge: config_merge_mode_wire(*merge),
+                    allowed_spaces: allowed_spaces
+                        .iter()
+                        .copied()
+                        .map(item_space_wire)
+                        .collect(),
+                    allowed_trust: allowed_trust
+                        .iter()
+                        .copied()
+                        .map(trust_class_wire)
+                        .collect(),
+                },
+                LaunchConfigInputDecl::Catalog {
+                    prefix,
+                    required,
+                    entry_merge,
+                    allowed_spaces,
+                    allowed_trust,
+                } => LaunchConfigInputDeclWire::Catalog {
+                    prefix: prefix.clone(),
+                    required: *required,
+                    entry_merge: config_merge_mode_wire(*entry_merge),
+                    allowed_spaces: allowed_spaces
+                        .iter()
+                        .copied()
+                        .map(item_space_wire)
+                        .collect(),
+                    allowed_trust: allowed_trust
+                        .iter()
+                        .copied()
+                        .map(trust_class_wire)
+                        .collect(),
+                },
+            };
+            (name.clone(), wire)
+        })
+        .collect();
+    let runtime_facts: BTreeMap<String, RuntimeFactDeclWire> = contract
+        .runtime_facts
+        .iter()
+        .map(|(name, fact)| {
+            (
+                name.clone(),
+                RuntimeFactDeclWire {
+                    required: fact.required,
+                    kind: runtime_fact_kind_wire(fact.kind),
+                    max_bytes: fact.max_bytes,
+                },
+            )
+        })
+        .collect();
+
+    ValidateLaunchPreparerConfigRequest {
+        handler_config: handler_config.clone(),
+        primary_allowed_kinds: contract.primary_allowed_kinds.clone(),
+        primary_allowed_spaces: contract
+            .primary_allowed_spaces
+            .iter()
+            .copied()
+            .map(item_space_wire)
+            .collect(),
+        primary_allowed_trust: contract
+            .primary_allowed_trust
+            .iter()
+            .copied()
+            .map(trust_class_wire)
+            .collect(),
+        ref_bindings,
+        config_inputs,
+        secret_policy: LaunchSecretPolicyDeclWire {
+            max_requirements: contract.secret_policy.max_requirements,
+            allowed_names: contract.secret_policy.allowed_names.clone(),
+        },
+        required_runtime_data: contract.required_runtime_data.clone(),
+        runtime_facts,
+    }
+}
+
+fn item_space_wire(space: LaunchItemSpace) -> ItemSpaceWire {
+    match space {
+        LaunchItemSpace::Bundle => ItemSpaceWire::Bundle,
+        LaunchItemSpace::Project => ItemSpaceWire::Project,
+    }
+}
+
+fn trust_class_wire(trust: TrustClass) -> TrustClassWire {
+    match trust {
+        TrustClass::TrustedBundle => TrustClassWire::TrustedBundle,
+        TrustClass::TrustedProject => TrustClassWire::TrustedProject,
+        TrustClass::UntrustedProject => TrustClassWire::UntrustedProject,
+        TrustClass::Unsigned => TrustClassWire::Unsigned,
+    }
+}
+
+fn config_merge_mode_wire(mode: ConfigMergeMode) -> ConfigMergeModeWire {
+    match mode {
+        ConfigMergeMode::DeepMerge => ConfigMergeModeWire::DeepMerge,
+        ConfigMergeMode::FirstMatch => ConfigMergeModeWire::FirstMatch,
+    }
+}
+
+fn runtime_fact_kind_wire(kind: RuntimeFactKind) -> RuntimeFactKindWire {
+    match kind {
+        RuntimeFactKind::Bool => RuntimeFactKindWire::Bool,
+        RuntimeFactKind::Integer => RuntimeFactKindWire::Integer,
+        RuntimeFactKind::String => RuntimeFactKindWire::String,
+        RuntimeFactKind::Json => RuntimeFactKindWire::Json,
     }
 }
 
@@ -601,6 +958,7 @@ mod tests {
     use crate::test_support::load_live_handler_registry;
     use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
+    use ryeos_handler_protocol::{ComposerFieldRequirement, ComposerFieldSemantics};
     use serde_json::Value;
     use std::fs;
     use std::sync::Arc;
@@ -1448,6 +1806,90 @@ composed_value_contract:
         assert!(
             bad.contains(&"alpha") && bad.contains(&"beta"),
             "expected InvalidComposerConfig for both kinds, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn history_policy_rejects_partial_merge_composer_config_at_boot() {
+        let root = tempdir();
+        let sk = signing_key();
+        let ts = trust_store(&sk);
+        let yaml = "\
+location:
+  directory: synthetic_items
+resolution:
+  - step: resolve_extends_chain
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  history_policy:
+    composed_path: lifecycle_policy
+effective_trust:
+  include_references: false
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/extends-chain
+composer_config:
+  extends_field: extends
+  fields:
+    - name: lifecycle_policy
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    lifecycle_policy:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          retention:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                terminal_for: { type: single, prim: string }
+";
+        let dir = root.join("synthetic");
+        fs::create_dir_all(&dir).unwrap();
+        let signed = lillux::signature::sign_content(yaml, &sk, "#", None);
+        fs::write(dir.join("synthetic.kind-schema.yaml"), signed).unwrap();
+        let kinds = KindRegistry::load_base(&[root], &ts).unwrap();
+
+        let requirements = field_requirements_for_schema(kinds.get("synthetic").unwrap());
+        assert_eq!(
+            requirements,
+            vec![ComposerFieldRequirement {
+                field: "lifecycle_policy".into(),
+                semantics: ComposerFieldSemantics::InheritOrReplace,
+            }]
+        );
+
+        let parsers = ParserRegistry::from_entries(vec![(
+            "parser:ryeos/core/yaml/yaml".to_string(),
+            parser_descriptor(
+                "handler:ryeos/core/yaml-document",
+                serde_json::json!({ "require_mapping": true }),
+            ),
+        )]);
+        let handlers = live_handler_registry();
+        let composers = ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
+        let issues = validate_boot(&kinds, &parsers, &handlers, &composers, &[]).unwrap_err();
+        assert!(
+            issues.iter().any(|issue| matches!(
+                issue,
+                BootIssue::InvalidComposerConfig { kind, reason, .. }
+                    if kind == "synthetic"
+                        && reason.contains("cannot provide InheritOrReplace")
+            )),
+            "expected exact-value composer rejection, got: {issues:?}"
         );
     }
 

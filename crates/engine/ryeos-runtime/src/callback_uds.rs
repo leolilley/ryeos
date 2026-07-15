@@ -344,6 +344,24 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn project_snapshot(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        let map = request.as_object_mut().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "runtime.project_snapshot request must be a JSON object"
+            ))
+        })?;
+        map.insert("thread_id".to_string(), json!(thread_id));
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.project_snapshot", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);
@@ -482,6 +500,7 @@ mod tests {
             project_path: "/project".to_string(),
             action: ActionPayload {
                 item_id: "tool:test/audit".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
                 thread: "inline".to_string(),
                 call: None,
@@ -503,6 +522,7 @@ mod tests {
             project_path: "/project".to_string(),
             action: ActionPayload {
                 item_id: "tool:test/noop".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
                 thread: "inline".to_string(),
                 call: None,

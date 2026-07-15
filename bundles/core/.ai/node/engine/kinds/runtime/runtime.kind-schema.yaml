@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-14T10:12:30Z:4bebe560dabba4b3e3e9d3a80133a06e6f972613bd9e0fd0addba3c37d31009c:CaiNUwSxiaqwUgsCyKXu+YwRPtYImDZkzuT13hXh32egM8GMOdQSmPU4wkXL0bMFA+of1jqk7nh5A+aq4fmJCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# rye:unsigned
+# ryeos:signed:2026-07-15T01:10:25Z:4eed14766d3ad6504a55be4686c448b0db4632f1c849e419edcf267537da54b7:t7FLduFRHwMhopnPIajHf4ciXEruhyHNCJ+PUWIPQDSqxSdV368GfiNvQJpXXTuA1qdzH4bxn+Zyde2wgXzKDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
 version: "1.0.0"
 location:
@@ -30,13 +29,49 @@ composed_value_contract:
     serves: { type: single, prim: string }
     binary_ref: { type: single, prim: string }
     abi_version: { type: single, prim: string }
+    launch_contract:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          primary_allowed_kinds:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          primary_allowed_spaces:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string, enum: [bundle, project] }
+          primary_allowed_trust:
+            type: single
+            prim: sequence
+            elements:
+              type: single
+              prim: string
+              enum: [trusted_bundle, trusted_project, untrusted_project, unsigned]
+          ref_bindings: { type: single, prim: mapping }
+          preparation: { type: single, prim: mapping }
+          config_inputs: { type: single, prim: mapping }
+          secret_policy:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                max_requirements: { type: single, prim: integer }
+                allowed_names:
+                  type: single
+                  prim: sequence
+                  elements: { type: single, prim: string }
+          required_runtime_data:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          runtime_facts: { type: single, prim: mapping }
   optional:
     default: { type: single, prim: boolean }
     required_caps:
-      type: single
-      prim: sequence
-      elements: { type: single, prim: string }
-    required_envelope_fields:
       type: single
       prim: sequence
       elements: { type: single, prim: string }
@@ -64,6 +99,3 @@ metadata:
     required_caps:
       from: path_string_seq
       key: required_caps
-    required_envelope_fields:
-      from: path_string_seq
-      key: required_envelope_fields

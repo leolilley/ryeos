@@ -12,11 +12,26 @@ mod integration_tests {
     use std::sync::Arc;
 
     use ryeos_app::state_store::{
-        ContinuedThreadSettlement, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord,
-        StateStore,
+        FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, StateStore,
     };
     use ryeos_app::write_barrier::WriteBarrier;
     use tempfile::TempDir;
+
+    fn captured_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistoryPolicy {
+        let hash = "a".repeat(64);
+        ryeos_state::objects::CapturedThreadHistoryPolicy {
+            retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+            canonical_item_ref: item_ref.to_string(),
+            item_content_hash: hash.clone(),
+            item_signer_fingerprint: Some(hash.clone()),
+            item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+            kind_schema_content_hash: hash,
+            resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                node_policy:
+                    ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+            },
+        }
+    }
 
     fn setup_state_store() -> (TempDir, Arc<StateStore>) {
         let tmpdir = TempDir::new().unwrap();
@@ -29,11 +44,23 @@ mod integration_tests {
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            identity.verifying_key().clone(),
+        );
 
         let write_barrier = WriteBarrier::new();
 
-        let store = StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier)
-            .expect("StateStore creation should succeed");
+        let store = StateStore::new_with_head_trust(
+            tmpdir.path().to_path_buf(),
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier,
+            Arc::new(head_trust),
+        )
+        .expect("StateStore creation should succeed");
 
         (tmpdir, Arc::new(store))
     }
@@ -59,21 +86,8 @@ mod integration_tests {
             project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
-        }
-    }
-
-    fn continued_settlement() -> ContinuedThreadSettlement {
-        ContinuedThreadSettlement {
-            result_json: None,
-            final_cost: None,
-            managed_envelope: serde_json::json!({
-                "success": false,
-                "status": "continued",
-                "result": null,
-                "outputs": null,
-                "warnings": [],
-                "cost": null,
-            }),
+            captured_history_policy: (thread_id == chain_root_id)
+                .then(|| captured_policy(item_ref)),
         }
     }
 
@@ -92,11 +106,18 @@ mod integration_tests {
     }
 
     fn set_follow_child(store: &StateStore, follow_key: &str, child: &str, root: &str) {
-        let item_ref = "test/item";
-        let spec_hash =
-            ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &serde_json::json!({}), None);
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
+        let spec_hash = ryeos_app::runtime_db::follow_child_spec_hash(
+            item_ref,
+            &std::collections::BTreeMap::new(),
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
         store
-            .set_follow_child(follow_key, 0, item_ref, &spec_hash, child, root)
+            .set_follow_child(follow_key, 0, item_ref, &spec_hash, child, root, &sealed)
             .unwrap();
     }
 
@@ -142,13 +163,18 @@ mod integration_tests {
         // Idempotent: the identical child is a no-op.
         set_follow_child(&store, "k1", "C", "C");
         // A different child would strand the original → refused.
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(
-            "test/item",
+            item_ref,
+            &std::collections::BTreeMap::new(),
             &serde_json::json!({}),
             None,
-        );
+        )
+        .unwrap();
         assert!(store
-            .set_follow_child("k1", 0, "test/item", &hash, "C2", "C2")
+            .set_follow_child("k1", 0, item_ref, &hash, "C2", "C2", &sealed)
             .is_err());
         let w = store.get_follow_waiter_by_key("k1").unwrap().unwrap();
         assert_eq!(w.children.len(), 1);
@@ -225,6 +251,7 @@ mod integration_tests {
                 &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
                     kind: kind.into(),
                     item_ref: "test/item".into(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     launch_mode: "inline".into(),
                     parameters: serde_json::json!({}),
                     project_context: ProjectContext::LocalPath {
@@ -253,7 +280,7 @@ mod integration_tests {
         let (_tmp, store) = setup_state_store();
         // Running parent with captured launch identity.
         store
-            .create_thread(&make_thread("P", "P", "graph", "test/graph", None))
+            .create_thread_for_test(&make_thread("P", "P", "graph", "test/graph", None))
             .unwrap();
         seed_continuable(&store, "P", "graph");
 
@@ -263,7 +290,7 @@ mod integration_tests {
             .unwrap();
         // Child is a FRESH ROOT: its own chain root, no upstream braid.
         store
-            .create_thread(&make_thread("C", "C", "graph", "test/graph", None))
+            .create_thread_for_test(&make_thread("C", "C", "graph", "test/graph", None))
             .unwrap();
         set_follow_child(&store, "P/gr-1/node-a/0", "C", "C");
         // Parent follow-resume successor: created (not launched), settles parent.
@@ -272,7 +299,6 @@ mod integration_tests {
                 &make_thread("S", "P", "graph", "test/graph", Some("P")),
                 "P",
                 "P",
-                &continued_settlement(),
             )
             .unwrap();
         store
@@ -306,7 +332,7 @@ mod integration_tests {
     fn follow_adopts_existing_successor_when_waiter_missing_it() {
         let (_tmp, store) = setup_state_store();
         store
-            .create_thread(&make_thread("P", "P", "graph", "test/graph", None))
+            .create_thread_for_test(&make_thread("P", "P", "graph", "test/graph", None))
             .unwrap();
         seed_continuable(&store, "P", "graph");
         store.reserve_follow(&follow_seed("k")).unwrap();
@@ -318,7 +344,6 @@ mod integration_tests {
                 &make_thread("S", "P", "graph", "test/graph", Some("P")),
                 "P",
                 "P",
-                &continued_settlement(),
             )
             .unwrap();
         assert!(store
@@ -344,7 +369,7 @@ mod integration_tests {
 
         let thread = make_thread("T-root-1", "T-root-1", "directive", "test/directive", None);
         let persisted = store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
 
         assert!(!persisted.is_empty(), "Should return persisted events");
@@ -357,7 +382,7 @@ mod integration_tests {
 
         let thread = make_thread("T-running-1", "T-running-1", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
 
         let persisted = store
@@ -372,7 +397,7 @@ mod integration_tests {
 
         let thread = make_thread("T-proc-1", "T-proc-1", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
 
         store
@@ -399,7 +424,7 @@ mod integration_tests {
 
         let root = make_thread("T-list-1", "T-list-1", "directive", "test/item", None);
         store
-            .create_thread(&root)
+            .create_thread_for_test(&root)
             .expect("create_thread 1 should succeed");
 
         let child = make_thread(
@@ -410,7 +435,7 @@ mod integration_tests {
             Some("T-list-1"),
         );
         store
-            .create_thread(&child)
+            .create_thread_for_test(&child)
             .expect("create_thread 2 should succeed");
 
         let threads = store
@@ -425,7 +450,7 @@ mod integration_tests {
 
         let thread = make_thread("T-final-1", "T-final-1", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
         store
             .mark_thread_running("T-final-1", None)
@@ -438,7 +463,6 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
 
         let persisted = store
@@ -464,146 +488,13 @@ mod integration_tests {
     }
 
     #[test]
-    fn managed_finalization_rejects_terminal_authority_contradictions() {
-        let (_tmpdir, store) = setup_state_store();
-        let thread = make_thread(
-            "T-managed-contract",
-            "T-managed-contract",
-            "directive",
-            "test/item",
-            None,
-        );
-        store.create_thread(&thread).expect("create thread");
-        store
-            .mark_thread_running("T-managed-contract", None)
-            .expect("mark running");
-
-        let error = serde_json::json!({"code": "runtime_failed"});
-        let cost = ryeos_engine::contracts::FinalCost {
-            turns: 0,
-            input_tokens: 11,
-            output_tokens: 4,
-            spend: 0.25,
-            provider: None,
-            basis: None,
-            metadata: None,
-        };
-        let valid_envelope = serde_json::json!({
-            "success": false,
-            "status": "failed",
-            "result": error.clone(),
-            "outputs": {"partial": true},
-            "warnings": ["runtime fallback"],
-            "cost": {
-                "input_tokens": 11,
-                "output_tokens": 4,
-                "total_usd": 0.25,
-            },
-        });
-        let valid = FinalizeThreadRecord {
-            status: "failed".to_string(),
-            outcome_code: Some("failed".to_string()),
-            result_json: None,
-            error_json: Some(error),
-            artifacts: vec![],
-            final_cost: Some(cost),
-            managed_envelope: Some(valid_envelope.clone()),
-        };
-
-        for (label, envelope) in [
-            (
-                "status",
-                serde_json::json!({
-                    "success": false,
-                    "status": "cancelled",
-                    "result": valid.error_json.clone().unwrap(),
-                    "outputs": {"partial": true},
-                    "warnings": ["runtime fallback"],
-                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
-                }),
-            ),
-            (
-                "success",
-                serde_json::json!({
-                    "success": true,
-                    "status": "failed",
-                    "result": valid.error_json.clone().unwrap(),
-                    "outputs": {"partial": true},
-                    "warnings": ["runtime fallback"],
-                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
-                }),
-            ),
-            (
-                "result",
-                serde_json::json!({
-                    "success": false,
-                    "status": "failed",
-                    "result": {"code": "different"},
-                    "outputs": {"partial": true},
-                    "warnings": ["runtime fallback"],
-                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
-                }),
-            ),
-            (
-                "cost",
-                serde_json::json!({
-                    "success": false,
-                    "status": "failed",
-                    "result": valid.error_json.clone().unwrap(),
-                    "outputs": {"partial": true},
-                    "warnings": ["runtime fallback"],
-                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.5},
-                }),
-            ),
-        ] {
-            let mut contradictory = valid.clone();
-            contradictory.managed_envelope = Some(envelope);
-            assert!(
-                store
-                    .finalize_thread("T-managed-contract", &contradictory)
-                    .is_err(),
-                "{label} contradiction must be rejected"
-            );
-        }
-
-        let mut missing_required_field = valid.clone();
-        let mut envelope = valid_envelope.clone();
-        envelope.as_object_mut().unwrap().remove("outputs");
-        missing_required_field.managed_envelope = Some(envelope);
-        assert!(store
-            .finalize_thread("T-managed-contract", &missing_required_field)
-            .is_err());
-
-        let mut completed_with_error = valid.clone();
-        completed_with_error.status = "completed".to_string();
-        completed_with_error.managed_envelope = Some(serde_json::json!({
-            "success": true,
-            "status": "completed",
-            "result": completed_with_error.error_json.clone().unwrap(),
-            "outputs": null,
-            "warnings": [],
-            "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
-        }));
-        assert!(store
-            .finalize_thread("T-managed-contract", &completed_with_error)
-            .is_err());
-
-        store
-            .finalize_thread("T-managed-contract", &valid)
-            .expect("coherent managed finalization");
-        let authority = store
-            .get_thread_terminal_authority("T-managed-contract")
-            .unwrap()
-            .unwrap();
-        assert_eq!(authority.managed_envelope, Some(valid_envelope));
-    }
-
-    #[test]
     fn state_store_reads_back_structured_error_as_object() {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-err-1", "T-err-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-err-1", None)
             .expect("mark_thread_running");
@@ -619,7 +510,6 @@ mod integration_tests {
             error_json: Some(err.clone()),
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
         store
             .finalize_thread("T-err-1", &finalize)
@@ -647,7 +537,7 @@ mod integration_tests {
         // Create root thread
         let root = make_thread("T-edge-root", "T-edge-root", "directive", "test/item", None);
         store
-            .create_thread(&root)
+            .create_thread_for_test(&root)
             .expect("create root should succeed");
 
         // Create child thread with upstream_thread_id
@@ -659,7 +549,7 @@ mod integration_tests {
             Some("T-edge-root"),
         );
         store
-            .create_thread(&child)
+            .create_thread_for_test(&child)
             .expect("create child should succeed");
 
         // Verify edge exists in projection (derived from snapshot's upstream_thread_id)
@@ -678,7 +568,7 @@ mod integration_tests {
 
         let thread = make_thread("T-art-1", "T-art-1", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
         store
             .mark_thread_running("T-art-1", None)
@@ -713,7 +603,7 @@ mod integration_tests {
 
         let thread = make_thread("T-art-fin", "T-art-fin", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
         store
             .mark_thread_running("T-art-fin", None)
@@ -731,7 +621,6 @@ mod integration_tests {
                 metadata: None,
             }],
             final_cost: None,
-            managed_envelope: None,
         };
 
         store
@@ -757,7 +646,7 @@ mod integration_tests {
 
         let thread = make_thread("T-cont-1", "T-cont-1", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
         store
             .mark_thread_running("T-cont-1", None)
@@ -766,7 +655,7 @@ mod integration_tests {
         // Create a successor via continuation
         let successor = make_thread("T-cont-2", "T-cont-1", "directive", "test/item2", None);
         let events = store
-            .create_continuation(&successor, "T-cont-1", "T-cont-1", Some("retry"))
+            .create_continuation_for_test(&successor, "T-cont-1", "T-cont-1", Some("retry"))
             .expect("create_continuation should succeed");
 
         assert!(!events.is_empty(), "should return persisted events");
@@ -812,7 +701,9 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-done-1", "T-done-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-done-1", None)
             .expect("mark_thread_running");
@@ -826,7 +717,6 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
-                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
@@ -834,7 +724,7 @@ mod integration_tests {
         // Braid a successor onto the completed turn.
         let successor = make_thread("T-done-2", "T-done-1", "directive", "test/item", None);
         store
-            .create_continuation(&successor, "T-done-1", "T-done-1", Some("follow-up"))
+            .create_continuation_for_test(&successor, "T-done-1", "T-done-1", Some("follow-up"))
             .expect("create_continuation onto completed source");
 
         // Predecessor keeps its terminal status and result.
@@ -876,7 +766,9 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-once-1", "T-once-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-once-1", None)
             .expect("mark_thread_running");
@@ -890,19 +782,18 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
-                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
 
         let first = make_thread("T-once-2", "T-once-1", "directive", "test/item", None);
         store
-            .create_continuation(&first, "T-once-1", "T-once-1", Some("first"))
+            .create_continuation_for_test(&first, "T-once-1", "T-once-1", Some("first"))
             .expect("first continuation");
 
         let dup = make_thread("T-once-3", "T-once-1", "directive", "test/item", None);
         let err = store
-            .create_continuation(&dup, "T-once-1", "T-once-1", Some("second"))
+            .create_continuation_for_test(&dup, "T-once-1", "T-once-1", Some("second"))
             .expect_err("second continuation of the same source must be refused");
         assert!(
             err.to_string().contains("already continued"),
@@ -929,7 +820,9 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-mc-done-1", "T-mc-done-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-mc-done-1", None)
             .expect("mark_thread_running");
@@ -943,20 +836,13 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
-                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
 
         let successor = make_thread("T-mc-done-2", "T-mc-done-1", "directive", "test/item", None);
         let err = store
-            .create_machine_continuation(
-                &successor,
-                "T-mc-done-1",
-                "T-mc-done-1",
-                Some("limit"),
-                &continued_settlement(),
-            )
+            .create_machine_continuation(&successor, "T-mc-done-1", "T-mc-done-1", Some("limit"))
             .expect_err("machine continuation must refuse a terminal source");
         assert!(
             err.to_string().contains("requires a running source"),
@@ -986,7 +872,9 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-mc-run-1", "T-mc-run-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-mc-run-1", None)
             .expect("mark_thread_running");
@@ -994,13 +882,7 @@ mod integration_tests {
 
         let successor = make_thread("T-mc-run-2", "T-mc-run-1", "directive", "test/item", None);
         let err = store
-            .create_machine_continuation(
-                &successor,
-                "T-mc-run-1",
-                "T-mc-run-1",
-                Some("limit"),
-                &continued_settlement(),
-            )
+            .create_machine_continuation(&successor, "T-mc-run-1", "T-mc-run-1", Some("limit"))
             .expect_err("machine continuation must require a captured ResumeContext");
         assert!(
             err.to_string().contains("no captured ResumeContext"),
@@ -1027,159 +909,13 @@ mod integration_tests {
     }
 
     #[test]
-    fn machine_continuation_rejects_managed_authority_contradictions_without_mutation() {
-        let (_tmpdir, store) = setup_state_store();
-        let source = make_thread(
-            "T-mc-invalid-1",
-            "T-mc-invalid-1",
-            "directive",
-            "test/item",
-            None,
-        );
-        store.create_thread(&source).expect("create source");
-        seed_continuable(&store, "T-mc-invalid-1", "directive");
-        let successor = make_thread(
-            "T-mc-invalid-2",
-            "T-mc-invalid-1",
-            "directive",
-            "test/item",
-            Some("T-mc-invalid-1"),
-        );
-
-        let mut wrong_status = continued_settlement();
-        wrong_status.managed_envelope["status"] = serde_json::json!("failed");
-        assert!(store
-            .create_machine_continuation(
-                &successor,
-                "T-mc-invalid-1",
-                "T-mc-invalid-1",
-                Some("segment limit"),
-                &wrong_status,
-            )
-            .is_err());
-
-        let mut wrong_result = continued_settlement();
-        wrong_result.managed_envelope["result"] = serde_json::json!({"unexpected": true});
-        assert!(store
-            .create_machine_continuation(
-                &successor,
-                "T-mc-invalid-1",
-                "T-mc-invalid-1",
-                Some("segment limit"),
-                &wrong_result,
-            )
-            .is_err());
-
-        let mut unexpected_cost = continued_settlement();
-        unexpected_cost.managed_envelope["cost"] = serde_json::json!({
-            "input_tokens": 1,
-            "output_tokens": 0,
-            "total_usd": 0.0,
-        });
-        assert!(store
-            .create_machine_continuation(
-                &successor,
-                "T-mc-invalid-1",
-                "T-mc-invalid-1",
-                Some("segment limit"),
-                &unexpected_cost,
-            )
-            .is_err());
-
-        assert_eq!(
-            store.get_thread("T-mc-invalid-1").unwrap().unwrap().status,
-            "running"
-        );
-        assert!(store.get_thread("T-mc-invalid-2").unwrap().is_none());
-    }
-
-    #[test]
-    fn machine_continuation_persists_exact_terminal_authority() {
-        let (_tmpdir, store) = setup_state_store();
-        let source = make_thread(
-            "T-mc-authority-1",
-            "T-mc-authority-1",
-            "directive",
-            "test/item",
-            None,
-        );
-        store.create_thread(&source).expect("create source");
-        seed_continuable(&store, "T-mc-authority-1", "directive");
-
-        let result = serde_json::json!({"checkpoint": "cut-off"});
-        let raw_cost = serde_json::json!({
-            "input_tokens": 17,
-            "output_tokens": 5,
-            "total_usd": 0.125,
-            "basis": "rollup",
-        });
-        let envelope = serde_json::json!({
-            "success": false,
-            "status": "continued",
-            "result": result.clone(),
-            "outputs": {"partial": true},
-            "warnings": ["near segment limit"],
-            "cost": raw_cost,
-        });
-        let settlement = ContinuedThreadSettlement {
-            result_json: Some(result),
-            final_cost: Some(ryeos_engine::contracts::FinalCost {
-                turns: 3,
-                input_tokens: 17,
-                output_tokens: 5,
-                spend: 0.125,
-                provider: Some("test-provider".to_string()),
-                basis: Some("rollup".to_string()),
-                metadata: Some(serde_json::json!({"source": "runtime"})),
-            }),
-            managed_envelope: envelope.clone(),
-        };
-        let successor = make_thread(
-            "T-mc-authority-2",
-            "T-mc-authority-1",
-            "directive",
-            "test/item",
-            Some("T-mc-authority-1"),
-        );
-
-        store
-            .create_machine_continuation(
-                &successor,
-                "T-mc-authority-1",
-                "T-mc-authority-1",
-                Some("segment limit"),
-                &settlement,
-            )
-            .expect("machine continuation");
-
-        let authority = store
-            .get_thread_terminal_authority("T-mc-authority-1")
-            .expect("read terminal authority")
-            .expect("continued source is terminal");
-        assert_eq!(
-            authority.status,
-            ryeos_state::objects::ThreadStatus::Continued
-        );
-        assert_eq!(authority.managed_envelope, Some(envelope));
-        let cost = authority.final_cost.expect("authoritative final cost");
-        assert_eq!(cost.turns, 3);
-        assert_eq!(cost.input_tokens, 17);
-        assert_eq!(cost.output_tokens, 5);
-        assert_eq!(cost.spend, 0.125);
-        assert_eq!(cost.provider.as_deref(), Some("test-provider"));
-        assert_eq!(cost.basis.as_deref(), Some("rollup"));
-        assert_eq!(
-            cost.metadata,
-            Some(serde_json::json!({"source": "runtime"}))
-        );
-    }
-
-    #[test]
     fn create_or_get_continuation_dedups_by_fingerprint() {
         use ryeos_app::state_store::ContinuationOutcome;
         let (_tmpdir, store) = setup_state_store();
         let thread = make_thread("T-fp-1", "T-fp-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-fp-1", None)
             .expect("mark_thread_running");
@@ -1193,7 +929,6 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
-                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
@@ -1201,7 +936,7 @@ mod integration_tests {
         // First follow-up: creates the successor + persists fingerprint fp-A.
         let succ = make_thread("T-fp-2", "T-fp-1", "directive", "test/item", None);
         let outcome = store
-            .create_or_get_continuation(
+            .create_or_get_continuation_for_test(
                 &succ,
                 "T-fp-1",
                 "T-fp-1",
@@ -1237,7 +972,7 @@ mod integration_tests {
         // return the EXISTING successor and mint no sibling.
         let dup = make_thread("T-fp-3", "T-fp-1", "directive", "test/item", None);
         let outcome = store
-            .create_or_get_continuation(
+            .create_or_get_continuation_for_test(
                 &dup,
                 "T-fp-1",
                 "T-fp-1",
@@ -1262,7 +997,7 @@ mod integration_tests {
         // A DIFFERENT fingerprint onto the already-continued source is a conflict.
         let conflicting = make_thread("T-fp-4", "T-fp-1", "directive", "test/item", None);
         let outcome = store
-            .create_or_get_continuation(
+            .create_or_get_continuation_for_test(
                 &conflicting,
                 "T-fp-1",
                 "T-fp-1",
@@ -1297,6 +1032,7 @@ mod integration_tests {
         let resume_ctx = || ResumeContext {
             kind: "directive".into(),
             item_ref: "test/item".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
@@ -1331,7 +1067,7 @@ mod integration_tests {
         };
 
         let root = make_thread("D0", "D0", "directive", "test/item", None);
-        store.create_thread(&root).expect("create root");
+        store.create_thread_for_test(&root).expect("create root");
         make_continuable("D0");
 
         // `max` consecutive machine continuations — all allowed (links #1..#max).
@@ -1340,13 +1076,7 @@ mod integration_tests {
             let id = format!("D{i}");
             let succ = make_thread(&id, "D0", "directive", "test/item", Some(&source));
             store
-                .create_machine_continuation(
-                    &succ,
-                    &source,
-                    "D0",
-                    Some("turn_limit"),
-                    &continued_settlement(),
-                )
+                .create_machine_continuation(&succ, &source, "D0", Some("turn_limit"))
                 .unwrap_or_else(|e| panic!("machine link #{i} must be allowed: {e}"));
             make_continuable(&id);
             source = id;
@@ -1357,13 +1087,7 @@ mod integration_tests {
         // runtime fails terminal.
         let over = make_thread("D-over", "D0", "directive", "test/item", Some(&source));
         let err = store
-            .create_machine_continuation(
-                &over,
-                &source,
-                "D0",
-                Some("turn_limit"),
-                &continued_settlement(),
-            )
+            .create_machine_continuation(&over, &source, "D0", Some("turn_limit"))
             .expect_err("continuation past the cap must be refused");
         assert!(
             err.to_string().contains("continuation depth limit reached"),
@@ -1384,7 +1108,7 @@ mod integration_tests {
         // apply. It is created (not launched) and settles the source `continued`.
         let follow_succ = make_thread("D-follow", "D0", "directive", "test/item", Some(&source));
         store
-            .create_follow_resume_successor(&follow_succ, &source, "D0", &continued_settlement())
+            .create_follow_resume_successor(&follow_succ, &source, "D0")
             .expect("follow-resume must be allowed at the machine cap");
         let fs = store
             .get_thread("D-follow")
@@ -1413,6 +1137,7 @@ mod integration_tests {
         let resume_ctx = || ResumeContext {
             kind: "directive".into(),
             item_ref: "test/item".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
@@ -1460,7 +1185,7 @@ mod integration_tests {
         for spoof in ["operator_follow_up", "graph_follow_resume"] {
             let src = format!("M-{spoof}");
             store
-                .create_thread(&make_thread(&src, &src, "directive", "test/item", None))
+                .create_thread_for_test(&make_thread(&src, &src, "directive", "test/item", None))
                 .expect("create root");
             make_continuable(&src);
             let succ = format!("M-{spoof}-s");
@@ -1470,7 +1195,6 @@ mod integration_tests {
                     &src,
                     &src,
                     Some(spoof),
-                    &continued_settlement(),
                 )
                 .expect("machine continuation");
             assert_eq!(
@@ -1482,7 +1206,7 @@ mod integration_tests {
 
         // Follow-resume successor invariants.
         store
-            .create_thread(&make_thread(
+            .create_thread_for_test(&make_thread(
                 "F-root",
                 "F-root",
                 "directive",
@@ -1496,7 +1220,6 @@ mod integration_tests {
                 &make_thread("F-succ", "F-root", "directive", "test/item", Some("F-root")),
                 "F-root",
                 "F-root",
-                &continued_settlement(),
             )
             .expect("follow-resume");
 
@@ -1558,7 +1281,6 @@ mod integration_tests {
                     &make_thread("F-dup", "F-root", "directive", "test/item", Some("F-root")),
                     "F-root",
                     "F-root",
-                    &continued_settlement(),
                 )
                 .is_err(),
             "a second successor off a settled source must be rejected"
@@ -1566,7 +1288,7 @@ mod integration_tests {
 
         // Source must be running.
         store
-            .create_thread(&make_thread("R-cr", "R-cr", "directive", "test/item", None))
+            .create_thread_for_test(&make_thread("R-cr", "R-cr", "directive", "test/item", None))
             .expect("create");
         assert!(
             store
@@ -1575,7 +1297,6 @@ mod integration_tests {
                     "R-cr",
                     "R-cr",
                     Some("turn_limit"),
-                    &continued_settlement(),
                 )
                 .is_err(),
             "machine continuation requires a running source"
@@ -1583,7 +1304,7 @@ mod integration_tests {
 
         // Missing resume context fails BEFORE the source settles.
         store
-            .create_thread(&make_thread("R-nr", "R-nr", "directive", "test/item", None))
+            .create_thread_for_test(&make_thread("R-nr", "R-nr", "directive", "test/item", None))
             .expect("create");
         store
             .mark_thread_running("R-nr", None)
@@ -1595,7 +1316,6 @@ mod integration_tests {
                     "R-nr",
                     "R-nr",
                     Some("turn_limit"),
-                    &continued_settlement(),
                 )
                 .is_err(),
             "missing source ResumeContext must fail"
@@ -1609,7 +1329,7 @@ mod integration_tests {
         // Successor preconditions are checked BEFORE any runtime-db write, so a
         // rejection leaves no orphan row and the source untouched.
         store
-            .create_thread(&make_thread(
+            .create_thread_for_test(&make_thread(
                 "G-root",
                 "G-root",
                 "directive",
@@ -1631,7 +1351,6 @@ mod integration_tests {
                     ),
                     "G-root",
                     "G-root",
-                    &continued_settlement(),
                 )
                 .is_err(),
             "successor with a foreign chain root must be rejected"
@@ -1654,7 +1373,6 @@ mod integration_tests {
                     ),
                     "G-root",
                     "G-root",
-                    &continued_settlement(),
                 )
                 .is_err(),
             "successor declaring a foreign upstream must be rejected"
@@ -1673,7 +1391,7 @@ mod integration_tests {
 
         let root = make_thread("T-reb-root", "T-reb-root", "directive", "test/item", None);
         store
-            .create_thread(&root)
+            .create_thread_for_test(&root)
             .expect("create root should succeed");
 
         let child = make_thread(
@@ -1684,7 +1402,7 @@ mod integration_tests {
             Some("T-reb-root"),
         );
         store
-            .create_thread(&child)
+            .create_thread_for_test(&child)
             .expect("create child should succeed");
 
         // Verify edges exist before rebuild
@@ -1696,6 +1414,9 @@ mod integration_tests {
         // Now delete the projection and rebuild from CAS
         store
             .with_state_db(|db| {
+                let cas_root = db.cas_root().to_path_buf();
+                let refs_root = db.refs_root().to_path_buf();
+
                 // Clear edges from projection
                 db.projection()
                     .connection()
@@ -1703,7 +1424,13 @@ mod integration_tests {
                     .expect("clear projection should succeed");
 
                 // Rebuild from CAS
-                let report = db.rebuild_projection().expect("rebuild should succeed");
+                let report = ryeos_state::rebuild::rebuild_projection(
+                    db.projection(),
+                    &cas_root,
+                    &refs_root,
+                    db.head_trust_store(),
+                )
+                .expect("rebuild should succeed");
 
                 assert_eq!(report.chains_rebuilt, 1);
                 assert_eq!(report.threads_restored, 2);
@@ -1731,7 +1458,7 @@ mod integration_tests {
 
         let thread = make_thread("T-reb-art", "T-reb-art", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
         store
             .mark_thread_running("T-reb-art", None)
@@ -1749,7 +1476,6 @@ mod integration_tests {
                 metadata: Some(serde_json::json!({"lines": 10})),
             }],
             final_cost: None,
-            managed_envelope: None,
         };
 
         store
@@ -1770,7 +1496,16 @@ mod integration_tests {
         // Rebuild from CAS
         store
             .with_state_db(|db| {
-                let report = db.rebuild_projection().expect("rebuild should succeed");
+                let cas_root = db.cas_root().to_path_buf();
+                let refs_root = db.refs_root().to_path_buf();
+
+                let report = ryeos_state::rebuild::rebuild_projection(
+                    db.projection(),
+                    &cas_root,
+                    &refs_root,
+                    db.head_trust_store(),
+                )
+                .expect("rebuild should succeed");
 
                 assert_eq!(report.chains_rebuilt, 1);
 
@@ -1791,12 +1526,12 @@ mod integration_tests {
     }
 
     #[test]
-    fn catch_up_projection_recovers_new_state() {
+    fn named_chain_repair_recovers_new_state() {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-catchup", "T-catchup", "directive", "test/item", None);
         store
-            .create_thread(&thread)
+            .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
 
         // Simulate projection drift: update projection_meta to a fake old hash
@@ -1821,12 +1556,15 @@ mod integration_tests {
             })
             .expect("with_state_db should succeed");
 
-        // Run catch-up
+        // Repair only the named chain; current-generation recovery never scans
+        // the global head directory.
         store
             .with_state_db(|db| {
-                let report = db.catch_up_projection().expect("catch_up should succeed");
+                let report = db
+                    .repair_one_chain("T-catchup")
+                    .expect("named-chain repair should succeed");
 
-                assert_eq!(report.chains_updated, 1, "chain should be caught up");
+                assert_eq!(report.chains_updated, 1, "chain should be repaired");
 
                 Ok::<_, anyhow::Error>(())
             })
@@ -1846,14 +1584,14 @@ mod integration_tests {
 
         // 1. Create root thread
         let root = make_thread("T-e2e", "T-e2e", "directive", "test/e2e", None);
-        store.create_thread(&root).expect("create root");
+        store.create_thread_for_test(&root).expect("create root");
         store
             .mark_thread_running("T-e2e", None)
             .expect("mark running");
 
         // 2. Spawn child thread
         let child = make_thread("T-e2e-child", "T-e2e", "tool", "test/child", Some("T-e2e"));
-        store.create_thread(&child).expect("create child");
+        store.create_thread_for_test(&child).expect("create child");
 
         // 3. Finalize root with artifacts
         let finalize = FinalizeThreadRecord {
@@ -1876,7 +1614,6 @@ mod integration_tests {
                 basis: None,
                 metadata: None,
             }),
-            managed_envelope: None,
         };
         store.finalize_thread("T-e2e", &finalize).expect("finalize");
 
@@ -1917,7 +1654,15 @@ mod integration_tests {
                     )
                     .expect("clear projection");
 
-                let report = db.rebuild_projection().expect("rebuild");
+                let cas_root = db.cas_root().to_path_buf();
+                let refs_root = db.refs_root().to_path_buf();
+                let report = ryeos_state::rebuild::rebuild_projection(
+                    db.projection(),
+                    &cas_root,
+                    &refs_root,
+                    db.head_trust_store(),
+                )
+                .expect("rebuild");
 
                 assert!(report.chains_rebuilt >= 1);
 
@@ -1959,7 +1704,9 @@ mod integration_tests {
             "test/item",
             None,
         );
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-skip-attach", None)
             .expect("mark running");
@@ -1972,7 +1719,6 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
         store
             .finalize_thread("T-skip-attach", &finalize)
@@ -2018,7 +1764,9 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-cancel-1", "T-cancel-1", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-cancel-1", None)
             .expect("mark running");
@@ -2030,7 +1778,6 @@ mod integration_tests {
             error_json: Some(serde_json::json!({"reason": "test_cancel"})),
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
 
         let persisted = store
@@ -2061,7 +1808,9 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         let thread = make_thread("T-double", "T-double", "directive", "test/item", None);
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-double", None)
             .expect("mark running");
@@ -2073,7 +1822,6 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
         store
             .finalize_thread("T-double", &finalize)
@@ -2087,7 +1835,6 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
         let err = store
             .finalize_thread("T-double", &cancel_finalize)
@@ -2109,7 +1856,9 @@ mod integration_tests {
             "test/item",
             None,
         );
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         // Don't mark running — stays in "created".
 
         let finalize = FinalizeThreadRecord {
@@ -2119,7 +1868,6 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
-            managed_envelope: None,
         };
 
         let persisted = store

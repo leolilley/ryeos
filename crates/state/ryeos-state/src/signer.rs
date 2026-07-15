@@ -15,22 +15,38 @@ pub trait Signer: Send + Sync {
     /// public key in hex).
     fn fingerprint(&self) -> &str;
 
-    /// Return the public key corresponding to this signer.
-    ///
-    /// Chain state is discovered through signed refs, so state owners must
-    /// supply verification authority as well as write authority. Keeping both
-    /// halves on one trait prevents callers from silently trusting a
-    /// fingerprint string without possessing the corresponding key.
+    /// Return the public key corresponding to the private signing authority.
+    /// Authoritative writers use this to prove both fingerprint consistency
+    /// and membership in the StateDb-owned trust store before publication.
     fn verifying_key(&self) -> lillux::crypto::VerifyingKey;
 }
 
-/// Build the minimum explicit verification authority for state written by a
-/// signer. Callers that need to trust rotated or imported historical keys
-/// should construct a larger [`crate::refs::TrustStore`] instead.
-pub fn trust_store_for_signer(signer: &dyn Signer) -> crate::refs::TrustStore {
-    let mut trust_store = crate::refs::TrustStore::new();
-    trust_store.insert(signer.fingerprint().to_owned(), signer.verifying_key());
-    trust_store
+/// Prove that a prospective authoritative writer owns the exact key admitted
+/// under its declared fingerprint. Checking the fingerprint alone would not
+/// prove possession of the trusted private key.
+pub fn ensure_signer_trusted(
+    signer: &dyn Signer,
+    trust_store: &crate::refs::TrustStore,
+) -> anyhow::Result<()> {
+    let verifying_key = signer.verifying_key();
+    let actual_fingerprint = lillux::crypto::fingerprint(&verifying_key);
+    if signer.fingerprint() != actual_fingerprint {
+        anyhow::bail!(
+            "signer fingerprint/key mismatch: declared {}, actual {}",
+            signer.fingerprint(),
+            actual_fingerprint,
+        );
+    }
+    let trusted = trust_store
+        .get(signer.fingerprint())
+        .ok_or_else(|| anyhow::anyhow!("signer {} is not trusted", signer.fingerprint()))?;
+    if trusted.as_bytes() != verifying_key.as_bytes() {
+        anyhow::bail!(
+            "signer key does not match trusted key for {}",
+            signer.fingerprint()
+        );
+    }
+    Ok(())
 }
 
 /// Deterministic test signer with real Ed25519 cryptography.

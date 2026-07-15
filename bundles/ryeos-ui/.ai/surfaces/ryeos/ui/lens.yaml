@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:797cd808b9af93c359f5a2e8763f7814e4280a959377544ed198bc682ad5f332:Mkp7A05bp8hDz3MRV/OmJPoaVTIZ1YIz77bWxryqPy6NoWoPf4xt/XS2Sjmj68962SzXZgNuaScXU456l1h5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:5c20d48e183d6067cbf3638fcca1d91950b98ec4ffe6916951988f2d97f18516:86MBvJCJPFdmbQyYZt4h7qnbCSV0hd7zxpokpFmE/ixR3culyYd4yauKNdmMg02YhSyFC7UdDYFRvNPMI7HTBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 version: "1.0.0"
 description: >-
@@ -42,6 +42,7 @@ library:
     views:
       - view:ryeos/threads/history
       - view:ryeos/node/threads/history
+      - view:ryeos/thread/tree
       - view:ryeos/thread/transcript
       - view:ryeos/threads/detail
   - group: Project
@@ -91,11 +92,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      # Opt into project scoping: the client fills this empty slot with the
-      # seat's project (threads/input requires project_path). Services that
-      # don't declare it never receive it.
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

@@ -17,7 +17,11 @@ impl Walker {
             execution,
             cache: _,
         } = input;
-        let FollowSuspendOutcome { item_id, params } = outcome;
+        let FollowSuspendOutcome {
+            item_id,
+            ref_bindings,
+            params,
+        } = outcome;
         let item_id = item_id.as_str();
         let params = &params;
         // Suspend lifecycle: started + a DISTINCT suspended event + the
@@ -105,6 +109,7 @@ impl Walker {
                 current,
                 step as i64,
                 item_id,
+                ref_bindings,
                 params.clone(),
                 None,
                 completion,
@@ -332,14 +337,36 @@ impl Walker {
             }
             // The fanout variable is lexical, not a temporary state key.
         }
+        let result_hash = match hash_json_value(&json!({
+            "results": &results,
+            "statuses": &statuses,
+        })) {
+            Ok(hash) => hash,
+            Err(error) => {
+                let message = format!("failed to canonicalize follow result: {error}");
+                return self
+                    .commit_terminal(CommitTerminalInput {
+                        graph_run_id,
+                        steps: step,
+                        state,
+                        suppressed_errors,
+                        base_status: GraphRunStatus::Error,
+                        error: Some(&message),
+                        output: None,
+                        guard,
+                        current_node_id: current,
+                        inputs,
+                        execution,
+                    })
+                    .await;
+            }
+        };
         let receipt = NodeReceipt {
             node: current.to_string(),
             step,
             definition_ref: self.graph.definition_ref.clone(),
             definition_hash: self.graph.definition_hash.clone(),
-            result_hash: Some(hash_json_value(
-                &json!({"results": results, "statuses": statuses}),
-            )),
+            result_hash: Some(result_hash),
             cache_hit: false,
             elapsed_ms,
             error: diagnostic.clone(),

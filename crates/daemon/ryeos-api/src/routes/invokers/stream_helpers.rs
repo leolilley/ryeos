@@ -54,7 +54,11 @@ pub fn is_terminal_status(status: &str) -> bool {
 }
 
 pub fn error_envelope(code: &str, message: &str) -> RouteStreamEnvelope {
-    error_envelope_with(code, message, None)
+    error_envelope_with(
+        code,
+        message,
+        Some(serde_json::json!({ "retryable": false })),
+    )
 }
 
 /// Emit a `stream_error` envelope. When `extras` is provided, its keys are

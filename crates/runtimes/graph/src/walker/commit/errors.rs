@@ -84,12 +84,39 @@ impl Walker {
         if let Some(cost) = cost {
             self.record_node_cost(current, step, item_id, cost.clone());
         }
-        let result_hash = effects.fanout.as_ref().map(|fanout| {
-            hash_json_value(&json!({
-                "results": &fanout.results,
-                "statuses": &fanout.statuses,
-            }))
-        });
+        let result_hash = match effects
+            .fanout
+            .as_ref()
+            .map(|fanout| {
+                hash_json_value(&json!({
+                    "results": &fanout.results,
+                    "statuses": &fanout.statuses,
+                }))
+            })
+            .transpose()
+        {
+            Ok(hash) => hash,
+            Err(canonical_error) => {
+                let message = format!(
+                    "failed to canonicalize failed node result for `{current}`: {canonical_error}"
+                );
+                return self
+                    .commit_terminal(CommitTerminalInput {
+                        graph_run_id,
+                        steps: step,
+                        state,
+                        suppressed_errors,
+                        base_status: GraphRunStatus::Error,
+                        error: Some(&message),
+                        output: None,
+                        guard,
+                        current_node_id: current,
+                        inputs,
+                        execution,
+                    })
+                    .await;
+            }
+        };
         let fanout_receipt = effects.fanout.as_ref().map(|fanout| {
             crate::model::FanoutReceiptSummary {
                 statuses: fanout.statuses.clone(),

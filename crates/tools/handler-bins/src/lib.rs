@@ -1,3 +1,4 @@
+pub mod directive_launch;
 pub mod extends_chain;
 pub mod graph_permissions;
 pub mod identity;

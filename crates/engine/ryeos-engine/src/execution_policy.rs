@@ -137,6 +137,14 @@ pub struct ExecutionPolicyDocument {
     pub graphs: HashMap<String, ExecutionPolicyValues>,
     #[serde(default)]
     pub directives: HashMap<String, ExecutionPolicyValues>,
+    /// Root-history policy is intentionally opaque to per-item execution-limit
+    /// resolution. Its typed consumer parses the strict signed block.
+    #[serde(default)]
+    pub history: Option<Value>,
+    /// Other node-scoped valves (for example launch-window fanout) are also
+    /// outside per-item execution-limit resolution.
+    #[serde(default)]
+    pub node: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -427,7 +427,13 @@ fn verify_cas_object_hash(
             actual: "<invalid expected hash>".to_string(),
         });
     }
-    let actual = lillux::cas::sha256_hex(lillux::cas::canonical_json(value).as_bytes());
+    let actual = lillux::cas::canonical_json(value)
+        .map(|canonical| lillux::cas::sha256_hex(canonical.as_bytes()))
+        .map_err(|_| ExecutorResolutionError::CasObjectHashMismatch {
+            object_kind,
+            expected: expected_hash.to_string(),
+            actual: "<uncanonicalizable object>".to_string(),
+        })?;
     if actual != expected_hash {
         return Err(ExecutorResolutionError::CasObjectHashMismatch {
             object_kind,
@@ -611,12 +617,15 @@ mod tests {
             "integrity": format!("sha256:{blob_hash}"),
             "mode": 0o755,
         });
-        let hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&value).as_bytes());
+        let hash = lillux::cas::sha256_hex(
+            lillux::cas::canonical_json(&value).unwrap().as_bytes(),
+        );
         assert!(verify_executor_item_source(&value, &hash, item_ref).is_ok());
 
         value["signature_info"] = json!({"fingerprint": "claimed-only"});
-        let extra_field_hash =
-            lillux::cas::sha256_hex(lillux::cas::canonical_json(&value).as_bytes());
+        let extra_field_hash = lillux::cas::sha256_hex(
+            lillux::cas::canonical_json(&value).unwrap().as_bytes(),
+        );
         assert!(verify_executor_item_source(&value, &extra_field_hash, item_ref).is_err());
     }
 
@@ -628,7 +637,9 @@ mod tests {
                 "bin/x86_64-unknown-linux-gnu/demo": "ab".repeat(32),
             },
         });
-        let hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&value).as_bytes());
+        let hash = lillux::cas::sha256_hex(
+            lillux::cas::canonical_json(&value).unwrap().as_bytes(),
+        );
         assert!(verify_executor_manifest_object(&value, &hash).is_ok());
 
         value["item_source_hashes"]["bin/x86_64-unknown-linux-gnu/demo"] =

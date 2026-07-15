@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T01:06:00Z:b465bd8a3a9fc4c2a840616250f26e6f288aed629f9b139bb3ea00ae8db737b3:xy4sx5+PUlJ+2n1PHtGxlkMs/ToQYp+s3lbpZlPSUhXKCCHeoSpLYjfRyaCUqzwV/UGzS5LGUTqOFXIGDMObAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:46Z:a1d10fc19f4e42fd938267ab1cf239fae4d2a6f0ab9835411b6b4d8e5b62de10:XE/p0b04alTP0JWDRPZMEZlJNscOTiQTVYpEpv+6t4tbXPv1w35ZgdWXqo4/bMW5dhkcsmt394c8jcwzz6+6Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: knowledge
 default: true
@@ -6,4 +6,22 @@ binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime
 abi_version: "v1"
 required_caps:
   - runtime.execute
+launch_contract:
+  primary_allowed_kinds:
+    - knowledge
+  primary_allowed_spaces:
+    - bundle
+    - project
+  primary_allowed_trust:
+    - trusted_bundle
+    - trusted_project
+  ref_bindings: {}
+  preparation:
+    kind: none
+  config_inputs: {}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {}
 description: "Knowledge interpretation runtime — V5.3 stub, V5.4 lights up"

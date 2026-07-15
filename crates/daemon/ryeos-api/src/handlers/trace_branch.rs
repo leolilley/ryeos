@@ -163,6 +163,7 @@ pub async fn handle(
             .map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: None,
     };
     let branch_payload = json!({
         "relation": "trace_branch",

@@ -131,6 +131,9 @@ pub enum BuildError {
 
     #[error("stdin envelope serialize failed: {0}")]
     StdinSerialize(String),
+
+    #[error("{path_kind} path is not valid UTF-8")]
+    NonUtf8Path { path_kind: &'static str },
 }
 
 /// Build a `SubprocessSpec` from a protocol descriptor and dispatch inputs.
@@ -184,12 +187,28 @@ pub fn build_subprocess_spec(
             // build a synthetic request. This avoids duplicating the
             // production logic while keeping the builder pure.
             EnvInjectionSource::ThreadId => request.thread_id.to_string(),
-            EnvInjectionSource::ProjectPath => request.project_path.to_string_lossy().to_string(),
-            EnvInjectionSource::CallbackProjectPath => {
-                request.callback_project_path.to_string_lossy().to_string()
-            }
+            EnvInjectionSource::ProjectPath => request
+                .project_path
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "project",
+                })?
+                .to_owned(),
+            EnvInjectionSource::CallbackProjectPath => request
+                .callback_project_path
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "callback project",
+                })?
+                .to_owned(),
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
-            EnvInjectionSource::CasRoot => request.cas_root.to_string_lossy().to_string(),
+            EnvInjectionSource::CasRoot => request
+                .cas_root
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "CAS root",
+                })?
+                .to_owned(),
             EnvInjectionSource::ThreadAuthToken => request
                 .thread_auth_token
                 .map(str::to_string)
@@ -444,6 +463,7 @@ mod tests {
                     requested_id: "runtime:ryeos/core/test-runtime".to_string(),
                     resolved_ref: "runtime:ryeos/core/test-runtime".to_string(),
                     source_path: PathBuf::from("/project/.ai/runtimes/ryeos/core/runtime.yaml"),
+                    source_space: crate::contracts::ItemSpace::Project,
                     trust_class: TrustClass::Unsigned,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
@@ -459,7 +479,7 @@ mod tests {
                 referenced_items: vec![],
             },
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data: BTreeMap::new(),
         }
     }
 

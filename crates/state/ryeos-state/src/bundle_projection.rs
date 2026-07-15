@@ -1,9 +1,11 @@
 //! Rebuildable SQLite projection helpers for bundle events.
 
+use std::ffi::OsStr;
+use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use crate::bundle_events::BundleEventRecord;
 use crate::objects::validate_bundle_identifier;
@@ -55,20 +57,53 @@ pub struct BundleProjectionSyncReport {
 
 pub struct BundleProjectionDb {
     conn: Connection,
+    _directory: lillux::PinnedDirectory,
+    _instance_file: fs::File,
 }
 
 impl BundleProjectionDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create projection dir {}", parent.display()))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = path.file_name().ok_or_else(|| {
+            anyhow::anyhow!("bundle projection path has no filename: {}", path.display())
+        })?;
+        let directory = lillux::PinnedDirectory::open_or_create(parent)
+            .with_context(|| format!("create projection dir {}", parent.display()))?;
+        Self::open_in_directory(directory, filename)
+    }
+
+    pub(crate) fn open_in_directory(
+        directory: lillux::PinnedDirectory,
+        filename: &OsStr,
+    ) -> anyhow::Result<Self> {
+        let path = directory.path().join(filename);
+        let sqlite_path = directory.descriptor_child_path(filename)?;
+        let existing = directory.open_regular(filename, false)?;
+        let conn = Connection::open_with_flags(
+            &sqlite_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .with_context(|| format!("open bundle projection db {}", path.display()))?;
+        let instance_file = directory
+            .open_regular(filename, false)?
+            .ok_or_else(|| anyhow::anyhow!("bundle projection disappeared after open"))?;
+        if let Some(existing) = existing.as_ref() {
+            ensure_same_regular_file(existing, &instance_file, &path)?;
         }
-        let conn = Connection::open(path)
-            .with_context(|| format!("open bundle projection db {}", path.display()))?;
         conn.execute_batch(META_SCHEMA_SQL)
             .context("create bundle projection metadata schema")?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-        Ok(Self { conn })
+        let current = directory
+            .open_regular(filename, false)?
+            .ok_or_else(|| anyhow::anyhow!("bundle projection disappeared after schema open"))?;
+        ensure_same_regular_file(&instance_file, &current, &path)?;
+        Ok(Self {
+            conn,
+            _directory: directory,
+            _instance_file: instance_file,
+        })
     }
 
     pub fn connection(&self) -> &Connection {
@@ -250,6 +285,27 @@ impl BundleProjectionDb {
     }
 }
 
+fn ensure_same_regular_file(left: &fs::File, right: &fs::File, path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right, path);
+        anyhow::bail!("bundle projection file identity is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        if left.dev() != right.dev() || left.ino() != right.ino() {
+            anyhow::bail!(
+                "bundle projection path changed while opening: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
 fn ensure_projection_meta(
     conn: &Connection,
     projection_name: &str,
@@ -345,17 +401,7 @@ fn validate_projection_name(value: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
-    use crate::signer::{trust_store_for_signer, TestSigner};
-
-    fn append_test_bundle_event(
-        cas_root: &Path,
-        refs_root: &Path,
-        request: BundleEventAppendRequest,
-        signer: &TestSigner,
-    ) -> anyhow::Result<crate::BundleEventAppendResult> {
-        let trust_store = trust_store_for_signer(signer);
-        append_bundle_event(cas_root, refs_root, request, signer, &trust_store)
-    }
+    use crate::signer::{Signer, TestSigner};
 
     fn append_request(chain_id: &str, event_type: &str) -> BundleEventAppendRequest {
         BundleEventAppendRequest {
@@ -374,6 +420,12 @@ mod tests {
         }
     }
 
+    fn trust_store(signer: &TestSigner) -> crate::refs::TrustStore {
+        let mut trust = crate::refs::TrustStore::new();
+        trust.insert(signer.fingerprint().to_string(), signer.verifying_key());
+        trust
+    }
+
     #[test]
     fn projection_sync_tracks_per_chain_cursors_and_skips_replay() {
         let tmp = tempfile::tempdir().unwrap();
@@ -382,25 +434,26 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
+        let trust = trust_store(&signer);
 
-        let first = append_test_bundle_event(
+        let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
+            &trust,
         )
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_test_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        append_bundle_event(&cas_root, &refs_root, second_req, &signer, &trust).unwrap();
 
-        let trust_store = trust_store_for_signer(&signer);
         let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
-            &trust_store,
+            &trust,
         )
         .unwrap();
         let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
@@ -469,11 +522,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended = append_test_bundle_event(
+        let trust = trust_store(&signer);
+        let appended = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
+            &trust,
         )
         .unwrap();
 
@@ -507,24 +562,25 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
+        let trust = trust_store(&signer);
 
-        let first = append_test_bundle_event(
+        let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
+            &trust,
         )
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_test_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
-        let trust_store = trust_store_for_signer(&signer);
+        append_bundle_event(&cas_root, &refs_root, second_req, &signer, &trust).unwrap();
         let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
-            &trust_store,
+            &trust,
         )
         .unwrap();
 

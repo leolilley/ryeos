@@ -64,6 +64,11 @@ pub enum ViewLocalState {
         /// rows widgets use this; feeds ignore it.
         #[serde(default)]
         expanded_rows: BTreeSet<String>,
+        /// Hierarchy rows folded shut, keyed by the hierarchy's stable authored
+        /// id. Separate from detail expansion: a tree row can collapse its
+        /// descendants while still exposing its own expanded detail.
+        #[serde(default)]
+        collapsed_tree_rows: BTreeSet<String>,
         /// Rows whose projected content changed recently, keyed by stable
         /// record identity. Renderers use this as a transient flash signal;
         /// the flash carries the transition's tone when there was one.
@@ -102,6 +107,7 @@ impl ViewSpec {
             scroll: 0,
             collapsed: BTreeSet::new(),
             expanded_rows: BTreeSet::new(),
+            collapsed_tree_rows: BTreeSet::new(),
             changed_rows: BTreeMap::new(),
         }
     }

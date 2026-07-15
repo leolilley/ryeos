@@ -2,34 +2,38 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
 use crate::handlers::objects_closure_describe::{
-    closure_summary_json, collect_limited_closure, Request,
+    closure_summary_json, collect_limited_closure_with_cas, Request,
 };
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let report = collect_limited_closure(&req, state.clone())?;
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let _cas_guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
+    let report = collect_limited_closure_with_cas(&req, &cas)?;
     if !req.allow_incomplete && !report.is_complete() {
         bail!("object closure is incomplete");
     }
-
-    let cas_root = state.state_store.cas_root()?;
-    let cas = lillux::cas::CasStore::new(cas_root.clone());
 
     let mut entries = Vec::new();
     let mut total_object_bytes = 0_u64;
     let mut estimated_response_bytes = 128_u64;
 
     for hash in &report.object_hashes {
-        let path = lillux::shard_path(&cas_root, "objects", hash, ".json");
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            total_object_bytes = total_object_bytes.saturating_add(metadata.len());
+        if let Some(value) = cas.get_object(hash)? {
+            let canonical = lillux::canonical_json(&value)
+                .context("failed to canonicalize closure object")?;
+            let object_bytes = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
+            total_object_bytes = total_object_bytes.saturating_add(object_bytes);
             if total_object_bytes > req.max_total_object_bytes {
                 bail!(
                     "object closure exceeds max_total_object_bytes: {} > {}",
@@ -37,7 +41,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     req.max_total_object_bytes
                 );
             }
-            estimated_response_bytes = estimated_response_bytes.saturating_add(metadata.len());
+            estimated_response_bytes = estimated_response_bytes.saturating_add(object_bytes);
             if estimated_response_bytes > req.max_response_bytes {
                 bail!(
                     "object closure response exceeds max_response_bytes: {} > {}",
@@ -45,9 +49,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     req.max_response_bytes
                 );
             }
-        }
-
-        if let Some(value) = cas.get_object(hash)? {
             entries.push(serde_json::json!({
                 "hash": hash,
                 "kind": "object",
@@ -63,9 +64,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut total_blob_bytes = 0_u64;
     for hash in &report.blob_hashes {
-        let path = lillux::shard_path(&cas_root, "blobs", hash, "");
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            total_blob_bytes = total_blob_bytes.saturating_add(metadata.len());
+        if let Some(data) = cas.get_blob(hash)? {
+            let blob_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            total_blob_bytes = total_blob_bytes.saturating_add(blob_bytes);
             if total_blob_bytes > req.max_total_blob_bytes {
                 bail!(
                     "object closure exceeds max_total_blob_bytes: {} > {}",
@@ -73,7 +74,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     req.max_total_blob_bytes
                 );
             }
-            let encoded_bytes = encoded_len(metadata.len());
+            let encoded_bytes = encoded_len(blob_bytes);
             estimated_response_bytes = estimated_response_bytes.saturating_add(encoded_bytes);
             if estimated_response_bytes > req.max_response_bytes {
                 bail!(
@@ -82,9 +83,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     req.max_response_bytes
                 );
             }
-        }
-
-        if let Some(data) = cas.get_blob(hash)? {
             entries.push(serde_json::json!({
                 "hash": hash,
                 "kind": "blob",

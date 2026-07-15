@@ -1,4 +1,4 @@
-//! `rebuild` — rebuild the projection DB from CAS state.
+//! Offline projection verification and rebuild from signed heads plus CAS.
 //!
 //! OfflineOnly: caller (run-service standalone path) holds the state lock;
 //! this handler just ports the rebuild logic from `actions::rebuild`.
@@ -12,71 +12,109 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-#[derive(Debug, serde::Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
-pub struct Request {
-    /// When true, follow up the rebuild with a reachability sweep so
-    /// callers can sanity-check object/blob counts.
-    pub verify: bool,
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    Verify,
+    Rebuild,
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {}
 
 #[derive(Debug, serde::Serialize)]
-pub struct RebuildReport {
-    pub chains_rebuilt: usize,
-    pub threads_restored: usize,
-    pub events_projected: usize,
+pub struct ProjectionMaintenanceReport {
+    pub operation: Operation,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reachable_objects: Option<usize>,
+    pub chains_rebuilt: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reachable_blobs: Option<usize>,
+    pub threads_restored: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events_projected: Option<usize>,
+    pub signed_heads_verified: usize,
+    pub projection_cursors_verified: usize,
+    pub projection_tables_verified: usize,
+    pub pending_retirements_recovered: usize,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let inner = state.config.runtime_state_dir();
-    let cas_root = inner.join("objects");
-    let refs_root = inner.join("refs");
+async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
+    let _scheduler_guard = match operation {
+        Operation::Verify => None,
+        Operation::Rebuild => Some(state.scheduler_runtime_gate.clone().write_owned().await),
+    };
     let state_store = state.state_store.clone();
+    let scheduler_db = state.scheduler_db.clone();
 
-    let report = tokio::task::spawn_blocking(move || -> Result<RebuildReport> {
-        let report = state_store.rebuild_thread_projection()?;
-        let mut out = RebuildReport {
-            chains_rebuilt: report.chains_rebuilt,
-            threads_restored: report.threads_restored,
-            events_projected: report.events_projected,
-            reachable_objects: None,
-            reachable_blobs: None,
+    let report = tokio::task::spawn_blocking(move || -> Result<ProjectionMaintenanceReport> {
+        let rebuilt = match operation {
+            Operation::Verify => None,
+            Operation::Rebuild => Some(state_store.rebuild_projection_generation()?),
         };
-        if req.verify && report.chains_rebuilt > 0 {
-            let reachable = state_store.with_state_db(|db| {
-                ryeos_state::reachability::collect_reachable(
-                    &cas_root,
-                    &refs_root,
-                    db.trust_store(),
-                )
-            })?;
-            out.reachable_objects = Some(reachable.object_hashes.len());
-            out.reachable_blobs = Some(reachable.blob_hashes.len());
-        }
-        Ok(out)
+        let pending_retirements_recovered = match operation {
+            Operation::Verify => 0,
+            Operation::Rebuild => {
+                state_store
+                    .recover_pending_terminal_chain_removals(
+                        &lillux::time::iso8601_now(),
+                        false,
+                        |thread_ids| {
+                            let mut pins = 0_u64;
+                            for thread_id in thread_ids {
+                                if scheduler_db.find_fire_by_thread(thread_id)?.is_some() {
+                                    pins = pins.checked_add(1).ok_or_else(|| {
+                                        anyhow::anyhow!("scheduler recovery pin count overflow")
+                                    })?;
+                                }
+                            }
+                            Ok(pins)
+                        },
+                    )?
+                    .pending_retirements_recovered
+            }
+        };
+        // Verification is deliberately a separate, non-mutating full scan.
+        // Running it after rebuild also validates the selected installed
+        // generation rather than trusting the temporary rebuild connection.
+        let verified = state_store.verify_projection_generation()?;
+        Ok(ProjectionMaintenanceReport {
+            operation,
+            chains_rebuilt: rebuilt.as_ref().map(|report| report.chains_rebuilt),
+            threads_restored: rebuilt.as_ref().map(|report| report.threads_restored),
+            events_projected: rebuilt.as_ref().map(|report| report.events_projected),
+            signed_heads_verified: verified.signed_heads_verified,
+            projection_cursors_verified: verified.projection_cursors_verified,
+            projection_tables_verified: verified.projection_tables_verified,
+            pending_retirements_recovered,
+        })
     })
     .await??;
 
     serde_json::to_value(report).map_err(Into::into)
 }
 
-pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:rebuild",
-    endpoint: "rebuild",
+pub const VERIFY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:projection/verify",
+    endpoint: "projection.verify",
     availability: ServiceAvailability::OfflineOnly,
-    required_caps: &["ryeos.execute.service.rebuild"],
+    required_caps: &["ryeos.execute.service.projection/verify"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
-            let req: Request = if params.is_null() {
-                Request::default()
-            } else {
-                serde_json::from_value(params)?
-            };
-            handle(req, state).await
+            let _: Request = serde_json::from_value(params)?;
+            handle(Operation::Verify, state).await
+        })
+    },
+};
+
+pub const REBUILD_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:projection/rebuild",
+    endpoint: "projection.rebuild",
+    availability: ServiceAvailability::OfflineOnly,
+    required_caps: &["ryeos.execute.service.projection/rebuild"],
+    handler: |params, _ctx, state| {
+        Box::pin(async move {
+            let _: Request = serde_json::from_value(params)?;
+            handle(Operation::Rebuild, state).await
         })
     },
 };

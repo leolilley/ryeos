@@ -14,7 +14,7 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {}
 
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
-    serde_json::to_value(state.status()).map_err(Into::into)
+    serde_json::to_value(state.status()?).map_err(Into::into)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

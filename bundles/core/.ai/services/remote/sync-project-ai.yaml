@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T05:13:14Z:5c40abf62d4602a07aeb59ba8dec864a3a75ca677ba46e82ddfcb04529d10de2:OVSikXYdkeo6Y02VHo+5oLRXhLesrKVtflH3cqMvBh9xKKSU0Y5itqZx4eNJUoXssKph0hrKEXWu80FMGwXWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:d9ceeb209e055ba68a434d42399d82bb456b6362b1fc68e699d3da29a19c647f:n1sDmJRa5ThSuHZ2fz5sJ7XuMvmrqUxALN4MWhNKlaTTOtu/pceqeEaxvGJmwQD8LTIIOGHOd3OcK6dKChcqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-project-ai
 required_caps: ["ryeos.execute.service.remote/sync-project-ai"]
@@ -6,5 +6,4 @@ schema:
   remote: string?
   project: string
   expected_deployed_hash: string?
-  force: boolean?
 description: "Sync managed project .ai content to a remote node and apply it"

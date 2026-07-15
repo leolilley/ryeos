@@ -190,9 +190,10 @@ fn read_process_identity(
 }
 
 fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -262,6 +263,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
     let url = format!("http://{}/execute", h.bind);
     let body = json!({
         "item_ref": "graph:chain",
+        "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
     });

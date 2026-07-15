@@ -75,9 +75,16 @@ pub async fn run_hooks(
     dispatcher: &HookDispatcher,
 ) -> Result<HookRunResult, HookRunError> {
     let event = occurrence.event();
-    let context_hash = lillux::sha256_hex(lillux::canonical_json(context).as_bytes());
-    let mut control_result: Option<Value> = None;
     let mut aggregate_cost: Option<RuntimeCost> = None;
+    let canonical_context = lillux::canonical_json(context).map_err(|error| {
+        HookRunError::new(
+            HookRunErrorKind::Integrity,
+            format!("hook context cannot be represented as canonical JSON: {error}"),
+            &aggregate_cost,
+        )
+    })?;
+    let context_hash = lillux::sha256_hex(canonical_context.as_bytes());
+    let mut control_result: Option<Value> = None;
     let evaluation_limits = EvaluationLimits::default();
 
     for (idx, hook) in hooks.iter().enumerate() {
@@ -211,7 +218,12 @@ mod tests {
             id: id.to_string(),
             event: event.to_string(),
             condition: ExpressionCondition::Absent,
-            action: json!({"primary": "execute", "item_id": "tool:test/noop", "params": {}}),
+            action: json!({
+                "primary": "execute",
+                "item_id": "tool:test/noop",
+                "ref_bindings": {},
+                "params": {}
+            }),
         }
     }
 
@@ -371,7 +383,7 @@ mod tests {
         assert_eq!(identity.layer, HookLayer::Infrastructure);
         assert_eq!(
             identity.context_hash,
-            lillux::sha256_hex(lillux::canonical_json(&context).as_bytes())
+            lillux::sha256_hex(lillux::canonical_json(&context).unwrap().as_bytes())
         );
     }
 
@@ -474,6 +486,7 @@ mod tests {
             action: json!({
                 "primary": "execute",
                 "item_id": "directive:test/hook",
+                "ref_bindings": {},
                 "params": {"reason": "${event.missing}"}
             }),
         }]);
@@ -504,6 +517,7 @@ mod tests {
             action: json!({
                 "primary": "execute",
                 "item_id": "directive:test/hook",
+                "ref_bindings": {},
                 "params": {
                     "messages": "${event.messages}",
                     "usage": "${event.usage}"

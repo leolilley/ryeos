@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:faa4ccaaee6c94641f4358a49720eec2e980b99a42c435fcc9265613e5802666:ROmbSmzkOzg7CYxBWDiLp8XN+5bxHpzUlPc9GFyyCPLRrqp34pU5YstXSqF1z3YxRP0ToUF3q+McJXWrGJefDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:45c958cdf473d2b35d78bf566542a368eb0924e9a96c901e42d78bb288260f39:ZB4FkPLpd/39idZepSVDGbqTJAOWpOeVliprbkkphQw/XUvK0TNoYaCEW0I5OQMehvi3AvfzYYdx8WEkwJJgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
@@ -25,6 +25,7 @@ library:
     views:
       - view:ryeos/threads/history
       - view:ryeos/node/threads/history
+      - view:ryeos/thread/tree
   - group: Project
     views:
       - view:ryeos/project/files
@@ -48,8 +49,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

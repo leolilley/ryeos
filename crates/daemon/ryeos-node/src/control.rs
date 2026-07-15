@@ -8,6 +8,8 @@ use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use crate::LIFECYCLE_FRAME_MAX_BYTES;
+
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Serialize)]
@@ -56,6 +58,54 @@ impl std::fmt::Display for ControlCallTimeout {
 
 impl std::error::Error for ControlCallTimeout {}
 
+/// Classified connect failure. Only `NotFound` and `ConnectionRefused` prove
+/// that no listener accepted the probe; permission/resource failures remain
+/// uncertain and must not authorize replacement startup.
+#[derive(Debug)]
+pub struct ControlConnectError {
+    pub kind: std::io::ErrorKind,
+    pub uds_path: std::path::PathBuf,
+    pub detail: String,
+}
+
+impl std::fmt::Display for ControlConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "connect lifecycle control at {} failed: {}",
+            self.uds_path.display(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for ControlConnectError {}
+
+/// Marker error for a lifecycle RPC that connected to a peer but could not
+/// complete a usable exchange. Once connect succeeds, replacement startup is
+/// unsafe even if the peer closes, emits a malformed frame, or rejects the
+/// current protocol.
+#[derive(Debug)]
+pub struct ControlLivePeerError {
+    pub method: String,
+    pub uds_path: std::path::PathBuf,
+    pub detail: String,
+}
+
+impl std::fmt::Display for ControlLivePeerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "live lifecycle peer failed {} on {}: {}",
+            self.method,
+            self.uds_path.display(),
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for ControlLivePeerError {}
+
 /// Perform a single lifecycle RPC bounded by `timeout`.
 ///
 /// The timeout wraps the entire round trip (connect + write + read +
@@ -80,18 +130,34 @@ pub async fn call(
 }
 
 async fn call_inner(uds_path: &Path, method: &str, params: Value) -> Result<Value> {
-    let mut stream = UnixStream::connect(uds_path)
-        .await
-        .with_context(|| format!("connect lifecycle control at {}", uds_path.display()))?;
+    let mut stream = UnixStream::connect(uds_path).await.map_err(|error| {
+        anyhow::Error::new(ControlConnectError {
+            kind: error.kind(),
+            uds_path: uds_path.to_path_buf(),
+            detail: error.to_string(),
+        })
+    })?;
 
+    call_connected(&mut stream, method, params)
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(ControlLivePeerError {
+                method: method.to_owned(),
+                uds_path: uds_path.to_path_buf(),
+                detail: format!("{error:#}"),
+            })
+        })
+}
+
+async fn call_connected(stream: &mut UnixStream, method: &str, params: Value) -> Result<Value> {
     let request = RpcRequest {
         request_id: REQUEST_ID.fetch_add(1, Ordering::Relaxed),
         method,
         params,
     };
     let encoded = rmp_serde::to_vec_named(&request).context("encode lifecycle rpc")?;
-    write_frame(&mut stream, &encoded).await?;
-    let frame = read_frame(&mut stream).await?;
+    write_frame(stream, &encoded).await?;
+    let frame = read_frame(stream).await?;
     let response: RpcResponse = rmp_serde::from_slice(&frame).context("decode lifecycle rpc")?;
     if let Some(error) = response.error {
         return Err(anyhow!("{}: {}", error.code, error.message));
@@ -104,6 +170,7 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
         .len()
         .try_into()
         .map_err(|_| anyhow!("frame too large"))?;
+    let len = validate_frame_len(len)?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(payload).await?;
     Ok(())
@@ -112,8 +179,41 @@ async fn write_frame(stream: &mut UnixStream, payload: &[u8]) -> Result<()> {
 async fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut payload = vec![0u8; len];
+    let len = validate_frame_len(u32::from_be_bytes(len_buf))?;
+    let mut payload = vec![0u8; len as usize];
     stream.read_exact(&mut payload).await?;
     Ok(payload)
+}
+
+fn validate_frame_len(frame_len: u32) -> Result<u32> {
+    if frame_len > LIFECYCLE_FRAME_MAX_BYTES {
+        return Err(anyhow!(
+            "frame too large: {} bytes (max {})",
+            frame_len,
+            LIFECYCLE_FRAME_MAX_BYTES
+        ));
+    }
+    Ok(frame_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_size_boundary_is_inclusive() {
+        assert_eq!(
+            validate_frame_len(LIFECYCLE_FRAME_MAX_BYTES).unwrap(),
+            LIFECYCLE_FRAME_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn oversized_frame_is_rejected_before_allocation() {
+        let frame_len = LIFECYCLE_FRAME_MAX_BYTES + 1;
+        assert_eq!(
+            validate_frame_len(frame_len).unwrap_err().to_string(),
+            format!("frame too large: {frame_len} bytes (max {LIFECYCLE_FRAME_MAX_BYTES})")
+        );
+    }
 }

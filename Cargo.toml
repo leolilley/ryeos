@@ -11,6 +11,7 @@ members = [
     "crates/clients/base",
     "crates/clients/terminal",
     "crates/clients/web",
+    "crates/runtimes/directive-core",
     "crates/runtimes/directive",
     "crates/engine/ryeos-engine",
     "crates/engine/ryeos-executor",
@@ -46,6 +47,7 @@ ryeos-app = { path = "crates/daemon/ryeos-app" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
+ryeos-directive-core = { path = "crates/runtimes/directive-core" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
@@ -88,6 +90,7 @@ once_cell = "1"
 rand = "0.8.6"
 regex = "1"
 reqwest = { version = "0.12", default-features = false }
+ryu = "1"
 signal-hook = "0.3"
 rmp-serde = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }

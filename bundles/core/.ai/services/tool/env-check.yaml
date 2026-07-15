@@ -1,9 +1,10 @@
-# ryeos:signed:2026-06-19T13:40:21Z:c7c8799e89c325b89d76c82e8a90e4d8e8e813ddf3b659ebe20f2db42a900d4e:ZJpJkw6WxGIkbH+dqumf4ofcr4gOliI3VsBBBFLbgBEa6nR3JM08HIJ8pAsuu7UwEDBe7pz3SAWntmPHSymbBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:45Z:7749b5022ba0d6a3563f0fbe74a5a241eaeff343b2599706706bb92d70a57e8f:KjHFlJ/kDYY5st52xer5KCitqzlBVhZWyA7WLBfKQvRN+Meaoj5fazo/5l52RBC+5Cm/ZUeQ3v3z1kh5pldhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: tool.env-check
 availability: daemon_only
 required_caps: ["ryeos.execute.service.tool/env-check"]
 schema:
   item_ref: string
+  ref_bindings: object
   project_path: string
 description: "Report which source would satisfy each declared required_secret of an item (vault / host env / .env / missing), without running it. Names and sources only, never values."

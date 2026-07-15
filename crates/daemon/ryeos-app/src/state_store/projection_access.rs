@@ -26,22 +26,48 @@ impl StateStore {
     }
 
     pub fn projection_health_snapshot(&self) -> ThreadProjectionHealthSnapshot {
+        let pending = self
+            .lock()
+            .and_then(|g| g.state_db.pending_chain_transitions());
+        match pending {
+            Ok(pending) => self
+                .projection_health
+                .observe_pending_transitions(pending.len()),
+            Err(error) => self
+                .projection_health
+                .observe_pending_transition_error(&error),
+        }
         self.projection_health.snapshot()
     }
 
     pub fn repair_thread_projection(&self) -> Result<()> {
-        self.catch_up_thread_projection()?;
+        let g = self.lock()?;
+        // Every failed chain-head publication leaves a durable pending Set.
+        // Drain only that bounded journal; a live repair must never rediscover
+        // all historical chain heads.
+        g.state_db
+            .replay_pending_chain_transitions_with_runtime_liveness(&g.runtime_db)?;
+        self.projection_health
+            .observe_pending_transitions(g.state_db.pending_chain_transitions()?.len());
         Ok(())
     }
 
-    pub fn catch_up_thread_projection(&self) -> Result<ryeos_state::rebuild::CatchUpReport> {
+    /// Replay the bounded durable transition journal during startup while
+    /// retaining access to runtime liveness for headless Set decisions.
+    pub fn replay_pending_chain_transitions_with_observer(
+        &self,
+        observer: &dyn ryeos_state::ProjectionRecoveryObserver,
+    ) -> Result<ryeos_state::PendingReplayReport> {
         let g = self.lock()?;
-        g.state_db.catch_up_projection()
-    }
-
-    pub fn rebuild_thread_projection(&self) -> Result<ryeos_state::rebuild::RebuildReport> {
-        let g = self.lock()?;
-        g.state_db.rebuild_projection()
+        let report = g
+            .state_db
+            .replay_pending_chain_transitions_with_observer_and_runtime_liveness(
+                observer,
+                &g.runtime_db,
+            )?;
+        self.projection_health
+            .observe_pending_transitions(g.state_db.pending_chain_transitions()?.len());
+        Ok(report)
     }
 
     /// Run a closure with access to the projection database.
@@ -51,6 +77,8 @@ impl StateStore {
     {
         // Preserve the existing lock-before-health-check ordering.
         let g = self.lock()?;
+        self.projection_health
+            .observe_pending_transitions(g.state_db.pending_chain_transitions()?.len());
         ensure_projection_current(&self.projection_health)?;
         f(g.state_db.projection())
     }

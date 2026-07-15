@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:7765ade5eaf23004512b941921a8c806b867c005e45455977d9f928abc15c1cc:Uk9dm8u/gHvBf+KoSW8JWef0G7jgxH9POI0ApNY0p36JT4EBvHL6oXZvj0KTuQy/Y8Bl09TeGGfq46F03XnEAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:45Z:d80746b73bf50385499893d0ca6e25cdee2313ee17f4c3728a3c898e61c97b6f:PVpV4fkLRDcP7NWci8TSdKO8/9M0aAv6IOZR28MEpVeo9ILKBiRey6CpRaHVJ/qo2/W898vNouLAFUHvqUrTBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/handler"
 version: "1.0.0"
 location:
@@ -12,7 +12,8 @@ formats:
     signature:
       prefix: "#"
 # Handler descriptors are NOT root-executable. They are an
-# engine-internal extension-point registry (parsers + composers in v1).
+# engine-internal extension-point registry (parsers, composers, and launch
+# preparers).
 # Therefore: NO `execution:` block, NO terminator. The handler kind is
 # config-only metadata.
 #
@@ -26,7 +27,7 @@ composed_value_contract:
     category: { type: single, prim: string }
     name: { type: single, prim: string }
     kind: { type: single, prim: string, enum: [handler] }
-    serves: { type: single, prim: string, enum: [parser, composer] }
+    serves: { type: single, prim: string, enum: [parser, composer, launch_preparer] }
     binary_ref: { type: single, prim: string }
     abi_version: { type: single, prim: string }
   optional:

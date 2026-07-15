@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -133,6 +135,13 @@ pub async fn dispatch_action(
     let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
     tracing::Span::current().record("tool_name", item_id);
     let params = action.get("params").cloned().unwrap_or(json!({}));
+    let ref_bindings = action
+        .get("ref_bindings")
+        .ok_or_else(|| anyhow::anyhow!("action `{item_id}` is missing required `ref_bindings`"))
+        .and_then(|value| {
+            serde_json::from_value::<BTreeMap<String, String>>(value.clone())
+                .map_err(|e| anyhow::anyhow!("invalid `ref_bindings` for `{item_id}`: {e}"))
+        })?;
     let thread = action
         .get("thread")
         .and_then(|v| v.as_str())
@@ -174,6 +183,7 @@ pub async fn dispatch_action(
         project_path: project_path.to_string(),
         action: ryeos_runtime::callback::ActionPayload {
             item_id: item_id.to_string(),
+            ref_bindings,
             params,
             thread: thread.to_string(),
             call,
@@ -1008,6 +1018,7 @@ mod tests {
 
         let action = json!({
             "item_id": "knowledge:arc/resources",
+            "ref_bindings": {},
             "params": {},
             "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
         });
@@ -1030,6 +1041,7 @@ mod tests {
 
         let action = json!({
             "item_id": "graph:t/leaf",
+            "ref_bindings": {},
             "params": {},
             "thread": "detached",
             "launch_window": { "key": "gr-1:fan", "width": 12 },
@@ -1049,6 +1061,7 @@ mod tests {
         let client = make_mock_client(vec![]);
         let action = json!({
             "item_id": "graph:t/leaf",
+            "ref_bindings": {},
             "thread": "detached",
             "launch_window": { "width": "twelve" },
         });
@@ -1065,7 +1078,7 @@ mod tests {
             Arc::new(CapturingClient { last: last.clone() });
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
-        let action = json!({ "item_id": "tool:t/echo", "params": {} });
+        let action = json!({ "item_id": "tool:t/echo", "ref_bindings": {}, "params": {} });
         dispatch_action(&client, &action, "T-test", "/project", None)
             .await
             .expect("dispatch ok");
@@ -1082,7 +1095,8 @@ mod tests {
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
         // Parity with `/execute`'s `Option<MethodCall>`: explicit null == absent.
-        let action = json!({ "item_id": "tool:t/echo", "params": {}, "call": null });
+        let action =
+            json!({ "item_id": "tool:t/echo", "ref_bindings": {}, "params": {}, "call": null });
         dispatch_action(&client, &action, "T-test", "/project", None)
             .await
             .expect("dispatch ok");
@@ -1102,6 +1116,7 @@ mod tests {
 
             let action = json!({
                 "item_id": item_id,
+                "ref_bindings": {},
                 "params": {"user_input": "kept"},
             });
             dispatch_action(&client, &action, "T-test", "/project", None)
@@ -1118,6 +1133,7 @@ mod tests {
         let client = make_mock_client(vec![]);
         let action = json!({
             "item_id": "knowledge:arc/resources",
+            "ref_bindings": {},
             "params": {},
             "call": { "op": "query" }, // unknown field — deny_unknown_fields
         });
@@ -1136,7 +1152,7 @@ mod tests {
         // returns a continuation_id must FAIL loudly (directing the author to
         // `follow: true`), never silently block chasing the chain.
         let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
-        let action = json!({"item_id": "tool:test/deep"});
+        let action = json!({"item_id": "tool:test/deep", "ref_bindings": {}});
         let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
             .await
             .unwrap();

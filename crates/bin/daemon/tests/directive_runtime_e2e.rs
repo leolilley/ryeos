@@ -217,8 +217,9 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
                 let stderr = h.drain_stderr_nonblocking().await;
                 // Probe state dir for runtime exit + thread events
                 let state = h.state_path.clone();
-                let projection = state.join(".ai/state/projection.sqlite3");
-                let projection_dump = if projection.exists() {
+                let projection = common::selected_projection_path(&state).ok();
+                let projection_dump = if projection.as_ref().is_some_and(|path| path.exists()) {
+                    let projection = projection.as_ref().expect("checked selected projection");
                     match ryeos_state::projection::ProjectionDb::open(&projection) {
                         Ok(db) => format!(
                             "threads = {:#?}",
@@ -227,7 +228,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
                         Err(e) => format!("projection open error: {e}"),
                     }
                 } else {
-                    "no projection.sqlite3".into()
+                    "no selected projection generation".into()
                 };
                 panic!(
                     "POST /execute timed out after 30s — directive-runtime hung.\n\
@@ -337,7 +338,8 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     // Open the projection DB and confirm the thread row carries the
     // SUBJECT identity (`directive_run` / `directive:p3b3/subject`),
     // not the executor runtime's identity.
-    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     for _ in 0..40 {
         if projection_path.exists() {
             break;
@@ -346,7 +348,7 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     }
     assert!(
         projection_path.exists(),
-        "projection.sqlite3 must exist at {}",
+        "selected projection must exist at {}",
         projection_path.display()
     );
 
@@ -709,7 +711,8 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     );
 
     // The settled directive thread (no upstream).
-    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     let first = poll_thread(
         &projection_path,
         |t| t.item_ref == "directive:cont/dir" && t.upstream_thread_id.is_none(),
@@ -727,9 +730,11 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
             "service:threads/input",
             &project_path,
             serde_json::json!({
-                "thread": first_id.clone(),
-                "project_path": project_path.clone(),
                 "input": "continue",
+                "target": {
+                    "kind": "thread",
+                    "thread_id": first_id.clone(),
+                },
             }),
         )
         .await

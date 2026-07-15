@@ -24,7 +24,9 @@ use serde_json::json;
 use crate::canonical_ref::CanonicalRef;
 
 use crate::resolution::context::{ensure_canonical, field_as_string, ResolutionContext};
-use crate::resolution::types::{ResolutionError, ResolutionStepName, ResolvedAncestor};
+use crate::resolution::types::{
+    ResolutionError, ResolutionFailureClass, ResolutionStepName, ResolvedAncestor,
+};
 
 pub(crate) fn run(
     ctx: &mut ResolutionContext<'_>,
@@ -88,6 +90,7 @@ fn walk(
     let canonical = ensure_canonical(&after_alias, parent_kind);
     let ref_ = CanonicalRef::parse(&canonical).map_err(|e| ResolutionError::StepFailed {
         step: ResolutionStepName::ResolveExtendsChain,
+        class: ResolutionFailureClass::InvalidDefinition,
         reason: format!("invalid canonical ref `{canonical}`: {e}"),
     })?;
 
@@ -100,6 +103,7 @@ fn walk(
             requested_id: requested_id.to_string(),
             resolved_ref: ref_.to_string(),
             source_path: source_path.clone(),
+            source_space: loaded.source_space,
             trust_class: loaded.trust_class,
             alias_resolution: alias_hop,
             added_by: ResolutionStepName::ResolveExtendsChain,

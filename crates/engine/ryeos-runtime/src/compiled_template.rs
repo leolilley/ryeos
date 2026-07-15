@@ -543,6 +543,7 @@ mod tests {
     fn action_template_obeys_callback_field_whitelist() {
         let source = json!({
             "item_id": "tool:${inputs.tool}",
+            "ref_bindings": {"policy": "knowledge:${inputs.policy}"},
             "params": {"value": "${inputs.value}"},
             "call": {"method": "${inputs.method}", "args": {"q": "${inputs.query}"}},
             "facets": {"lane": "${inputs.lane}"},
@@ -555,6 +556,7 @@ mod tests {
         let context = json!({
             "inputs": {
                 "tool": "echo",
+                "policy": "test/policy",
                 "value": 7,
                 "method": "query",
                 "query": "hello",
@@ -568,6 +570,7 @@ mod tests {
         let rendered = compiled.render(&mut session).unwrap();
 
         assert_eq!(rendered["item_id"], "tool:echo");
+        assert_eq!(rendered["ref_bindings"]["policy"], "knowledge:test/policy");
         assert_eq!(rendered["params"]["value"], 7);
         assert_eq!(rendered["call"]["method"], "query");
         assert_eq!(rendered["facets"]["lane"], "a");

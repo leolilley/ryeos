@@ -2231,13 +2231,14 @@ config:
 #[test]
 fn cache_result_replays_within_one_execution_cache() {
     let cache = NodeCache::new("cache-test-unique-sequential");
-    let action = json!({"item_id": "tool:test/echo"});
+    let action = json!({"item_id": "tool:test/echo", "ref_bindings": {}});
     let key = compute_cache_key(
         "definition-hash",
         "cache-test-unique-sequential",
         "step1",
         &action,
-    );
+    )
+    .unwrap();
 
     assert!(cache.lookup(&key).is_none());
 
@@ -4333,7 +4334,11 @@ config:
     assert_eq!(receipt["node"].as_str(), Some("step1"));
     assert_eq!(
         receipt["node_result_hash"].as_str(),
-        Some(hash_json_value(&json!({"msg": "hello"})).as_str())
+        Some(
+            hash_json_value(&json!({"msg": "hello"}))
+                .unwrap()
+                .as_str()
+        )
     );
 }
 
@@ -4564,10 +4569,15 @@ fn node_result_hash_uses_canonical_json() {
 
     let left = Value::Object(left);
     let right = Value::Object(right);
-    let expected = lillux::cas::sha256_hex(lillux::cas::canonical_json(&right).as_bytes());
+    let expected = lillux::cas::sha256_hex(
+        lillux::cas::canonical_json(&right).unwrap().as_bytes(),
+    );
 
-    assert_eq!(hash_json_value(&left), expected);
-    assert_eq!(hash_json_value(&left), hash_json_value(&right));
+    assert_eq!(hash_json_value(&left).unwrap(), expected);
+    assert_eq!(
+        hash_json_value(&left).unwrap(),
+        hash_json_value(&right).unwrap()
+    );
 }
 
 #[tokio::test]

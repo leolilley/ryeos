@@ -21,6 +21,7 @@ use ryeos_runtime::CommandDispatch;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub tokens: Vec<String>,
+    pub ref_bindings: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub project_path: Option<String>,
     #[serde(default)]
@@ -117,6 +118,7 @@ pub async fn handle(
         target_site_id: None,
         validate_only: false,
         params: parameters,
+        ref_bindings: req.ref_bindings,
         acting_principal: ctx.fingerprint.as_str(),
         project_path: &project_path,
         provenance,
@@ -125,6 +127,7 @@ pub async fn handle(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        root_admission: None,
         parent_execution_context: None,
     };
 

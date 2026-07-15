@@ -588,11 +588,18 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// daemon bootstrap) for daemon-written `kind: node` items to verify on
 /// next boot.
 ///
-/// Returns `(engine, node_config_snapshot)`.
+/// Returns the engine, node-config snapshot, and the immutable sandbox snapshot
+/// selected after runtime admission. The returned sandbox may add a captured
+/// Bubblewrap backend when a disabled general policy still has a registered
+/// mandatory launch preparer.
 pub fn load_node_config_two_phase(
     config: &Config,
     sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
-) -> Result<(Arc<Engine>, Arc<NodeConfigSnapshot>)> {
+) -> Result<(
+    Arc<Engine>,
+    Arc<NodeConfigSnapshot>,
+    Arc<ryeos_engine::sandbox::SandboxRuntime>,
+)> {
     let app_root = &config.app_root;
 
     // ── Phase 1: bootstrap trust store + bundle section ──
@@ -627,11 +634,9 @@ pub fn load_node_config_two_phase(
     );
 
     // ── Build engine ──
-    let engine = Arc::new(crate::engine_init::build_engine(
-        config,
-        &effective_bundle_roots,
-        sandbox,
-    )?);
+    let (engine, sandbox) =
+        crate::engine_init::build_engine(config, &effective_bundle_roots, sandbox)?;
+    let engine = Arc::new(engine);
 
     // ── Phase 2: full node-config scan ──
     let section_table = SectionTable::new();
@@ -650,7 +655,7 @@ pub fn load_node_config_two_phase(
         "Phase 2: node config loaded"
     );
 
-    Ok((engine, snapshot))
+    Ok((engine, snapshot, sandbox))
 }
 
 #[cfg(test)]

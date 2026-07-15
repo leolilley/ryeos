@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -1771,9 +1772,9 @@ fn merge_into(target: &mut Value, source: &Value) {
     }
 }
 
-fn hash_json_value(value: &Value) -> String {
-    let canonical = lillux::cas::canonical_json(value);
-    lillux::cas::sha256_hex(canonical.as_bytes())
+fn hash_json_value(value: &Value) -> Result<String, lillux::cas::CanonicalJsonError> {
+    let canonical = lillux::cas::canonical_json(value)?;
+    Ok(lillux::cas::sha256_hex(canonical.as_bytes()))
 }
 
 fn compute_cache_key(
@@ -1781,12 +1782,12 @@ fn compute_cache_key(
     graph_id: &str,
     node_name: &str,
     action: &Value,
-) -> String {
+) -> Result<String, lillux::cas::CanonicalJsonError> {
     // Length-prefix each identity component so concatenation cannot alias.
     // The definition hash prevents a changed graph from reusing an entry, and
     // canonical JSON gives object-key ordering one deterministic identity.
     let mut hasher = Sha256::new();
-    let canonical_action = lillux::cas::canonical_json(action);
+    let canonical_action = lillux::cas::canonical_json(action)?;
     for component in [
         definition_hash.as_bytes(),
         graph_id.as_bytes(),
@@ -1796,7 +1797,7 @@ fn compute_cache_key(
         hasher.update((component.len() as u64).to_be_bytes());
         hasher.update(component);
     }
-    lillux::cas::sha256_hex(&hasher.finalize())
+    Ok(lillux::cas::sha256_hex(&hasher.finalize()))
 }
 
 #[cfg(test)]

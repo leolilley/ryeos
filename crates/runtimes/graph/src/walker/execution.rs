@@ -180,8 +180,34 @@ impl Walker {
         // action off to a detached child and suspend (handled in commit_step). The
         // result is consumed on resume, so nothing is dispatched or cached here.
         if node.follow && resumed_follow_envelope.is_none() {
+            let ref_bindings = match rendered_action.get("ref_bindings") {
+                Some(value) => {
+                    match serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
+                        Ok(bindings) => bindings,
+                        Err(error) => {
+                            return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                                item_id: Some(dispatched_item_id),
+                                error: format!("follow action has invalid ref_bindings: {error}"),
+                                next_on_error: resolve_next_on_error(node, cfg),
+                                elapsed_ms: elapsed,
+                                cost: None,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                        item_id: Some(dispatched_item_id),
+                        error: "follow action is missing required ref_bindings".to_string(),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: elapsed,
+                        cost: None,
+                    });
+                }
+            };
             return StepOutcome::FollowSuspend(FollowSuspendOutcome {
                 item_id: dispatched_item_id,
+                ref_bindings,
                 params: rendered_action
                     .get("params")
                     .cloned()
@@ -214,12 +240,25 @@ impl Walker {
                     }
                 }
             } else if node.is_cacheable() {
-                let cache_key = compute_cache_key(
+                let cache_key = match compute_cache_key(
                     &self.graph.definition_hash,
                     &self.graph.graph_id,
                     current,
                     &rendered_action,
-                );
+                ) {
+                    Ok(cache_key) => cache_key,
+                    Err(error) => {
+                        return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                            item_id: Some(dispatched_item_id),
+                            error: format!(
+                                "failed to canonicalize cache identity for node `{current}`: {error}"
+                            ),
+                            elapsed_ms: elapsed,
+                            cost: None,
+                            effects: ExpressionFailureEffects::default(),
+                        });
+                    }
+                };
                 if let Some(cached) = cache.lookup(&cache_key) {
                     cache_hit = true;
                     // A cache hit replays a result retained earlier in this execution
@@ -832,6 +871,35 @@ impl Walker {
                     cost: None,
                 });
             }
+            let ref_bindings = match action.get("ref_bindings") {
+                Some(value) => {
+                    match serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
+                        Ok(bindings) => bindings,
+                        Err(error) => {
+                            return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                                item_id: Some(item_ref),
+                                error: format!(
+                                    "follow fanout item {index} has invalid ref_bindings: {error}"
+                                ),
+                                next_on_error: resolve_next_on_error(node, cfg),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                cost: None,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                        item_id: Some(item_ref),
+                        error: format!(
+                            "follow fanout item {index} is missing required ref_bindings"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                    });
+                }
+            };
 
             // A bounded expression result per child is not enough: a large
             // cohort of individually valid child specs can still retain an
@@ -845,6 +913,11 @@ impl Walker {
                 .unwrap_or_else(|| json!({}));
             let mut child_fields = Map::new();
             child_fields.insert("item_ref".to_string(), Value::String(item_ref));
+            child_fields.insert(
+                "ref_bindings".to_string(),
+                serde_json::to_value(&ref_bindings)
+                    .expect("validated ref bindings must serialize as JSON"),
+            );
             child_fields.insert("parameters".to_string(), parameters);
             if let Some(facets) = facets {
                 child_fields.insert("facets".to_string(), facets);
@@ -877,6 +950,7 @@ impl Walker {
             let facets = child_fields.remove("facets");
             children.push(ryeos_runtime::callback::FollowChildSpec {
                 item_ref,
+                ref_bindings,
                 parameters,
                 facets,
             });

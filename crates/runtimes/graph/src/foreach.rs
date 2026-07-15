@@ -1323,7 +1323,7 @@ mod tests {
 
     fn detach_node(max_concurrency: Option<usize>) -> GraphNode {
         let mut node: GraphNode = serde_yaml::from_str(
-            "node_type: foreach\nover: \"${state.items}\"\ndetach: true\nparallel: true\naction: {item_id: \"graph:t/leaf\"}\n",
+            "node_type: foreach\nover: \"${state.items}\"\ndetach: true\nparallel: true\naction: {item_id: \"graph:t/leaf\", ref_bindings: {}}\n",
         )
         .unwrap();
         node.max_concurrency = max_concurrency;

@@ -1,6 +1,8 @@
 //! Daemon-wide SQLite schema-ownership invariant.
 //!
-//! Every daemon-owned SQLite file (`runtime.db` and `projection.db`)
+//! Every daemon-owned SQLite file (`runtime.sqlite3`, `scheduler.sqlite3`,
+//! `operational.sqlite3`, and
+//! replaceable projection generations)
 //! must be verified by an exact [`SchemaSpec`] + `application_id` before
 //! any DDL touches it. This prevents the partial-DDL hazard where a
 //! stale db file with a pre-column schema causes `CREATE TABLE IF NOT
@@ -362,6 +364,64 @@ pub fn assert_owned(conn: &Connection, spec: &SchemaSpec, path: &Path) -> Result
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SchemaSqlEntry {
+    object_type: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_stat%'
+         ORDER BY type, name",
+    )?;
+    let entries = statement
+        .query_map([], |row| {
+            let sql: Option<String> = row.get(3)?;
+            Ok(SchemaSqlEntry {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                // The reference database is built by this exact SQLite
+                // library from the declared DDL, so raw stored SQL is stable.
+                // Comparing it byte-for-byte also preserves whitespace and
+                // case inside quoted CHECK literals.
+                sql,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("read complete SQLite schema SQL")?;
+    Ok(entries)
+}
+
+/// Verify the complete SQLite schema against a same-library reference built
+/// from the declared DDL. Unlike [`assert_owned`], this includes table CHECK,
+/// UNIQUE/autoindex and foreign-key clauses, index predicates, views, and
+/// triggers. SQLite statistics tables are runtime artifacts and are excluded.
+///
+/// This is intended for stable source-of-truth stores whose fail-closed exact
+/// schema contract must cover constraints that PRAGMA table/index metadata
+/// does not fully describe.
+pub fn assert_complete_schema_sql(conn: &Connection, ddl: &str, path: &Path) -> Result<()> {
+    let reference = Connection::open_in_memory().context("open reference SQLite schema")?;
+    reference
+        .execute_batch(ddl)
+        .context("build reference SQLite schema")?;
+    let expected = schema_sql_entries(&reference)?;
+    let actual = schema_sql_entries(conn)?;
+    if actual != expected {
+        bail!(
+            "complete schema SQL mismatch in {}; CHECK/UNIQUE/foreign-key/index predicates must exactly match the current operational schema",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Initialize a fresh database with the given schema spec.
 ///
 /// Stamps `PRAGMA application_id` and runs the DDL. The caller MUST
@@ -399,7 +459,10 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
 }
 
 /// Open-time schema preparation for a daemon-owned SQLite DB whose data is
-/// the **source of truth** (NOT rebuildable) — `scheduler.db`, `runtime.db`.
+/// retained across daemon restarts — for example `runtime.sqlite3` and stores
+/// such as `operational.sqlite3` when an explicit migration exists. Rebuildable
+/// owners such as `scheduler.sqlite3` may also use this exact-schema helper;
+/// calling it does not make their SQLite contents authoritative.
 ///
 /// Strategy: *migrate-forward, then exact-assert*.
 /// - **Already ours** (`application_id` matches): run `migrate` — an

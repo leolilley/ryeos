@@ -1,8 +1,10 @@
-//! `objects/has` — check which object hashes exist in the CAS.
+//! `objects/has` — check which typed CAS entries exist in the CAS.
 //!
-//! Batch check: accepts `{ "hashes": ["abc", "def", ...] }`, returns
-//! `{ "found": ["abc"], "missing": ["def"] }`.
+//! Object and blob namespaces are intentionally independent. The same digest
+//! may validly exist in both namespaces, so a flattened presence answer cannot
+//! prove that a transfer closure is complete.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -15,28 +17,55 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
-    pub hashes: Vec<String>,
+    pub object_hashes: Vec<String>,
+    pub blob_hashes: Vec<String>,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let cas = state.cas_store()?;
+    validate_hashes("object", &req.object_hashes)?;
+    validate_hashes("blob", &req.blob_hashes)?;
+    let cas_read = state.acquire_cas_read()?;
+    let cas = cas_read.cas();
 
-    let mut found = Vec::new();
-    let mut missing = Vec::new();
+    let mut found_object_hashes = Vec::new();
+    let mut missing_object_hashes = Vec::new();
+    let mut found_blob_hashes = Vec::new();
+    let mut missing_blob_hashes = Vec::new();
 
-    for hash in &req.hashes {
-        if cas.has(hash) {
-            found.push(hash.clone());
+    for hash in &req.object_hashes {
+        if cas.has_object(hash)? {
+            found_object_hashes.push(hash.clone());
         } else {
-            missing.push(hash.clone());
+            missing_object_hashes.push(hash.clone());
+        }
+    }
+    for hash in &req.blob_hashes {
+        if cas.has_blob(hash)? {
+            found_blob_hashes.push(hash.clone());
+        } else {
+            missing_blob_hashes.push(hash.clone());
         }
     }
 
     Ok(serde_json::json!({
-        "found": found,
-        "missing": missing,
+        "found_object_hashes": found_object_hashes,
+        "missing_object_hashes": missing_object_hashes,
+        "found_blob_hashes": found_blob_hashes,
+        "missing_blob_hashes": missing_blob_hashes,
     }))
+}
+
+fn validate_hashes(namespace: &str, hashes: &[String]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for hash in hashes {
+        if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            anyhow::bail!("objects/has contains an invalid {namespace} hash: {hash}");
+        }
+        if !seen.insert(hash) {
+            anyhow::bail!("objects/has contains a duplicate {namespace} hash: {hash}");
+        }
+    }
+    Ok(())
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
