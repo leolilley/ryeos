@@ -17,6 +17,7 @@ pub mod ui_remotes;
 pub mod ui_schedules;
 pub mod ui_seat;
 pub mod ui_session_current;
+pub mod ui_thread_tree;
 pub mod ui_threads;
 
 pub const ALL: &[ServiceDescriptor] = &[
@@ -31,6 +32,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_items::ITEM_INSPECT_DESCRIPTOR,
     ui_threads::DESCRIPTOR,
     ui_threads::INSPECT_DESCRIPTOR,
+    ui_thread_tree::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
     ui_schedules::DESCRIPTOR,
     ui_gc::DESCRIPTOR,

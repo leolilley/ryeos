@@ -36,7 +36,7 @@ use ryeos_app::launch_metadata::{
 };
 use ryeos_app::runtime_db::{follow_child_spec_hash, follow_phase, NewFollowWaiter};
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::NewThreadRecord;
+use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
 use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
@@ -477,6 +477,41 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 &child_thread_id,
             )?;
             bail!("follow: parent {parent_thread_id} was stop-requested during child admission");
+        }
+        // Portable cross-chain lineage: unlike an ordinary graph dispatch, a
+        // follow child is spawned inside this daemon callback, so the graph
+        // walker never receives a dispatch result from which it could emit
+        // `child_thread_spawned`. Repair the durable edge here before the
+        // parent is settled `continued`. The projection existence check makes
+        // a RESERVED-phase re-drive idempotent while the event itself keeps the
+        // relationship rebuild-safe (runtime_db's child link remains the
+        // separate operational cascade copy).
+        if !state
+            .state_store
+            .thread_edge_exists(&parent_thread_id, &child_thread_id)?
+        {
+            let event_type = ryeos_runtime::events::RuntimeEventType::ChildThreadSpawned;
+            let persisted = state.threads.append_thread_events(
+                &parent.chain_root_id,
+                &parent_thread_id,
+                &[NewEventRecord {
+                    event_type: event_type.as_str().to_string(),
+                    storage_class: event_type.storage_class().as_str().to_string(),
+                    payload: json!({
+                        "child_thread_id": child_thread_id,
+                        "node": params.follow_node,
+                        "step": params.step_count,
+                        "item_id": child.item_ref,
+                        "cohort_index": item_index,
+                        "spawn_reason": "follow",
+                    }),
+                }],
+            )?;
+            if persisted.is_none() {
+                bail!(
+                    "follow: parent {parent_thread_id} settled before child lineage was recorded"
+                );
+            }
         }
         if let Some(persisted) = persisted_meta
             .as_ref()

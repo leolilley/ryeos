@@ -411,6 +411,10 @@ pub struct RyeOsTextPositionVm {
 pub struct RyeOsTableRowVm {
     pub id: String,
     pub cells: Vec<String>,
+    /// Structural position when the table declares `projections.hierarchy`.
+    /// Renderers derive connector glyphs from this generic shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hierarchy: Option<RyeOsTableHierarchyVm>,
     /// Per-cell tone overrides, parallel to `cells` (`None` = inherit the row
     /// tone). Present only when at least one column declares a `tone` block,
     /// so tables without per-column tones pay nothing on the wire.
@@ -439,6 +443,15 @@ pub struct RyeOsTableRowVm {
     /// the per-row wire payload.
     #[serde(skip)]
     pub raw: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RyeOsTableHierarchyVm {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestor_continues: Vec<bool>,
+    pub is_last: bool,
+    pub has_children: bool,
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -994,6 +1007,7 @@ struct RowLocalState<'a> {
     cursor: Option<usize>,
     collapsed: Option<&'a std::collections::BTreeSet<usize>>,
     expanded_rows: Option<&'a std::collections::BTreeSet<String>>,
+    collapsed_tree_rows: Option<&'a std::collections::BTreeSet<String>>,
     changed_rows: Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 }
 
@@ -1003,12 +1017,14 @@ fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowLocalSta
             cursor,
             collapsed,
             expanded_rows,
+            collapsed_tree_rows,
             changed_rows,
             ..
         }) => RowLocalState {
             cursor: Some(*cursor),
             collapsed: Some(collapsed),
             expanded_rows: Some(expanded_rows),
+            collapsed_tree_rows: Some(collapsed_tree_rows),
             changed_rows: Some(changed_rows),
         },
         _ => RowLocalState::default(),
@@ -1027,7 +1043,7 @@ fn instance_input_vm(core: &RyeOsCore, instance_id: &str, view_ref: &str) -> Opt
 /// Render a content-bound view: binding + source response -> widget VM.
 /// Pure projection; unknown widgets and missing data degrade honestly.
 pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -> RyeOsViewVm {
-    let (expanded_rows, changed_rows) = selected_row_state(core, tile_id);
+    let (expanded_rows, collapsed_tree_rows, changed_rows) = selected_row_state(core, tile_id);
     bound_view_vm_keyed(
         core,
         &tile_id.0.to_string(),
@@ -1035,6 +1051,7 @@ pub(super) fn bound_view_vm(core: &RyeOsCore, tile_id: TileId, view_ref: &str) -
             cursor: selected_cursor(core, tile_id),
             collapsed: selected_collapsed(core, tile_id),
             expanded_rows,
+            collapsed_tree_rows,
             changed_rows,
         },
         view_ref,
@@ -1053,6 +1070,7 @@ fn bound_view_vm_keyed(
         cursor,
         collapsed,
         expanded_rows,
+        collapsed_tree_rows,
         changed_rows,
     } = local;
     let Some(binding) = core.views.get(view_ref) else {
@@ -1445,16 +1463,32 @@ fn bound_view_vm_keyed(
             let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
             let records = super::content::source_collection(binding, response);
-            let total_rows = records.len();
+            let empty_tree_folds = std::collections::BTreeSet::new();
+            let visible_rows = super::content::table_hierarchy_rows(
+                binding,
+                records,
+                collapsed_tree_rows.unwrap_or(&empty_tree_folds),
+            )
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.source_index, Some(row)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| (0..records.len()).map(|index| (index, None)).collect());
+            let total_rows = visible_rows.len();
             let (start, end) = row_render_window(total_rows, cursor);
             let selected_index = clamped_row_cursor(total_rows, cursor);
-            let rows = records[start..end]
+            let rows = visible_rows[start..end]
                 .iter()
                 .enumerate()
-                .map(|(offset, raw)| {
+                .map(|(offset, (source_index, hierarchy))| {
                     let index = start + offset;
+                    let raw = &records[*source_index];
                     let record = super::content::project_table_record(binding, raw, &columns);
-                    let key = super::model::row_key(&record.raw, index);
+                    let key = hierarchy
+                        .as_ref()
+                        .map(|tree| tree.key.clone())
+                        .unwrap_or_else(|| super::model::row_key(&record.raw, *source_index));
                     let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
                     let detail = if expanded {
                         detail_vm(&record.raw, &expand_fields)
@@ -1462,8 +1496,14 @@ fn bound_view_vm_keyed(
                         Default::default()
                     };
                     RyeOsTableRowVm {
-                        id: format!("{view_ref}#{index}"),
+                        id: format!("{view_ref}#{key}"),
                         cells: record.cells,
+                        hierarchy: hierarchy.as_ref().map(|tree| RyeOsTableHierarchyVm {
+                            ancestor_continues: tree.ancestor_continues.clone(),
+                            is_last: tree.is_last,
+                            has_children: tree.has_children,
+                            collapsed: tree.collapsed,
+                        }),
                         cell_tones: if record.cell_tones.iter().all(Option::is_none) {
                             Vec::new()
                         } else {
@@ -2764,15 +2804,21 @@ fn selected_row_state(
     tile_id: TileId,
 ) -> (
     Option<&std::collections::BTreeSet<String>>,
+    Option<&std::collections::BTreeSet<String>>,
     Option<&std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
 ) {
     match core.workspace.tiles.get(&tile_id).map(|tile| &tile.local) {
         Some(ViewLocalState::GenericList {
             expanded_rows,
+            collapsed_tree_rows,
             changed_rows,
             ..
-        }) => (Some(expanded_rows), Some(changed_rows)),
-        _ => (None, None),
+        }) => (
+            Some(expanded_rows),
+            Some(collapsed_tree_rows),
+            Some(changed_rows),
+        ),
+        _ => (None, None, None),
     }
 }
 
@@ -2878,6 +2924,7 @@ mod tests {
                 cursor: None,
                 collapsed: None,
                 expanded_rows: None,
+                collapsed_tree_rows: None,
                 changed_rows: None,
             },
             view_ref,
@@ -3300,12 +3347,12 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "id", "project", "status", "source", "follow", "created"]
+            ["thread", "kind", "item", "project", "status", "lineage", "created"]
         );
         let rows = project_table(
             &binding,
             &json!({ "threads": [
-                { "thread_id": "T-ab", "kind": "directive", "item_ref": "directive:ops/base", "status": "running", "requested_by": "fp:claude", "created_at": "2026-06-29T00:00:00Z" },
+                { "thread_id": "T-ab", "kind": "directive", "item_ref": "directive:ops/base", "status": "running", "requested_by": "fp:claude", "created_at": "2026-06-29T00:00:00Z", "follow": { "display_state": "resume_queued" } },
                 { "thread_id": "T-cd", "kind": "graph", "item_ref": "directive:ops/scan", "status": "failed",  "requested_by": "fp:amp", "created_at": "2026-06-28T00:00:00Z" }
             ]}),
             &columns,
@@ -3316,13 +3363,11 @@ mod tests {
             [
                 "T-ab",
                 "directive",
-                "base \u{2039} directive:ops",
-                "directive:ops/base",
-                "",
+                "base",
+                "node",
                 "running",
-                "fp:claude",
-                "",
-                "2026-06-29T00:00:00Z"
+                "resume queued",
+                "00:00 · 29 Jun"
             ]
         );
         // Tone reuses the shared status→tone block the rows widget would.

@@ -549,6 +549,12 @@ impl RyeOsCore {
                 }
                 Vec::new()
             }
+            RyeOsUiEvent::SetTreeRowCollapsed { collapsed } => {
+                if self.set_focused_tree_row_collapsed(collapsed) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             RyeOsUiEvent::ActivateFocused => intent_for_focused_row(self)
                 .map_or_else(Vec::new, |intent| self.dispatch_intent(intent)),
             RyeOsUiEvent::PopLens => self.pop_view(),
@@ -981,6 +987,7 @@ fn initial_list_local_state() -> crate::workspace::ViewLocalState {
         scroll: 0,
         collapsed: std::collections::BTreeSet::new(),
         expanded_rows: std::collections::BTreeSet::new(),
+        collapsed_tree_rows: std::collections::BTreeSet::new(),
         changed_rows: std::collections::BTreeMap::new(),
     }
 }

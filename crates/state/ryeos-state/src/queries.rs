@@ -184,6 +184,31 @@ pub struct ThreadEdgeRow {
     pub spawn_reason: Option<String>,
 }
 
+/// One row in a bounded execution-tree closure. `tree_parent_thread_id` and
+/// `relation` describe the structural edge selected by the durable projection;
+/// `depth` is returned for diagnostics only (clients derive presentation from
+/// ids/parents rather than trusting server-authored indentation).
+#[derive(Debug, Clone)]
+pub struct ExecutionTreeRow {
+    pub thread: ThreadRow,
+    pub tree_parent_thread_id: Option<String>,
+    pub relation: String,
+    pub depth: usize,
+    pub has_children: bool,
+}
+
+impl ExecutionTreeRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            thread: ThreadRow::from_row(row)?,
+            tree_parent_thread_id: row.get("tree_parent_thread_id")?,
+            relation: row.get("tree_relation")?,
+            depth: row.get::<_, i64>("tree_depth")?.max(0) as usize,
+            has_children: row.get("tree_has_children")?,
+        })
+    }
+}
+
 impl ThreadEdgeRow {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -870,6 +895,126 @@ pub fn list_thread_edges(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+pub fn thread_edge_exists(
+    db: &ProjectionDb,
+    parent_thread_id: &str,
+    child_thread_id: &str,
+) -> anyhow::Result<bool> {
+    db.connection()
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM thread_edges
+                WHERE parent_thread_id = ?1 AND child_thread_id = ?2
+            )",
+            rusqlite::params![parent_thread_id, child_thread_id],
+            |row| row.get(0),
+        )
+        .context("query thread_edge_exists")
+}
+
+/// Resolve `selected_thread_id` to the oldest reachable execution ancestor,
+/// then return a deterministic pre-order closure over both durable edge kinds:
+/// continuation (`threads.upstream_thread_id`) and cross-chain spawn
+/// (`thread_edges`). The caller supplies hard depth/node bounds; cycles are
+/// rejected by the path guard instead of making the query unbounded.
+pub fn execution_tree(
+    db: &ProjectionDb,
+    selected_thread_id: &str,
+    max_depth: usize,
+    row_limit: usize,
+) -> anyhow::Result<Vec<ExecutionTreeRow>> {
+    let sql = r#"
+        WITH RECURSIVE
+        edges(parent_thread_id, child_thread_id, relation, created_at) AS (
+            SELECT
+                e.parent_thread_id,
+                e.child_thread_id,
+                CASE
+                    WHEN MAX(
+                        CASE WHEN child.upstream_thread_id = e.parent_thread_id THEN 1 ELSE 0 END
+                    ) = 1 THEN 'continued'
+                    WHEN MAX(CASE WHEN e.spawn_reason = 'follow' THEN 1 ELSE 0 END) = 1
+                        THEN 'follow'
+                    ELSE 'spawned'
+                END,
+                MIN(COALESCE(NULLIF(e.created_at, ''), child.created_at))
+            FROM thread_edges e
+            JOIN threads child ON child.thread_id = e.child_thread_id
+            GROUP BY e.parent_thread_id, e.child_thread_id
+        ),
+        ancestors(thread_id, depth, path) AS (
+            SELECT ?1, 0, ',' || ?1 || ','
+            WHERE EXISTS (SELECT 1 FROM threads WHERE thread_id = ?1)
+            UNION ALL
+            SELECT e.parent_thread_id,
+                   a.depth + 1,
+                   a.path || e.parent_thread_id || ','
+            FROM ancestors a
+            JOIN edges e ON e.child_thread_id = a.thread_id
+            WHERE a.depth < ?2
+              AND instr(a.path, ',' || e.parent_thread_id || ',') = 0
+        ),
+        root(thread_id) AS (
+            SELECT thread_id
+            FROM ancestors
+            ORDER BY depth DESC, thread_id
+            LIMIT 1
+        ),
+        walk(thread_id, parent_thread_id, relation, depth, path, sort_path) AS (
+            SELECT root.thread_id,
+                   NULL,
+                   'root',
+                   0,
+                   ',' || root.thread_id || ',',
+                   (SELECT created_at FROM threads WHERE thread_id = root.thread_id)
+                       || ':' || root.thread_id
+            FROM root
+            UNION ALL
+            SELECT e.child_thread_id,
+                   e.parent_thread_id,
+                   e.relation,
+                   w.depth + 1,
+                   w.path || e.child_thread_id || ',',
+                   w.sort_path || '/' || e.created_at || ':' || e.child_thread_id
+            FROM walk w
+            JOIN edges e ON e.parent_thread_id = w.thread_id
+            WHERE w.depth < ?2
+              AND instr(w.path, ',' || e.child_thread_id || ',') = 0
+        )
+        SELECT
+            t.thread_id, t.chain_root_id, t.kind, t.status,
+            t.item_ref, t.executor_ref, t.launch_mode,
+            t.current_site_id, t.origin_site_id, t.upstream_thread_id,
+            t.requested_by, t.project_root,
+            t.created_at, t.updated_at, t.started_at, t.finished_at,
+            walk.parent_thread_id AS tree_parent_thread_id,
+            walk.relation AS tree_relation,
+            walk.depth AS tree_depth,
+            EXISTS (
+                SELECT 1 FROM edges child_edge
+                WHERE child_edge.parent_thread_id = walk.thread_id
+            ) AS tree_has_children
+        FROM walk
+        JOIN threads t ON t.thread_id = walk.thread_id
+        ORDER BY walk.sort_path
+        LIMIT ?3
+    "#;
+    let max_depth = i64::try_from(max_depth).context("execution tree depth is too large")?;
+    let row_limit = i64::try_from(row_limit).context("execution tree row limit is too large")?;
+    let mut stmt = db
+        .connection()
+        .prepare(sql)
+        .context("prepare execution_tree")?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![selected_thread_id, max_depth, row_limit],
+            ExecutionTreeRow::from_row,
+        )
+        .context("query execution_tree")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("read execution_tree rows")
+}
+
 pub fn replay_events(
     db: &ProjectionDb,
     chain_root_id: &str,
@@ -1253,11 +1398,10 @@ pub fn continuation_fingerprint(
         .map(|s| s.to_string()))
 }
 
-/// # Follow lineage: the two projected edge kinds (and the one that is NOT)
+/// # Follow lineage: the two projected edge kinds
 ///
-/// A graph `follow:` relationship spans two distinct lineage links. Only the
-/// first is recorded in the projection today; the second is NOT, by current
-/// design:
+/// A graph `follow:` relationship spans two distinct lineage links. Both are
+/// recorded in the projection, but from different durable events:
 ///
 /// 1. **Parent → resume-successor (within-chain, projected).** When a followed
 ///    child terminates, the suspended parent is resumed by minting a successor
@@ -1268,22 +1412,12 @@ pub fn continuation_fingerprint(
 ///    marker (read via [`continuation_edge`]) is the discriminator that tells a
 ///    follow-resume successor from an ordinary segment-cut continuation.
 ///
-/// 2. **Parent → followed child chain root (cross-chain, NOT projected).** The
+/// 2. **Parent → followed child chain root (cross-chain, projected).** The
 ///    followed child is spawned as a FRESH ROOT — its own `chain_root_id`, no
-///    `upstream_thread_id` — so `project_thread_snapshot` derives no edge, and
-///    the parent↔child link lives ONLY in the operational `follow_waiter` table
-///    (runtime_db), never in CAS-derived projection data. Once the waiter is
-///    cleared, that historical "this thread followed into child chain X" fact is
-///    gone from durable state.
-///
-/// Recording kind (2) durably would require emitting a new cross-chain spawn
-/// event from the follow-spawn path (executor side) through the event/projection
-/// pipeline AND extending the chain-scoped `thread_edges` model to hold a
-/// cross-chain edge — a deliberate change deferred to the wave that owns the
-/// follow spawn/event path (it pairs with nested child-braid rendering). Until
-/// then, a client reads live follow lineage from the waiter-sourced `follow`
-/// fact on a thread projection, and terminal-history resume lineage from kind (1)
-/// above; the cross-chain child link is not queryable from the projection.
+///    `upstream_thread_id` — so the executor emits `child_thread_spawned` on the
+///    parent braid with `spawn_reason = 'follow'`. Event projection derives the
+///    cross-chain edge exactly like an ordinary graph dispatch. The runtime DB
+///    child link remains a separate operational copy for stop cascading.
 ///
 /// Daemon-owned markers stored as the `reason` on a `thread_continued` edge.
 /// Centralizes the wire value so it is not a scattered string literal a runtime
@@ -2412,6 +2546,55 @@ mod tests {
         assert_eq!(edges[0].spawn_seq, Some(1));
         assert_eq!(edges[0].spawn_reason, Some("reason".to_string()));
         assert_eq!(edges[1].spawn_seq, None);
+    }
+
+    #[test]
+    fn execution_tree_resolves_root_and_combines_spawn_and_continuation_edges() {
+        let db = test_db();
+        insert_thread(&db, "T-root", "T-root", ThreadStatus::Running);
+        insert_thread(&db, "T-child", "T-child", ThreadStatus::Running);
+        insert_thread(&db, "T-resume", "T-root", ThreadStatus::Created);
+        insert_thread(&db, "T-sub", "T-sub", ThreadStatus::Created);
+        db.connection()
+            .execute(
+                "UPDATE threads SET upstream_thread_id = 'T-root' WHERE thread_id = 'T-resume'",
+                [],
+            )
+            .unwrap();
+        project_thread_edge(&db, "T-root", "T-root", "T-child", Some(1), Some("follow")).unwrap();
+        project_thread_edge(
+            &db,
+            "T-root",
+            "T-root",
+            "T-resume",
+            Some(2),
+            Some("spawned"),
+        )
+        .unwrap();
+        project_thread_edge(
+            &db,
+            "T-child",
+            "T-child",
+            "T-sub",
+            Some(1),
+            Some("dispatch"),
+        )
+        .unwrap();
+
+        let rows = execution_tree(&db, "T-sub", 16, 20).unwrap();
+        assert_eq!(rows.first().unwrap().thread.thread_id, "T-root");
+        let by_id = rows
+            .iter()
+            .map(|row| (row.thread.thread_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(by_id["T-child"].relation, "follow");
+        assert_eq!(by_id["T-resume"].relation, "continued");
+        assert_eq!(by_id["T-sub"].relation, "spawned");
+        assert_eq!(
+            by_id["T-sub"].tree_parent_thread_id.as_deref(),
+            Some("T-child")
+        );
+        assert_eq!(by_id["T-sub"].depth, 2);
     }
 
     #[test]

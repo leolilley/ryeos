@@ -241,6 +241,24 @@ pub struct ThreadListItem {
     pub updated_at: String,
 }
 
+/// One durable row in an execution-tree closure. The embedded list item keeps
+/// the same bounded enrichment path as the thread dashboard; the extra fields
+/// are structural facts consumed by a hierarchy-aware view.
+#[derive(Debug)]
+pub struct ExecutionTreeItem {
+    pub item: ThreadListItem,
+    pub tree_parent_thread_id: Option<String>,
+    pub relation: String,
+    pub depth: usize,
+    pub has_children: bool,
+}
+
+#[derive(Debug)]
+pub struct ExecutionTreePage {
+    pub items: Vec<ExecutionTreeItem>,
+    pub truncated: bool,
+}
+
 /// Auxiliary facts for one thread-list page, loaded under one store lock and
 /// grouped in memory. Keeps the UI list path from reacquiring the global store
 /// mutex and rerunning projection queries for every row.
@@ -3514,6 +3532,61 @@ impl StateStore {
         Self::rows_to_list_items(thread_rows, successor_payloads)
     }
 
+    /// Bounded execution closure containing continuation and cross-chain spawn
+    /// edges. The query resolves an arbitrary selected thread to its oldest
+    /// reachable ancestor, so opening the tree from a child still shows its
+    /// surrounding execution rather than an orphaned subtree.
+    pub fn execution_tree(
+        &self,
+        selected_thread_id: &str,
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> Result<ExecutionTreePage> {
+        let (mut tree_rows, successor_payloads) = {
+            let g = self.lock()?;
+            let hold_started = std::time::Instant::now();
+            let rows = queries::execution_tree(
+                g.state_db.projection(),
+                selected_thread_id,
+                max_depth,
+                max_nodes.saturating_add(1),
+            )?;
+            let thread_rows = rows
+                .iter()
+                .take(max_nodes)
+                .map(|row| row.thread.clone())
+                .collect::<Vec<_>>();
+            let payloads = Self::continuation_payloads_for_rows(&g, &thread_rows)?;
+            Self::warn_slow_lock_hold("execution_tree", hold_started);
+            (rows, payloads)
+        };
+        let node_truncated = tree_rows.len() > max_nodes;
+        tree_rows.truncate(max_nodes);
+        let depth_truncated = tree_rows
+            .iter()
+            .any(|row| row.depth >= max_depth && row.has_children);
+        let thread_rows = tree_rows
+            .iter()
+            .map(|row| row.thread.clone())
+            .collect::<Vec<_>>();
+        let items = Self::rows_to_list_items(thread_rows, successor_payloads)?;
+        let items = tree_rows
+            .into_iter()
+            .zip(items)
+            .map(|(tree, item)| ExecutionTreeItem {
+                item,
+                tree_parent_thread_id: tree.tree_parent_thread_id,
+                relation: tree.relation,
+                depth: tree.depth,
+                has_children: tree.has_children,
+            })
+            .collect();
+        Ok(ExecutionTreePage {
+            items,
+            truncated: node_truncated || depth_truncated,
+        })
+    }
+
     /// Project thread rows into `ThreadListItem`s, resolving each terminal
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list
@@ -3738,6 +3811,15 @@ impl StateStore {
             });
         }
         Ok(children)
+    }
+
+    pub fn thread_edge_exists(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        queries::thread_edge_exists(g.state_db.projection(), parent_thread_id, child_thread_id)
     }
 
     pub fn list_chain_threads(&self, chain_root_id: &str) -> Result<Vec<ThreadDetail>> {
