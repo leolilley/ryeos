@@ -8,6 +8,7 @@ pub mod arch_check;
 pub mod cache;
 pub mod ingest;
 pub mod launch;
+pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod lillux_bridge;
 pub mod limits;
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use lillux::cas::{sha256_hex, CasStore};
 use ryeos_state::objects::SourceManifest;
@@ -131,10 +132,12 @@ pub fn checkout_project(
 /// the working directory is unchanged.
 pub fn fold_back_outputs(
     cas_root: &Path,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
     working_dir: &Path,
     pre_manifest_hash: &str,
     ignore: &ryeos_app::ignore::IgnoreMatcher,
 ) -> Result<Option<String>> {
+    cas_mutation_guard.ensure_protects_cas_root(cas_root)?;
     let cas = CasStore::new(cas_root.to_path_buf());
 
     // Load pre-execution manifest
@@ -206,13 +209,15 @@ pub fn fold_back_outputs(
 /// [`ryeos_state::refs::principal_storage_key`]).
 pub fn advance_after_foldback(
     cas_root: &Path,
-    refs_root: &Path,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
+    state_db: &ryeos_state::StateDb,
     signer: &dyn Signer,
     principal_key: &str,
     project_path_hash: &str,
     new_manifest_hash: &str,
     current_snapshot_hash: &str,
 ) -> Result<String> {
+    cas_mutation_guard.ensure_protects_cas_root(cas_root)?;
     let cas = CasStore::new(cas_root.to_path_buf());
     let now = lillux::time::iso8601_now();
 
@@ -236,8 +241,7 @@ pub fn advance_after_foldback(
     };
     let new_snapshot_hash = cas.store_object(&snapshot.to_value())?;
 
-    ryeos_state::refs::advance_project_head_ref(
-        refs_root,
+    state_db.advance_project_head_ref(
         principal_key,
         project_path_hash,
         &new_snapshot_hash,
@@ -262,11 +266,22 @@ fn walk_and_diff(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
+        let relative = path.strip_prefix(root).with_context(|| {
+            format!(
+                "fold-back path '{}' escaped project root '{}'",
+                path.display(),
+                root.display()
+            )
+        })?;
+        let rel = relative
+            .to_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "fold-back project-relative path '{}' is not valid UTF-8",
+                    relative.display()
+                )
+            })?
+            .replace('\\', "/");
 
         // Always skip state/ (internal daemon state)
         if rel.starts_with("state/") || rel == "state" {

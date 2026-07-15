@@ -8,8 +8,15 @@ fn main() {
             Err((step, reason)) => HandlerResponse::ComposeErr { step, reason },
         },
         HandlerRequest::ValidateComposerConfig(v) => {
-            match extends_chain::validate_config(&v.composer_config) {
-                Ok(()) => HandlerResponse::ValidateOk,
+            match extends_chain::validate_config(&v.composer_config).and_then(|()| {
+                extends_chain::validate_field_requirements(
+                    &v.composer_config,
+                    &v.field_requirements,
+                )
+            }) {
+                Ok(()) => HandlerResponse::ValidateComposerOk {
+                    field_requirements: v.field_requirements,
+                },
                 Err(msg) => HandlerResponse::ValidateErr { message: msg },
             }
         }

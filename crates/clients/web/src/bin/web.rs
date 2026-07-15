@@ -110,9 +110,16 @@ async fn main() -> Result<()> {
 
     let project_path = cli.project.or_else(project_from_cli_env);
 
+    let project_path = project_path
+        .map(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("project path is not valid UTF-8"))
+        })
+        .transpose()?;
     let mint_req = MintRequest {
         surface_ref: cli.surface,
-        project_path: project_path.map(|p| p.to_string_lossy().to_string()),
+        project_path,
         read_only: cli.read_only || !cli.allow_intents,
         user_principal_id: cli
             .hosted_principal

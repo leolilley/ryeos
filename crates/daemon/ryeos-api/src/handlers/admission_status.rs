@@ -38,35 +38,24 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }));
     };
 
-    let cas_root = state.state_store.cas_root()?;
-    let attestation_path = lillux::shard_path(&cas_root, "objects", &head.target_hash, ".json");
-    let (status, attestation) = match std::fs::read(&attestation_path) {
-        Ok(bytes) => {
-            let actual = lillux::sha256_hex(&bytes);
-            if actual != head.target_hash {
-                ("invalid".to_string(), None)
-            } else {
-                match serde_json::from_slice::<Value>(&bytes)
-                    .ok()
-                    .and_then(|value| {
-                        let parsed = ryeos_state::Attestation::from_value(&value).ok()?;
-                        if parsed.subject_hash != req.subject_hash || parsed.policy != req.policy {
-                            return None;
-                        }
-                        parsed
-                            .verify_with_key(state.identity.verifying_key())
-                            .ok()?;
-                        Some((parsed.claim, value))
-                    }) {
-                    Some((claim, value)) => (claim, Some(value)),
-                    None => ("invalid".to_string(), None),
+    let cas = state.cas_store()?;
+    let (status, attestation) = match cas.get_object(&head.target_hash)? {
+        Some(value) => {
+            match Some(value).and_then(|value| {
+                let parsed = ryeos_state::Attestation::from_value(&value).ok()?;
+                if parsed.subject_hash != req.subject_hash || parsed.policy != req.policy {
+                    return None;
                 }
+                parsed
+                    .verify_with_key(state.identity.verifying_key())
+                    .ok()?;
+                Some((parsed.claim, value))
+            }) {
+                Some((claim, value)) => (claim, Some(value)),
+                None => ("invalid".to_string(), None),
             }
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            ("missing_attestation".to_string(), None)
-        }
-        Err(err) => return Err(err.into()),
+        None => ("missing_attestation".to_string(), None),
     };
 
     Ok(serde_json::json!({

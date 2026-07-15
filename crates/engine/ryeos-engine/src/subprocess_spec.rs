@@ -77,13 +77,25 @@ pub fn sandbox_lillux_request(
     };
     let wrapped = sandbox_wrap(spec, &policy)?;
     Ok(lillux::SubprocessRequest {
-        cmd: wrapped.cmd.to_string_lossy().into_owned(),
+        cmd: exact_sandbox_path(&wrapped.cmd, "sandbox command")?,
         args: wrapped.args,
-        cwd: Some(wrapped.cwd.to_string_lossy().into_owned()),
+        cwd: Some(exact_sandbox_path(&wrapped.cwd, "sandbox cwd")?),
         envs: wrapped.env,
-        stdin_data: Some(String::from_utf8_lossy(&wrapped.stdin).into_owned()),
+        stdin_data: Some(String::from_utf8(wrapped.stdin).map_err(|_| {
+            EngineError::SandboxPolicyRefused {
+                reason: "sandbox subprocess stdin is not valid UTF-8".to_string(),
+            }
+        })?),
         timeout: wrapped.timeout.as_secs_f64(),
     })
+}
+
+fn exact_sandbox_path(path: &Path, label: &str) -> Result<String, EngineError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| EngineError::SandboxPolicyRefused {
+            reason: format!("{label} is not valid UTF-8: {}", path.display()),
+        })
 }
 
 /// The unified subprocess invocation boundary. Both the tool-style
@@ -306,11 +318,11 @@ pub fn sandbox_wrap(
         let path = PathBuf::from(path);
         if path.exists() {
             let source = std::fs::canonicalize(&path).unwrap_or(path.clone());
-            let source = source.to_string_lossy().into_owned();
+            let source = exact_sandbox_path(&source, "sandbox system source")?;
             args.extend([
                 "--ro-bind".to_string(),
                 source,
-                path.to_string_lossy().into_owned(),
+                exact_sandbox_path(&path, "sandbox system target")?,
             ]);
         }
     }
@@ -338,9 +350,12 @@ pub fn sandbox_wrap(
             .collect::<Vec<_>>();
         command_parents.reverse();
         for parent in command_parents {
-            args.extend(["--dir".to_string(), parent.to_string_lossy().into_owned()]);
+            args.extend([
+                "--dir".to_string(),
+                exact_sandbox_path(&parent, "sandbox command parent")?,
+            ]);
         }
-        let command = command_path.to_string_lossy().into_owned();
+        let command = exact_sandbox_path(&command_path, "sandbox command")?;
         args.extend(["--ro-bind".to_string(), command.clone(), command]);
     }
     args.extend(["--dev".to_string(), "/dev".to_string()]);
@@ -355,18 +370,21 @@ pub fn sandbox_wrap(
             .collect::<Vec<_>>();
         parents.reverse();
         for parent in parents {
-            args.extend(["--dir".to_string(), parent.to_string_lossy().into_owned()]);
+            args.extend([
+                "--dir".to_string(),
+                exact_sandbox_path(&parent, "sandbox writable parent")?,
+            ]);
         }
-        let path = path.to_string_lossy().into_owned();
+        let path = exact_sandbox_path(path, "sandbox writable path")?;
         args.extend(["--bind".to_string(), path.clone(), path]);
     }
     // Bubblewrap has no rlimit options. The requested limits remain visible on
     // `EffectiveSandbox`; enforcing them requires `setrlimit` at the Lillux spawn
     // boundary so they are inherited across Bubblewrap's fork/exec.
     args.push("--chdir".to_string());
-    args.push(canonical_cwd.to_string_lossy().into_owned());
+    args.push(exact_sandbox_path(&canonical_cwd, "sandbox cwd")?);
     args.push("--".to_string());
-    args.push(command_path.to_string_lossy().into_owned());
+    args.push(exact_sandbox_path(&command_path, "sandbox command")?);
     args.append(&mut spec.args);
 
     spec.cmd = backend_path.clone();

@@ -40,6 +40,13 @@ pub enum HandlerResponse {
         message: String,
     },
     ValidateOk,
+    /// Composer-specific validation success. Unlike the parser-only
+    /// `ValidateOk`, this echoes the exact field-semantics requirements the
+    /// composer validated. That makes an old or permissive composer unable to
+    /// silently acknowledge a new security-sensitive composition contract.
+    ValidateComposerOk {
+        field_requirements: Vec<ComposerFieldRequirement>,
+    },
     ValidateErr {
         message: String,
     },
@@ -121,6 +128,38 @@ pub enum TrustClassWire {
 #[serde(deny_unknown_fields)]
 pub struct ValidateComposerConfigRequest {
     pub composer_config: Value,
+    /// Exact top-level fields whose composition behavior is security- or
+    /// lifecycle-sensitive. The engine derives these requirements from the
+    /// verified kind schema; the verified composer must reject any config that
+    /// cannot provide the requested semantics.
+    pub field_requirements: Vec<ComposerFieldRequirement>,
+}
+
+/// One generic, top-level composition invariant requested by the engine.
+///
+/// This protocol deliberately knows nothing about the consumer of the field.
+/// History retention, authorization, and future policy consumers all use the
+/// same exact-value semantics rather than teaching the engine composer names
+/// or strategy strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComposerFieldRequirement {
+    pub field: String,
+    pub semantics: ComposerFieldSemantics,
+}
+
+/// Required behavior for one composed top-level field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComposerFieldSemantics {
+    /// The final field is exactly the root's value, or absent when the root
+    /// omits it. The composer may not merge, normalize, synthesize, or inspect
+    /// the value.
+    RootVerbatim,
+    /// The final field is exactly the root's complete value when present;
+    /// otherwise it is exactly the nearest ancestor's complete value. No
+    /// partial/deep merge or value reinterpretation is permitted.
+    InheritOrReplace,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,5 +226,32 @@ mod tests {
         };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains(r#""result":"parse_ok""#));
+    }
+
+    #[test]
+    fn composer_validation_round_trips_exact_field_requirements() {
+        let requirements = vec![ComposerFieldRequirement {
+            field: "lifecycle_policy".into(),
+            semantics: ComposerFieldSemantics::InheritOrReplace,
+        }];
+        let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
+            composer_config: serde_json::json!({"fields": []}),
+            field_requirements: requirements.clone(),
+        });
+        let encoded = serde_json::to_string(&request).unwrap();
+        let decoded: HandlerRequest = serde_json::from_str(&encoded).unwrap();
+        match decoded {
+            HandlerRequest::ValidateComposerConfig(decoded) => {
+                assert_eq!(decoded.field_requirements, requirements);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        let response = HandlerResponse::ValidateComposerOk {
+            field_requirements: requirements,
+        };
+        assert!(serde_json::to_string(&response)
+            .unwrap()
+            .contains("validate_composer_ok"));
     }
 }

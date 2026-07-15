@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+use ryeos_state::objects::ThreadStatus;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadResultOutcome {
     Success,
@@ -38,6 +40,12 @@ pub fn completed_fire_outcome(result: Option<&ThreadResultOutcome>) -> &'static 
     }
 }
 
+/// Classify thread lifecycle status through the state crate's canonical typed
+/// vocabulary. Unknown values fail closed as nonterminal.
+pub fn thread_status_is_terminal(status: &str) -> bool {
+    ThreadStatus::from_str_lossy(status).is_some_and(|status| status.is_terminal())
+}
+
 pub fn fire_status_for_thread_status(thread_status: &str) -> &'static str {
     match thread_status {
         "completed" => "completed",
@@ -54,6 +62,13 @@ pub fn fire_outcome_for_terminal(
     match thread_status {
         "completed" => completed_fire_outcome(result).to_string(),
         "cancelled" => "thread_cancelled".to_string(),
+        "killed" => fallback_outcome_code.unwrap_or("thread_killed").to_string(),
+        "timed_out" => fallback_outcome_code
+            .unwrap_or("thread_timed_out")
+            .to_string(),
+        "continued" => fallback_outcome_code
+            .unwrap_or("thread_continued")
+            .to_string(),
         _ => fallback_outcome_code.unwrap_or("thread_failed").to_string(),
     }
 }
@@ -174,5 +189,57 @@ mod tests {
             ),
             "result_failed"
         );
+    }
+
+    #[test]
+    fn canonical_terminal_thread_statuses_are_all_terminal() {
+        for status in [
+            "completed",
+            "failed",
+            "cancelled",
+            "killed",
+            "timed_out",
+            "continued",
+        ] {
+            assert!(
+                thread_status_is_terminal(status),
+                "canonical terminal status was rejected: {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_and_unknown_thread_statuses_are_not_terminal() {
+        for status in ["created", "running", "pending", "", "Completed"] {
+            assert!(
+                !thread_status_is_terminal(status),
+                "nonterminal or unknown status was admitted: {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_canonical_terminal_status_has_a_stable_fire_classification() {
+        let cases = [
+            ("completed", "completed", "success"),
+            ("failed", "failed", "thread_failed"),
+            ("cancelled", "cancelled", "thread_cancelled"),
+            ("killed", "failed", "thread_killed"),
+            ("timed_out", "failed", "thread_timed_out"),
+            ("continued", "failed", "thread_continued"),
+        ];
+        for (thread_status, fire_status, fire_outcome) in cases {
+            assert!(thread_status_is_terminal(thread_status));
+            assert_eq!(
+                fire_status_for_thread_status(thread_status),
+                fire_status,
+                "wrong fire status for {thread_status}"
+            );
+            assert_eq!(
+                fire_outcome_for_terminal(thread_status, None, None),
+                fire_outcome,
+                "wrong fire outcome for {thread_status}"
+            );
+        }
     }
 }

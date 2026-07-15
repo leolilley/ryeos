@@ -24,6 +24,7 @@ pub struct GcStatusResponse {
     pub state: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_events: Vec<Value>,
+    pub pending_head_transitions: ryeos_app::state_store::PendingHeadTransitionStatus,
 }
 
 /// Max recent events to return from the JSONL log.
@@ -59,6 +60,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         running,
         state: gc_state,
         recent_events,
+        pending_head_transitions: state.state_store.pending_head_transition_status()?,
     };
 
     serde_json::to_value(response).map_err(Into::into)

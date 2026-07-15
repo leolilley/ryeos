@@ -305,7 +305,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     let mut daemon_stale_pid: Option<u32> = None;
     let mut daemon_stale = false;
     match controller.status().await {
-        Ok(LifecycleStatus::Running { metadata }) => {
+        Ok(LifecycleStatus::Running { metadata, .. }) => {
             daemon_running = true;
             let current = ryeos_app::build_info::get();
             let skew = is_revision_skew(metadata.revision.as_deref(), current.revision)
@@ -364,21 +364,39 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                     "state": "unresponsive",
                     "pid": metadata.pid,
                     "message": diagnostics.message,
-                    "note": "control probe timed out against a live socket — likely busy, not dead",
+                    "note": "a live socket did not provide a usable current lifecycle response; do not start a replacement",
                 }),
             ));
         }
         Ok(LifecycleStatus::Starting {
-            pid, started_at, ..
+            metadata, startup, ..
         }) => {
             checks.push(check(
                 "daemon",
                 WARN,
                 serde_json::json!({
                     "state": "starting",
-                    "pid": pid,
-                    "started_at": started_at,
-                    "note": "boot in progress (e.g. projection catch-up) — control socket not up yet; wait for readiness",
+                    "pid": metadata.pid,
+                    "started_at": metadata.started_at,
+                    "phase": startup.phase,
+                    "elapsed_ms": startup.elapsed_ms,
+                    "progress": startup,
+                    "note": "boot in progress; wait for readiness",
+                }),
+            ));
+        }
+        Ok(LifecycleStatus::Failed { metadata, startup }) => {
+            checks.push(check(
+                "daemon",
+                FAIL,
+                serde_json::json!({
+                    "state": "failed",
+                    "pid": metadata.pid,
+                    "started_at": metadata.started_at,
+                    "phase": startup.phase,
+                    "elapsed_ms": startup.elapsed_ms,
+                    "error": startup.error,
+                    "fix": "inspect the startup error, then run: ryeos stop",
                 }),
             ));
         }
@@ -790,7 +808,7 @@ async fn run_start_command(argv: &[String]) -> Result<()> {
 ///      daemon started. This catches a rebuild at the same commit, which the
 ///      revision check alone cannot see.
 fn warn_if_stale_daemon(status: &LifecycleStatus) {
-    let LifecycleStatus::Running { metadata } = status else {
+    let LifecycleStatus::Running { metadata, .. } = status else {
         return;
     };
     let current = ryeos_app::build_info::get();
@@ -895,7 +913,9 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
             println!("initialized, stopped — run: ryeos start");
             println!("app root: {}", app_root.display());
         }
-        LifecycleStatus::Running { metadata } => {
+        LifecycleStatus::Running {
+            metadata, ready_at, ..
+        } => {
             println!("running");
             if let Some(pid) = metadata.pid {
                 println!("pid: {pid}");
@@ -906,6 +926,7 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
             if let Some(socket) = &metadata.uds_path {
                 println!("socket: {}", socket.display());
             }
+            println!("ready since: {ready_at}");
         }
         LifecycleStatus::Stale { diagnostics, .. } => {
             println!("stale daemon metadata — {}", diagnostics.message);
@@ -914,20 +935,44 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
             metadata,
             diagnostics,
         } => {
-            println!("running but not answering — {}", diagnostics.message);
+            println!("live daemon control is unusable — {}", diagnostics.message);
             if let Some(pid) = metadata.pid {
                 println!("pid: {pid}");
             }
-            println!("likely busy; retry shortly (do not start a second daemon)");
+            println!("retry if busy, otherwise inspect or stop it (do not start a second daemon)");
         }
         LifecycleStatus::Starting {
-            pid, started_at, ..
+            metadata, startup, ..
         } => {
-            println!("starting — daemon (pid {pid}) is booting, control socket not up yet");
-            println!("since: {started_at}");
+            let pid = metadata.pid.unwrap_or_default();
             println!(
-                "boot can take minutes after a deploy (projection catch-up); wait for readiness"
+                "starting — daemon (pid {pid}) is in {}",
+                startup.phase.as_str()
             );
+            if let Some(started_at) = &metadata.started_at {
+                println!("since: {started_at}");
+            }
+            println!("elapsed: {}ms", startup.elapsed_ms);
+            if let (Some(done), Some(total)) = (startup.chains_done, startup.chains_total) {
+                println!("chains: {done}/{total}");
+            }
+            if let Some(message) = &startup.message {
+                println!("detail: {message}");
+            }
+            println!("wait for readiness");
+        }
+        LifecycleStatus::Failed { metadata, startup } => {
+            let pid = metadata.pid.unwrap_or_default();
+            println!("failed — daemon (pid {pid}) could not start");
+            println!("phase: {}", startup.phase.as_str());
+            println!(
+                "error: {}",
+                startup
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown startup failure")
+            );
+            println!("run `ryeos stop` after inspecting the error");
         }
     }
 }

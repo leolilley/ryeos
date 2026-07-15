@@ -112,13 +112,7 @@ impl PrincipalResolver for HostedPrincipalResolver {
 }
 
 pub fn principal_storage_key(principal_id: &str) -> Result<String> {
-    let raw = principal_id
-        .strip_prefix("fp:")
-        .ok_or_else(|| anyhow::anyhow!("principal id must be in fp:<hex> format"))?;
-    if raw.len() != 64 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
-        anyhow::bail!("principal id must be in fp:<64 hex> format");
-    }
-    Ok(raw.to_ascii_lowercase())
+    Ok(ryeos_state::refs::principal_storage_key(principal_id)?.to_owned())
 }
 
 #[derive(Debug, Clone)]
@@ -333,7 +327,7 @@ mod tests {
     #[test]
     fn principal_resolver_maps_fp_to_isolated_space() {
         let resolver = HostedPrincipalResolver::for_app_root("/tmp/system");
-        let principal = format!("fp:{}", "AB".repeat(32));
+        let principal = format!("fp:{}", "ab".repeat(32));
         let paths = resolver.resolve(&principal).unwrap();
 
         assert_eq!(principal_storage_key(&principal).unwrap(), "ab".repeat(32));
@@ -349,10 +343,13 @@ mod tests {
     #[test]
     fn principal_storage_key_rejects_non_fp_principals() {
         let err = principal_storage_key("session:abc").unwrap_err();
-        assert!(err.to_string().contains("fp:<hex>"));
+        assert!(err.to_string().contains("fp:<64 lowercase hex>"));
 
         let err = principal_storage_key("fp:not-hex").unwrap_err();
-        assert!(err.to_string().contains("fp:<64 hex>"));
+        assert!(err.to_string().contains("fp:<64 lowercase hex>"));
+
+        let err = principal_storage_key(&format!("fp:{}", "AB".repeat(32))).unwrap_err();
+        assert!(err.to_string().contains("fp:<64 lowercase hex>"));
     }
 
     #[test]

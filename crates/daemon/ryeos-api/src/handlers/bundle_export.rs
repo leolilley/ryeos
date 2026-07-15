@@ -42,11 +42,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
         )));
     }
 
-    let cas_root = state
+    let cas_guard =
+        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())
+            .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let authority = state
         .state_store
-        .cas_root()
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let cas = lillux::cas::CasStore::new(cas_root);
+        .with_state_db(|db| db.pinned_authority())
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    authority
+        .ensure_guard(&cas_guard)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let cas = authority
+        .cas_store()
+        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let _permit = state.write_barrier.try_acquire().map_err(|error| {
+        HandlerError::Internal(format!("cannot acquire CAS write permit: {error}"))
+    })?;
 
     // Walk the bundle tree, ingest each file into CAS.
     let mut entries: Vec<Value> = Vec::new();

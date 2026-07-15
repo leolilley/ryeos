@@ -6,13 +6,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::node_config::writer;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -46,48 +45,16 @@ pub async fn handle(
     }
 
     if spec.enabled {
+        super::scheduler_register::verify_schedule_enabled(&state, &spec, true)
+            .map_err(|e| HandlerError::Internal(e.to_string()))?;
         return Ok(serde_json::json!({
             "schedule_id": req.schedule_id,
             "enabled": true,
         }));
     }
 
-    let node_dir = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node");
-    let yaml_path = node_dir
-        .join("schedules")
-        .join(format!("{}.yaml", req.schedule_id));
-
-    let content = std::fs::read_to_string(&yaml_path)
-        .with_context(|| format!("read schedule YAML {}", yaml_path.display()))
+    let rec = super::scheduler_register::rewrite_schedule_enabled(&state, &spec, true)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
-
-    let body_str = lillux::signature::strip_signature_lines(&content);
-    let mut body: serde_json::Value =
-        serde_yaml::from_str(&body_str).map_err(|e| HandlerError::Internal(e.to_string()))?;
-    body["enabled"] = Value::Bool(true);
-
-    let spec_path = writer::write_signed_node_item(
-        &node_dir,
-        "schedules",
-        &req.schedule_id,
-        &body,
-        &state.identity,
-    )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
-
-    // Update projection — preserve registered_at (immutable anchor)
-    let content =
-        std::fs::read_to_string(&spec_path).map_err(|e| HandlerError::Internal(e.to_string()))?;
-    let mut rec = spec;
-    rec.enabled = true;
-    rec.signer_fingerprint =
-        ryeos_scheduler::projection::parse_signer_fingerprint_from_str(&content)
-            .unwrap_or_else(|| state.identity.fingerprint().to_string());
-    rec.spec_hash = lillux::cas::sha256_hex(content.as_bytes());
     state
         .scheduler_db
         .upsert_spec(&rec)

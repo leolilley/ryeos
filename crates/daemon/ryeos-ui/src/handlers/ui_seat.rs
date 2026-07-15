@@ -132,18 +132,13 @@ pub async fn handle_open(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .into_iter()
         .filter(|thread| {
-            thread.kind == SEAT_KIND
-                && thread.status == "running"
-                && thread.item_ref == surface_ref
+            thread.kind == SEAT_KIND && thread.status == "running" && thread.item_ref == surface_ref
         })
         .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
     if let Some(thread) = existing {
-        state.state_store.touch_seat_lease(
-            &thread.thread_id,
-            &owner,
-            &surface_ref,
-            &client_ref,
-        )?;
+        state
+            .state_store
+            .touch_seat_lease(&thread.thread_id, &owner, &surface_ref, &client_ref)?;
         return Ok(json!({
             "thread_id": thread.thread_id,
             "chain_root_id": thread.chain_root_id,
@@ -151,23 +146,46 @@ pub async fn handle_open(
         }));
     }
 
+    let project_root = session
+        .project_root
+        .as_deref()
+        .map(std::path::Path::new)
+        .unwrap_or(&state.config.app_root);
+    let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
+        &state.engine,
+        &state.node_history_policy,
+        &surface_ref,
+        project_root,
+        &owner,
+        session.granted_caps.clone(),
+        state.threads.site_id(),
+        SEAT_KIND.to_string(),
+    )
+    .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+
     let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     let site_id = state.threads.site_id().to_string();
-    let detail = state.threads.create_thread(&ThreadCreateParams {
-        thread_id: thread_id.clone(),
-        chain_root_id: thread_id.clone(),
-        kind: SEAT_KIND.to_string(),
-        item_ref: surface_ref.clone(),
-        executor_ref: client_ref.clone(),
-        launch_mode: "inline".to_string(),
-        current_site_id: site_id.clone(),
-        origin_site_id: site_id,
-        upstream_thread_id: None,
-        requested_by: Some(owner.clone()),
-        project_root: None,
-        usage_subject: None,
-        usage_subject_asserted_by: None,
-    })?;
+    let detail = state.threads.create_non_execution_root_thread(
+        &ThreadCreateParams {
+            thread_id: thread_id.clone(),
+            chain_root_id: thread_id.clone(),
+            kind: SEAT_KIND.to_string(),
+            item_ref: surface_ref.clone(),
+            executor_ref: client_ref.clone(),
+            launch_mode: "inline".to_string(),
+            current_site_id: site_id.clone(),
+            origin_site_id: site_id,
+            upstream_thread_id: None,
+            requested_by: Some(owner.clone()),
+            project_root: root_admission
+                .project_root()
+                .map(std::path::Path::to_path_buf),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: None,
+        },
+        &root_admission,
+    )?;
     state.threads.mark_running(&thread_id)?;
     state
         .state_store
@@ -234,7 +252,7 @@ pub async fn handle_append(
             HandlerError::BadRequest(
                 "seat session is no longer running; only running seats accept events".into(),
             )
-    })?;
+        })?;
     let last_seq = persisted.iter().map(|r| r.chain_seq).max().unwrap_or(0);
 
     Ok(json!({

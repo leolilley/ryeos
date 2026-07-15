@@ -68,46 +68,73 @@ fn node_config_envelope() -> SignatureEnvelope {
     }
 }
 
+/// Load one standalone node YAML item through the same strict trust boundary
+/// used by registered node-config sections. This is for typed control-plane
+/// declarations that have not yet become a full [`NodeConfigSection`]: regular
+/// YAML files only, symlinks rejected, trusted signature required, legacy
+/// structural fields rejected.
+pub fn load_verified_node_yaml(file: &Path, trust_store: &TrustStore) -> Result<Value> {
+    let ext = file.extension().and_then(|extension| extension.to_str());
+    if !matches!(ext, Some("yaml" | "yml")) {
+        bail!(
+            "node config item at {} is not a .yaml or .yml file",
+            file.display()
+        );
+    }
+    let content = lillux::read_regular_file_to_string_no_follow(file)
+        .with_context(|| format!("failed to securely read {}", file.display()))?;
+    let envelope = node_config_envelope();
+    let header = ryeos_engine::item_resolution::parse_signature_header(&content, &envelope)
+        .with_context(|| {
+            format!(
+                "node config item at {} has no valid signature line",
+                file.display()
+            )
+        })?;
+    let (trust_class, _) =
+        ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)?;
+    if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
+        bail!(
+            "node config item at {} is not trusted (trust_class: {:?}); only trusted items are allowed in node config",
+            file.display(),
+            trust_class
+        );
+    }
+    let body: Value = serde_yaml::from_str(&strip_signature(&content))
+        .with_context(|| format!("failed to parse YAML body of {}", file.display()))?;
+    for forbidden in ["category", "section"] {
+        if body.get(forbidden).is_some() {
+            bail!(
+                "node config item at {} declares legacy structural field '{}' (section/category are path-owned)",
+                file.display(),
+                forbidden
+            );
+        }
+    }
+    Ok(body)
+}
+
 /// Recursively collect all `.yaml`/`.yml` regular files under a directory.
 ///
 /// Returns files in deterministic depth-first order, with entries sorted
 /// alphabetically at each directory level. Rejects symlinks at every level
 /// (both files and directories).
 fn scan_yaml_files_recursive(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    scan_dir_recursive(dir, &mut files)?;
-    Ok(files)
+    scan_yaml_files(dir, true)
 }
 
-fn scan_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    // Read and sort for deterministic order
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
-        .with_context(|| format!("failed to read directory {}", dir.display()))?
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let path = entry.path();
-
-        // Reject all symlinks — both files and directories
-        if path.is_symlink() {
+fn scan_yaml_files(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
+    let files = lillux::collect_regular_files_no_follow(dir, recursive)?.unwrap_or_default();
+    for path in &files {
+        let ext = path.extension().and_then(|extension| extension.to_str());
+        if !matches!(ext, Some("yaml" | "yml")) {
             bail!(
-                "node config scan encountered symlink at {} (symlinks rejected)",
+                "node config directory contains unsupported non-YAML entry {}",
                 path.display()
             );
         }
-
-        if path.is_dir() {
-            scan_dir_recursive(&path, files)?;
-        } else if path.is_file() {
-            let ext = path.extension().and_then(|e| e.to_str());
-            if ext == Some("yaml") || ext == Some("yml") {
-                files.push(path);
-            }
-        }
-        // Ignore special files (sockets, fifos, etc.)
     }
-    Ok(())
+    Ok(files)
 }
 
 /// Verify signature, trust, and section invariant for a single node-config file.
@@ -121,14 +148,6 @@ fn verify_and_parse(
     expected_section: &str,
     trust_store: &TrustStore,
 ) -> Result<VerifiedItem> {
-    // Reject symlinks and non-regular files
-    if !file.is_file() || file.is_symlink() {
-        bail!(
-            "node config item at {} is not a regular file (symlinks rejected)",
-            file.display()
-        );
-    }
-
     let ext = file.extension().and_then(|e| e.to_str());
     if ext != Some("yaml") && ext != Some("yml") {
         bail!(
@@ -142,8 +161,8 @@ fn verify_and_parse(
         file.display()
     ))?;
 
-    let content =
-        fs::read_to_string(file).with_context(|| format!("failed to read {}", file.display()))?;
+    let content = lillux::read_regular_file_to_string_no_follow(file)
+        .with_context(|| format!("failed to securely read {}", file.display()))?;
 
     let envelope = node_config_envelope();
 
@@ -249,30 +268,10 @@ impl<'a> BootstrapLoader<'a> {
         let mut records: Vec<BundleRecord> = Vec::new();
 
         let node_dir = self.app_root.join(".ai").join("node").join("bundles");
-        if !node_dir.is_dir() {
-            return Ok(records);
-        }
-
-        // Bundles use flat scan only (no subdirectories for bundles)
-        let mut entries: Vec<fs::DirEntry> = fs::read_dir(&node_dir)
-            .with_context(|| format!("failed to read node config dir {}", node_dir.display()))?
-            .collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
-
-        for entry in entries {
-            let path = entry.path();
-
-            let verified = match verify_and_parse(&path, &node_dir, "bundles", self.trust_store) {
-                Ok(v) => v,
-                Err(e) => {
-                    // For bundles, non-YAML files are silently skipped (compatibility)
-                    let ext = path.extension().and_then(|e| e.to_str());
-                    if ext == Some("yaml") || ext == Some("yml") {
-                        return Err(e);
-                    }
-                    continue;
-                }
-            };
+        // Bundles use one exact flat YAML namespace. Missing is empty; any
+        // directory, symlink, special file, or non-YAML entry is an error.
+        for path in scan_yaml_files(&node_dir, false)? {
+            let verified = verify_and_parse(&path, &node_dir, "bundles", self.trust_store)?;
 
             let record = section
                 .parse(&verified.ctx, &verified.body)
@@ -361,9 +360,6 @@ impl<'a> BootstrapLoader<'a> {
 
             for scan_root in &scan_roots {
                 let section_dir = scan_root.path.join(".ai").join("node").join(section_name);
-                if !section_dir.is_dir() {
-                    continue;
-                }
 
                 // Routes and commands: recursive scan.
                 // Bundles: flat scan (enforced by policy type, but we handle
@@ -379,25 +375,7 @@ impl<'a> BootstrapLoader<'a> {
                         )
                     })?
                 } else {
-                    // Flat scan for bundles (same as Phase 1)
-                    let mut files: Vec<PathBuf> = Vec::new();
-                    let mut entries: Vec<fs::DirEntry> = fs::read_dir(&section_dir)
-                        .with_context(|| {
-                            format!(
-                                "failed to read node config section dir {}",
-                                section_dir.display()
-                            )
-                        })?
-                        .collect::<Result<Vec<_>, _>>()?;
-                    entries.sort_by_key(|e| e.file_name());
-                    for entry in entries {
-                        let path = entry.path();
-                        let ext = path.extension().and_then(|e| e.to_str());
-                        if ext == Some("yaml") || ext == Some("yml") {
-                            files.push(path);
-                        }
-                    }
-                    files
+                    scan_yaml_files(&section_dir, false)?
                 };
 
                 for path in yaml_files {
@@ -819,8 +797,6 @@ mod tests {
             "id: ui.ryeos.dimension-get",
         )
         .unwrap();
-        // Non-yaml file (should be skipped)
-        fs::write(routes_dir.join("README.md"), "not yaml").unwrap();
         // Hidden file (should be found — no hidden filtering)
         fs::write(routes_dir.join(".hidden.yaml"), "id: hidden").unwrap();
 
@@ -864,14 +840,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(dir.path().join("elsewhere"), &link_target).unwrap();
 
-        let result = scan_yaml_files_recursive(&routes_dir);
-        let err = result.unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("symlink"),
-            "symlinked directory should be rejected, got: {}",
-            msg
-        );
+        assert!(scan_yaml_files_recursive(&routes_dir).is_err());
     }
 
     #[test]
@@ -889,14 +858,17 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let result = scan_yaml_files_recursive(&routes_dir);
-        let err = result.unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("symlink"),
-            "symlinked file should be rejected, got: {}",
-            msg
-        );
+        assert!(scan_yaml_files_recursive(&routes_dir).is_err());
+    }
+
+    #[test]
+    fn scan_yaml_files_recursive_rejects_non_yaml_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+        fs::write(routes_dir.join("README.md"), "not yaml").unwrap();
+
+        assert!(scan_yaml_files_recursive(&routes_dir).is_err());
     }
 
     #[test]

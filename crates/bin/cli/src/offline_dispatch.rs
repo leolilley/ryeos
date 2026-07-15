@@ -1282,11 +1282,14 @@ mod tests {
             let content_blob_hash = lillux::sha256_hex(script);
             let item_ref = format!("bin/{triple}/{name}");
             let item_source = serde_json::json!({
+                "kind": "item_source",
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
+                "integrity": format!("sha256:{content_blob_hash}"),
                 "signature_info": {
                     "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
-                }
+                },
+                "mode": 0o755
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source);
             let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
@@ -1310,7 +1313,10 @@ mod tests {
                 serde_json::Map::new()
             };
             item_source_hashes.insert(item_ref, Value::String(item_source_hash));
-            let manifest = serde_json::json!({ "item_source_hashes": item_source_hashes });
+            let manifest = serde_json::json!({
+                "kind": "source_manifest",
+                "item_source_hashes": item_source_hashes
+            });
             let manifest_hash = cas.store_object(&manifest).unwrap();
             std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
             std::fs::write(ref_path, manifest_hash).unwrap();

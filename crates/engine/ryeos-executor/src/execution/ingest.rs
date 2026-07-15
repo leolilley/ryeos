@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use lillux::cas::{sha256_hex, CasStore};
@@ -32,7 +32,7 @@ pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                m.permissions().mode()
+                m.permissions().mode() & 0o7777
             }
             #[cfg(not(unix))]
             None
@@ -100,11 +100,22 @@ fn ingest_walk(
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
+        let relative = path.strip_prefix(root).with_context(|| {
+            format!(
+                "ingest path '{}' escaped project root '{}'",
+                path.display(),
+                root.display()
+            )
+        })?;
+        let rel = relative
+            .to_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ingest project-relative path '{}' is not valid UTF-8",
+                    relative.display()
+                )
+            })?
+            .replace('\\', "/");
 
         // Always skip the state/ directory (internal daemon state)
         if rel.starts_with("state/") || rel == "state" {

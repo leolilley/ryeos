@@ -56,9 +56,17 @@ pub fn produce_env_value(
 ) -> Result<String, EngineError> {
     match source {
         EnvInjectionSource::ThreadId => Ok(request.thread_id.clone()),
-        EnvInjectionSource::ProjectPath => Ok(request.project_path.to_string_lossy().to_string()),
+        EnvInjectionSource::ProjectPath => request
+            .project_path
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("project path is not valid UTF-8".into())),
         EnvInjectionSource::ActingPrincipal => Ok(request.acting_principal.clone()),
-        EnvInjectionSource::CasRoot => Ok(request.cas_root.to_string_lossy().to_string()),
+        EnvInjectionSource::CasRoot => request
+            .cas_root
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("CAS root is not valid UTF-8".into())),
         EnvInjectionSource::CallbackTokenUrl => request.callback_token.clone().ok_or_else(|| {
             EngineError::Internal(
                 "callback_token_url requested but no callback_token available".into(),
@@ -77,7 +85,11 @@ pub fn produce_env_value(
         EnvInjectionSource::VaultHandle => request.vault_handle.clone().ok_or_else(|| {
             EngineError::Internal("vault_handle requested but no vault_handle available".into())
         }),
-        EnvInjectionSource::AppRoot => Ok(request.app_root.to_string_lossy().to_string()),
+        EnvInjectionSource::AppRoot => request
+            .app_root
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("app root is not valid UTF-8".into())),
         EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.clone().ok_or_else(|| {
             EngineError::Internal(
                 "thread_auth_token requested but no thread_auth_token available".into(),

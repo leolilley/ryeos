@@ -311,6 +311,16 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         )))
     }
 
+    async fn project_snapshot(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.project_snapshot callback is not implemented by this client"
+        )))
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     /// Report a claimed command as `completed` or `rejected`. `command_id` is the

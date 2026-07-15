@@ -26,6 +26,9 @@ pub struct GcEvent {
     /// Schedule-fire JSONL lines dropped by the retention sweep.
     #[serde(default)]
     pub deleted_fire_records: usize,
+    /// Terminal rows dropped from the scheduler fire projection.
+    #[serde(default)]
+    pub deleted_fire_projection_rows: usize,
     /// Terminal sync-job rows dropped by the retention sweep.
     #[serde(default)]
     pub deleted_sync_jobs: usize,
@@ -35,9 +38,19 @@ pub struct GcEvent {
     #[serde(default)]
     pub reaped_seats: usize,
     #[serde(default)]
-    pub retired_service_chains: usize,
+    pub terminal_chain_candidates: usize,
     #[serde(default)]
-    pub deleted_service_chain_rows: usize,
+    pub retired_terminal_chains: usize,
+    #[serde(default)]
+    pub deleted_thread_projection_rows: usize,
+    #[serde(default)]
+    pub deleted_thread_runtime_rows: usize,
+    #[serde(default)]
+    pub deleted_thread_runtime_files: usize,
+    #[serde(default)]
+    pub pending_retirements_recovered: usize,
+    #[serde(default)]
+    pub retired_durable_cas_uploads: usize,
     pub freed_bytes: u64,
     pub snapshots_compacted: usize,
     pub duration_ms: u64,
@@ -62,11 +75,17 @@ impl GcEvent {
             deleted_blobs: result.deleted_blobs,
             deleted_runtime_files: result.deleted_runtime_files,
             deleted_fire_records: result.deleted_fire_records,
+            deleted_fire_projection_rows: result.deleted_fire_projection_rows,
             deleted_sync_jobs: result.deleted_sync_jobs,
             deleted_sync_job_attempts: result.deleted_sync_job_attempts,
             reaped_seats: result.reaped_seats,
-            retired_service_chains: result.retired_service_chains,
-            deleted_service_chain_rows: result.deleted_service_chain_rows,
+            terminal_chain_candidates: result.terminal_chain_candidates,
+            retired_terminal_chains: result.retired_terminal_chains,
+            deleted_thread_projection_rows: result.deleted_thread_projection_rows,
+            deleted_thread_runtime_rows: result.deleted_thread_runtime_rows,
+            deleted_thread_runtime_files: result.deleted_thread_runtime_files,
+            pending_retirements_recovered: result.pending_retirements_recovered,
+            retired_durable_cas_uploads: result.retired_durable_cas_uploads,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
@@ -120,11 +139,17 @@ mod tests {
             deleted_blobs: 5,
             deleted_runtime_files: 0,
             deleted_fire_records: 0,
+            deleted_fire_projection_rows: 0,
             deleted_sync_jobs: 0,
             deleted_sync_job_attempts: 0,
             reaped_seats: 0,
-            retired_service_chains: 0,
-            deleted_service_chain_rows: 0,
+            terminal_chain_candidates: 0,
+            retired_terminal_chains: 0,
+            deleted_thread_projection_rows: 0,
+            deleted_thread_runtime_rows: 0,
+            deleted_thread_runtime_files: 0,
+            pending_retirements_recovered: 0,
+            retired_durable_cas_uploads: 0,
             freed_bytes: 4096,
             snapshots_compacted: 0,
             duration_ms: 150,
@@ -158,11 +183,17 @@ mod tests {
                 deleted_blobs: 2,
                 deleted_runtime_files: 0,
                 deleted_fire_records: 0,
+                deleted_fire_projection_rows: 0,
                 deleted_sync_jobs: 0,
                 deleted_sync_job_attempts: 0,
                 reaped_seats: 0,
-                retired_service_chains: 0,
-                deleted_service_chain_rows: 0,
+                terminal_chain_candidates: 0,
+                retired_terminal_chains: 0,
+                deleted_thread_projection_rows: 0,
+                deleted_thread_runtime_rows: 0,
+                deleted_thread_runtime_files: 0,
+                pending_retirements_recovered: 0,
+                retired_durable_cas_uploads: 0,
                 freed_bytes: 1024,
                 snapshots_compacted: 0,
                 duration_ms: 100,

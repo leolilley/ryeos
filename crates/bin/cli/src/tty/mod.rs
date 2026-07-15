@@ -254,7 +254,7 @@ async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
             status: "stopped".to_string(),
             detail: Some(format!("app root: {}", app_root.display())),
         },
-        Ok(LifecycleStatus::Running { metadata }) => {
+        Ok(LifecycleStatus::Running { metadata, .. }) => {
             let mut detail = Vec::new();
             if let Some(pid) = metadata.pid {
                 detail.push(format!("pid {pid}"));
@@ -272,14 +272,31 @@ async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
             detail: Some(diagnostics.message),
         },
         Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => TtyNodeSummary {
-            status: "busy".to_string(),
+            status: "unresponsive".to_string(),
             detail: Some(diagnostics.message),
         },
         Ok(LifecycleStatus::Starting {
-            pid, started_at, ..
+            metadata, startup, ..
         }) => TtyNodeSummary {
             status: "starting".to_string(),
-            detail: Some(format!("pid {pid} · since {started_at}")),
+            detail: Some(format!(
+                "pid {} · {} · {}ms elapsed",
+                metadata.pid.unwrap_or_default(),
+                startup.phase.as_str(),
+                startup.elapsed_ms,
+            )),
+        },
+        Ok(LifecycleStatus::Failed { metadata, startup }) => TtyNodeSummary {
+            status: "failed".to_string(),
+            detail: Some(format!(
+                "pid {} · {} · {}",
+                metadata.pid.unwrap_or_default(),
+                startup.phase.as_str(),
+                startup
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown startup failure"),
+            )),
         },
         Err(err) => TtyNodeSummary {
             status: "status error".to_string(),

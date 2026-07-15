@@ -507,51 +507,84 @@ async fn push_no_project(
         .join("state")
         .join("objects");
     let local_cas = lillux::cas::CasStore::new(local_cas_root);
+    let recovery =
+        ryeos_state::RecoveryStore::from_runtime_state_dir(&state.config.runtime_state_dir())
+            .map_err(|e| RemoteForwardError::PushFailed(format!("open recovery store: {e:#}")))?;
+    let mut staged_roots = recovery
+        .begin_staged_cas_roots("remote-forward-no-project")
+        .map_err(|e| RemoteForwardError::PushFailed(format!("stage CAS roots: {e:#}")))?;
 
     let empty_manifest = ryeos_state::objects::SourceManifest {
         item_source_hashes: std::collections::HashMap::new(),
     };
-    let manifest_hash = local_cas
-        .store_object(&empty_manifest.to_value())
+    let manifest_value = empty_manifest.to_value();
+    let manifest_hash = staged_roots
+        .store_object(&local_cas, &manifest_value)
         .map_err(|e| RemoteForwardError::PushFailed(format!("store empty manifest: {e:#}")))?;
+
+    let upload_session = client
+        .objects_put(None, remote_project_path, &[], &[])
+        .await
+        .map_err(|e| RemoteForwardError::PushFailed(format!("begin upload: {e:#}")))?;
 
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
         user_manifest_hash: None,
         message: None,
         project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
-        parent_hashes: Vec::new(),
+        parent_hashes: upload_session
+            .expected_previous_hash
+            .iter()
+            .cloned()
+            .collect(),
         created_at: lillux::time::iso8601_now(),
         source: "push-no-project".to_string(),
     };
-    let snapshot_hash = local_cas
-        .store_object(&snapshot.to_value())
+    let snapshot_value = snapshot.to_value();
+    let snapshot_hash = staged_roots
+        .store_object(&local_cas, &snapshot_value)
         .map_err(|e| RemoteForwardError::PushFailed(format!("store snapshot: {e:#}")))?;
 
-    let all_hashes = collect_snapshot_hashes(
+    let upload_closure = collect_snapshot_hashes(
         &local_cas,
         &empty_manifest,
         None,
         None,
         &manifest_hash,
         &snapshot_hash,
-    );
-    let (blobs_uploaded, blobs_skipped) = upload_missing(client, &local_cas, &all_hashes)
-        .await
-        .map_err(|e| RemoteForwardError::PushFailed(format!("upload missing objects: {e:#}")))?;
+    )
+    .map_err(|e| RemoteForwardError::PushFailed(format!("collect upload closure: {e:#}")))?;
+    let upload = upload_missing(
+        client,
+        &local_cas,
+        &upload_closure,
+        &snapshot_hash,
+        remote_project_path,
+        upload_session,
+    )
+    .await
+    .map_err(|e| RemoteForwardError::PushFailed(format!("upload missing objects: {e:#}")))?;
 
     client
-        .push_head(remote_project_path, &snapshot_hash)
+        .push_head(
+            remote_project_path,
+            &snapshot_hash,
+            &upload.staging_id,
+            upload.expected_previous_hash.as_deref(),
+        )
         .await
         .map_err(|e| RemoteForwardError::PushFailed(format!("push_head failed: {e:#}")))?;
+    staged_roots
+        .finish()
+        .map_err(|e| RemoteForwardError::PushFailed(format!("release staged roots: {e:#}")))?;
 
     Ok(PushResult {
         snapshot_hash,
         manifest_hash,
         manifest: empty_manifest,
         manifest_entries: 0,
-        blobs_uploaded,
-        blobs_skipped,
+        blobs_uploaded: upload.uploaded,
+        blobs_skipped: upload.skipped,
         user_manifest_hash: None,
         user_manifest: None,
     })

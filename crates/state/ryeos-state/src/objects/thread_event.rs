@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
 use super::{validate_object_kind, SCHEMA_VERSION};
 
 /// Event durability classes.
@@ -101,18 +102,13 @@ impl ThreadEvent {
         if self.event_type.is_empty() {
             anyhow::bail!("event_type must not be empty");
         }
-        if self.ts.is_empty() {
-            anyhow::bail!("ts must not be empty");
-        }
+        parse_canonical_timestamp(&self.ts)
+            .map_err(|error| anyhow::anyhow!("invalid thread event ts: {error}"))?;
         if let Some(hash) = &self.prev_chain_event_hash {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid prev_chain_event_hash: {hash}");
-            }
+            validate_canonical_hash("prev_chain_event_hash", hash)?;
         }
         if let Some(hash) = &self.prev_thread_event_hash {
-            if !lillux::valid_hash(hash) {
-                anyhow::bail!("invalid prev_thread_event_hash: {hash}");
-            }
+            validate_canonical_hash("prev_thread_event_hash", hash)?;
         }
         Ok(())
     }
@@ -343,6 +339,18 @@ mod tests {
             .prev_chain_event_hash(Some("not-a-valid-hash".to_string()))
             .build_with_ts("2026-04-21T12:34:56Z".to_string());
         assert!(event.validate().is_err());
+    }
+
+    #[test]
+    fn event_validation_rejects_noncanonical_timestamp_and_uppercase_link() {
+        let fractional = NewEvent::new("chain-1", "thread-1", "test")
+            .build_with_ts("2026-04-21T12:34:56.000Z".to_string());
+        assert!(fractional.validate().is_err());
+
+        let uppercase = NewEvent::new("chain-1", "thread-1", "test")
+            .prev_thread_event_hash(Some("AA".repeat(32)))
+            .build_with_ts("2026-04-21T12:34:56Z".to_string());
+        assert!(uppercase.validate().is_err());
     }
 
     #[test]

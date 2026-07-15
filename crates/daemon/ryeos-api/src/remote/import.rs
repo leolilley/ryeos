@@ -244,13 +244,15 @@ pub async fn import_admitted_root(
         source_peer: req.source_peer.clone(),
         job_id: req.job_id.clone(),
     };
+    let _cas_guard =
+        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
     let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
-    let import = state
-        .state_store
-        .with_state_db(|db| ryeos_state::sync::import_objects_staged(db, &payload, &attribution))?;
+    let import = state.state_store.with_state_db(|db| {
+        ryeos_state::sync::import_objects_staged(db, &payload, &attribution, &_cas_guard)
+    })?;
     if import.hash_mismatches != 0 {
         anyhow::bail!(
             "remote import encountered {} hash mismatch(es)",
@@ -313,9 +315,9 @@ fn verify_local_imported_closure(
             .max_links_per_object
             .unwrap_or(defaults.max_links_per_object),
     };
-    let cas_root = state.state_store.cas_root()?;
-    let report = ryeos_state::object_closure::collect_object_closure_with_limits(
-        &cas_root,
+    let cas = state.cas_store()?;
+    let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        &cas,
         [subject_hash.to_string()],
         limits,
     )?;
@@ -512,6 +514,10 @@ mod tests {
 
         fn fingerprint(&self) -> &str {
             &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
         }
     }
 

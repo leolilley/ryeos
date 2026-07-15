@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use lillux::cas::CasStore;
-use ryeos_state::objects::SourceManifest;
+use ryeos_state::objects::{ItemSource, SourceManifest};
 
 use crate::remote::client::RemoteClient;
 
@@ -78,6 +78,13 @@ pub async fn pull_results(
         .join("state")
         .join("objects");
     let local_cas = CasStore::new(local_cas_root.clone());
+    let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(
+        &app_root.join(ryeos_engine::AI_DIR).join("state"),
+    )
+    .map_err(PullResultsError::Other)?;
+    let mut staged_roots = recovery
+        .begin_staged_cas_roots("remote-pull-results")
+        .map_err(PullResultsError::Other)?;
 
     // 1. Fetch remote snapshot object
     let snapshot_objs = client
@@ -156,7 +163,15 @@ pub async fn pull_results(
             for entry in &fetched.entries {
                 if entry.kind == "object" {
                     if let Some(ref val) = entry.value {
-                        local_cas.store_object(val)?;
+                        let stored = staged_roots
+                            .store_object(&local_cas, val)
+                            .map_err(PullResultsError::Other)?;
+                        if stored != entry.hash {
+                            return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+                                "object hash mismatch: expected {}, got {stored}",
+                                entry.hash
+                            )));
+                        }
                         fetched_count += 1;
                         if let Some(blob_hash) =
                             val.get("content_blob_hash").and_then(|v| v.as_str())
@@ -166,7 +181,14 @@ pub async fn pull_results(
                                 .await
                                 .map_err(PullResultsError::Other)?;
                             if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
-                                local_cas.store_blob(&blob_data)?;
+                                let stored = staged_roots
+                                    .store_blob(&local_cas, &blob_data)
+                                    .map_err(PullResultsError::Other)?;
+                                if stored != blob_hash {
+                                    return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+                                        "blob hash mismatch: expected {blob_hash}, got {stored}"
+                                    )));
+                                }
                                 fetched_count += 1;
                             }
                         }
@@ -179,7 +201,15 @@ pub async fn pull_results(
                             .map_err(|e| {
                                 PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}"))
                             })?;
-                        local_cas.store_blob(&bytes)?;
+                        let stored = staged_roots
+                            .store_blob(&local_cas, &bytes)
+                            .map_err(PullResultsError::Other)?;
+                        if stored != entry.hash {
+                            return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+                                "blob hash mismatch: expected {}, got {stored}",
+                                entry.hash
+                            )));
+                        }
                         fetched_count += 1;
                     }
                 }
@@ -200,6 +230,7 @@ pub async fn pull_results(
     // 6. No global user-space pull-back exists in the single-app-root model.
     let user_fetched = 0usize;
     let (user_files_updated, user_files_deleted) = (0usize, 0usize);
+    staged_roots.finish().map_err(PullResultsError::Other)?;
 
     Ok(PullResult {
         snapshot_hash: remote_snapshot_hash.to_string(),
@@ -634,49 +665,27 @@ fn fetch_content_for_item_strict(
     item_hash: &str,
     rel_path: &str,
 ) -> Result<Vec<u8>, PullResultsError> {
-    let obj = cas
-        .get_object(item_hash)
-        .map_err(|e| {
-            PullResultsError::Other(anyhow::anyhow!(
-                "CAS object {} for '{}' not found: {}",
-                item_hash,
-                rel_path,
-                e
-            ))
-        })?
-        .ok_or_else(|| {
-            PullResultsError::Other(anyhow::anyhow!(
-                "CAS object {} for '{}' not found in store",
-                item_hash,
-                rel_path
-            ))
-        })?;
-    let blob_hash = obj
-        .get("content_blob_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            PullResultsError::Other(anyhow::anyhow!(
-                "CAS object {} for '{}' has no content_blob_hash",
-                item_hash,
-                rel_path
-            ))
-        })?;
-    cas.get_blob(blob_hash)
-        .map_err(|e| {
-            PullResultsError::Other(anyhow::anyhow!(
-                "CAS blob {} for '{}' not found: {}",
-                blob_hash,
-                rel_path,
-                e
-            ))
-        })?
-        .ok_or_else(|| {
-            PullResultsError::Other(anyhow::anyhow!(
-                "CAS blob {} for '{}' not found in store",
-                blob_hash,
-                rel_path
-            ))
-        })
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
+    let obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        cas,
+        item_hash,
+        limits.max_object_bytes,
+    )
+    .map_err(PullResultsError::Other)?;
+    let item = ItemSource::from_value(&obj).map_err(PullResultsError::Other)?;
+    if item.item_ref != rel_path {
+        return Err(PullResultsError::Other(anyhow::anyhow!(
+            "manifest path {:?} does not match embedded item_source path {:?}",
+            rel_path,
+            item.item_ref
+        )));
+    }
+    ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+        cas,
+        &item.content_blob_hash,
+        limits.max_blob_bytes,
+    )
+    .map_err(PullResultsError::Other)
 }
 
 /// Extract snapshot_hash from a remote execute response.
@@ -726,17 +735,7 @@ pub fn extract_snapshot_hash(response: &Value) -> Option<String> {
 
 /// Parse a SourceManifest from a JSON value.
 fn parse_manifest(val: &Value) -> Result<SourceManifest, PullResultsError> {
-    let mut items = HashMap::new();
-    if let Some(hashes) = val.get("item_source_hashes").and_then(|v| v.as_object()) {
-        for (path, hash) in hashes {
-            if let Some(h) = hash.as_str() {
-                items.insert(path.clone(), h.to_string());
-            }
-        }
-    }
-    Ok(SourceManifest {
-        item_source_hashes: items,
-    })
+    SourceManifest::from_value(val).map_err(PullResultsError::Other)
 }
 
 #[cfg(test)]
@@ -747,10 +746,15 @@ mod tests {
 
     /// Helper: create a CAS with a single blob and its corresponding item
     /// source object. Returns the item hash.
-    fn store_blob_and_item(cas: &CasStore, content: &[u8]) -> String {
+    fn store_blob_and_item(cas: &CasStore, rel_path: &str, content: &[u8]) -> String {
         let blob_hash = cas.store_blob(content).unwrap();
         let item = serde_json::json!({
+            "kind": "item_source",
+            "item_ref": rel_path,
             "content_blob_hash": blob_hash,
+            "integrity": blob_hash,
+            "signature_info": null,
+            "mode": null,
         });
         cas.store_object(&item).unwrap()
     }
@@ -842,7 +846,7 @@ mod tests {
         let cas = CasStore::new(cas_root);
 
         // Store content for file A only
-        let hash_a = store_blob_and_item(&cas, b"new A content");
+        let hash_a = store_blob_and_item(&cas, "a.txt", b"new A content");
         let hash_a_old = lillux::cas::sha256_hex(content_a.as_bytes());
         let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
         // File B's hash doesn't exist in CAS — will trigger strict failure
@@ -886,8 +890,8 @@ mod tests {
         let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
         let hash_c = lillux::cas::sha256_hex(content_c.as_bytes());
 
-        let hash_a_new = store_blob_and_item(&cas, b"new A");
-        let hash_d = store_blob_and_item(&cas, b"brand new D");
+        let hash_a_new = store_blob_and_item(&cas, "a.txt", b"new A");
+        let hash_d = store_blob_and_item(&cas, "d.txt", b"brand new D");
 
         let base = make_manifest(&[
             ("a.txt", &hash_a_old),

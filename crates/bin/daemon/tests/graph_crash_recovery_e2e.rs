@@ -187,9 +187,10 @@ fn read_pgid(state_path: &Path, thread_id: &str, deadline: Instant) -> i64 {
 }
 
 fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

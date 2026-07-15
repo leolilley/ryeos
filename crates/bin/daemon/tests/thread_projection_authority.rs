@@ -26,6 +26,21 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
 use tempfile::TempDir;
 
+fn captured_policy(item_ref: &str) -> ryeos_state::objects::CapturedThreadHistoryPolicy {
+    let hash = "a".repeat(64);
+    ryeos_state::objects::CapturedThreadHistoryPolicy {
+        retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+        canonical_item_ref: item_ref.to_string(),
+        item_content_hash: hash.clone(),
+        item_signer_fingerprint: Some(hash.clone()),
+        item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+        kind_schema_content_hash: hash,
+        resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+            node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+        },
+    }
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -59,19 +74,34 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
 
     let identity = NodeIdentity::create(&tmp.path().join("identity").join("node-key.pem")).unwrap();
     let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        identity.verifying_key().clone(),
+    );
     let state_store = Arc::new(
-        StateStore::new(
+        StateStore::new_with_head_trust(
             tmp.path().join(".ai").join("state"),
             tmp.path().join("runtime.sqlite3"),
             signer,
             WriteBarrier::new(),
+            Arc::new(head_trust),
         )
         .unwrap(),
     );
     let events = Arc::new(EventStoreService::new(state_store.clone()));
     let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
+    let engine = Arc::new(ryeos_engine::engine::Engine::new(
+        ryeos_engine::kind_registry::KindRegistry::empty(),
+        ryeos_engine::parsers::ParserDispatcher::new(
+            ryeos_engine::parsers::ParserRegistry::empty(),
+            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+        ),
+        Vec::new(),
+    ));
     let threads = Arc::new(
-        ThreadLifecycleService::new(state_store, kind_profiles, events, event_streams).unwrap(),
+        ThreadLifecycleService::new(state_store, engine, kind_profiles, events, event_streams)
+            .unwrap(),
     );
     (tmp, threads)
 }
@@ -91,6 +121,7 @@ fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
         project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: Some(captured_policy("test/item")),
     }
 }
 
@@ -100,7 +131,7 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
 
     // directive_run ships `supports_continuation: true`.
     threads
-        .create_thread(&create_params("T-dir", "directive_run"))
+        .create_thread_for_test(&create_params("T-dir", "directive_run"))
         .unwrap();
     let dir = serde_json::to_value(
         threads
@@ -123,7 +154,7 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
     // but folds no conversation, so it advertises continuation WITHOUT operator
     // follow-up.
     threads
-        .create_thread(&create_params("T-graph", "graph_run"))
+        .create_thread_for_test(&create_params("T-graph", "graph_run"))
         .unwrap();
     let graph = serde_json::to_value(
         threads
@@ -147,10 +178,10 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
 fn thread_list_reflects_real_kind_continuation_authority() {
     let (_tmp, threads) = lifecycle_with_real_kinds();
     threads
-        .create_thread(&create_params("T-dir", "directive_run"))
+        .create_thread_for_test(&create_params("T-dir", "directive_run"))
         .unwrap();
     threads
-        .create_thread(&create_params("T-graph", "graph_run"))
+        .create_thread_for_test(&create_params("T-graph", "graph_run"))
         .unwrap();
 
     let listing = threads.list_threads_filtered(100, None).unwrap();

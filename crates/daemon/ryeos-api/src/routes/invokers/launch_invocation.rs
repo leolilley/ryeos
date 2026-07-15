@@ -75,6 +75,40 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(project_path_str)
             .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
+        let preflight = crate::routes::launch::preflight_dispatch_launch(
+            &ctx.state,
+            &item_ref,
+            &project_path,
+            &parameters,
+            &principal_id,
+            &principal_scopes,
+            None,
+            "inline",
+            false,
+            None,
+            None,
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
+        })?;
+        if !preflight.class.persists_pre_minted_root() {
+            return Err(RouteDispatchError::BadRequest(
+                "background launch requires execution that persists a pre-minted thread root"
+                    .to_string(),
+            ));
+        }
+        let root_admission = preflight.root_admission.ok_or_else(|| {
+            RouteDispatchError::Internal(
+                "threaded dispatch preflight returned no root admission".to_string(),
+            )
+        })?;
+        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(root_admission)
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "validated launch contract rejected at dispatch boundary: {error:#}"
+                ))
+            })?;
+
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 
         let route_id: String = ctx.route_id.to_string();
@@ -89,12 +123,11 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         let handle = crate::routes::launch::spawn_dispatch_launch(
             &ctx.state,
             item_ref,
-            project_path,
             parameters,
             principal_id.clone(),
             principal_scopes,
             thread_id.clone(),
-            Default::default(), // launch options: use all defaults
+            launch_options,
         );
 
         // Detached watcher: await the handle and log outcome.

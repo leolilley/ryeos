@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T04:48:38Z:36b32f2f02554de7e94bfbdd95a27c1dbdf097385ce5b42b1a095d33279a241e:q4BXOnO5INXzUXsXPh4GYnWgf7Dg3xRvBlUN9kxpNXCR+jKzmRb2+EslWfAkBcG6mv5Z/RFIysaij4ovZEr1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:b33c7aa951307fb44a3d2a033f1be712647f2ccd185f6cee3292031a89719d65:4vnN5+Aqf6a7M6W5zeSawaPPbeiulTVrV8NUBohj1RBF5yAVlQUcdK6Rp7jwxTKYZVM+0Eyq+LYsz0upDfGFBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Bundle-authored maintenance schedule declaration (standard bundle).
 #
 # The daemon reconciles this into a signed node schedule spec at init
@@ -8,12 +8,16 @@
 # shows maintenance fires and `scheduler pause maintenance-gc` pauses them.
 #
 # This is the ONLY source of maintenance cadence/params: no declaration, no
-# scheduled GC — the daemon schedules nothing implicitly. Edit here to change
-# the cadence; delete the entry (or the file) to leave GC unscheduled.
+# scheduled GC — the daemon schedules nothing implicitly. Every boot refreshes
+# declaration-owned fields and removes generated specs no longer declared.
+# `enabled` is the initial value for a new spec; after creation, use scheduler
+# pause/resume, whose explicit operator override survives declaration refresh.
 #
 # Runs the deep GC profile daily (see GcParams profile docs): CAS sweep plus
-# cache purge, trace truncation, runtime-history pruning, and the retention
-# sweeps. overlap_policy `skip` never stacks a second GC over a running one.
+# cache purge, trace truncation, and captured-policy runtime-history pruning.
+# Operational cleanup windows are authored here; omission disables that pass
+# because Rust supplies no retention age/count. overlap_policy `skip` never
+# stacks a second GC over a running one.
 spec_version: 1
 schedules:
   - schedule_id: maintenance-gc
@@ -23,11 +27,21 @@ schedules:
     timezone: UTC
     misfire_policy: skip
     overlap_policy: skip
-    # Disabled 2026-07-04 while the deep-GC profile settles post-deploy;
-    # flip back to re-enable. Kept declared-but-disabled (rather than
-    # deleted) so the schedule stays visible in data.
-    enabled: false
+    lateness_grace_secs: 60
+    # The cadence and every cleanup window are signed data. Rust supplies no
+    # implicit timer or fallback age. This seeds a newly created spec; use
+    # scheduler pause/resume for the durable operator override thereafter.
+    enabled: true
     params:
+      compact: true
+      policy:
+        manual_pushes: 10
+        auto_snapshots: 30
       deep: true
+      schedule_fire_max_age_days: 30
+      schedule_fire_max_count: 500
+      sync_job_retention_days: 14
+      seat_lease_grace_seconds: 600
+      durable_cas_upload_max_age_seconds: 21600
     capabilities:
       - "ryeos.execute.service.maintenance/gc"

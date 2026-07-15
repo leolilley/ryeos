@@ -71,6 +71,7 @@ pub(super) fn prepare_managed_launch(
     runtime_ref: &str,
     ctx: &ExecutionContext,
     request: &DispatchRequest<'_>,
+    node_history_policy: &ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy,
 ) -> Result<PreparedManagedLaunch, DispatchError> {
     let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
     let executor_ref = format!("native:{bare}");
@@ -79,19 +80,49 @@ pub(super) fn prepare_managed_launch(
         thread_profile: hop_thread_profile.to_string(),
         verified: hop_verified.cloned(),
     });
-    let resolved_item = match subject.verified {
-        Some(v) => v.resolved,
+    let verified_subject = match subject.verified {
+        Some(verified) => verified,
         None => {
             let canonical = CanonicalRef::parse(&subject.item_ref)
                 .map_err(|e| DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string()))?;
-            ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
+            let resolved = ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
                 DispatchError::SchemaMisconfigured {
                     kind: canonical.kind.clone(),
                     detail: format!("subject resolution failed for '{}': {e}", subject.item_ref),
                 }
+            })?;
+            ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
+                DispatchError::InvalidRef(
+                    subject.item_ref.clone(),
+                    format!("subject verification failed: {e}"),
+                )
             })?
         }
     };
+    let root_admission = request
+        .previous_thread_id
+        .is_none()
+        .then(|| {
+            if let Some(admission) = request.root_admission.as_ref() {
+                admission
+                    .ensure_matches_subject(&ctx.engine, &verified_subject, &subject.thread_profile)
+                    .map_err(DispatchError::Internal)?;
+                Ok(admission.clone())
+            } else {
+                ryeos_app::thread_lifecycle::admit_verified_root_execution(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    verified_subject.clone(),
+                    node_history_policy,
+                    subject.thread_profile.clone(),
+                    request.usage_subject.clone(),
+                    request.usage_subject_asserted_by.clone(),
+                )
+                .map_err(DispatchError::Internal)
+            }
+        })
+        .transpose()?;
+    let resolved_item = verified_subject.resolved.clone();
     let resolved = ResolvedExecutionRequest {
         kind: subject.thread_profile.clone(),
         item_ref: subject.item_ref.clone(),
@@ -106,6 +137,7 @@ pub(super) fn prepare_managed_launch(
         parameters: request.params.clone(),
         resolved_item,
         plan_context: ctx.plan_ctx.clone(),
+        root_admission,
     };
     Ok(PreparedManagedLaunch {
         resolved,

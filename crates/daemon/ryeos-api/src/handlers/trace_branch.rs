@@ -157,9 +157,13 @@ pub async fn handle(
         origin_site_id: parent_thread.origin_site_id,
         upstream_thread_id: None,
         requested_by: Some(ctx.fingerprint.clone()),
-        project_root: parent_thread.project_root.as_ref().map(std::path::PathBuf::from),
+        project_root: parent_thread
+            .project_root
+            .as_ref()
+            .map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: None,
     };
     let branch_payload = json!({
         "relation": "trace_branch",

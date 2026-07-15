@@ -21,8 +21,6 @@ pub struct Request {
     pub project: PathBuf,
     #[serde(default)]
     pub expected_deployed_hash: Option<String>,
-    #[serde(default)]
-    pub force: bool,
 }
 
 fn default_remote() -> String {
@@ -43,7 +41,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
-    let expected_deployed_hash = if req.force || req.expected_deployed_hash.is_some() {
+    let expected_deployed_hash = if req.expected_deployed_hash.is_some() {
         req.expected_deployed_hash.clone()
     } else {
         let status = client.project_status(&binding.remote_project_path).await?;
@@ -62,8 +60,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     .to_string(),
             )
         } else {
-            // Empty string is an apply-snapshot sentinel for "expect no deployed ref".
-            Some(String::new())
+            None
         }
     };
     // Apply the remote's ingest ignore rules client-side so files the
@@ -84,7 +81,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &binding.remote_project_path,
             &push.snapshot_hash,
             expected_deployed_hash.as_deref(),
-            req.force,
         )
         .await
         .map_err(|e| {

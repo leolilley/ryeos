@@ -16,6 +16,21 @@ use ryeos_app::state_store::{FinalizeThreadRecord, NewThreadRecord, StateStore};
 use ryeos_app::write_barrier::WriteBarrier;
 use tempfile::TempDir;
 
+fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
+    let hash = "a".repeat(64);
+    ryeos_state::objects::CapturedThreadHistoryPolicy {
+        retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+        canonical_item_ref: "test/directive".to_string(),
+        item_content_hash: hash.clone(),
+        item_signer_fingerprint: Some(hash.clone()),
+        item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+        kind_schema_content_hash: hash,
+        resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+            node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+        },
+    }
+}
+
 fn setup_state_store() -> (TempDir, Arc<StateStore>) {
     let tmpdir = TempDir::new().unwrap();
     let runtime_state_dir = tmpdir.path().join(".ai").join("state");
@@ -27,11 +42,22 @@ fn setup_state_store() -> (TempDir, Arc<StateStore>) {
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        identity.verifying_key().clone(),
+    );
 
     let write_barrier = WriteBarrier::new();
 
-    let store = StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier)
-        .expect("StateStore creation should succeed");
+    let store = StateStore::new_with_head_trust(
+        runtime_state_dir,
+        runtime_db_path,
+        signer,
+        write_barrier,
+        Arc::new(head_trust),
+    )
+    .expect("StateStore creation should succeed");
 
     (tmpdir, Arc::new(store))
 }
@@ -51,6 +77,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: (thread_id == chain_root_id).then(captured_policy),
     }
 }
 
@@ -61,7 +88,9 @@ fn state_store_write_path_emits_state_spans() {
 
     let (_, spans) = ryeos_tracing::test::capture_traces(|| {
         let thread = make_thread("T-trace-1", "T-trace-1");
-        store.create_thread(&thread).expect("create_thread");
+        store
+            .create_thread_for_test(&thread)
+            .expect("create_thread");
         store
             .mark_thread_running("T-trace-1", None)
             .expect("mark_thread_running");
@@ -136,7 +165,7 @@ fn resume_attempts_bump_emits_state_span() {
 
     // Need a thread row in runtime_db for bump_resume_attempts to act on.
     store
-        .create_thread(&make_thread("T-bump-1", "T-bump-1"))
+        .create_thread_for_test(&make_thread("T-bump-1", "T-bump-1"))
         .expect("create_thread");
 
     let (post, spans) = ryeos_tracing::test::capture_traces(|| {

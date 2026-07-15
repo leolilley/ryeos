@@ -1,0 +1,9 @@
+# ryeos:signed:2026-07-14T23:18:48Z:ffa0dc3a75c977fa53cdccb4beb48e4b61f7f217c562de3f371f69c249d4346a:DwAfysTcqPJk8yxWxqcsBpxsdH6iIxgOaIOgmrhA+XS6O6cQmqZ5/PP3WbaH5IEY1OKW9x78OYM0rkclrRwJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: projection.rebuild
+availability: offline
+record_thread: false
+state_access: projection_rebuild
+required_caps: ["ryeos.execute.service.projection/rebuild"]
+schema: {}
+description: "Rebuild the thread projection into a fresh generation-selected instance from trusted signed heads and CAS, publish it atomically, then strictly verify it. Offline-only."

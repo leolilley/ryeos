@@ -33,16 +33,30 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        identity.verifying_key().clone(),
+    );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
-        ryeos_app::state_store::StateStore::new(
+        ryeos_app::state_store::StateStore::new_with_head_trust(
             runtime_state_dir,
             runtime_db_path,
             signer,
             write_barrier.clone(),
+            Arc::new(head_trust),
         )
         .unwrap(),
     );
+    let engine = Arc::new(ryeos_engine::engine::Engine::new(
+        ryeos_engine::kind_registry::KindRegistry::empty(),
+        ryeos_engine::parsers::ParserDispatcher::new(
+            ryeos_engine::parsers::ParserRegistry::empty(),
+            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+        ),
+        Vec::new(),
+    ));
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
@@ -51,6 +65,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let threads = Arc::new(
         ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
             state_store.clone(),
+            engine.clone(),
             kind_profiles.clone(),
             events.clone(),
             event_streams.clone(),
@@ -62,15 +77,6 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         kind_profiles,
         events.clone(),
     ));
-
-    let engine = ryeos_engine::engine::Engine::new(
-        ryeos_engine::kind_registry::KindRegistry::empty(),
-        ryeos_engine::parsers::ParserDispatcher::new(
-            ryeos_engine::parsers::ParserRegistry::empty(),
-            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-        ),
-        Vec::new(),
-    );
 
     build_app_state(
         tmpdir,
@@ -148,7 +154,7 @@ fn build_app_state(
     config: ryeos_app::config::Config,
     identity: ryeos_app::identity::NodeIdentity,
     state_store: Arc<ryeos_app::state_store::StateStore>,
-    engine: ryeos_engine::engine::Engine,
+    engine: Arc<ryeos_engine::engine::Engine>,
     threads: Arc<ryeos_app::thread_lifecycle::ThreadLifecycleService>,
     events: Arc<ryeos_app::event_store_service::EventStoreService>,
     commands: Arc<ryeos_app::command_service::CommandService>,
@@ -169,7 +175,7 @@ fn build_app_state(
     let state = AppState {
         config: Arc::new(config),
         state_store,
-        engine: Arc::new(engine),
+        engine,
         engine_cache: ryeos_app::engine_cache::EngineCache::new(
             ryeos_app::engine_cache::EngineCacheConfig::default(),
         ),
@@ -192,6 +198,9 @@ fn build_app_state(
         services: Arc::new(ryeos_api::registry::build_service_registry()),
         service_descriptors: ryeos_api::handlers::ALL,
         node_config: Arc::new(snapshot),
+        node_history_policy: Arc::new(
+            ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+        ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: test_command_registry,
         authorizer: test_auth,

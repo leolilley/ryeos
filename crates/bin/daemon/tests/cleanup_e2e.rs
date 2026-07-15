@@ -121,7 +121,7 @@ async fn cli_initialized_but_stopped_suggests_start() {
 async fn offline_only_service_errors_when_daemon_up() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
-        .post_execute("service:rebuild", ".", serde_json::json!({}))
+        .post_execute("service:projection/rebuild", ".", serde_json::json!({}))
         .await
         .expect("post /execute");
     assert!(

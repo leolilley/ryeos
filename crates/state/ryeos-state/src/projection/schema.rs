@@ -13,7 +13,13 @@ CREATE TABLE IF NOT EXISTS projection_meta (
     updated_at TEXT NOT NULL
 );
 
--- Threads: the primary durable table
+-- Binds generation.json to the exact installed projection database.
+CREATE TABLE IF NOT EXISTS projection_recovery_identity (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    projection_instance_id TEXT NOT NULL
+);
+
+-- Threads: the primary thread read model
 CREATE TABLE IF NOT EXISTS threads (
     thread_id TEXT PRIMARY KEY,
     chain_root_id TEXT NOT NULL,
@@ -36,6 +42,7 @@ CREATE TABLE IF NOT EXISTS threads (
     upstream_thread_id TEXT,
     requested_by TEXT,
     project_root TEXT,
+    captured_history_policy_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
@@ -48,7 +55,16 @@ CREATE INDEX IF NOT EXISTS idx_threads_created_at ON threads(created_at);
 CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at);
 CREATE INDEX IF NOT EXISTS idx_threads_project_root ON threads(project_root);
 
--- Events: durable thread events
+CREATE TABLE IF NOT EXISTS chain_retention (
+    chain_root_id TEXT PRIMARY KEY,
+    terminal_at TEXT,
+    retire_after INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_chain_retention_due
+    ON chain_retention(retire_after, chain_root_id)
+    WHERE retire_after IS NOT NULL;
+
+-- Events: read model of authoritative durable thread events
 CREATE TABLE IF NOT EXISTS events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_hash TEXT NOT NULL,
@@ -86,11 +102,14 @@ CREATE TABLE IF NOT EXISTS thread_edges (
     child_thread_id TEXT NOT NULL,
     spawn_seq INTEGER,
     spawn_reason TEXT,
+    source_event_hash TEXT,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_edges_parent ON thread_edges(parent_thread_id);
 CREATE INDEX IF NOT EXISTS idx_edges_child ON thread_edges(child_thread_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_source_event_hash
+    ON thread_edges(source_event_hash);
 
 -- Thread results: final output and status
 CREATE TABLE IF NOT EXISTS thread_results (
@@ -108,6 +127,7 @@ CREATE INDEX IF NOT EXISTS idx_results_chain_root ON thread_results(chain_root_i
 -- Thread artifacts: published outputs
 CREATE TABLE IF NOT EXISTS thread_artifacts (
     artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_event_hash TEXT NOT NULL,
     chain_root_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -117,6 +137,8 @@ CREATE TABLE IF NOT EXISTS thread_artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON thread_artifacts(thread_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_chain_root ON thread_artifacts(chain_root_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_source_event_hash
+    ON thread_artifacts(source_event_hash);
 
 -- Thread facets: extensible attributes
 CREATE TABLE IF NOT EXISTS thread_facets (
@@ -179,88 +201,6 @@ CREATE TABLE IF NOT EXISTS thread_usage_subjects (
 
 CREATE INDEX IF NOT EXISTS idx_thread_usage_subjects_subject
     ON thread_usage_subjects(namespace, subject);
-
--- CAS entry attribution: why a CAS object/blob is present locally.
-CREATE TABLE IF NOT EXISTS cas_entries (
-    hash TEXT NOT NULL,
-    entry_kind TEXT NOT NULL CHECK (entry_kind IN ('object', 'blob')),
-    bytes INTEGER NOT NULL CHECK (bytes >= 0),
-    first_seen_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    source_principal TEXT,
-    source_peer TEXT,
-    job_id TEXT,
-    state TEXT NOT NULL CHECK (state IN ('local', 'staged', 'accepted', 'mirrored', 'rejected')),
-    PRIMARY KEY(entry_kind, hash)
-);
-
-CREATE INDEX IF NOT EXISTS idx_cas_entries_state ON cas_entries(state);
-CREATE INDEX IF NOT EXISTS idx_cas_entries_source_principal ON cas_entries(source_principal);
-CREATE INDEX IF NOT EXISTS idx_cas_entries_source_peer ON cas_entries(source_peer);
-CREATE INDEX IF NOT EXISTS idx_cas_entries_job_id ON cas_entries(job_id);
-
--- Durable distributed-substrate jobs. These are operational records, not CAS facts.
-CREATE TABLE IF NOT EXISTS sync_jobs (
-    job_id TEXT PRIMARY KEY,
-    operation_type TEXT NOT NULL,
-    peer TEXT,
-    state TEXT NOT NULL CHECK (state IN ('planned', 'running', 'completed', 'failed', 'retryable', 'cancelled')),
-    phase TEXT NOT NULL,
-    roots_json BLOB NOT NULL,
-    heads_json BLOB NOT NULL,
-    uploaded_hashes_json BLOB NOT NULL,
-    fetched_hashes_json BLOB NOT NULL,
-    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
-    max_attempts INTEGER NOT NULL CHECK (max_attempts >= 0),
-    last_error TEXT,
-    result_json BLOB,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    finished_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_jobs_state ON sync_jobs(state);
-CREATE INDEX IF NOT EXISTS idx_sync_jobs_operation_type ON sync_jobs(operation_type);
-CREATE INDEX IF NOT EXISTS idx_sync_jobs_peer ON sync_jobs(peer);
-
-CREATE TABLE IF NOT EXISTS sync_job_attempts (
-    attempt_id TEXT PRIMARY KEY,
-    job_id TEXT NOT NULL,
-    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
-    worker_id TEXT,
-    state TEXT NOT NULL CHECK (state IN ('running', 'completed', 'failed', 'cancelled')),
-    phase TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    finished_at TEXT,
-    error TEXT,
-    result_json BLOB,
-    UNIQUE(job_id, attempt_number)
-);
-
-CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_job_id ON sync_job_attempts(job_id);
-CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_state ON sync_job_attempts(state);
-CREATE INDEX IF NOT EXISTS idx_sync_job_attempts_worker_id ON sync_job_attempts(worker_id);
-
--- Admission attestation lookup index. Attestations remain immutable CAS objects;
--- this projection makes subject/policy/issuer lookup efficient.
-CREATE TABLE IF NOT EXISTS admission_attestations (
-    attestation_hash TEXT PRIMARY KEY,
-    subject_hash TEXT NOT NULL,
-    policy TEXT NOT NULL,
-    claim TEXT NOT NULL,
-    issuer TEXT NOT NULL,
-    issued_at TEXT NOT NULL,
-    expires_at TEXT,
-    head_ref_path TEXT,
-    indexed_at TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('accepted', 'rejected'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_admission_attestations_subject ON admission_attestations(subject_hash);
-CREATE INDEX IF NOT EXISTS idx_admission_attestations_policy ON admission_attestations(policy);
-CREATE INDEX IF NOT EXISTS idx_admission_attestations_issuer ON admission_attestations(issuer);
-CREATE INDEX IF NOT EXISTS idx_admission_attestations_subject_policy_claim_issuer ON admission_attestations(subject_hash, policy, claim, issuer);
 "#;
 
 /// Application ID stamp for projection.db.
@@ -277,7 +217,7 @@ pub(super) const PROJECTION_APP_ID: i32 = 0x5259_504a;
 /// are detected automatically by the spec fingerprint in
 /// [`projection_schema_epoch`]. Adding derivation for a brand-new event type
 /// also needs no bump (there are no past events of that type to re-derive).
-pub(super) const PROJECTION_DERIVATION_VERSION: u64 = 1;
+pub(super) const PROJECTION_DERIVATION_VERSION: u64 = 3;
 
 /// The projection schema epoch, stored in SQLite's `PRAGMA user_version`.
 ///
@@ -290,7 +230,10 @@ pub(super) const PROJECTION_DERIVATION_VERSION: u64 = 1;
 /// the hard backstop on a freshly-built DB.
 pub(super) fn projection_schema_epoch() -> i32 {
     let fingerprint = schema_spec_fingerprint(&projection_schema_spec());
-    let combined = fingerprint ^ PROJECTION_DERIVATION_VERSION.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let ddl_fingerprint = fnv1a_64(SCHEMA_SQL.as_bytes());
+    let combined = fingerprint
+        ^ ddl_fingerprint.rotate_left(17)
+        ^ PROJECTION_DERIVATION_VERSION.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     // Fold the 64-bit value into the i32 `user_version` slot.
     (combined ^ (combined >> 32)) as i32
 }
@@ -373,6 +316,23 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "projection_recovery_identity",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "singleton",
+                        col_type: "INTEGER",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "projection_instance_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "threads",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -448,6 +408,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "captured_history_policy_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "created_at",
                         col_type: "TEXT",
                         pk: false,
@@ -468,6 +434,29 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "finished_at",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "chain_retention",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "retire_after",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: false,
                     },
@@ -613,6 +602,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "source_event_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "created_at",
                         col_type: "TEXT",
                         pk: false,
@@ -674,6 +669,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                         name: "artifact_id",
                         col_type: "INTEGER",
                         pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "source_event_hash",
+                        col_type: "TEXT",
+                        pk: false,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
@@ -879,302 +880,6 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
-            sqlite_schema::TableSpec {
-                name: "cas_entries",
-                columns: &[
-                    sqlite_schema::ColumnSpec {
-                        name: "hash",
-                        col_type: "TEXT",
-                        pk: true,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "entry_kind",
-                        col_type: "TEXT",
-                        pk: true,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "bytes",
-                        col_type: "INTEGER",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "first_seen_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "updated_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "source_principal",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "source_peer",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "job_id",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "state",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                ],
-            },
-            sqlite_schema::TableSpec {
-                name: "sync_jobs",
-                columns: &[
-                    sqlite_schema::ColumnSpec {
-                        name: "job_id",
-                        col_type: "TEXT",
-                        pk: true,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "operation_type",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "peer",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "state",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "phase",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "roots_json",
-                        col_type: "BLOB",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "heads_json",
-                        col_type: "BLOB",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "uploaded_hashes_json",
-                        col_type: "BLOB",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "fetched_hashes_json",
-                        col_type: "BLOB",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "attempt_count",
-                        col_type: "INTEGER",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "max_attempts",
-                        col_type: "INTEGER",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "last_error",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "result_json",
-                        col_type: "BLOB",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "created_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "updated_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "finished_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                ],
-            },
-            sqlite_schema::TableSpec {
-                name: "sync_job_attempts",
-                columns: &[
-                    sqlite_schema::ColumnSpec {
-                        name: "attempt_id",
-                        col_type: "TEXT",
-                        pk: true,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "job_id",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "attempt_number",
-                        col_type: "INTEGER",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "worker_id",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "state",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "phase",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "started_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "updated_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "finished_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "error",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "result_json",
-                        col_type: "BLOB",
-                        pk: false,
-                        not_null: false,
-                    },
-                ],
-            },
-            sqlite_schema::TableSpec {
-                name: "admission_attestations",
-                columns: &[
-                    sqlite_schema::ColumnSpec {
-                        name: "attestation_hash",
-                        col_type: "TEXT",
-                        pk: true,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "subject_hash",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "policy",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "claim",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "issuer",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "issued_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "expires_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "head_ref_path",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "indexed_at",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "state",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: true,
-                    },
-                ],
-            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -1205,6 +910,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_threads_project_root",
                 table: "threads",
                 columns: &["project_root"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_chain_retention_due",
+                table: "chain_retention",
+                columns: &["retire_after", "chain_root_id"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -1250,6 +961,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_edges_source_event_hash",
+                table: "thread_edges",
+                columns: &["source_event_hash"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_results_chain_root",
                 table: "thread_results",
                 columns: &["chain_root_id"],
@@ -1266,6 +983,12 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "thread_artifacts",
                 columns: &["chain_root_id"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_artifacts_source_event_hash",
+                table: "thread_artifacts",
+                columns: &["source_event_hash"],
+                unique: true,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_facets_thread",
@@ -1301,90 +1024,6 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_thread_usage_subjects_subject",
                 table: "thread_usage_subjects",
                 columns: &["namespace", "subject"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_cas_entries_state",
-                table: "cas_entries",
-                columns: &["state"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_cas_entries_source_principal",
-                table: "cas_entries",
-                columns: &["source_principal"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_cas_entries_source_peer",
-                table: "cas_entries",
-                columns: &["source_peer"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_cas_entries_job_id",
-                table: "cas_entries",
-                columns: &["job_id"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_sync_jobs_state",
-                table: "sync_jobs",
-                columns: &["state"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_sync_jobs_operation_type",
-                table: "sync_jobs",
-                columns: &["operation_type"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_sync_jobs_peer",
-                table: "sync_jobs",
-                columns: &["peer"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_sync_job_attempts_job_id",
-                table: "sync_job_attempts",
-                columns: &["job_id"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_sync_job_attempts_state",
-                table: "sync_job_attempts",
-                columns: &["state"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_sync_job_attempts_worker_id",
-                table: "sync_job_attempts",
-                columns: &["worker_id"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_admission_attestations_subject",
-                table: "admission_attestations",
-                columns: &["subject_hash"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_admission_attestations_policy",
-                table: "admission_attestations",
-                columns: &["policy"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_admission_attestations_issuer",
-                table: "admission_attestations",
-                columns: &["issuer"],
-                unique: false,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_admission_attestations_subject_policy_claim_issuer",
-                table: "admission_attestations",
-                columns: &["subject_hash", "policy", "claim", "issuer"],
                 unique: false,
             },
         ],

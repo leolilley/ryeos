@@ -1,8 +1,6 @@
 //! Project AI sync scope and manifest path validation.
 
-use std::path::Component;
-
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::ignore::IgnoreMatcher;
@@ -364,35 +362,7 @@ pub fn materialized_project_ai_surface_roots() -> impl Iterator<Item = &'static 
 
 /// Basic relative path safety shared by full-project and AI-only snapshots.
 pub fn validate_safe_relative_path(rel_path: &str) -> Result<()> {
-    if rel_path.is_empty() {
-        anyhow::bail!("manifest path must not be empty");
-    }
-    if rel_path.contains('\\') {
-        anyhow::bail!("manifest path '{}' contains a backslash", rel_path);
-    }
-
-    let path = std::path::Path::new(rel_path);
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => {}
-            Component::ParentDir => anyhow::bail!("manifest path '{}' contains '..'", rel_path),
-            Component::CurDir => anyhow::bail!("manifest path '{}' contains '.'", rel_path),
-            Component::RootDir | Component::Prefix(_) => {
-                anyhow::bail!("manifest path '{}' is absolute", rel_path)
-            }
-        }
-    }
-
-    // `Path::components` can normalize some odd forms; reject strings
-    // that did not yield any normal component as a final guard.
-    if !path.components().any(|c| matches!(c, Component::Normal(_))) {
-        return Err(anyhow!(
-            "manifest path '{}' has no normal components",
-            rel_path
-        ));
-    }
-
-    Ok(())
+    crate::objects::validate_canonical_project_relative_path(rel_path)
 }
 
 #[cfg(test)]

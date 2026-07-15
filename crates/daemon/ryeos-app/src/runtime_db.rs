@@ -1,7 +1,10 @@
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -13,6 +16,97 @@ pub struct RuntimeInfo {
     pub pgid: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
+}
+
+/// Runtime-owned facts which can make an otherwise terminal chain unsafe to
+/// retire.  This is deliberately structural: retention callers never infer
+/// safety from an item kind or ref, and a failed inspection propagates as an
+/// error (therefore pins the chain).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ChainRecoveryPins {
+    /// Runtime rows whose chain membership disagrees with authoritative chain
+    /// truth. These are retained as a structural pin rather than silently
+    /// orphaned by deleting the signed head.
+    pub runtime_membership_conflicts: u64,
+    pub live_processes: u64,
+    pub launch_claims: u64,
+    /// Active launch claims whose persisted launch contract is resume- or
+    /// continuation-capable. This is deliberately derived from an owning claim;
+    /// a non-zero historical `resume_attempts` counter is not an in-flight owner.
+    pub recovery_capable_launch_claims: u64,
+    /// Durable owners which may still consume a checkpoint. Checkpoint files and
+    /// launch metadata alone are residue, not pins: an owning recovery launch or
+    /// parent follow waiter must still exist.
+    pub required_checkpoint_consumers: u64,
+    pub pending_commands: u64,
+    /// Open cancel/kill commands or cancelled launch-window tombstones which
+    /// still require the recovery/cascade machinery to converge.
+    pub cancellation_repairs: u64,
+    pub follow_waiters: u64,
+    pub launch_windows: u64,
+    pub seat_leases: u64,
+    pub child_links: u64,
+    pub scheduler_fires: u64,
+}
+
+impl ChainRecoveryPins {
+    pub fn is_empty(&self) -> bool {
+        self.runtime_membership_conflicts == 0
+            && self.live_processes == 0
+            && self.launch_claims == 0
+            && self.recovery_capable_launch_claims == 0
+            && self.required_checkpoint_consumers == 0
+            && self.pending_commands == 0
+            && self.cancellation_repairs == 0
+            && self.follow_waiters == 0
+            && self.launch_windows == 0
+            && self.seat_leases == 0
+            && self.child_links == 0
+            && self.scheduler_fires == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ThreadRecoveryOwners {
+    recovery_capable_launch_claims: u64,
+    required_checkpoint_consumers: u64,
+    cancellation_repairs: u64,
+}
+
+/// Classify recovery ownership from durable state-machine rows rather than
+/// from historical counters or leftover files. A launch contract is only live
+/// for retention while its launch claim exists. Likewise, a checkpoint path is
+/// only required while that claimed recovery-capable launch can consume it.
+fn classify_thread_recovery_owners(
+    runtime_info: Option<&RuntimeInfo>,
+    launch_claims: u64,
+    open_control_commands: u64,
+) -> ThreadRecoveryOwners {
+    let metadata = runtime_info.and_then(|info| info.launch_metadata.as_ref());
+    let recovery_capable = metadata.is_some_and(|metadata| {
+        metadata.native_resume.is_some() || metadata.resume_context.is_some()
+    });
+    let claimed_recovery = if recovery_capable { launch_claims } else { 0 };
+    let claimed_checkpoint_consumer = if metadata.is_some_and(|metadata| {
+        metadata.checkpoint_dir.is_some()
+            && (metadata.native_resume.is_some() || metadata.resume_context.is_some())
+    }) {
+        launch_claims
+    } else {
+        0
+    };
+    ThreadRecoveryOwners {
+        recovery_capable_launch_claims: claimed_recovery,
+        required_checkpoint_consumers: claimed_checkpoint_consumer,
+        cancellation_repairs: open_control_commands,
+    }
+}
+
+fn add_pin_count(total: &mut u64, count: u64, label: &str) -> Result<()> {
+    *total = total
+        .checked_add(count)
+        .with_context(|| format!("{label} recovery-pin count overflow"))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +187,7 @@ pub struct FollowWaiterChild {
     pub spec_hash: String,
     pub child_thread_id: String,
     pub child_chain_root_id: String,
+    pub sealed_root_request: crate::thread_lifecycle::SealedRootExecutionRequest,
     pub terminal_thread_id: Option<String>,
     pub terminal_status: Option<String>,
     pub terminal_envelope: Option<Value>,
@@ -100,10 +195,10 @@ pub struct FollowWaiterChild {
     pub updated_at_ms: i64,
 }
 
-/// Stable identity for one normalized follow child specification. Both the
-/// legacy migration and the spawn path use this exact encoding so an idempotent
-/// re-drive can never adopt a different item, parameter set, or facet set at an
-/// already-recorded cohort index.
+/// Stable identity for one normalized follow child specification. The spawn
+/// path uses this exact encoding so an idempotent re-drive can never adopt a
+/// different item, parameter set, or facet set at an already-recorded cohort
+/// index.
 pub fn follow_child_spec_hash(
     item_ref: &str,
     parameters: &Value,
@@ -190,11 +285,6 @@ CREATE TABLE IF NOT EXISTS follow_waiter (
     graph_run_id TEXT NOT NULL,
     step_count INTEGER NOT NULL,
     frontier_id TEXT,
-    child_thread_id TEXT,
-    child_chain_root_id TEXT,
-    child_terminal_thread_id TEXT,
-    child_terminal_status TEXT,
-    terminal_envelope TEXT,
     phase TEXT NOT NULL CHECK (phase IN ('reserved', 'waiting', 'ready', 'resuming')),
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
@@ -205,9 +295,6 @@ CREATE TABLE IF NOT EXISTS follow_waiter (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_successor
     ON follow_waiter(parent_successor_thread_id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_child_chain
-    ON follow_waiter(child_chain_root_id);
-
 CREATE TABLE IF NOT EXISTS follow_waiter_child (
     follow_key TEXT NOT NULL,
     item_index INTEGER NOT NULL,
@@ -215,6 +302,7 @@ CREATE TABLE IF NOT EXISTS follow_waiter_child (
     spec_hash TEXT NOT NULL,
     child_thread_id TEXT NOT NULL,
     child_chain_root_id TEXT NOT NULL,
+    sealed_root_request TEXT NOT NULL,
     terminal_thread_id TEXT,
     terminal_status TEXT,
     terminal_envelope TEXT,
@@ -263,11 +351,11 @@ CREATE INDEX IF NOT EXISTS idx_seat_lease_last_seen
 
 use ryeos_state::sqlite_schema;
 
-/// Application ID stamp for runtime.db.
+/// Application ID stamp for `runtime.sqlite3`.
 /// RYEA = 0x5259_4541 ("RY" + "EA" for "runtime").
 const RUNTIME_APP_ID: i32 = 0x5259_4541;
 
-/// Schema spec for runtime.db — the single source of truth for
+/// Schema spec for `runtime.sqlite3` — the single source of truth for
 /// what tables/columns/indexes this database must contain.
 fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     sqlite_schema::SchemaSpec {
@@ -472,36 +560,6 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
-                        name: "child_thread_id",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "child_chain_root_id",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "child_terminal_thread_id",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "child_terminal_status",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
-                        name: "terminal_envelope",
-                        col_type: "TEXT",
-                        pk: false,
-                        not_null: false,
-                    },
-                    sqlite_schema::ColumnSpec {
                         name: "phase",
                         col_type: "TEXT",
                         pk: false,
@@ -568,6 +626,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "child_chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "sealed_root_request",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -677,12 +741,42 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "seat_lease",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "seat_thread_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "owner", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "surface", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "client_ref", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "last_seen_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "reaping_at_ms", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec {
+                        name: "seat_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "surface",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "client_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_seen_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reaping_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],
@@ -703,12 +797,6 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_follow_waiter_successor",
                 table: "follow_waiter",
                 columns: &["parent_successor_thread_id"],
-                unique: true,
-            },
-            sqlite_schema::IndexSpec {
-                name: "idx_follow_waiter_child_chain",
-                table: "follow_waiter",
-                columns: &["child_chain_root_id"],
                 unique: true,
             },
             sqlite_schema::IndexSpec {
@@ -739,156 +827,336 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     }
 }
 
-/// Forward-migrate an already-owned runtime.db to the current schema.
-///
-/// Re-running `SCHEMA_SQL` adds newly introduced tables/indexes. Columns added
-/// to existing tables require explicit guarded ALTERs below because CREATE TABLE
-/// IF NOT EXISTS cannot heal them. Non-additive drift is intentionally NOT
-/// papered over — the `assert_owned` that runs next fails loud, forcing a real
-/// migration to be written (cf. the scheduler DB's `rebuild_*` precedent).
-fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
-    // Preserve the existing additive table/index migration first. Keep this
-    // outside the data transaction because SCHEMA_SQL also sets journal_mode.
-    conn.execute_batch(SCHEMA_SQL)
-        .context("failed to apply additive runtime.db schema migration")?;
+pub struct RuntimeDb {
+    conn: Connection,
+    _directory: Option<lillux::PinnedDirectory>,
+    _directory_lock: Option<lillux::secure_fs::PinnedDirectoryLock>,
+    _database_file: Option<File>,
+    _wal_file: Option<File>,
+    _shm_file: Option<File>,
+}
 
-    let tx = conn.unchecked_transaction()?;
-    let columns = {
-        let mut stmt = tx.prepare("PRAGMA table_info(follow_waiter)")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    if !columns.iter().any(|c| c == "fanout") {
-        tx.execute_batch("ALTER TABLE follow_waiter ADD COLUMN fanout INTEGER NOT NULL DEFAULT 0")?;
-    }
-    if !columns.iter().any(|c| c == "expected_children") {
-        tx.execute_batch(
-            "ALTER TABLE follow_waiter ADD COLUMN expected_children INTEGER NOT NULL DEFAULT 1",
-        )?;
-    }
-    let launch_columns = {
-        let mut stmt = tx.prepare("PRAGMA table_info(launch_window)")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    if !launch_columns.iter().any(|c| c == "cancelled_at_ms") {
-        tx.execute_batch("ALTER TABLE launch_window ADD COLUMN cancelled_at_ms INTEGER")?;
-    }
-    let seat_columns = {
-        let mut stmt = tx.prepare("PRAGMA table_info(seat_lease)")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    if !seat_columns.iter().any(|c| c == "reaping_at_ms") {
-        tx.execute_batch("ALTER TABLE seat_lease ADD COLUMN reaping_at_ms INTEGER")?;
-    }
-    let legacy = {
-        let mut stmt = tx.prepare(
-            "SELECT follow_key, child_thread_id, child_chain_root_id,
-                    child_terminal_thread_id, child_terminal_status, terminal_envelope,
-                    created_at_ms, updated_at_ms
-               FROM follow_waiter WHERE child_thread_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (key, thread_id, chain_id, terminal_id, status, envelope, created, updated) in legacy {
-        let metadata: Option<String> = tx
-            .query_row(
-                "SELECT launch_metadata FROM thread_runtime WHERE thread_id = ?1",
-                params![thread_id],
-                |r| r.get(0),
+fn assert_current_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
+    sqlite_schema::assert_owned(conn, &runtime_schema_spec(), path)
+        .context("runtime database is not the exact current owned schema")?;
+    sqlite_schema::assert_complete_schema_sql(conn, SCHEMA_SQL, path)
+        .context("runtime database SQL does not match the exact current format")
+}
+
+fn runtime_sidecar_name(database_name: &OsStr, suffix: &str) -> OsString {
+    let mut name = database_name.to_os_string();
+    name.push(suffix);
+    name
+}
+
+fn inspect_runtime_sidecars(
+    directory: &lillux::PinnedDirectory,
+    database_name: &OsStr,
+) -> Result<()> {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let name = runtime_sidecar_name(database_name, suffix);
+        let _ = directory.open_regular(&name, false).with_context(|| {
+            format!(
+                "runtime database sidecar must be regular and non-symlink: {}",
+                directory.path().join(&name).display()
             )
-            .with_context(|| {
-                format!(
-                    "legacy follow {key} child thread {thread_id} is missing from thread_runtime"
-                )
-            })?;
-        let metadata = metadata.with_context(|| {
-            format!("legacy follow {key} child thread {thread_id} has NULL launch_metadata")
         })?;
-        let metadata: RuntimeLaunchMetadata = serde_json::from_str(&metadata)
-            .with_context(|| format!("legacy follow {key} child launch metadata is corrupt"))?;
-        let context = metadata
-            .resume_context
-            .with_context(|| format!("legacy follow {key} child has no persisted ResumeContext"))?;
-        let spec_hash = follow_child_spec_hash(&context.item_ref, &context.parameters, None);
-        let existing = tx
-            .query_row(
-                "SELECT item_ref, spec_hash, child_thread_id, child_chain_root_id,
-                    terminal_thread_id, terminal_status, terminal_envelope
-               FROM follow_waiter_child WHERE follow_key = ?1 AND item_index = 0",
-                params![key],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, Option<String>>(5)?,
-                        r.get::<_, Option<String>>(6)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let expected = (
-            context.item_ref,
-            spec_hash,
-            thread_id,
-            chain_id,
-            terminal_id,
-            status,
-            envelope,
-        );
-        if let Some(existing) = existing {
-            if existing != expected {
-                bail!("legacy follow {key} child backfill conflicts with existing cohort row");
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO follow_waiter_child
-                (follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
-                 terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms)
-                 VALUES (?1,0,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    key, expected.0, expected.1, expected.2, expected.3, expected.4, expected.5,
-                    expected.6, created, updated
-                ],
-            )?;
-        }
     }
-    tx.commit()?;
     Ok(())
 }
 
-pub struct RuntimeDb {
-    conn: Connection,
+fn ensure_runtime_directory_binding(directory: &lillux::PinnedDirectory) -> Result<()> {
+    let current = lillux::PinnedDirectory::open(directory.path())?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "pinned runtime database directory disappeared: {}",
+            directory.path().display()
+        )
+    })?;
+    if !directory.is_same_directory(&current)? {
+        bail!(
+            "runtime database directory changed while in use: {}",
+            directory.path().display()
+        );
+    }
+    Ok(())
+}
+
+fn runtime_files_are_same(left: &File, right: &File) -> Result<bool> {
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right);
+        bail!("runtime database file identity is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+}
+
+fn ensure_runtime_file_binding(
+    directory: &lillux::PinnedDirectory,
+    name: &OsStr,
+    expected: &File,
+    label: &str,
+) -> Result<()> {
+    let current = directory.open_regular(name, false)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{label} disappeared while in use: {}",
+            directory.path().join(name).display()
+        )
+    })?;
+    if !runtime_files_are_same(expected, &current)? {
+        bail!(
+            "{label} changed while in use: {}",
+            directory.path().join(name).display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_same_runtime_file(
+    expected: &File,
+    current: &File,
+    label: &str,
+    database_path: &Path,
+) -> Result<()> {
+    if !runtime_files_are_same(expected, current)? {
+        bail!(
+            "{label} changed while runtime database was opening: {}",
+            database_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn matching_open_descriptors(file: &File) -> Result<BTreeSet<i32>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let expected = file.metadata()?;
+    let mut descriptors = BTreeSet::new();
+    for entry in fs::read_dir("/proc/self/fd").context("enumerate process descriptors")? {
+        let entry = entry.context("read process descriptor entry")?;
+        let Some(descriptor) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let metadata = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect process descriptor {}", entry.path().display())
+                });
+            }
+        };
+        if metadata.dev() == expected.dev() && metadata.ino() == expected.ino() {
+            descriptors.insert(descriptor);
+        }
+    }
+    Ok(descriptors)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn matching_open_descriptors(_file: &File) -> Result<BTreeSet<i32>> {
+    Ok(BTreeSet::new())
+}
+
+fn ensure_sqlite_connection_uses_expected_file(
+    file: &File,
+    descriptors_before: &BTreeSet<i32>,
+    label: &str,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let mut descriptors_after = matching_open_descriptors(file)?;
+        descriptors_after.remove(&file.as_raw_fd());
+        if descriptors_after.is_subset(descriptors_before) {
+            bail!("SQLite did not retain a descriptor for the pinned {label} inode");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (file, descriptors_before, label);
+    Ok(())
+}
+
+impl ryeos_state::RuntimeLivenessInspector for RuntimeDb {
+    fn chain_has_live_recovery_state(&self, chain_root_id: &str) -> Result<bool> {
+        self.chain_has_live_state(chain_root_id)
+    }
 }
 
 impl RuntimeDb {
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create runtime db dir {}", parent.display()))?;
-        }
-        let conn = Connection::open(path)
-            .with_context(|| format!("failed to open runtime db {}", path.display()))?;
-
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
         let spec = runtime_schema_spec();
-        sqlite_schema::prepare_owned(&conn, &spec, SCHEMA_SQL, path, migrate_owned_runtime_db)?;
-        Ok(Self { conn })
+        sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, Path::new(":memory:"))?;
+        assert_current_runtime_schema(&conn, Path::new(":memory:"))?;
+        Ok(Self {
+            conn,
+            _directory: None,
+            _directory_lock: None,
+            _database_file: None,
+            _wal_file: None,
+            _shm_file: None,
+        })
+    }
+
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::open_bound(path, true)
+    }
+
+    /// Open the persisted runtime database for offline projection recovery
+    /// without creating or migrating anything. Pending head transitions use
+    /// this as fail-closed liveness authority, so an absent or stale database
+    /// must never be replaced by a fresh empty one.
+    pub fn open_existing_current(path: &Path) -> Result<Self> {
+        Self::open_bound(path, false)
+    }
+
+    fn open_bound(path: &Path, allow_create: bool) -> Result<Self> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| {
+                anyhow::anyhow!("runtime database path has no filename: {}", path.display())
+            })?
+            .to_os_string();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let directory = if allow_create {
+            lillux::PinnedDirectory::open_or_create(parent)
+                .with_context(|| format!("pin runtime database parent {}", parent.display()))?
+        } else {
+            lillux::PinnedDirectory::open(parent)
+                .with_context(|| format!("pin runtime database parent {}", parent.display()))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("runtime database parent is absent: {}", parent.display())
+                })?
+        };
+        ensure_runtime_directory_binding(&directory)?;
+        let directory_lock = directory
+            .lock_exclusive()
+            .context("lock runtime database parent")?;
+        inspect_runtime_sidecars(&directory, &name)?;
+
+        let existing = directory.open_regular(&name, true).with_context(|| {
+            format!(
+                "runtime database must be a regular non-symlink file: {}",
+                path.display()
+            )
+        })?;
+        let (database_file, created) = match existing {
+            Some(file) => (file, false),
+            None if allow_create => {
+                let file = directory
+                    .open_regular_create(&name, true, true, 0o600)
+                    .with_context(|| format!("create runtime database {}", path.display()))?;
+                directory.sync().context("sync runtime database creation")?;
+                (file, true)
+            }
+            None => bail!("runtime database is absent: {}", path.display()),
+        };
+        let descriptors_before = matching_open_descriptors(&database_file)?;
+        let wal_name = runtime_sidecar_name(&name, "-wal");
+        let shm_name = runtime_sidecar_name(&name, "-shm");
+        let wal_before = directory.open_regular(&wal_name, false)?;
+        let shm_before = directory.open_regular(&shm_name, false)?;
+        let wal_descriptors_before = wal_before
+            .as_ref()
+            .map(matching_open_descriptors)
+            .transpose()?
+            .unwrap_or_default();
+        let shm_descriptors_before = shm_before
+            .as_ref()
+            .map(matching_open_descriptors)
+            .transpose()?
+            .unwrap_or_default();
+        ensure_runtime_file_binding(&directory, &name, &database_file, "runtime database")?;
+
+        let descriptor_path = directory.descriptor_child_path(&name)?;
+        let conn = Connection::open_with_flags(&descriptor_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_context(|| format!("open runtime database {}", path.display()))?;
+        ensure_runtime_directory_binding(&directory)?;
+        ensure_runtime_file_binding(&directory, &name, &database_file, "runtime database")?;
+        ensure_sqlite_connection_uses_expected_file(
+            &database_file,
+            &descriptors_before,
+            "runtime database",
+        )?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .context("enable runtime database foreign keys")?;
+
+        if created {
+            sqlite_schema::init_owned(&conn, &runtime_schema_spec(), SCHEMA_SQL, path)?;
+        }
+        assert_current_runtime_schema(&conn, path)?;
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .context("verify runtime database integrity")?;
+        if integrity != "ok" {
+            bail!(
+                "runtime database integrity check failed for {}: {integrity}",
+                path.display()
+            );
+        }
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .context("read runtime database journal mode")?;
+        if journal_mode != "wal" {
+            bail!(
+                "runtime database journal mode mismatch in {}: stored={journal_mode}, expected=wal",
+                path.display()
+            );
+        }
+        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+            .context("eagerly establish runtime database WAL handles")?;
+        let wal_file = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SQLite did not establish runtime WAL: {}",
+                directory.path().join(&wal_name).display()
+            )
+        })?;
+        let shm_file = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SQLite did not establish runtime shared memory: {}",
+                directory.path().join(&shm_name).display()
+            )
+        })?;
+        if let Some(expected) = wal_before.as_ref() {
+            ensure_same_runtime_file(expected, &wal_file, "runtime WAL", path)?;
+        }
+        if let Some(expected) = shm_before.as_ref() {
+            ensure_same_runtime_file(expected, &shm_file, "runtime shared memory", path)?;
+        }
+        ensure_sqlite_connection_uses_expected_file(
+            &wal_file,
+            &wal_descriptors_before,
+            "runtime WAL",
+        )?;
+        ensure_sqlite_connection_uses_expected_file(
+            &shm_file,
+            &shm_descriptors_before,
+            "runtime shared memory",
+        )?;
+        ensure_runtime_directory_binding(&directory)?;
+        ensure_runtime_file_binding(&directory, &name, &database_file, "runtime database")?;
+        ensure_runtime_file_binding(&directory, &wal_name, &wal_file, "runtime WAL")?;
+        ensure_runtime_file_binding(&directory, &shm_name, &shm_file, "runtime shared memory")?;
+
+        Ok(Self {
+            conn,
+            _directory: Some(directory),
+            _directory_lock: Some(directory_lock),
+            _database_file: Some(database_file),
+            _wal_file: Some(wal_file),
+            _shm_file: Some(shm_file),
+        })
     }
 
     pub fn insert_thread_runtime(&self, thread_id: &str, chain_root_id: &str) -> Result<()> {
@@ -954,48 +1222,229 @@ impl RuntimeDb {
         )? > 0)
     }
 
-    pub fn chain_has_live_state(&self, chain_root_id: &str) -> Result<bool> {
-        let live: bool = self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM thread_runtime r
-                WHERE r.chain_root_id=?1 AND (r.pid IS NOT NULL OR r.pgid IS NOT NULL)
-             ) OR EXISTS(
-                SELECT 1 FROM thread_launch_claim c JOIN thread_runtime r USING(thread_id)
-                WHERE r.chain_root_id=?1
-             ) OR EXISTS(
-                SELECT 1 FROM follow_waiter WHERE parent_chain_root_id=?1 OR child_chain_root_id=?1
-             ) OR EXISTS(
-                SELECT 1 FROM follow_waiter_child WHERE child_chain_root_id=?1
-             ) OR EXISTS(
-                SELECT 1 FROM launch_window WHERE child_chain_root_id=?1
-             )",
-            params![chain_root_id],
-            |row| row.get(0),
+    pub fn inspect_chain_recovery_pins(
+        &self,
+        chain_root_id: &str,
+        thread_ids: &[String],
+    ) -> Result<ChainRecoveryPins> {
+        let count = |sql: &str| -> Result<u64> {
+            let value: i64 = self
+                .conn
+                .query_row(sql, params![chain_root_id], |row| row.get(0))?;
+            u64::try_from(value).context("negative recovery-pin count")
+        };
+        let count_thread = |sql: &str, thread_id: &str| -> Result<u64> {
+            let value: i64 = self
+                .conn
+                .query_row(sql, params![thread_id], |row| row.get(0))?;
+            u64::try_from(value).context("negative thread recovery-pin count")
+        };
+        let parent_follow_waiters =
+            count("SELECT COUNT(*) FROM follow_waiter WHERE parent_chain_root_id=?1")?;
+        let follow_waiters = count(
+            "SELECT
+                (SELECT COUNT(*) FROM follow_waiter
+                 WHERE parent_chain_root_id=?1)
+              + (SELECT COUNT(*) FROM follow_waiter_child
+                 WHERE child_chain_root_id=?1)",
         )?;
-        Ok(live)
+        let launch_windows =
+            count("SELECT COUNT(*) FROM launch_window WHERE child_chain_root_id=?1")?;
+        let cancelled_launch_windows = count(
+            "SELECT COUNT(*) FROM launch_window
+             WHERE child_chain_root_id=?1 AND cancelled_at_ms IS NOT NULL",
+        )?;
+        let mut pins = ChainRecoveryPins {
+            // A parent follow waiter owns the graph checkpoint until its
+            // successor is durably resumed or the waiter is otherwise settled.
+            required_checkpoint_consumers: parent_follow_waiters,
+            cancellation_repairs: cancelled_launch_windows,
+            follow_waiters,
+            launch_windows,
+            ..Default::default()
+        };
+        let authoritative_members = thread_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut runtime_members = self
+            .conn
+            .prepare("SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1")?
+            .query_map(params![chain_root_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        runtime_members.sort();
+        for runtime_thread_id in runtime_members {
+            if !authoritative_members.contains(runtime_thread_id.as_str()) {
+                add_pin_count(
+                    &mut pins.runtime_membership_conflicts,
+                    1,
+                    "runtime-membership-conflict",
+                )?;
+            }
+        }
+        for thread_id in thread_ids {
+            let runtime_chain_root_id = self
+                .conn
+                .query_row(
+                    "SELECT chain_root_id FROM thread_runtime WHERE thread_id=?1",
+                    params![thread_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if runtime_chain_root_id
+                .as_deref()
+                .is_some_and(|runtime_chain_root_id| runtime_chain_root_id != chain_root_id)
+            {
+                add_pin_count(
+                    &mut pins.runtime_membership_conflicts,
+                    1,
+                    "runtime-membership-conflict",
+                )?;
+            }
+            // Decode launch metadata loudly. Corrupt recovery ownership is an
+            // unreadable pin set and therefore fails retention closed.
+            let runtime_info = self.get_runtime_info(thread_id)?;
+            let live = match runtime_info.as_ref() {
+                Some(RuntimeInfo {
+                    pgid: Some(pgid), ..
+                }) => crate::process::pgid_live_for_retention(*pgid)?,
+                Some(RuntimeInfo { pid: Some(pid), .. }) => {
+                    crate::process::pid_live_for_retention(*pid)?
+                }
+                Some(RuntimeInfo {
+                    pid: None,
+                    pgid: None,
+                    ..
+                })
+                | None => false,
+            };
+            if live {
+                add_pin_count(&mut pins.live_processes, 1, "live-process")?;
+            }
+            let launch_claims = count_thread(
+                "SELECT COUNT(*) FROM thread_launch_claim WHERE thread_id=?1",
+                thread_id,
+            )?;
+            let pending_commands = count_thread(
+                "SELECT COUNT(*) FROM thread_commands
+                 WHERE thread_id=?1 AND status IN ('pending','claimed')",
+                thread_id,
+            )?;
+            let open_control_commands = count_thread(
+                "SELECT COUNT(*) FROM thread_commands
+                 WHERE thread_id=?1 AND status IN ('pending','claimed')
+                   AND command_type IN ('cancel','kill')",
+                thread_id,
+            )?;
+            let owners = classify_thread_recovery_owners(
+                runtime_info.as_ref(),
+                launch_claims,
+                open_control_commands,
+            );
+            add_pin_count(&mut pins.launch_claims, launch_claims, "launch-claim")?;
+            add_pin_count(
+                &mut pins.recovery_capable_launch_claims,
+                owners.recovery_capable_launch_claims,
+                "recovery-capable-launch-claim",
+            )?;
+            add_pin_count(
+                &mut pins.required_checkpoint_consumers,
+                owners.required_checkpoint_consumers,
+                "required-checkpoint-consumer",
+            )?;
+            add_pin_count(&mut pins.pending_commands, pending_commands, "open-command")?;
+            add_pin_count(
+                &mut pins.cancellation_repairs,
+                owners.cancellation_repairs,
+                "cancellation-repair",
+            )?;
+            let seat_leases = count_thread(
+                "SELECT COUNT(*) FROM seat_lease WHERE seat_thread_id=?1",
+                thread_id,
+            )?;
+            add_pin_count(&mut pins.seat_leases, seat_leases, "seat-lease")?;
+        }
+        Ok(pins)
     }
 
-    pub fn delete_chain_runtime(&self, chain_root_id: &str) -> Result<usize> {
+    pub fn chain_has_live_state(&self, chain_root_id: &str) -> Result<bool> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1")?;
+        let thread_ids = statement
+            .query_map(params![chain_root_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(!self
+            .inspect_chain_recovery_pins(chain_root_id, &thread_ids)?
+            .is_empty())
+    }
+
+    /// Return every operational parent/child edge touching one of the supplied
+    /// authoritative chain members. The StateStore combines these structural
+    /// edges with projected counterpart status; the runtime DB cannot decide
+    /// by itself whether an edge still pins recovery.
+    pub fn chain_child_links(&self, thread_ids: &[String]) -> Result<Vec<(String, String)>> {
+        let mut links = BTreeSet::new();
+        let mut statement = self.conn.prepare(
+            "SELECT parent_thread_id, child_thread_id FROM thread_child_link
+             WHERE parent_thread_id=?1 OR child_thread_id=?1",
+        )?;
+        for thread_id in thread_ids {
+            for row in statement.query_map(params![thread_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })? {
+                links.insert(row?);
+            }
+        }
+        Ok(links.into_iter().collect())
+    }
+
+    pub fn delete_chain_runtime(
+        &self,
+        chain_root_id: &str,
+        thread_ids: &[String],
+    ) -> Result<usize> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
-            let ids = "SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1";
             let mut deleted = 0usize;
-            deleted += self.conn.execute(
-                &format!("DELETE FROM thread_commands WHERE thread_id IN ({ids})"),
-                params![chain_root_id],
-            )?;
-            deleted += self.conn.execute(
-                &format!("DELETE FROM thread_launch_claim WHERE thread_id IN ({ids})"),
-                params![chain_root_id],
-            )?;
-            deleted += self.conn.execute(
-                &format!("DELETE FROM seat_lease WHERE seat_thread_id IN ({ids})"),
-                params![chain_root_id],
-            )?;
-            deleted += self.conn.execute(
-                &format!("DELETE FROM thread_child_link WHERE child_thread_id IN ({ids}) OR parent_thread_id IN ({ids})"),
-                params![chain_root_id],
-            )?;
+            // Signed chain truth supplies the authoritative members. Include
+            // any runtime row structurally attributed to the same chain so a
+            // replay after the head-removal boundary cannot leave orphaned
+            // operational rows. The pre-removal pin pass rejects this
+            // disagreement; this union is the idempotent crash-cleanup side.
+            let mut cleanup_thread_ids = thread_ids.iter().cloned().collect::<BTreeSet<_>>();
+            {
+                let mut statement = self
+                    .conn
+                    .prepare("SELECT thread_id FROM thread_runtime WHERE chain_root_id=?1")?;
+                let runtime_thread_ids = statement
+                    .query_map(params![chain_root_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                cleanup_thread_ids.extend(runtime_thread_ids);
+            }
+            for thread_id in cleanup_thread_ids {
+                deleted += self.conn.execute(
+                    "DELETE FROM thread_commands WHERE thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
+                    "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
+                    "DELETE FROM seat_lease WHERE seat_thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
+                    "DELETE FROM thread_child_link
+                     WHERE child_thread_id=?1 OR parent_thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
+                    "DELETE FROM thread_runtime WHERE thread_id=?1",
+                    params![&thread_id],
+                )?;
+            }
             deleted += self.conn.execute(
                 "DELETE FROM launch_window WHERE child_chain_root_id=?1",
                 params![chain_root_id],
@@ -1005,20 +1454,24 @@ impl RuntimeDb {
                 params![chain_root_id],
             )?;
             deleted += self.conn.execute(
-                "DELETE FROM follow_waiter WHERE parent_chain_root_id=?1 OR child_chain_root_id=?1",
-                params![chain_root_id],
-            )?;
-            deleted += self.conn.execute(
-                "DELETE FROM thread_runtime WHERE chain_root_id=?1",
+                "DELETE FROM follow_waiter WHERE parent_chain_root_id=?1",
                 params![chain_root_id],
             )?;
             Ok::<_, rusqlite::Error>(deleted)
         })();
         match result {
-            Ok(deleted) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(deleted)
-            }
+            Ok(deleted) => match self.conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(deleted),
+                Err(commit_error) => {
+                    let rollback_error = self.conn.execute_batch("ROLLBACK").err();
+                    match rollback_error {
+                        Some(rollback_error) => Err(anyhow::anyhow!(
+                            "commit chain runtime cleanup failed: {commit_error}; rollback after commit failure also failed: {rollback_error}"
+                        )),
+                        None => Err(commit_error.into()),
+                    }
+                }
+            },
             Err(err) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
                 Err(err.into())
@@ -1208,40 +1661,27 @@ impl RuntimeDb {
     /// caller won the claim.
     ///
     /// This is the sole authorization for a spawn. A fresh thread takes the
-    /// claim; a thread already mid-launch (a live, unexpired claim) returns
-    /// [`LaunchClaimOutcome::AlreadyClaimed`]. A **stale** claim — one whose
-    /// lease has expired, meaning the prior launcher died mid-launch (e.g. a
-    /// daemon crash between create and spawn) — is reclaimed so the successor is
-    /// not stranded. Lease expiry is the liveness proxy: a crashed daemon cannot
-    /// renew, and a different daemon instance only reclaims after expiry.
-    ///
-    /// The whole decision is one `INSERT … ON CONFLICT DO UPDATE … WHERE expired`
-    /// statement, so it is atomic against a concurrent claimer with no
-    /// read-then-write race. `lease_ms` bounds how long this claim blocks a
-    /// reclaim if the caller dies before releasing.
+    /// claim; a thread already mid-launch returns
+    /// [`LaunchClaimOutcome::AlreadyClaimed`]. Claims deliberately do not expire
+    /// within a daemon lifetime: pre-attach resolution and materialization are
+    /// unbounded, so a wall-clock lease cannot be the sole spawn authorization.
+    /// Owned guards release on every task exit, and startup clears all surviving
+    /// rows after the state lock proves the previous daemon is gone.
     pub fn claim_thread_launch(
         &self,
         thread_id: &str,
         claim_id: &str,
         claimed_by: &str,
-        lease_ms: i64,
     ) -> Result<LaunchClaimOutcome> {
         let now_ms = lillux::time::timestamp_millis();
-        let expires_ms = now_ms.saturating_add(lease_ms);
-        // Insert if absent; on conflict, reclaim ONLY when the existing lease has
-        // already expired (`lease_expires_at_ms <= now`). A live claim leaves the
-        // row untouched → 0 rows changed → AlreadyClaimed.
+        // Keep the existing column at an explicit non-expiring sentinel so
+        // diagnostics and pin readers retain one current-format shape.
         let changed = self.conn.execute(
             "INSERT INTO thread_launch_claim
                  (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
              VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(thread_id) DO UPDATE SET
-                 claim_id = excluded.claim_id,
-                 claimed_at_ms = excluded.claimed_at_ms,
-                 lease_expires_at_ms = excluded.lease_expires_at_ms,
-                 claimed_by = excluded.claimed_by
-             WHERE thread_launch_claim.lease_expires_at_ms <= excluded.claimed_at_ms",
-            params![thread_id, claim_id, now_ms, expires_ms, claimed_by],
+             ON CONFLICT(thread_id) DO NOTHING",
+            params![thread_id, claim_id, now_ms, i64::MAX, claimed_by],
         )?;
         Ok(if changed == 1 {
             LaunchClaimOutcome::Claimed
@@ -1252,9 +1692,8 @@ impl RuntimeDb {
 
     /// Release a launch claim the caller owns (matched by `claim_id`), e.g. when
     /// the launch failed and the thread should become reclaimable immediately
-    /// rather than waiting out the lease. Returns true if a row was removed.
-    /// A mismatched `claim_id` (another launcher reclaimed in the meantime) is a
-    /// no-op, never a cross-owner delete.
+    /// rather than waiting for restart recovery. Returns true if a row was
+    /// removed. A mismatched `claim_id` is a no-op, never a cross-owner delete.
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let removed = self.conn.execute(
             "DELETE FROM thread_launch_claim WHERE thread_id = ?1 AND claim_id = ?2",
@@ -1265,15 +1704,13 @@ impl RuntimeDb {
 
     /// Delete ALL launch claims. Called once at daemon startup (before reconcile
     /// dispatches): a restart proves every prior in-process launcher is gone, so
-    /// any surviving claim is stale and would otherwise block a reconcile relaunch
-    /// of a `created` successor until the lease expired. Returns the count removed.
+    /// every surviving claim is stale. Returns the count removed.
     pub fn clear_all_launch_claims(&self) -> Result<usize> {
         Ok(self.conn.execute("DELETE FROM thread_launch_claim", [])?)
     }
 
     /// Read the current launch claim for a thread, if any. The reconciler uses
-    /// this to tell an unlaunched successor (no claim, or expired) from one
-    /// mid-launch (live claim) without attempting to claim.
+    /// this to tell an unlaunched successor from one owned by a launch task.
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<LaunchClaim>> {
         self.conn
             .query_row(
@@ -1585,8 +2022,16 @@ impl RuntimeDb {
         spec_hash: &str,
         child_thread_id: &str,
         child_chain_root_id: &str,
+        sealed_root_request: &crate::thread_lifecycle::SealedRootExecutionRequest,
     ) -> Result<()> {
+        if sealed_root_request.item_ref() != item_ref {
+            bail!("follow child sealed authority does not match slot item_ref");
+        }
         let tx = self.conn.unchecked_transaction()?;
+        let sealed_root_request = lillux::canonical_json(
+            &serde_json::to_value(sealed_root_request)
+                .context("encode sealed follow-child root request")?,
+        );
         let expected_children = tx
             .query_row(
                 "SELECT expected_children FROM follow_waiter WHERE follow_key = ?1",
@@ -1602,12 +2047,12 @@ impl RuntimeDb {
         }
         let now = lillux::time::timestamp_millis();
         tx.execute("INSERT INTO follow_waiter_child
-            (follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,created_at_ms,updated_at_ms)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?7) ON CONFLICT(follow_key,item_index) DO NOTHING",
-            params![follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,now])?;
+            (follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,sealed_root_request,created_at_ms,updated_at_ms)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8) ON CONFLICT(follow_key,item_index) DO NOTHING",
+            params![follow_key,item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,sealed_root_request,now])?;
         let child = tx
             .query_row(
-                "SELECT item_ref,spec_hash,child_thread_id,child_chain_root_id
+                "SELECT item_ref,spec_hash,child_thread_id,child_chain_root_id,sealed_root_request
             FROM follow_waiter_child WHERE follow_key=?1 AND item_index=?2",
                 params![follow_key, item_index],
                 |r| {
@@ -1616,6 +2061,7 @@ impl RuntimeDb {
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
                 },
             )
@@ -1629,6 +2075,7 @@ impl RuntimeDb {
             || child.1 != spec_hash
             || child.2 != child_thread_id
             || child.3 != child_chain_root_id
+            || child.4 != sealed_root_request
         {
             bail!("follow waiter {follow_key} child index {item_index} conflicts with persisted child/spec");
         }
@@ -1936,12 +2383,12 @@ impl RuntimeDb {
         let mut waiters = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut child_stmt = self.conn.prepare(
             "SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
-             terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms,
+             sealed_root_request,terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms,
              follow_key
              FROM follow_waiter_child ORDER BY follow_key,item_index",
         )?;
         let child_rows = child_stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(10)?, read_follow_child_row(row)?))
+            Ok((row.get::<_, String>(11)?, read_follow_child_row(row)?))
         })?;
         let mut children_by_waiter = std::collections::HashMap::new();
         for row in child_rows {
@@ -1967,7 +2414,7 @@ impl RuntimeDb {
         self.conn
             .query_row(
                 "SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
-            terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms
+            sealed_root_request,terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms
             FROM follow_waiter_child WHERE follow_key=?1 AND item_index=?2",
                 params![follow_key, item_index],
                 read_follow_child_row,
@@ -1979,7 +2426,7 @@ impl RuntimeDb {
     fn with_follow_children(&self, mut waiter: FollowWaiter) -> Result<FollowWaiter> {
         let mut stmt = self.conn.prepare(
             "SELECT item_index,item_ref,spec_hash,child_thread_id,child_chain_root_id,
-            terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms
+            sealed_root_request,terminal_thread_id,terminal_status,terminal_envelope,created_at_ms,updated_at_ms
             FROM follow_waiter_child WHERE follow_key=?1 ORDER BY item_index",
         )?;
         waiter.children = stmt
@@ -2281,12 +2728,16 @@ fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWai
 }
 
 fn read_follow_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiterChild> {
-    let raw: Option<String> = row.get(7)?;
+    let sealed_raw: String = row.get(5)?;
+    let sealed_root_request = serde_json::from_str(&sealed_raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let raw: Option<String> = row.get(8)?;
     let terminal_envelope = raw
         .map(|s| {
             serde_json::from_str(&s).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    7,
+                    8,
                     rusqlite::types::Type::Text,
                     Box::new(e),
                 )
@@ -2299,11 +2750,12 @@ fn read_follow_child_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWait
         spec_hash: row.get(2)?,
         child_thread_id: row.get(3)?,
         child_chain_root_id: row.get(4)?,
-        terminal_thread_id: row.get(5)?,
-        terminal_status: row.get(6)?,
+        sealed_root_request,
+        terminal_thread_id: row.get(6)?,
+        terminal_status: row.get(7)?,
         terminal_envelope,
-        created_at_ms: row.get(8)?,
-        updated_at_ms: row.get(9)?,
+        created_at_ms: row.get(9)?,
+        updated_at_ms: row.get(10)?,
     })
 }
 
@@ -2383,10 +2835,8 @@ fn parse_json_blob(blob: Option<Vec<u8>>) -> rusqlite::Result<Option<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
-    use ryeos_engine::contracts::{
-        CancellationMode, EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
-    };
+    use crate::launch_metadata::RuntimeLaunchMetadata;
+    use ryeos_engine::contracts::CancellationMode;
     use tempfile::TempDir;
 
     fn fresh_db() -> (TempDir, RuntimeDb) {
@@ -2662,11 +3112,10 @@ mod tests {
         assert!(db.launch_window_cancelled_members().unwrap().is_empty());
     }
 
-    /// An owned runtime.db stamped by an earlier daemon that predates the
-    /// `thread_launch_claim` table must start cleanly: the open-time additive
-    /// migration creates the missing table rather than bailing on it.
+    /// Established runtime state is exact-format authority. A stale owned
+    /// database fails without mutation; there is no startup migration branch.
     #[test]
-    fn open_migrates_old_owned_db_missing_launch_claim() {
+    fn open_rejects_old_owned_db_without_mutating_it() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
 
@@ -2706,7 +3155,8 @@ mod tests {
             .unwrap();
             conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
                 .unwrap();
-            // Seed a runtime row so we also prove the migration preserves data.
+            // Seed a runtime row so rejection cannot be confused with an empty
+            // file taking the first-initialization branch.
             conn.execute(
                 "INSERT INTO thread_runtime (thread_id, chain_root_id) VALUES (?1, ?2)",
                 params!["t-old", "c-old"],
@@ -2714,118 +3164,61 @@ mod tests {
             .unwrap();
         }
 
-        // Open must succeed (no "missing expected table" bail)…
-        let db = RuntimeDb::open(&path).unwrap();
-        // …the new table is now usable…
-        assert_eq!(
-            db.claim_thread_launch("t-old", "claim-1", "launcher", 60_000)
-                .unwrap(),
-            LaunchClaimOutcome::Claimed
-        );
-        // …and pre-existing runtime state survived the migration.
-        assert!(db.get_runtime_info("t-old").unwrap().is_some());
+        assert!(RuntimeDb::open(&path).is_err());
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let added: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thread_launch_claim'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(added, 0);
     }
 
     #[test]
-    fn open_migrates_legacy_single_follow_to_cohort_idempotently() {
+    fn projection_rebuild_runtime_open_requires_existing_current_schema() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing-runtime.db");
+        assert!(RuntimeDb::open_existing_current(&missing).is_err());
+        assert!(!missing.exists());
+
+        let current = tmp.path().join("current-runtime.db");
+        drop(RuntimeDb::open(&current).unwrap());
+        drop(RuntimeDb::open_existing_current(&current).unwrap());
+    }
+
+    #[test]
+    fn projection_rebuild_runtime_open_never_migrates_owned_stale_schema() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
-        let context = ResumeContext {
-            kind: "directive".into(),
-            item_ref: "directive:example/child".into(),
-            launch_mode: "inline".into(),
-            parameters: serde_json::json!({"subject": "one"}),
-            project_context: ProjectContext::LocalPath {
-                path: "/tmp/example".into(),
-            },
-            original_snapshot_hash: None,
-            original_pushed_head_ref: None,
-            state_root: None,
-            current_site_id: "site:test".into(),
-            origin_site_id: "site:test".into(),
-            requested_by: EffectivePrincipal::Local(Principal {
-                fingerprint: "fp:test".into(),
-                scopes: vec!["execute".into()],
-            }),
-            execution_hints: ExecutionHints::default(),
-            effective_caps: vec!["ryeos.execute.directive.example/child".into()],
-            executor_ref: Some("native:directive-runtime".into()),
-            runtime_ref: Some("runtime:directive".into()),
-        };
-        let metadata = serde_json::to_string(
-            &RuntimeLaunchMetadata::default().with_resume_context(context.clone()),
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE thread_runtime (
+                thread_id TEXT PRIMARY KEY,
+                chain_root_id TEXT NOT NULL,
+                pid INTEGER,
+                pgid INTEGER,
+                metadata BLOB,
+                launch_metadata TEXT,
+                resume_attempts INTEGER NOT NULL DEFAULT 0
+             );",
         )
         .unwrap();
+        conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
+            .unwrap();
+        drop(conn);
 
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                r#"
-                CREATE TABLE thread_runtime (
-                    thread_id TEXT PRIMARY KEY, chain_root_id TEXT NOT NULL,
-                    pid INTEGER, pgid INTEGER, metadata BLOB, launch_metadata TEXT,
-                    resume_attempts INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE follow_waiter (
-                    follow_key TEXT PRIMARY KEY, parent_thread_id TEXT NOT NULL,
-                    parent_chain_root_id TEXT NOT NULL, parent_successor_thread_id TEXT,
-                    follow_node TEXT NOT NULL, graph_run_id TEXT NOT NULL,
-                    step_count INTEGER NOT NULL, frontier_id TEXT,
-                    child_thread_id TEXT, child_chain_root_id TEXT,
-                    child_terminal_thread_id TEXT, child_terminal_status TEXT,
-                    terminal_envelope TEXT,
-                    phase TEXT NOT NULL CHECK (phase IN ('reserved','waiting','ready','resuming')),
-                    created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
-                );
-                CREATE TABLE launch_window (
-                    child_chain_root_id TEXT PRIMARY KEY, window_key TEXT NOT NULL,
-                    width INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
-                    launched_at_ms INTEGER
-                );
-                "#,
+        assert!(RuntimeDb::open_existing_current(&path).is_err());
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let migrated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thread_launch_claim'",
+                [],
+                |row| row.get(0),
             )
             .unwrap();
-            conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
-                .unwrap();
-            conn.execute(
-                "INSERT INTO thread_runtime (thread_id,chain_root_id,launch_metadata) VALUES (?1,?2,?3)",
-                params!["child-1", "child-chain", metadata],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO follow_waiter
-                 (follow_key,parent_thread_id,parent_chain_root_id,parent_successor_thread_id,
-                  follow_node,graph_run_id,step_count,frontier_id,child_thread_id,
-                  child_chain_root_id,child_terminal_thread_id,child_terminal_status,
-                  terminal_envelope,phase,created_at_ms,updated_at_ms)
-                 VALUES (?1,?2,?3,NULL,?4,?5,?6,NULL,?7,?8,NULL,NULL,NULL,'waiting',10,11)",
-                params![
-                    "follow-1",
-                    "parent-1",
-                    "parent-chain",
-                    "review",
-                    "run-1",
-                    4,
-                    "child-1",
-                    "child-chain"
-                ],
-            )
-            .unwrap();
-        }
-
-        let expected_hash = follow_child_spec_hash(&context.item_ref, &context.parameters, None);
-        for _ in 0..2 {
-            let db = RuntimeDb::open(&path).unwrap();
-            let waiter = db.get_follow_waiter_by_key("follow-1").unwrap().unwrap();
-            assert!(!waiter.fanout);
-            assert_eq!(waiter.expected_children, 1);
-            assert_eq!(waiter.children.len(), 1);
-            let child = &waiter.children[0];
-            assert_eq!(child.item_ref, "directive:example/child");
-            assert_eq!(child.spec_hash, expected_hash);
-            assert_eq!(child.child_thread_id, "child-1");
-            assert_eq!(child.child_chain_root_id, "child-chain");
-        }
+        assert_eq!(migrated, 0);
     }
 
     #[test]
@@ -2864,6 +3257,10 @@ mod tests {
             err.to_string().contains("failed to decode launch_metadata"),
             "expected decode error, got: {err}"
         );
+        let err = db
+            .inspect_chain_recovery_pins("c1", &["t1".to_string()])
+            .expect_err("retention must fail closed on unreadable recovery metadata");
+        assert!(err.to_string().contains("failed to decode launch_metadata"));
     }
 
     #[test]
@@ -2874,6 +3271,114 @@ mod tests {
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 1);
         assert_eq!(db.bump_resume_attempts("t1").unwrap(), 2);
         assert_eq!(db.get_resume_attempts("t1").unwrap(), 2);
+    }
+
+    #[test]
+    fn retention_classifier_does_not_pin_historical_resume_or_checkpoint_residue() {
+        let (tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        db.bump_resume_attempts("t1").unwrap();
+        db.set_launch_metadata(
+            "t1",
+            &RuntimeLaunchMetadata {
+                native_resume: Some(Default::default()),
+                checkpoint_dir: Some(tmp.path().join("threads/t1/checkpoints")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let pins = db
+            .inspect_chain_recovery_pins("c1", &["t1".to_string()])
+            .unwrap();
+        assert!(pins.is_empty());
+        assert_eq!(pins.recovery_capable_launch_claims, 0);
+        assert_eq!(pins.required_checkpoint_consumers, 0);
+    }
+
+    #[test]
+    fn retention_pins_runtime_membership_conflicts_and_cleanup_covers_them() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("root", "chain").unwrap();
+        db.insert_thread_runtime("orphan-runtime-member", "chain")
+            .unwrap();
+
+        let pins = db
+            .inspect_chain_recovery_pins("chain", &["root".to_string()])
+            .unwrap();
+        assert_eq!(pins.runtime_membership_conflicts, 1);
+        assert!(!pins.is_empty());
+
+        db.delete_chain_runtime("chain", &["root".to_string()])
+            .unwrap();
+        assert!(db.get_runtime_info("root").unwrap().is_none());
+        assert!(db
+            .get_runtime_info("orphan-runtime-member")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn retention_classifier_requires_an_owner_for_recovery_checkpoint_pin() {
+        let (tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        db.set_launch_metadata(
+            "t1",
+            &RuntimeLaunchMetadata {
+                native_resume: Some(Default::default()),
+                checkpoint_dir: Some(tmp.path().join("threads/t1/checkpoints")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.claim_thread_launch("t1", "claim-1", "daemon:test")
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+
+        let pins = db
+            .inspect_chain_recovery_pins("c1", &["t1".to_string()])
+            .unwrap();
+        assert_eq!(pins.launch_claims, 1);
+        assert_eq!(pins.recovery_capable_launch_claims, 1);
+        assert_eq!(pins.required_checkpoint_consumers, 1);
+        assert!(!pins.is_empty());
+
+        assert!(db.release_thread_launch_claim("t1", "claim-1").unwrap());
+        assert!(db
+            .inspect_chain_recovery_pins("c1", &["t1".to_string()])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn retention_classifier_derives_follow_and_cancellation_owners() {
+        let (_tmp, mut db) = fresh_db();
+        db.insert_thread_runtime("parent-1", "chain-parent")
+            .unwrap();
+        db.reserve_follow(&seed_follow("follow-1")).unwrap();
+        db.submit_command(&NewCommandRecord {
+            thread_id: "parent-1".to_string(),
+            command_type: "cancel".to_string(),
+            requested_by: None,
+            params: None,
+        })
+        .unwrap();
+        db.launch_window_insert("chain-parent", "window", 1, 1)
+            .unwrap();
+        db.launch_window_cancel_members(&["chain-parent".to_string()], 2)
+            .unwrap();
+
+        let pins = db
+            .inspect_chain_recovery_pins("chain-parent", &["parent-1".to_string()])
+            .unwrap();
+        assert_eq!(pins.follow_waiters, 1);
+        assert_eq!(pins.required_checkpoint_consumers, 1);
+        assert_eq!(pins.pending_commands, 1);
+        assert_eq!(pins.launch_windows, 1);
+        assert_eq!(pins.cancellation_repairs, 2);
+        assert!(!pins.is_empty());
     }
 
     #[test]
@@ -2927,16 +3432,14 @@ mod tests {
     #[test]
     fn launch_claim_first_caller_wins_second_blocked() {
         let (_tmp, db) = fresh_db();
-        // Fresh thread: first claim with a long lease wins.
+        // Fresh thread: first owner wins.
         assert_eq!(
-            db.claim_thread_launch("t1", "c1", "daemon-a", 60_000)
-                .unwrap(),
+            db.claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
             LaunchClaimOutcome::Claimed
         );
-        // A second launcher cannot claim while the lease is live.
+        // A second launcher cannot time-reclaim active daemon ownership.
         assert_eq!(
-            db.claim_thread_launch("t1", "c2", "daemon-b", 60_000)
-                .unwrap(),
+            db.claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
             LaunchClaimOutcome::AlreadyClaimed
         );
         // The live claim still belongs to the first caller.
@@ -2946,32 +3449,28 @@ mod tests {
     }
 
     #[test]
-    fn launch_claim_stale_lease_is_reclaimed() {
+    fn launch_claim_does_not_expire_within_daemon_lifetime() {
         let (_tmp, db) = fresh_db();
-        // A claim whose lease is already in the past (prior launcher died
-        // mid-launch) must be reclaimable.
         assert_eq!(
-            db.claim_thread_launch("t1", "c1", "daemon-a", -1_000)
-                .unwrap(),
+            db.claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
             LaunchClaimOutcome::Claimed
         );
         assert_eq!(
-            db.claim_thread_launch("t1", "c2", "daemon-b", 60_000)
-                .unwrap(),
-            LaunchClaimOutcome::Claimed,
-            "expired lease must be reclaimed by a new launcher"
+            db.claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
+            LaunchClaimOutcome::AlreadyClaimed,
+            "wall-clock time must never authorize a duplicate spawn"
         );
         let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
-        assert_eq!(claim.claim_id, "c2", "reclaim overwrites the owner");
-        assert_eq!(claim.claimed_by, "daemon-b");
+        assert_eq!(claim.claim_id, "c1");
+        assert_eq!(claim.claimed_by, "daemon-a");
+        assert_eq!(claim.lease_expires_at_ms, i64::MAX);
     }
 
     #[test]
     fn launch_claim_release_frees_for_reclaim() {
         let (_tmp, db) = fresh_db();
         assert_eq!(
-            db.claim_thread_launch("t1", "c1", "daemon-a", 60_000)
-                .unwrap(),
+            db.claim_thread_launch("t1", "c1", "daemon-a").unwrap(),
             LaunchClaimOutcome::Claimed
         );
         // A mismatched claim_id must not delete another owner's claim.
@@ -2981,8 +3480,7 @@ mod tests {
         assert!(db.release_thread_launch_claim("t1", "c1").unwrap());
         assert!(db.get_launch_claim("t1").unwrap().is_none());
         assert_eq!(
-            db.claim_thread_launch("t1", "c2", "daemon-b", 60_000)
-                .unwrap(),
+            db.claim_thread_launch("t1", "c2", "daemon-b").unwrap(),
             LaunchClaimOutcome::Claimed
         );
     }
@@ -3007,7 +3505,8 @@ mod tests {
         child_thread_id: &str,
         child_chain_root_id: &str,
     ) -> Result<()> {
-        let item_ref = "directive:test/child";
+        let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
         let parameters = serde_json::json!({});
         db.set_follow_child(
             follow_key,
@@ -3016,6 +3515,7 @@ mod tests {
             &follow_child_spec_hash(item_ref, &parameters, None),
             child_thread_id,
             child_chain_root_id,
+            &sealed,
         )
     }
 
@@ -3081,13 +3581,16 @@ mod tests {
 
         let params_0 = serde_json::json!({"episode": 0});
         let params_1 = serde_json::json!({"episode": 1});
+        let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
         db.set_follow_child(
             "fk-cohort",
             0,
-            "directive:test/episode",
-            &follow_child_spec_hash("directive:test/episode", &params_0, None),
+            item_ref,
+            &follow_child_spec_hash(item_ref, &params_0, None),
             "child-0",
             "chain-0",
+            &sealed,
         )
         .unwrap();
         db.set_follow_parent_successor("fk-cohort", "succ-1")
@@ -3097,10 +3600,11 @@ mod tests {
         db.set_follow_child(
             "fk-cohort",
             1,
-            "directive:test/episode",
-            &follow_child_spec_hash("directive:test/episode", &params_1, None),
+            item_ref,
+            &follow_child_spec_hash(item_ref, &params_1, None),
             "child-1",
             "chain-1",
+            &sealed,
         )
         .unwrap();
         db.mark_follow_waiting("fk-cohort").unwrap();
@@ -3135,23 +3639,27 @@ mod tests {
         db.reserve_follow(&seed_follow("fk1")).unwrap();
         let first = serde_json::json!({"episode": 1});
         let changed = serde_json::json!({"episode": 2});
+        let sealed = crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
         db.set_follow_child(
             "fk1",
             0,
-            "directive:test/episode",
-            &follow_child_spec_hash("directive:test/episode", &first, None),
+            item_ref,
+            &follow_child_spec_hash(item_ref, &first, None),
             "child-1",
             "chain-1",
+            &sealed,
         )
         .unwrap();
         assert!(db
             .set_follow_child(
                 "fk1",
                 0,
-                "directive:test/episode",
-                &follow_child_spec_hash("directive:test/episode", &changed, None),
+                item_ref,
+                &follow_child_spec_hash(item_ref, &changed, None),
                 "child-1",
                 "chain-1",
+                &sealed,
             )
             .is_err());
     }

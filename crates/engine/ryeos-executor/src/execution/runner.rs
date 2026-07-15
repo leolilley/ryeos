@@ -35,8 +35,12 @@ use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{
-    self, ResolvedExecutionRequest, ThreadAttachProcessParams, ThreadFinalizeParams,
+    self, ResolvedExecutionRequest, SealedRootExecutionRequest, ThreadAttachProcessParams,
+    ThreadFinalizeParams,
 };
+
+use super::launch::RecoveryLaunchOutcome;
+use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
 
 // ── Resume-specific error type ────────────────────────────────────
 
@@ -361,13 +365,6 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
             return;
         }
     };
-    let refs_root = match state.state_store.refs_root() {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to get refs_root");
-            return;
-        }
-    };
     // Need a working dir for fold-back. If neither an exec checkout
     // nor a LocalPath project_path is available (resume of a non-
     // LocalPath thread), nothing to fold back into.
@@ -382,7 +379,19 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
         }
     };
 
-    // Acquire write barrier for CAS mutations (fold-back + head advance)
+    // The shared CAS guard is the outer mutation lock. Keep it live from the
+    // first fold-back object write through the signed HEAD publication so GC
+    // cannot sweep an unpublished intermediate closure.
+    let cas_mutation_guard =
+        match ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir()) {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(%error, "cannot acquire CAS mutation guard for fold-back, skipping");
+                return;
+            }
+        };
+
+    // Acquire write barrier for CAS mutations (fold-back + head advance).
     let _permit = match state.write_barrier.try_acquire() {
         Ok(p) => p,
         Err(e) => {
@@ -394,6 +403,7 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
     // Fold back changes
     let output_manifest_hash = match crate::execution::fold_back_outputs(
         &cas_root,
+        &cas_mutation_guard,
         working_dir,
         manifest_hash,
         &state.ignore_matcher,
@@ -409,19 +419,35 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
     // AND a LocalPath project (HEAD ref is keyed off the LocalPath).
     if let Some(ref new_manifest_hash) = output_manifest_hash {
         if let (Some(ref snap_hash), Some(pp)) = (base_snapshot_hash, project_path) {
-            let project_str = pp.to_string_lossy();
+            let Some(project_str) = pp.to_str() else {
+                tracing::warn!(
+                    project_path = %pp.display(),
+                    "cannot advance fold-back HEAD for a non-UTF-8 project identity"
+                );
+                return;
+            };
             let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
-            let principal_key = ryeos_state::refs::principal_storage_key(acting_principal);
+            let principal_key = match ryeos_state::refs::principal_storage_key(acting_principal) {
+                Ok(principal_key) => principal_key,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot advance fold-back HEAD for invalid principal identity");
+                    return;
+                }
+            };
             let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-            match crate::execution::advance_after_foldback(
-                &cas_root,
-                &refs_root,
-                &signer,
-                principal_key,
-                &project_hash,
-                new_manifest_hash,
-                snap_hash,
-            ) {
+            let advanced = state.state_store.with_state_db(|db| {
+                crate::execution::advance_after_foldback(
+                    &cas_root,
+                    &cas_mutation_guard,
+                    db,
+                    &signer,
+                    principal_key,
+                    &project_hash,
+                    new_manifest_hash,
+                    snap_hash,
+                )
+            });
+            match advanced {
                 Ok(_new_snap) => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "advance_after_foldback failed");
@@ -617,6 +643,12 @@ fn mint_callback_env(
         state
             .thread_auth
             .mint(thread_id, acting_principal.to_string(), caller_scopes, ttl);
+    let callback_socket_path = state
+        .config
+        .uds_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("callback socket path is not valid UTF-8"))?
+        .to_owned();
 
     let request = SubprocessBuildRequest {
         cmd: PathBuf::new(),
@@ -632,7 +664,7 @@ fn mint_callback_env(
         acting_principal: acting_principal.to_string(),
         cas_root: state.config.app_root.join("cas"),
         callback_token: Some(cap.token.clone()),
-        callback_socket_path: Some(state.config.uds_path.to_string_lossy().to_string()),
+        callback_socket_path: Some(callback_socket_path),
         vault_handle: None,
         app_root: state.config.app_root.clone(),
         thread_auth_token: Some(thread_auth.token.clone()),
@@ -664,6 +696,17 @@ fn mint_callback_env(
     }
 
     Ok((bindings, cap.token, thread_auth.token))
+}
+
+fn verify_fresh_root_admission(params: &ExecutionParams) -> Result<()> {
+    let Some(admission) = params.resolved.root_admission.as_ref() else {
+        // Existing rows and continuation successors inherit the authoritative
+        // root policy; they never reinterpret mutable source content here.
+        return Ok(());
+    };
+    let engine = params.provenance.request_engine();
+    admission.ensure_matches_request(&params.resolved)?;
+    admission.ensure_matches_subject(engine, admission.verified_subject(), &params.resolved.kind)
 }
 
 /// Run an execution inline (blocking until completion).
@@ -728,6 +771,11 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
                 path: effective_path.clone(),
             };
     }
+    if let Err(error) = verify_fresh_root_admission(&params) {
+        guard.fail_thread("history_policy_changed");
+        guard.cleanup();
+        return Err(error);
+    }
 
     // Spawn — use the per-request engine (pushed_head overlay or
     // daemon startup engine), NOT state.engine directly.
@@ -789,7 +837,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     let inline_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
-    );
+    )?;
     let inline_sandbox_enabled = state.config.sandbox_enabled;
     let mut spawned = match task::spawn_blocking(move || {
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
@@ -994,6 +1042,11 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
                 path: effective_path.clone(),
             };
     }
+    if let Err(error) = verify_fresh_root_admission(&params) {
+        guard.fail_thread("history_policy_changed");
+        guard.cleanup();
+        return Err(error);
+    }
 
     // Capture thread details before moving guard
     let running_thread_id = running.thread_id.clone();
@@ -1075,6 +1128,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         None,  // prior_status_for_mark_running
         bg_cb_token,
         bg_tat_token,
+        None,
     ));
 
     // Re-fetch the thread detail (the original was consumed by the background task setup)
@@ -1112,7 +1166,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_project_path, bg_original_pushed_head_ref, bg_state_root, bg_temp_dir,
         bg_skip_snapshot_lifecycle, bg_runtime_state_dir,
         prior_status_for_mark_running,
-        bg_cb_token, bg_tat_token
+        bg_cb_token, bg_tat_token, launch_claim
     ),
     fields(
         thread_id = %bg_thread_id,
@@ -1142,11 +1196,19 @@ async fn dispatch_detached_bg_task(
     prior_status_for_mark_running: Option<String>,
     bg_cb_token: Option<String>,
     bg_tat_token: Option<String>,
+    launch_claim: Option<ThreadLaunchClaim>,
 ) {
+    // Keep recovery's durable spawn authorization alive through spawn, attach,
+    // running, wait, and failure/finalization. Every early return drops it; a
+    // completed task releases it at the function boundary.
+    let _launch_claim_guard = launch_claim;
     // Revoke callback + thread-auth tokens on every exit path of this
     // function. Both tokens' lifetimes are owned by this background task.
     let _cb_guard = defer_cb_token_revocation(&bg_state, &bg_thread_id, &bg_cb_token);
     let _tat_guard = defer_tat_token_revocation(&bg_state, &bg_thread_id, &bg_tat_token);
+    if is_resume && !ryeos_app::recovery_execution_gate::wait_if_armed().await {
+        return;
+    }
 
     if let Some(ref s) = prior_status_for_mark_running {
         tracing::Span::current().record("prior_status", s.as_str());
@@ -1180,7 +1242,7 @@ async fn dispatch_detached_bg_task(
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &eng_for_spawn.resolution_roots(project_root),
             &bg_runtime_state_dir,
-        );
+        )?;
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
             engine: &eng_for_spawn,
             resolved: &res_for_spawn,
@@ -1456,36 +1518,12 @@ fn decide_resume_provenance(resume: &ResumeContext) -> ResumeProvenanceDecision<
     }
 }
 
-/// Build `ExecutionParams` from a captured `ResumeContext`.
-///
-/// Provenance is selected by original spawn type BEFORE resolution, so
-/// a pushed-head resume resolves items/bundles against the pinned
-/// snapshot's overlay engine — not the daemon's live engine. See
-/// `decide_resume_provenance` and
-/// `docs/future/native-resume-snapshot-pinning.md`.
-#[tracing::instrument(
-    name = "thread:resume_params",
-    skip(state, resume),
-    fields(
-        item_ref = %resume.item_ref,
-        kind = %resume.kind,
-        snapshot_pinned = resume.original_snapshot_hash.is_some(),
-        pushed_head_pinned = resume.original_pushed_head_ref.is_some(),
-    )
-)]
-pub fn execution_params_from_resume_context(
+fn execution_provenance_from_resume_context(
     state: &AppState,
     resume: &ResumeContext,
-) -> Result<ExecutionParams> {
-    let (provenance, project_context) = match decide_resume_provenance(resume) {
+) -> Result<(ExecutionProvenance, ProjectContext)> {
+    match decide_resume_provenance(resume) {
         ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
-            // Rebuild what the original pushed-head spawn had: a fresh
-            // request-owned checkout of the PINNED snapshot (never the
-            // principal's current HEAD) plus the overlay engine from the
-            // cache keyed `(install_generation, snapshot_hash)`. The
-            // checkout guard doubles as the `root_pushed_head` lifeline;
-            // helper construction guarantees lifeline path ==
-            // effective_path, satisfying the constructor preconditions.
             let checkout_id = format!(
                 "resume-{}-{:08x}",
                 lillux::time::timestamp_millis(),
@@ -1520,28 +1558,18 @@ pub fn execution_params_from_resume_context(
                 effective_path = %effective_path.display(),
                 "resume: rebuilt pushed-head checkout + overlay engine"
             );
-            // Mirror the spawn path: the plan context points at the
-            // materialized checkout so the resolver walks it.
-            (
+            Ok((
                 provenance,
                 ProjectContext::LocalPath {
                     path: effective_path,
                 },
-            )
+            ))
         }
-        // LocalPath resume: live tree + the daemon's CURRENT engine, by
-        // intent — the original spawn also resolved against the
-        // then-current live engine. Accepted residual drift: an install-
-        // generation change between spawn and resume means item/bundle
-        // resolution here can differ from what the pre-crash run saw.
-        // The persisted state-root override is re-applied so a resumed
-        // overridden run keeps its state/callback anchor (the freshly
-        // minted token must match what the runtime advertises).
-        ResumeProvenanceDecision::LiveFs(path) => (
+        ResumeProvenanceDecision::LiveFs(path) => Ok((
             ExecutionProvenance::root_live_fs(path.to_path_buf(), state.engine.clone())
                 .with_state_root(resume.state_root.clone()),
             resume.project_context.clone(),
-        ),
+        )),
         ResumeProvenanceDecision::MissingPushedHeadRef(other) => {
             anyhow::bail!(
                 "resume: record for {} has project_context {other:?} but no \
@@ -1551,7 +1579,82 @@ pub fn execution_params_from_resume_context(
                 resume.item_ref,
             );
         }
+    }
+}
+
+/// Reconstruct a created root from its exact, already-admitted authority.
+///
+/// Unlike ordinary crash resume, this path must not resolve an item ref or
+/// re-run admission: the slot and launch metadata were durably committed only
+/// after the complete verified request was sealed. The resume context remains
+/// the independently persisted launch envelope identity and parent authority;
+/// every overlapping field must agree before the request can be used.
+pub(crate) fn execution_params_from_sealed_root_request(
+    state: &AppState,
+    resume: &ResumeContext,
+    sealed: &SealedRootExecutionRequest,
+    provenance_override: Option<ExecutionProvenance>,
+) -> Result<ExecutionParams> {
+    let provenance = match provenance_override {
+        Some(provenance) => provenance,
+        None => execution_provenance_from_resume_context(state, resume)?.0,
     };
+    let resolved = sealed.restore(provenance.request_engine())?;
+    let acting_principal = resume.principal_identifier().to_string();
+
+    if resolved.kind != resume.kind
+        || resolved.item_ref != resume.item_ref
+        || resolved.launch_mode != resume.launch_mode
+        || resolved.parameters != resume.parameters
+        || resolved.current_site_id != resume.current_site_id
+        || resolved.origin_site_id != resume.origin_site_id
+        || resolved.requested_by.as_deref() != Some(acting_principal.as_str())
+        || resolved.plan_context.requested_by != resume.requested_by
+        || resolved.plan_context.project_context != resume.project_context
+        || resolved.plan_context.execution_hints != resume.execution_hints
+        || resume.executor_ref.as_deref() != Some(sealed.executor_ref())
+        || resume.runtime_ref.as_deref() != Some(sealed.runtime_ref())
+    {
+        anyhow::bail!(
+            "created-root launch identity does not match its sealed execution request for {}",
+            resume.item_ref
+        );
+    }
+
+    Ok(ExecutionParams {
+        parameters: resolved.parameters.clone(),
+        resolved,
+        acting_principal,
+        vault_bindings: HashMap::new(),
+        pre_minted_thread_id: None,
+        effective_caps: resume.effective_caps.clone(),
+        provenance,
+        runtime_ref: Some(sealed.runtime_ref().to_string()),
+    })
+}
+
+/// Build `ExecutionParams` from a captured `ResumeContext`.
+///
+/// Provenance is selected by original spawn type BEFORE resolution, so
+/// a pushed-head resume resolves items/bundles against the pinned
+/// snapshot's overlay engine — not the daemon's live engine. See
+/// `decide_resume_provenance` and
+/// `docs/future/native-resume-snapshot-pinning.md`.
+#[tracing::instrument(
+    name = "thread:resume_params",
+    skip(state, resume),
+    fields(
+        item_ref = %resume.item_ref,
+        kind = %resume.kind,
+        snapshot_pinned = resume.original_snapshot_hash.is_some(),
+        pushed_head_pinned = resume.original_pushed_head_ref.is_some(),
+    )
+)]
+pub fn execution_params_from_resume_context(
+    state: &AppState,
+    resume: &ResumeContext,
+) -> Result<ExecutionParams> {
+    let (provenance, project_context) = execution_provenance_from_resume_context(state, resume)?;
 
     let plan_ctx = PlanContext {
         requested_by: resume.requested_by.clone(),
@@ -1608,6 +1711,7 @@ pub fn execution_params_from_resume_context(
         format!("native:{bare}")
     };
 
+    let acting_principal = resume.principal_identifier().to_string();
     let resolved = ResolvedExecutionRequest {
         kind: resume.kind.clone(),
         item_ref: resume.item_ref.clone(),
@@ -1616,17 +1720,17 @@ pub fn execution_params_from_resume_context(
         current_site_id: resume.current_site_id.clone(),
         origin_site_id: resume.origin_site_id.clone(),
         target_site_id: None,
-        requested_by: resume.requested_by_name(),
+        requested_by: Some(acting_principal.clone()),
         usage_subject: None,
         usage_subject_asserted_by: None,
         parameters: resume.parameters.clone(),
         resolved_item,
         plan_context: plan_ctx,
+        // The row already exists and its chain root owns the immutable
+        // captured policy. A resume must not reinterpret mutable item/config
+        // content as fresh destructive authority.
+        root_admission: None,
     };
-
-    let acting_principal = resume
-        .requested_by_name()
-        .unwrap_or_else(|| "fp:resume".to_string());
 
     // NOTE: read_required_secrets and envelope-field preflight are NOT
     // called here. They run later, inside run_existing_detached(), AFTER
@@ -1658,7 +1762,9 @@ pub fn execution_params_from_resume_context(
 ///
 /// Mirrors `run_detached` from spawn onward but does NOT call
 /// `create_root_thread` — the thread row already exists from the
-/// pre-crash spawn.
+/// pre-crash spawn. Returns `Enqueued` only after an owned SQLite launch claim
+/// has been transferred into the background task; duplicate/settled work is a
+/// classified `Skipped`.
 ///
 /// **Bounded-duplicates note:** if the daemon crashes after the
 /// subprocess writes a checkpoint but before the next checkpoint
@@ -1682,7 +1788,42 @@ pub async fn run_existing_detached(
     chain_root_id: String,
     mut params: ExecutionParams,
     prior_status: String,
-) -> Result<(), ResumeError> {
+) -> Result<RecoveryLaunchOutcome, ResumeError> {
+    // Claim before any fallible pre-spawn work. The claim is moved into the
+    // detached background task below, making a successful return a durable
+    // claimed-and-enqueued boundary rather than an in-memory scheduling hint.
+    let resume_claim = match ThreadLaunchClaim::acquire(&state, &thread_id)? {
+        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
+        }
+    };
+    let thread = state.threads.get_thread(&thread_id)?.ok_or_else(|| {
+        ResumeError::Other(anyhow::anyhow!(
+            "resume: thread not found after claiming launch: {thread_id}"
+        ))
+    })?;
+    if thread.chain_root_id != chain_root_id {
+        return Err(ResumeError::Other(anyhow::anyhow!(
+            "resume: thread {thread_id} belongs to chain {} rather than requested chain {chain_root_id}",
+            thread.chain_root_id
+        )));
+    }
+    if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+        .is_some_and(|status| status.is_terminal())
+    {
+        return Ok(RecoveryLaunchOutcome::Skipped("terminal"));
+    }
+    // Process attach precedes the `created -> running` transition, so liveness
+    // is checked for every nonterminal status. A duplicate recovery must never
+    // spawn beside an already-attached tool subprocess.
+    if thread
+        .runtime
+        .pgid
+        .is_some_and(ryeos_app::process::pgid_alive)
+    {
+        return Ok(RecoveryLaunchOutcome::Skipped("live_process"));
+    }
     let mut guard = ExecutionGuard::new(state.clone());
     guard.track_thread(&thread_id);
 
@@ -1901,9 +2042,10 @@ pub async fn run_existing_detached(
         Some(prior_status),
         bg_cb_token,
         bg_tat_token,
+        Some(resume_claim),
     ));
 
-    Ok(())
+    Ok(RecoveryLaunchOutcome::Enqueued)
 }
 
 #[cfg(test)]

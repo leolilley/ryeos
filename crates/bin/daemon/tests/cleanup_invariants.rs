@@ -239,7 +239,8 @@ fn gate_05_offline_only_services_correct() {
     let expected = [
         "service:bundle/install",
         "service:bundle/remove",
-        "service:rebuild",
+        "service:projection/verify",
+        "service:projection/rebuild",
     ];
     assert_eq!(
         offline_only.as_slice(),

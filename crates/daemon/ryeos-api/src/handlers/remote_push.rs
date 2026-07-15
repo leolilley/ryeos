@@ -48,7 +48,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             e
         )
     })?;
-    let mut project_path_for_ref = canonical_abs.to_string_lossy().to_string();
+    let mut project_path_for_ref = config::local_project_identity(&canonical_abs)?.to_owned();
     let abs_project_path = canonical_abs;
 
     let client = RemoteClient::from_named_remote(&state, &req.remote, Some(&abs_project_path))?;

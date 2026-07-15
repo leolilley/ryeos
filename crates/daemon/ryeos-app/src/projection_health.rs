@@ -17,6 +17,7 @@ pub enum ThreadProjectionState {
 pub struct ThreadProjectionHealthSnapshot {
     pub status: ThreadProjectionState,
     pub generation: u64,
+    pub pending_transitions: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_root_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,6 +38,7 @@ impl Default for ThreadProjectionHealth {
             state: Mutex::new(ThreadProjectionHealthSnapshot {
                 status: ThreadProjectionState::Current,
                 generation: 0,
+                pending_transitions: 0,
                 chain_root_id: None,
                 operation: None,
                 error: None,
@@ -55,7 +57,8 @@ impl ThreadProjectionHealth {
     }
 
     pub fn is_current(&self) -> bool {
-        self.snapshot().status == ThreadProjectionState::Current
+        let snapshot = self.snapshot();
+        snapshot.status == ThreadProjectionState::Current && snapshot.pending_transitions == 0
     }
 
     pub async fn notified(&self) {
@@ -85,16 +88,80 @@ impl ThreadProjectionHealth {
         }
         match result {
             Ok(()) => {
-                state.status = ThreadProjectionState::Current;
-                state.chain_root_id = None;
-                state.operation = None;
-                state.error = None;
+                if state.pending_transitions == 0 {
+                    state.status = ThreadProjectionState::Current;
+                    state.chain_root_id = None;
+                    state.operation = None;
+                    state.error = None;
+                } else {
+                    state.status = ThreadProjectionState::Stale;
+                    state.chain_root_id = None;
+                    state.operation = Some("pending_head_transition".to_string());
+                    state.error = Some(format!(
+                        "{} durable head transition(s) remain unresolved",
+                        state.pending_transitions
+                    ));
+                }
             }
             Err(error) => {
                 state.status = ThreadProjectionState::Failed;
                 state.error = Some(format!("{error:#}"));
             }
         }
+    }
+
+    pub fn observe_pending_transitions(&self, pending_transitions: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = state.clone();
+        state.pending_transitions = pending_transitions;
+        if pending_transitions != 0 {
+            let recovered_scan_failure = state.status == ThreadProjectionState::Failed
+                && state.operation.as_deref() == Some("pending_head_transition_scan");
+            if state.status == ThreadProjectionState::Current || recovered_scan_failure {
+                if state.status == ThreadProjectionState::Current {
+                    state.generation = state.generation.saturating_add(1);
+                }
+                state.status = ThreadProjectionState::Stale;
+                state.chain_root_id = None;
+                state.operation = Some("pending_head_transition".to_string());
+                state.error = Some(format!(
+                    "{pending_transitions} durable head transition(s) remain unresolved"
+                ));
+            }
+        } else {
+            let pending_only_staleness = state.status == ThreadProjectionState::Stale
+                && state.operation.as_deref() == Some("pending_head_transition");
+            let recovered_scan_failure = state.status == ThreadProjectionState::Failed
+                && state.operation.as_deref() == Some("pending_head_transition_scan");
+            if pending_only_staleness || recovered_scan_failure {
+                state.status = ThreadProjectionState::Current;
+                state.chain_root_id = None;
+                state.operation = None;
+                state.error = None;
+            }
+        }
+        let changed = *state != previous;
+        drop(state);
+        if changed {
+            self.notify.notify_one();
+        }
+    }
+
+    pub fn observe_pending_transition_error(&self, error: &anyhow::Error) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.generation = state.generation.saturating_add(1);
+        state.status = ThreadProjectionState::Failed;
+        state.chain_root_id = None;
+        state.operation = Some("pending_head_transition_scan".to_string());
+        state.error = Some(format!("read pending head transitions: {error:#}"));
+        drop(state);
+        self.notify.notify_one();
     }
 }
 
@@ -156,10 +223,39 @@ mod tests {
             ThreadProjectionHealthSnapshot {
                 status: ThreadProjectionState::Current,
                 generation,
+                pending_transitions: 0,
                 chain_root_id: None,
                 operation: None,
                 error: None,
             }
         );
+    }
+
+    #[test]
+    fn pending_transition_count_prevents_current_health() {
+        let health = ThreadProjectionHealth::default();
+        health.observe_pending_transitions(1);
+        assert_eq!(health.snapshot().status, ThreadProjectionState::Stale);
+        assert!(!health.is_current());
+
+        let generation = health.begin_repair().expect("repair generation");
+        health.finish_repair(generation, &Ok(()));
+        assert_eq!(health.snapshot().status, ThreadProjectionState::Stale);
+        assert!(!health.is_current());
+
+        health.observe_pending_transitions(0);
+        assert!(health.is_current());
+    }
+
+    #[test]
+    fn successful_empty_scan_clears_prior_scan_failure() {
+        let health = ThreadProjectionHealth::default();
+        health.observe_pending_transition_error(&anyhow::anyhow!("unreadable journal"));
+        assert_eq!(health.snapshot().status, ThreadProjectionState::Failed);
+
+        // The count was already zero before the scan failed. A later successful
+        // scan must still reconcile the failure instead of returning early.
+        health.observe_pending_transitions(0);
+        assert!(health.is_current());
     }
 }

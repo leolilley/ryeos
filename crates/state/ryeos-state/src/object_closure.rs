@@ -4,7 +4,8 @@
 //! transitive set of reachable object and blob hashes. It intentionally
 //! does not discover roots from refs; callers provide root object hashes.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::Context;
@@ -71,6 +72,74 @@ pub struct ObjectLinks {
     pub unsupported_kind: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ExpectedObject {
+    Any,
+    Kind(&'static str),
+    ItemSource { item_ref: String },
+}
+
+#[derive(Debug, Clone)]
+struct ObjectEdge {
+    hash: String,
+    expected: ExpectedObject,
+    history_graph: Option<HistoryGraph>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedObjectIdentity {
+    kind: String,
+    item_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum HistoryGraph {
+    ProjectSnapshotParents,
+    ChainStatePredecessors,
+    ThreadEventChainPredecessors,
+    ThreadEventThreadPredecessors,
+    BundleEventPredecessors,
+}
+
+impl HistoryGraph {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProjectSnapshotParents => "project_snapshot parent DAG",
+            Self::ChainStatePredecessors => "chain_state predecessor chain",
+            Self::ThreadEventChainPredecessors => "thread_event chain predecessor graph",
+            Self::ThreadEventThreadPredecessors => "thread_event thread predecessor graph",
+            Self::BundleEventPredecessors => "bundle_event predecessor chain",
+        }
+    }
+}
+
+impl ExpectedObject {
+    fn validate(&self, identity: &LoadedObjectIdentity) -> Result<(), String> {
+        match self {
+            Self::Any => Ok(()),
+            Self::Kind(expected) if identity.kind == *expected => Ok(()),
+            Self::Kind(expected) => Err(format!(
+                "object edge expected kind {expected}, got {}",
+                identity.kind
+            )),
+            Self::ItemSource { item_ref }
+                if identity.kind == "item_source"
+                    && identity.item_ref.as_deref() == Some(item_ref.as_str()) =>
+            {
+                Ok(())
+            }
+            Self::ItemSource { item_ref } if identity.kind != "item_source" => Err(format!(
+                "source_manifest entry {item_ref:?} expected kind item_source, got {}",
+                identity.kind
+            )),
+            Self::ItemSource { item_ref } => Err(format!(
+                "source_manifest key {item_ref:?} does not match embedded item_source item_ref {:?}",
+                identity.item_ref.as_deref().unwrap_or("<missing>")
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectClosureLimits {
     pub max_objects: usize,
@@ -79,6 +148,98 @@ pub struct ObjectClosureLimits {
     pub max_blob_bytes: u64,
     pub max_total_blob_bytes: u64,
     pub max_links_per_object: usize,
+}
+
+/// Load one CAS JSON object by its exact requested identity.
+///
+/// This is the shared authority boundary for consumers that act on a CAS
+/// object directly rather than through a complete closure report. It rejects
+/// symlinks, bodies stored under the wrong hash, and semantically equivalent
+/// but non-canonical JSON encodings.
+pub fn load_exact_cas_object(
+    cas_root: &Path,
+    requested_hash: &str,
+    max_bytes: u64,
+) -> anyhow::Result<Value> {
+    if !lillux::valid_hash(requested_hash)
+        || requested_hash.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("invalid requested CAS object hash {requested_hash}");
+    }
+    let bytes = read_cas_file_no_follow(cas_root, "objects", requested_hash, ".json", max_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
+    let actual_hash = lillux::sha256_hex(&bytes);
+    if actual_hash != requested_hash {
+        anyhow::bail!(
+            "CAS object hash mismatch: requested {requested_hash}, bytes hash to {actual_hash}"
+        );
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse CAS object {requested_hash}"))?;
+    if lillux::canonical_json(&value).as_bytes() != bytes.as_slice() {
+        anyhow::bail!("CAS object {requested_hash} is not stored as canonical JSON bytes");
+    }
+    Ok(value)
+}
+
+/// Load one exact object through an already-selected CAS authority.
+pub fn load_exact_cas_object_with_cas(
+    cas: &lillux::CasStore,
+    requested_hash: &str,
+    max_bytes: u64,
+) -> anyhow::Result<Value> {
+    if !is_canonical_hash(requested_hash) {
+        anyhow::bail!("invalid requested CAS object hash {requested_hash}");
+    }
+    let value = cas
+        .get_object(requested_hash)?
+        .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
+    let byte_len = u64::try_from(lillux::canonical_json(&value).len()).unwrap_or(u64::MAX);
+    if byte_len > max_bytes {
+        anyhow::bail!("CAS object {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
+    }
+    Ok(value)
+}
+
+/// Load one CAS blob by its exact requested identity without following links.
+pub fn load_exact_cas_blob(
+    cas_root: &Path,
+    requested_hash: &str,
+    max_bytes: u64,
+) -> anyhow::Result<Vec<u8>> {
+    if !lillux::valid_hash(requested_hash)
+        || requested_hash.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        anyhow::bail!("invalid requested CAS blob hash {requested_hash}");
+    }
+    let bytes = read_cas_file_no_follow(cas_root, "blobs", requested_hash, "", max_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("CAS blob {requested_hash} is missing"))?;
+    let actual_hash = lillux::sha256_hex(&bytes);
+    if actual_hash != requested_hash {
+        anyhow::bail!(
+            "CAS blob hash mismatch: requested {requested_hash}, bytes hash to {actual_hash}"
+        );
+    }
+    Ok(bytes)
+}
+
+/// Load one exact blob through an already-selected CAS authority.
+pub fn load_exact_cas_blob_with_cas(
+    cas: &lillux::CasStore,
+    requested_hash: &str,
+    max_bytes: u64,
+) -> anyhow::Result<Vec<u8>> {
+    if !is_canonical_hash(requested_hash) {
+        anyhow::bail!("invalid requested CAS blob hash {requested_hash}");
+    }
+    let bytes = cas
+        .get_blob(requested_hash)?
+        .ok_or_else(|| anyhow::anyhow!("CAS blob {requested_hash} is missing"))?;
+    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if byte_len > max_bytes {
+        anyhow::bail!("CAS blob {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
+    }
+    Ok(bytes)
 }
 
 impl Default for ObjectClosureLimits {
@@ -107,16 +268,120 @@ impl ObjectClosureLimits {
     }
 }
 
+/// Read one sharded CAS file without following symlinks. Every component below
+/// the supplied CAS root is opened descriptor-relative with `O_NOFOLLOW`, and
+/// the final descriptor must be a regular file.
+pub(crate) fn read_cas_file_no_follow(
+    cas_root: &Path,
+    namespace: &str,
+    hash: &str,
+    extension: &str,
+    max_bytes: u64,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let path = lillux::shard_path(cas_root, namespace, hash, extension);
+    let relative = path
+        .strip_prefix(cas_root)
+        .context("sharded CAS path escaped CAS root")?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            anyhow::bail!("sharded CAS path has unsafe component: {}", path.display());
+        };
+        components.push(component.to_os_string());
+    }
+    if components.is_empty() {
+        anyhow::bail!("CAS file path is empty");
+    }
+    let Some(mut directory) = lillux::PinnedDirectory::open(cas_root)? else {
+        return Ok(None);
+    };
+    for component in &components[..components.len() - 1] {
+        let Some(child) = directory.open_child_directory(component)? else {
+            return Ok(None);
+        };
+        directory = child;
+    }
+    let final_name = components
+        .last()
+        .expect("non-empty CAS path has a final component");
+    let Some(file) = directory.open_regular(final_name, false)? else {
+        return Ok(None);
+    };
+    let metadata = file.metadata().context("inspect opened CAS entry")?;
+    if metadata.len() > max_bytes {
+        anyhow::bail!(
+            "CAS entry {} exceeds byte limit: {} > {}",
+            path.display(),
+            metadata.len(),
+            max_bytes
+        );
+    }
+
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read CAS entry {}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        anyhow::bail!(
+            "CAS entry {} exceeded byte limit while reading",
+            path.display()
+        );
+    }
+    Ok(Some(bytes))
+}
+
 /// Collect the schema-defined object/blob closure reachable from `roots`.
 pub fn collect_object_closure(
     cas_root: &Path,
     roots: impl IntoIterator<Item = String>,
 ) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_with_limits(
+    let mut check = || Ok(());
+    collect_object_closure_with_limits_and_check(
         cas_root,
         roots,
         ObjectClosureLimits::unbounded_for_local_maintenance(),
+        &mut check,
     )
+}
+
+/// Collect an unbounded local-maintenance closure while allowing a caller to
+/// stop between individual object and blob inspection units.
+pub(crate) fn collect_object_closure_with_check(
+    cas_root: &Path,
+    roots: impl IntoIterator<Item = String>,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<ObjectClosureReport> {
+    collect_object_closure_with_limits_and_check(
+        cas_root,
+        roots,
+        ObjectClosureLimits::unbounded_for_local_maintenance(),
+        check,
+    )
+}
+
+pub(crate) fn collect_object_closure_with_cas_and_check(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<ObjectClosureReport> {
+    collect_object_closure_from_source(
+        ClosureCas::Pinned(cas),
+        roots,
+        ObjectClosureLimits::unbounded_for_local_maintenance(),
+        check,
+    )
+}
+
+/// Collect an unbounded closure from an already-pinned CAS authority.
+///
+/// Long-running authority-sensitive operations must not turn a retained CAS
+/// descriptor back into a pathname between individual object reads.
+pub(crate) fn collect_object_closure_with_cas(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+) -> anyhow::Result<ObjectClosureReport> {
+    let mut check = || Ok(());
+    collect_object_closure_with_cas_and_check(cas, roots, &mut check)
 }
 
 /// Collect the schema-defined object/blob closure reachable from `roots`,
@@ -140,21 +405,103 @@ pub fn collect_object_closure_with_limits(
     roots: impl IntoIterator<Item = String>,
     limits: ObjectClosureLimits,
 ) -> anyhow::Result<ObjectClosureReport> {
+    let mut check = || Ok(());
+    collect_object_closure_with_limits_and_check(cas_root, roots, limits, &mut check)
+}
+
+/// Collect a bounded closure from one already-selected CAS authority.
+/// Callers can retain the same store for subsequently exporting the reported
+/// objects and blobs, so traversal and payload reads cannot observe different
+/// runtime roots.
+pub fn collect_object_closure_with_cas_and_limits(
+    cas: &lillux::CasStore,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+) -> anyhow::Result<ObjectClosureReport> {
+    let mut check = || Ok(());
+    collect_object_closure_from_source(ClosureCas::Pinned(cas), roots, limits, &mut check)
+}
+
+fn collect_object_closure_with_limits_and_check(
+    cas_root: &Path,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<ObjectClosureReport> {
+    collect_object_closure_from_source(ClosureCas::Path(cas_root), roots, limits, check)
+}
+
+#[derive(Clone, Copy)]
+enum ClosureCas<'a> {
+    Path(&'a Path),
+    Pinned(&'a lillux::CasStore),
+}
+
+impl ClosureCas<'_> {
+    fn read(
+        self,
+        namespace: &str,
+        hash: &str,
+        extension: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Path(root) => {
+                read_cas_file_no_follow(root, namespace, hash, extension, max_bytes)
+            }
+            Self::Pinned(cas) => {
+                let bytes = match namespace {
+                    "objects" => cas
+                        .get_object(hash)?
+                        .map(|value| lillux::canonical_json(&value).into_bytes()),
+                    "blobs" => cas.get_blob(hash)?,
+                    _ => anyhow::bail!("unsupported CAS namespace {namespace}"),
+                };
+                if bytes
+                    .as_ref()
+                    .is_some_and(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes)
+                {
+                    anyhow::bail!("CAS entry {hash} exceeds byte limit {max_bytes}");
+                }
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+fn collect_object_closure_from_source(
+    cas: ClosureCas<'_>,
+    roots: impl IntoIterator<Item = String>,
+    limits: ObjectClosureLimits,
+    check: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<ObjectClosureReport> {
     let mut report = ObjectClosureReport::default();
-    let mut queue: VecDeque<(String, Option<String>)> = VecDeque::new();
+    let mut queue: VecDeque<(String, Option<String>, ExpectedObject)> = VecDeque::new();
+    let mut loaded_identities = HashMap::<String, LoadedObjectIdentity>::new();
+    let mut history_edges = BTreeMap::<HistoryGraph, BTreeMap<String, BTreeSet<String>>>::new();
     let mut total_blob_bytes = 0_u64;
 
     for root in roots {
         report.roots.push(root.clone());
-        queue.push_back((root, None));
+        queue.push_back((root, None, ExpectedObject::Any));
     }
 
-    while let Some((hash, referenced_by)) = queue.pop_front() {
+    while let Some((hash, referenced_by, expected)) = queue.pop_front() {
+        check()?;
         if !is_canonical_hash(&hash) {
             report.malformed_objects.push(MalformedObject {
                 hash,
                 reason: "invalid object hash".to_string(),
             });
+            continue;
+        }
+
+        if let Some(identity) = loaded_identities.get(&hash) {
+            if let Err(reason) = expected.validate(identity) {
+                report
+                    .malformed_objects
+                    .push(MalformedObject { hash, reason });
+            }
             continue;
         }
 
@@ -170,32 +517,25 @@ pub fn collect_object_closure_with_limits(
             );
         }
 
-        let object_path = lillux::shard_path(cas_root, "objects", &hash, ".json");
-        match std::fs::metadata(&object_path) {
-            Ok(metadata) if metadata.len() > limits.max_object_bytes => {
-                anyhow::bail!(
-                    "object {hash} exceeds max_object_bytes: {} > {}",
-                    metadata.len(),
-                    limits.max_object_bytes
-                );
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("stat object {hash}")),
-        }
-
-        let content = match std::fs::read_to_string(&object_path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+        let content = match cas.read("objects", &hash, ".json", limits.max_object_bytes)? {
+            Some(content) => content,
+            None => {
                 report.missing_objects.push(MissingDependency {
                     hash,
                     referenced_by,
                 });
                 continue;
             }
-            Err(err) => return Err(err).with_context(|| format!("read object {hash}")),
         };
-        let value: Value = match serde_json::from_str(&content) {
+        let actual_hash = lillux::sha256_hex(&content);
+        if actual_hash != hash {
+            let reason = format!("object bytes hash mismatch: requested {hash}, got {actual_hash}");
+            report
+                .malformed_objects
+                .push(MalformedObject { hash, reason });
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&content) {
             Ok(value) => value,
             Err(err) => {
                 report.malformed_objects.push(MalformedObject {
@@ -205,6 +545,44 @@ pub fn collect_object_closure_with_limits(
                 continue;
             }
         };
+        let canonical = lillux::canonical_json(&value);
+        if canonical.as_bytes() != content.as_slice() {
+            report.malformed_objects.push(MalformedObject {
+                hash,
+                reason: "object is not stored as canonical JSON bytes".to_string(),
+            });
+            continue;
+        }
+
+        if let Err(reason) = validate_current_object(&value) {
+            report
+                .malformed_objects
+                .push(MalformedObject { hash, reason });
+            continue;
+        }
+
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("validate_current_object requires a string kind")
+            .to_string();
+        let identity = LoadedObjectIdentity {
+            item_ref: (kind == "item_source").then(|| {
+                value
+                    .get("item_ref")
+                    .and_then(Value::as_str)
+                    .expect("validated item_source has item_ref")
+                    .to_string()
+            }),
+            kind,
+        };
+        loaded_identities.insert(hash.clone(), identity.clone());
+        if let Err(reason) = expected.validate(&identity) {
+            report
+                .malformed_objects
+                .push(MalformedObject { hash, reason });
+            continue;
+        }
 
         let links = match object_links(&value) {
             Ok(links) => links,
@@ -216,10 +594,17 @@ pub fn collect_object_closure_with_limits(
             }
         };
 
-        let link_count = links
-            .object_hashes
-            .len()
-            .saturating_add(links.blob_hashes.len());
+        let object_edges = match typed_object_edges(&value) {
+            Ok(edges) => edges,
+            Err(reason) => {
+                report
+                    .malformed_objects
+                    .push(MalformedObject { hash, reason });
+                continue;
+            }
+        };
+
+        let link_count = object_edges.len().saturating_add(links.blob_hashes.len());
         if link_count > limits.max_links_per_object {
             anyhow::bail!(
                 "object {hash} exceeds max_links_per_object: {} > {}",
@@ -235,21 +620,22 @@ pub fn collect_object_closure_with_limits(
             continue;
         }
 
-        for child in links.object_hashes {
-            queue.push_back((child, Some(hash.clone())));
+        for edge in object_edges {
+            if let Some(graph) = edge.history_graph {
+                history_edges
+                    .entry(graph)
+                    .or_default()
+                    .entry(hash.clone())
+                    .or_default()
+                    .insert(edge.hash.clone());
+            }
+            queue.push_back((edge.hash, Some(hash.clone()), edge.expected));
         }
         for blob in links.blob_hashes {
+            check()?;
             if is_canonical_hash(&blob) {
-                let blob_path = lillux::shard_path(cas_root, "blobs", &blob, "");
-                match std::fs::metadata(&blob_path) {
-                    Ok(metadata) => {
-                        if metadata.len() > limits.max_blob_bytes {
-                            anyhow::bail!(
-                                "blob {blob} exceeds max_blob_bytes: {} > {}",
-                                metadata.len(),
-                                limits.max_blob_bytes
-                            );
-                        }
+                match cas.read("blobs", &blob, "", limits.max_blob_bytes)? {
+                    Some(bytes) => {
                         if !report.blob_hashes.contains(&blob) {
                             if report.blob_hashes.len() + 1 > limits.max_blobs {
                                 anyhow::bail!(
@@ -258,7 +644,8 @@ pub fn collect_object_closure_with_limits(
                                     limits.max_blobs
                                 );
                             }
-                            total_blob_bytes = total_blob_bytes.saturating_add(metadata.len());
+                            total_blob_bytes = total_blob_bytes
+                                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
                             if total_blob_bytes > limits.max_total_blob_bytes {
                                 anyhow::bail!(
                                     "object closure exceeds max_total_blob_bytes: {} > {}",
@@ -267,15 +654,24 @@ pub fn collect_object_closure_with_limits(
                                 );
                             }
                         }
+                        let actual_hash = lillux::sha256_hex(&bytes);
+                        if actual_hash != blob {
+                            report.malformed_objects.push(MalformedObject {
+                                hash: hash.clone(),
+                                reason: format!(
+                                    "referenced blob {blob} bytes hash to {actual_hash}"
+                                ),
+                            });
+                            continue;
+                        }
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    None => {
                         report.missing_blobs.push(MissingDependency {
                             hash: blob,
                             referenced_by: Some(hash.clone()),
                         });
                         continue;
                     }
-                    Err(err) => return Err(err).with_context(|| format!("stat blob {blob}")),
                 }
                 report.blob_hashes.insert(blob);
             } else {
@@ -287,13 +683,308 @@ pub fn collect_object_closure_with_limits(
         }
     }
 
+    for (graph, edges) in history_edges {
+        if let Some(hash) = cyclic_graph_member(&edges) {
+            report.malformed_objects.push(MalformedObject {
+                hash,
+                reason: format!("{} contains a cycle", graph.label()),
+            });
+        }
+    }
+
     report.missing_objects.sort_by(|a, b| a.hash.cmp(&b.hash));
     report.missing_blobs.sort_by(|a, b| a.hash.cmp(&b.hash));
-    report.malformed_objects.sort_by(|a, b| a.hash.cmp(&b.hash));
+    report
+        .malformed_objects
+        .sort_by(|a, b| (&a.hash, &a.reason).cmp(&(&b.hash, &b.reason)));
+    report.malformed_objects.dedup();
     report
         .unsupported_objects
         .sort_by(|a, b| a.hash.cmp(&b.hash));
     Ok(report)
+}
+
+fn cyclic_graph_member(edges: &BTreeMap<String, BTreeSet<String>>) -> Option<String> {
+    let mut nodes = BTreeSet::new();
+    for (source, targets) in edges {
+        nodes.insert(source.clone());
+        nodes.extend(targets.iter().cloned());
+    }
+    let mut incoming = nodes
+        .iter()
+        .cloned()
+        .map(|node| (node, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for targets in edges.values() {
+        for target in targets {
+            *incoming
+                .get_mut(target)
+                .expect("all history targets were inserted") += 1;
+        }
+    }
+    let mut ready = incoming
+        .iter()
+        .filter_map(|(node, count)| (*count == 0).then_some(node.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut visited = 0usize;
+    while let Some(node) = ready.pop_first() {
+        visited += 1;
+        if let Some(targets) = edges.get(&node) {
+            for target in targets {
+                let count = incoming
+                    .get_mut(target)
+                    .expect("all history targets have an incoming count");
+                *count -= 1;
+                if *count == 0 {
+                    ready.insert(target.clone());
+                }
+            }
+        }
+    }
+    if visited == nodes.len() {
+        None
+    } else {
+        incoming
+            .into_iter()
+            .find_map(|(node, count)| (count > 0).then_some(node))
+    }
+}
+
+fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing object kind".to_string())?;
+    let mut edges = Vec::new();
+    match kind {
+        "attestation" => {
+            push_required_object_edge(value, "subject_hash", ExpectedObject::Any, None, &mut edges)?
+        }
+        "chain_state" => {
+            push_optional_object_edge(
+                value,
+                "prev_chain_state_hash",
+                ExpectedObject::Kind("chain_state"),
+                Some(HistoryGraph::ChainStatePredecessors),
+                &mut edges,
+            )?;
+            push_optional_object_edge(
+                value,
+                "last_event_hash",
+                ExpectedObject::Kind("thread_event"),
+                None,
+                &mut edges,
+            )?;
+            let threads = value
+                .get("threads")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "chain_state missing threads object".to_string())?;
+            for entry in threads.values() {
+                push_required_object_edge(
+                    entry,
+                    "snapshot_hash",
+                    ExpectedObject::Kind("thread_snapshot"),
+                    None,
+                    &mut edges,
+                )?;
+                push_optional_object_edge(
+                    entry,
+                    "last_event_hash",
+                    ExpectedObject::Kind("thread_event"),
+                    None,
+                    &mut edges,
+                )?;
+            }
+        }
+        "thread_snapshot" => {
+            for field in ["base_project_snapshot_hash", "result_project_snapshot_hash"] {
+                push_optional_object_edge(
+                    value,
+                    field,
+                    ExpectedObject::Kind("project_snapshot"),
+                    None,
+                    &mut edges,
+                )?;
+            }
+            push_optional_object_edge(
+                value,
+                "last_event_hash",
+                ExpectedObject::Kind("thread_event"),
+                None,
+                &mut edges,
+            )?;
+        }
+        "thread_event" => {
+            push_optional_object_edge(
+                value,
+                "prev_chain_event_hash",
+                ExpectedObject::Kind("thread_event"),
+                Some(HistoryGraph::ThreadEventChainPredecessors),
+                &mut edges,
+            )?;
+            push_optional_object_edge(
+                value,
+                "prev_thread_event_hash",
+                ExpectedObject::Kind("thread_event"),
+                Some(HistoryGraph::ThreadEventThreadPredecessors),
+                &mut edges,
+            )?;
+        }
+        "bundle_event" => push_optional_object_edge(
+            value,
+            "prev_chain_event_hash",
+            ExpectedObject::Kind("bundle_event"),
+            Some(HistoryGraph::BundleEventPredecessors),
+            &mut edges,
+        )?,
+        "project_snapshot" => {
+            push_required_object_edge(
+                value,
+                "project_manifest_hash",
+                ExpectedObject::Kind("source_manifest"),
+                None,
+                &mut edges,
+            )?;
+            push_optional_object_edge(
+                value,
+                "user_manifest_hash",
+                ExpectedObject::Kind("source_manifest"),
+                None,
+                &mut edges,
+            )?;
+            let parents = value
+                .get("parent_hashes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "project_snapshot missing parent_hashes array".to_string())?;
+            for parent in parents {
+                let hash = parent.as_str().ok_or_else(|| {
+                    "project_snapshot parent_hashes contains non-string".to_string()
+                })?;
+                push_typed_hash(
+                    hash,
+                    ExpectedObject::Kind("project_snapshot"),
+                    Some(HistoryGraph::ProjectSnapshotParents),
+                    &mut edges,
+                )?;
+            }
+        }
+        "source_manifest" => {
+            let hashes = value
+                .get("item_source_hashes")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "source_manifest missing item_source_hashes object".to_string())?;
+            for (item_ref, hash) in hashes {
+                let hash = hash.as_str().ok_or_else(|| {
+                    "source_manifest item_source_hashes contains non-string".to_string()
+                })?;
+                push_typed_hash(
+                    hash,
+                    ExpectedObject::ItemSource {
+                        item_ref: item_ref.clone(),
+                    },
+                    None,
+                    &mut edges,
+                )?;
+            }
+        }
+        "item_source" => {}
+        _ => return Ok(Vec::new()),
+    }
+    edges.sort_by(|left, right| {
+        (&left.hash, &left.expected, &left.history_graph).cmp(&(
+            &right.hash,
+            &right.expected,
+            &right.history_graph,
+        ))
+    });
+    edges.dedup_by(|left, right| {
+        left.hash == right.hash
+            && left.expected == right.expected
+            && left.history_graph == right.history_graph
+    });
+    Ok(edges)
+}
+
+fn push_required_object_edge(
+    value: &Value,
+    field: &str,
+    expected: ExpectedObject,
+    history_graph: Option<HistoryGraph>,
+    out: &mut Vec<ObjectEdge>,
+) -> Result<(), String> {
+    let hash = value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing required hash field {field}"))?;
+    push_typed_hash(hash, expected, history_graph, out)
+}
+
+fn push_optional_object_edge(
+    value: &Value,
+    field: &str,
+    expected: ExpectedObject,
+    history_graph: Option<HistoryGraph>,
+    out: &mut Vec<ObjectEdge>,
+) -> Result<(), String> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(hash)) => push_typed_hash(hash, expected, history_graph, out),
+        Some(_) => Err(format!(
+            "optional hash field {field} is not a string or null"
+        )),
+    }
+}
+
+fn push_typed_hash(
+    hash: &str,
+    expected: ExpectedObject,
+    history_graph: Option<HistoryGraph>,
+    out: &mut Vec<ObjectEdge>,
+) -> Result<(), String> {
+    if !is_canonical_hash(hash) {
+        return Err(format!("invalid hash: {hash}"));
+    }
+    out.push(ObjectEdge {
+        hash: hash.to_string(),
+        expected,
+        history_graph,
+    });
+    Ok(())
+}
+
+/// Validate one current CAS object using the same typed wire model and
+/// invariant checks as its authoritative reader. Link extraction alone is not
+/// validation: it must not make an old-schema or partially typed object a GC
+/// root merely because a few hash-shaped fields can be found.
+fn validate_current_object(value: &Value) -> Result<(), String> {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing object kind".to_string())?;
+    let result: anyhow::Result<()> = match kind {
+        "attestation" => crate::objects::Attestation::from_value(value).map(|_| ()),
+        "chain_state" => serde_json::from_value::<crate::objects::ChainState>(value.clone())
+            .context("deserialize chain_state")
+            .and_then(|object| object.validate()),
+        "thread_snapshot" => {
+            serde_json::from_value::<crate::objects::ThreadSnapshot>(value.clone())
+                .context("deserialize thread_snapshot")
+                .and_then(|object| object.validate())
+        }
+        "thread_event" => serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
+            .context("deserialize thread_event")
+            .and_then(|object| object.validate()),
+        "bundle_event" => {
+            serde_json::from_value::<crate::objects::BundleEventObject>(value.clone())
+                .context("deserialize bundle_event")
+                .and_then(|object| object.validate())
+        }
+        "project_snapshot" => crate::objects::ProjectSnapshot::from_value(value).map(|_| ()),
+        "source_manifest" => crate::objects::SourceManifest::from_value(value).map(|_| ()),
+        "item_source" => crate::objects::ItemSource::from_value(value).map(|_| ()),
+        _ => return Ok(()),
+    };
+    result.map_err(|error| format!("invalid {kind} object: {error:#}"))
 }
 
 /// Extract schema-defined links from one CAS object value.
@@ -437,6 +1128,12 @@ mod tests {
         hash
     }
 
+    fn write_raw_object_at(cas_root: &Path, hash: &str, bytes: &[u8]) {
+        let path = lillux::shard_path(cas_root, "objects", hash, ".json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        lillux::atomic_write(&path, bytes).unwrap();
+    }
+
     #[test]
     fn project_snapshot_reaches_manifest_item_and_blob() {
         let tmp = tempfile::tempdir().unwrap();
@@ -446,24 +1143,28 @@ mod tests {
             &cas_root,
             &json!({
                 "kind": "item_source",
-                "item_ref": "directive:test/example",
+                "item_ref": ".ai/directives/test/example.md",
                 "content_blob_hash": blob_hash,
-                "integrity": "none"
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
             }),
         );
         let manifest = write_object(
             &cas_root,
             &json!({
                 "kind": "source_manifest",
-                "item_source_hashes": { "directive:test/example": item }
+                "item_source_hashes": { ".ai/directives/test/example.md": item }
             }),
         );
         let snapshot = write_object(
             &cas_root,
             &json!({
                 "kind": "project_snapshot",
-                "schema": 3,
+                "schema": crate::objects::ProjectSnapshot::SCHEMA,
                 "project_manifest_hash": manifest,
+                "user_manifest_hash": null,
+                "message": null,
                 "project_sync_scope": "full_project",
                 "parent_hashes": [],
                 "created_at": "2026-05-29T00:00:00Z",
@@ -486,9 +1187,11 @@ mod tests {
             &cas_root,
             &json!({
                 "kind": "item_source",
-                "item_ref": "directive:test/example",
+                "item_ref": ".ai/directives/test/example.md",
                 "content_blob_hash": blob_hash,
-                "integrity": "none"
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
             }),
         );
 
@@ -496,6 +1199,132 @@ mod tests {
         assert!(!report.is_complete());
         assert_eq!(report.missing_blobs.len(), 1);
         assert_eq!(report.missing_blobs[0].hash, blob_hash);
+    }
+
+    #[test]
+    fn closure_rejects_wrong_object_hash_and_noncanonical_json_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let value = json!({
+            "kind": "source_manifest",
+            "item_source_hashes": {}
+        });
+        let canonical = lillux::canonical_json(&value);
+
+        let wrong_hash = h("12");
+        write_raw_object_at(&cas_root, &wrong_hash, canonical.as_bytes());
+        let wrong = collect_object_closure(&cas_root, [wrong_hash]).unwrap();
+        assert!(!wrong.is_complete());
+        assert!(wrong.malformed_objects[0]
+            .reason
+            .contains("object bytes hash mismatch"));
+
+        let pretty = serde_json::to_vec_pretty(&value).unwrap();
+        let pretty_hash = lillux::sha256_hex(&pretty);
+        write_raw_object_at(&cas_root, &pretty_hash, &pretty);
+        let noncanonical = collect_object_closure(&cas_root, [pretty_hash]).unwrap();
+        assert!(!noncanonical.is_complete());
+        assert!(noncanonical.malformed_objects[0]
+            .reason
+            .contains("canonical JSON"));
+    }
+
+    #[test]
+    fn closure_rejects_blob_bytes_stored_under_another_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let declared_blob = h("34");
+        let blob_path = lillux::shard_path(&cas_root, "blobs", &declared_blob, "");
+        std::fs::create_dir_all(blob_path.parent().unwrap()).unwrap();
+        lillux::atomic_write(&blob_path, b"different bytes").unwrap();
+        let item = write_object(
+            &cas_root,
+            &json!({
+                "kind": "item_source",
+                "item_ref": ".ai/directives/test/example.md",
+                "content_blob_hash": declared_blob,
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
+            }),
+        );
+
+        let report = collect_object_closure(&cas_root, [item]).unwrap();
+        assert!(!report.is_complete());
+        assert!(report.malformed_objects[0].reason.contains("bytes hash to"));
+    }
+
+    #[test]
+    fn source_manifest_key_must_match_embedded_item_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let item = write_object(
+            &cas_root,
+            &json!({
+                "kind": "item_source",
+                "item_ref": ".ai/directives/test/actual.md",
+                "content_blob_hash": h("ab"),
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
+            }),
+        );
+        let manifest = write_object(
+            &cas_root,
+            &json!({
+                "kind": "source_manifest",
+                "item_source_hashes": { ".ai/directives/test/declared.md": item }
+            }),
+        );
+
+        let report = collect_object_closure(&cas_root, [manifest]).unwrap();
+        assert!(!report.is_complete());
+        assert!(report
+            .malformed_objects
+            .iter()
+            .any(|object| object.reason.contains("does not match embedded")));
+    }
+
+    #[test]
+    fn schema_history_graphs_reject_cycles() {
+        let edges = BTreeMap::from([
+            ("a".to_string(), BTreeSet::from(["b".to_string()])),
+            ("b".to_string(), BTreeSet::from(["a".to_string()])),
+        ]);
+        assert!(cyclic_graph_member(&edges).is_some());
+
+        let dag = BTreeMap::from([
+            ("a".to_string(), BTreeSet::from(["b".to_string()])),
+            ("b".to_string(), BTreeSet::from(["c".to_string()])),
+        ]);
+        assert!(cyclic_graph_member(&dag).is_none());
+    }
+
+    #[test]
+    fn closure_rejects_old_or_structurally_incomplete_current_kinds() {
+        for value in [
+            json!({"kind": "attestation", "schema": 0}),
+            json!({"kind": "chain_state", "schema": 1}),
+            json!({"kind": "thread_snapshot", "schema": 2}),
+            json!({"kind": "thread_event", "schema": 1}),
+            json!({"kind": "bundle_event", "schema": 1}),
+            json!({
+                "kind": "project_snapshot",
+                "schema": crate::objects::ProjectSnapshot::SCHEMA - 1,
+                "project_manifest_hash": h("11"),
+                "project_sync_scope": "full_project",
+                "parent_hashes": [],
+                "created_at": "2026-07-14T00:00:00Z",
+                "source": "manual_push"
+            }),
+            json!({"kind": "source_manifest"}),
+            json!({"kind": "item_source"}),
+        ] {
+            assert!(
+                validate_current_object(&value).is_err(),
+                "current kind must pass its complete typed validator: {value}"
+            );
+        }
     }
 
     #[test]
@@ -562,24 +1391,28 @@ mod tests {
             &cas_root,
             &json!({
                 "kind": "item_source",
-                "item_ref": "directive:test/example",
+                "item_ref": ".ai/directives/test/example.md",
                 "content_blob_hash": h("cd"),
-                "integrity": "none"
+                "integrity": "none",
+                "signature_info": null,
+                "mode": null
             }),
         );
         let manifest = write_object(
             &cas_root,
             &json!({
                 "kind": "source_manifest",
-                "item_source_hashes": { "directive:test/example": item }
+                "item_source_hashes": { ".ai/directives/test/example.md": item }
             }),
         );
         let snapshot = write_object(
             &cas_root,
             &json!({
                 "kind": "project_snapshot",
-                "schema": 3,
+                "schema": crate::objects::ProjectSnapshot::SCHEMA,
                 "project_manifest_hash": manifest,
+                "user_manifest_hash": null,
+                "message": null,
                 "project_sync_scope": "full_project",
                 "parent_hashes": [],
                 "created_at": "2026-05-29T00:00:00Z",
@@ -612,7 +1445,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("exceeds max_object_bytes"));
+        assert!(err.to_string().contains("exceeds byte limit"));
     }
 
     #[test]
@@ -624,8 +1457,8 @@ mod tests {
             &json!({
                 "kind": "source_manifest",
                 "item_source_hashes": {
-                    "directive:a": h("11"),
-                    "directive:b": h("22"),
+                    "src/a": h("11"),
+                    "src/b": h("22"),
                 }
             }),
         );

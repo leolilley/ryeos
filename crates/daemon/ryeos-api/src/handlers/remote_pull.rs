@@ -47,6 +47,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut missing: Vec<String> = Vec::new();
 
     let cas = state.cas_store()?;
+    let _cas_guard =
+        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
+    let _permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
 
     for entry in &resp.entries {
         match entry.kind.as_str() {

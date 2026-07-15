@@ -5,25 +5,85 @@ use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::state::AppState;
 
 pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcResponse {
-    match request.method.as_str() {
-        // Daemon health is intentionally lightweight and ungated.
-        "system.health" => system_health(request.request_id, state),
+    let lifecycle = super::ready_lifecycle_response(state);
+    dispatch_with_state(request, Some(state), &lifecycle, None).await
+}
 
+pub(super) async fn dispatch_dynamic(
+    request: RpcRequest,
+    state: &super::DynamicServerState,
+) -> RpcResponse {
+    let lifecycle = state.lifecycle();
+    let application = state.application();
+    dispatch_with_state(request, application.as_deref(), &lifecycle, Some(state)).await
+}
+
+async fn dispatch_with_state(
+    request: RpcRequest,
+    state: Option<&AppState>,
+    lifecycle: &ryeos_node::LifecycleResponse,
+    dynamic: Option<&super::DynamicServerState>,
+) -> RpcResponse {
+    match request.method.as_str() {
         // Local lifecycle control has no public HTTP surface.
-        "lifecycle.status" => lifecycle_status(request.request_id, state),
-        "lifecycle.shutdown" => lifecycle_shutdown(request.request_id),
+        "lifecycle.status" => lifecycle_status(request.request_id, lifecycle),
+        "lifecycle.shutdown" => lifecycle_shutdown(request.request_id, dynamic),
+
+        // The UDS-only health read remains available to ready clients, but it
+        // is not a bootstrap alias for lifecycle.status. Before Ready,
+        // only the two lifecycle methods above are externally admitted.
+        "system.health" => {
+            if lifecycle.status == ryeos_node::LifecycleWireState::Running && lifecycle.ready {
+                system_health(request.request_id, state, lifecycle)
+            } else {
+                application_unavailable(request.request_id, lifecycle)
+            }
+        }
 
         // Runtime callbacks retain their token-gated service dispatcher.
-        other if other.starts_with("runtime.") => rpc_result(
-            request.request_id,
-            super::dispatch_runtime_method(other, &request.params, state).await,
-        ),
+        other if other.starts_with("runtime.") => {
+            if lifecycle.status == ryeos_node::LifecycleWireState::Failed {
+                application_unavailable(request.request_id, lifecycle)
+            } else {
+                match state {
+                    Some(state) => rpc_result(
+                        request.request_id,
+                        super::dispatch_runtime_method(other, &request.params, state).await,
+                    ),
+                    None => application_unavailable(request.request_id, lifecycle),
+                }
+            }
+        }
 
         other => unknown_method(request.request_id, other),
     }
 }
 
-fn system_health(request_id: u64, state: &AppState) -> RpcResponse {
+fn system_health(
+    request_id: u64,
+    state: Option<&AppState>,
+    lifecycle: &ryeos_node::LifecycleResponse,
+) -> RpcResponse {
+    if lifecycle.status == ryeos_node::LifecycleWireState::Failed {
+        return RpcResponse::ok(
+            request_id,
+            json!({
+                "status": "failed",
+                "ready": false,
+                "startup": &lifecycle.startup,
+            }),
+        );
+    }
+    let Some(state) = state else {
+        return RpcResponse::ok(
+            request_id,
+            json!({
+                "status": "starting",
+                "ready": false,
+                "startup": &lifecycle.startup,
+            }),
+        );
+    };
     let thread_projection = state.state_store.projection_health_snapshot();
     let status = if thread_projection.status
         == ryeos_app::projection_health::ThreadProjectionState::Current
@@ -36,29 +96,22 @@ fn system_health(request_id: u64, state: &AppState) -> RpcResponse {
         request_id,
         json!({
             "status": status,
+            "ready": lifecycle.ready,
+            "startup": &lifecycle.startup,
             "thread_projection": thread_projection,
         }),
     )
 }
 
-fn lifecycle_status(request_id: u64, state: &AppState) -> RpcResponse {
-    RpcResponse::ok(
-        request_id,
-        json!({
-            "status": "running",
-            "pid": std::process::id(),
-            "version": env!("CARGO_PKG_VERSION"),
-            "started_at": &state.started_at_iso,
-            "bind": state.config.bind.to_string(),
-            "uds_path": state.config.uds_path.display().to_string(),
-            "app_root": state.config.app_root.display().to_string(),
-            "thread_projection": state.state_store.projection_health_snapshot(),
-        }),
-    )
+fn lifecycle_status(request_id: u64, lifecycle: &ryeos_node::LifecycleResponse) -> RpcResponse {
+    RpcResponse::ok(request_id, json!(lifecycle))
 }
 
-fn lifecycle_shutdown(request_id: u64) -> RpcResponse {
-    crate::request_shutdown();
+fn lifecycle_shutdown(request_id: u64, dynamic: Option<&super::DynamicServerState>) -> RpcResponse {
+    match dynamic {
+        Some(dynamic) => dynamic.request_shutdown(),
+        None => crate::request_shutdown(),
+    }
     RpcResponse::ok(request_id, json!({ "accepted": true }))
 }
 
@@ -67,6 +120,37 @@ fn unknown_method(request_id: u64, method: &str) -> RpcResponse {
         request_id,
         "unknown_method",
         format!("unknown rpc method: {method}"),
+    )
+}
+
+fn application_unavailable(
+    request_id: u64,
+    lifecycle: &ryeos_node::LifecycleResponse,
+) -> RpcResponse {
+    let failed = lifecycle.status == ryeos_node::LifecycleWireState::Failed;
+    RpcResponse::classified_err(
+        request_id,
+        if failed {
+            "node_startup_failed"
+        } else {
+            "node_starting"
+        },
+        if failed {
+            lifecycle
+                .error
+                .as_deref()
+                .unwrap_or("daemon startup failed")
+        } else {
+            "daemon application state is not ready"
+        },
+        !failed,
+        json!({
+            "phase": lifecycle.startup.phase,
+            "sequence": lifecycle.startup.sequence,
+            "elapsed_ms": lifecycle.startup.elapsed_ms,
+            "retry_after_ms": if failed { None } else { Some(250u64) },
+            "startup": &lifecycle.startup,
+        }),
     )
 }
 

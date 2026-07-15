@@ -116,6 +116,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         },
     };
 
+    let _cas_guard =
+        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
+    state
+        .state_store
+        .with_state_db(|db| db.pinned_authority()?.ensure_guard(&_cas_guard))?;
     let _permit = state
         .write_barrier
         .try_acquire()

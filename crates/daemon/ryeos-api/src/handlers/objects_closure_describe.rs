@@ -92,6 +92,14 @@ pub(crate) fn collect_limited_closure(
     req: &Request,
     state: Arc<AppState>,
 ) -> Result<ryeos_state::object_closure::ObjectClosureReport> {
+    let cas = state.cas_store()?;
+    collect_limited_closure_with_cas(req, &cas)
+}
+
+pub(crate) fn collect_limited_closure_with_cas(
+    req: &Request,
+    cas: &lillux::CasStore,
+) -> Result<ryeos_state::object_closure::ObjectClosureReport> {
     if req.roots.is_empty() {
         bail!("roots must not be empty");
     }
@@ -128,9 +136,8 @@ pub(crate) fn collect_limited_closure(
         bail!("max_links_per_object must be between 1 and {MAX_LINKS_PER_OBJECT_LIMIT}");
     }
 
-    let cas_root = state.state_store.cas_root()?;
-    let report = ryeos_state::object_closure::collect_object_closure_with_limits(
-        &cas_root,
+    let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        cas,
         req.roots.clone(),
         ryeos_state::object_closure::ObjectClosureLimits {
             max_objects: req.max_objects,

@@ -11,6 +11,7 @@ pub mod error;
 pub mod execution_policy;
 pub mod executor_resolution;
 pub mod handlers;
+pub mod history_policy;
 pub mod inventory;
 pub mod item_resolution;
 pub mod kind_registry;

@@ -59,6 +59,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }

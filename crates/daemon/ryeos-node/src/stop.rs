@@ -44,18 +44,22 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
         LifecycleStatus::Stale { diagnostics, .. } => {
             bail!("stale daemon metadata: {}", diagnostics.message)
         }
-        LifecycleStatus::Running { ref metadata } => metadata.uds_path.clone(),
+        LifecycleStatus::Running { ref metadata, .. } => metadata.uds_path.clone(),
         // Busy-but-alive: proceed with the normal stop flow — the graceful
         // shutdown call may itself time out, after which the deadline/force
         // path below applies.
         LifecycleStatus::Unresponsive { ref metadata, .. } => metadata.uds_path.clone(),
-        LifecycleStatus::Starting { pid, .. } => {
-            // No control socket exists yet, so there is nothing to send a
-            // graceful shutdown to; the force path can't reconfirm a live
-            // pid either. Booting clears on its own.
+        LifecycleStatus::Starting {
+            ref metadata,
+            control_available: true,
+            ..
+        }
+        | LifecycleStatus::Failed { ref metadata, .. } => metadata.uds_path.clone(),
+        LifecycleStatus::Starting { ref metadata, .. } => {
             bail!(
-                "a daemon (pid {pid}) is starting up and has no control socket yet; \
-                 wait for it to finish booting, then stop it"
+                "a daemon (pid {}) is starting but its control socket is not available yet; \
+                 wait briefly, then retry stop",
+                metadata.pid.unwrap_or_default(),
             )
         }
     };
@@ -92,7 +96,8 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
             }
             LifecycleStatus::Running { .. }
             | LifecycleStatus::Unresponsive { .. }
-            | LifecycleStatus::Starting { .. } => {}
+            | LifecycleStatus::Starting { .. }
+            | LifecycleStatus::Failed { .. } => {}
         }
 
         if Instant::now() >= deadline {
@@ -125,32 +130,17 @@ async fn reconfirm_live_pid(env: &LocalLifecycleEnv) -> Result<(u32, PathBuf)> {
                 Err(_) => continue,
             };
 
-        // Fail-closed mirror of status.rs's guard: a successful RPC
-        // must explicitly report "running" before we trust the pid.
-        // Otherwise we could SIGTERM based on a deceptive or off-spec
-        // response.
-        let reports_running = value
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "running")
-            .unwrap_or(false);
-        if !reports_running {
+        let response: crate::LifecycleResponse = match serde_json::from_value(value) {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+        if response.validate().is_err()
+            || response.identity.app_root != env.config().app_root
+            || response.identity.uds_path != candidate
+        {
             continue;
         }
-
-        let pid = value.get("pid").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let live_uds = value
-            .get("uds_path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| candidate.clone());
-        return match pid {
-            Some(pid) => Ok((pid, live_uds)),
-            None => Err(anyhow::anyhow!(
-                "cannot force stop: live daemon at {} did not report a pid",
-                live_uds.display()
-            )),
-        };
+        return Ok((response.identity.pid, candidate));
     }
     Err(anyhow::anyhow!(
         "cannot force stop: no daemon responded to live status reconfirmation"

@@ -165,12 +165,18 @@ pub async fn run(
             requested_by: Some(principal_fingerprint.to_string()),
             project_root: match &plan_ctx.project_context {
                 ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                    Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+                    Some(path.canonicalize().map_err(|error| {
+                        LaunchAugmentationError::Threads(format!(
+                            "canonicalize augmentation project {}: {error}",
+                            path.display()
+                        ))
+                    })?)
                 }
                 _ => None,
             },
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy: None,
         })
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
 
@@ -256,12 +262,28 @@ pub async fn run(
         )
         .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
 
-        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let executor_path_str = executor_path
+            .to_str()
+            .ok_or_else(|| {
+                LaunchAugmentationError::RuntimeRegistry(
+                    "resolved executor path is not valid UTF-8".to_string(),
+                )
+            })?
+            .to_owned();
+        let project_path_str = project_path
+            .to_str()
+            .ok_or_else(|| {
+                LaunchAugmentationError::RuntimeRegistry(
+                    "augmentation project path is not valid UTF-8".to_string(),
+                )
+            })?
+            .to_owned();
         let stdin_data = serde_json::to_string(&envelope)?;
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
-        );
+        )
+        .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?;
         let envs = ryeos_app::process::build_subprocess_envs_with_roots(
             &std::collections::BTreeMap::new(),
             &[("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
@@ -271,7 +293,7 @@ pub async fn run(
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
-            cwd: Some(project_path.to_string_lossy().into_owned()),
+            cwd: Some(project_path_str),
             envs,
             stdin_data: Some(stdin_data),
             timeout: 60.0,

@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use super::DynamicServerState;
 use crate::uds::protocol::RpcRequest;
-use ryeos_app::state::AppState;
 
-const MAX_FRAME_SIZE: u32 = 10 * 1024 * 1024;
-
-pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
+pub(super) async fn handle_connection(
+    mut stream: UnixStream,
+    state: DynamicServerState,
+) -> Result<()> {
     loop {
         let Some(frame) = read_frame(&mut stream).await? else {
             return Ok(());
@@ -32,8 +31,11 @@ pub(super) async fn handle_connection(mut stream: UnixStream, state: Arc<AppStat
             span.record("thread_id", tid);
         }
 
-        let response =
-            tracing::Instrument::instrument(super::dispatch(request, &state), span).await;
+        let response = tracing::Instrument::instrument(
+            super::routing::dispatch_dynamic(request, &state),
+            span,
+        )
+        .await;
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;
     }
@@ -57,18 +59,22 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
 }
 
 fn validate_frame_len(frame_len: u32) -> Result<u32> {
-    if frame_len > MAX_FRAME_SIZE {
+    if frame_len > ryeos_node::LIFECYCLE_FRAME_MAX_BYTES {
         return Err(anyhow!(
             "frame too large: {} bytes (max {})",
             frame_len,
-            MAX_FRAME_SIZE
+            ryeos_node::LIFECYCLE_FRAME_MAX_BYTES
         ));
     }
     Ok(frame_len)
 }
 
 async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
-    let len = (bytes.len() as u32).to_be_bytes();
+    let len: u32 = bytes
+        .len()
+        .try_into()
+        .map_err(|_| anyhow!("frame too large"))?;
+    let len = validate_frame_len(len)?.to_be_bytes();
     stream
         .write_all(&len)
         .await
@@ -86,15 +92,21 @@ mod tests {
 
     #[test]
     fn frame_size_boundary_is_inclusive() {
-        assert_eq!(validate_frame_len(MAX_FRAME_SIZE).unwrap(), MAX_FRAME_SIZE);
+        assert_eq!(
+            validate_frame_len(ryeos_node::LIFECYCLE_FRAME_MAX_BYTES).unwrap(),
+            ryeos_node::LIFECYCLE_FRAME_MAX_BYTES
+        );
     }
 
     #[test]
     fn oversized_frame_preserves_wire_error_wording() {
-        let frame_len = MAX_FRAME_SIZE + 1;
+        let frame_len = ryeos_node::LIFECYCLE_FRAME_MAX_BYTES + 1;
         assert_eq!(
             validate_frame_len(frame_len).unwrap_err().to_string(),
-            format!("frame too large: {frame_len} bytes (max {MAX_FRAME_SIZE})")
+            format!(
+                "frame too large: {frame_len} bytes (max {})",
+                ryeos_node::LIFECYCLE_FRAME_MAX_BYTES
+            )
         );
     }
 }

@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use ryeos_state::chain::{ChainLock, SnapshotUpdate};
-use ryeos_state::objects::thread_snapshot::ThreadStatus;
+use ryeos_state::objects::thread_snapshot::{parse_canonical_timestamp, ThreadStatus};
 use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
@@ -69,6 +69,10 @@ impl Signer for NodeIdentitySigner {
     fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+        self.signing_key.verifying_key()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +90,9 @@ pub struct NewThreadRecord {
     pub project_root: Option<PathBuf>,
     pub usage_subject: Option<UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
+    /// Destructive history authority captured only on a new chain root.
+    /// Continuation members leave this absent and inherit the root policy.
+    pub captured_history_policy: Option<ryeos_state::objects::CapturedThreadHistoryPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +120,35 @@ pub struct FinalizeThreadRecord {
     pub final_cost: Option<ryeos_engine::contracts::FinalCost>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ValidatedFinalCost {
+    completed_turns: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    spend_usd: f64,
+}
+
+/// Validate the signed runtime cost domain before any write is admitted.
+/// `FinalCost` uses signed counters at the external contract boundary; direct
+/// `as` casts would wrap negative or oversized values into authoritative usage.
+fn validate_final_cost(cost: &ryeos_engine::contracts::FinalCost) -> Result<ValidatedFinalCost> {
+    let completed_turns =
+        u32::try_from(cost.turns).context("final cost turns must be within 0..=u32::MAX")?;
+    let input_tokens =
+        u64::try_from(cost.input_tokens).context("final cost input_tokens must be non-negative")?;
+    let output_tokens = u64::try_from(cost.output_tokens)
+        .context("final cost output_tokens must be non-negative")?;
+    if !cost.spend.is_finite() || cost.spend < 0.0 {
+        bail!("final cost spend must be finite and non-negative");
+    }
+    Ok(ValidatedFinalCost {
+        completed_turns,
+        input_tokens,
+        output_tokens,
+        spend_usd: cost.spend,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ThreadArtifactRecord {
     pub artifact_id: i64,
@@ -134,10 +170,22 @@ pub struct ThreadEdgeRecord {
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct ServiceChainRetirement {
+pub struct TerminalChainRetirement {
     pub candidate_chains: usize,
     pub retired_chains: usize,
-    pub deleted_rows: usize,
+    pub deleted_projection_rows: usize,
+    pub deleted_runtime_rows: usize,
+    pub deleted_runtime_files: usize,
+    pub pending_retirements_recovered: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PendingHeadTransitionStatus {
+    pub pending: usize,
+    pub pending_sets: usize,
+    pub pending_removes: usize,
+    pub oldest_prepared_at: Option<String>,
+    pub oldest_age_seconds: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,12 +282,31 @@ struct Inner {
     state_db: StateDb,
     runtime_db: runtime_db::RuntimeDb,
     signer: Arc<dyn Signer>,
-    write_barrier: WriteBarrier,
 }
 
 pub struct StateStore {
+    runtime_state_dir: PathBuf,
     inner: Mutex<Inner>,
     projection_health: Arc<ThreadProjectionHealth>,
+    read_only: bool,
+    allow_projection_rebuild: bool,
+    /// Kept outside the state mutex so lock order is always write permit then
+    /// StateStore mutex (never a mutex probe followed by permit acquisition).
+    write_barrier: WriteBarrier,
+}
+
+/// Enforces the global mutation order for every StateStore write: the
+/// cross-process CAS/GC guard is acquired before the daemon write permit and
+/// both remain held until the operation has released its store/chain locks.
+struct StateMutationPermit {
+    cas_guard: ryeos_state::CasMutationGuard,
+    _write_permit: WritePermit,
+}
+
+impl StateMutationPermit {
+    fn cas_guard(&self) -> &ryeos_state::CasMutationGuard {
+        &self.cas_guard
+    }
 }
 
 impl std::fmt::Debug for StateStore {
@@ -253,7 +320,7 @@ impl std::fmt::Debug for StateStore {
 fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
     let now = lillux::time::iso8601_now();
     ThreadSnapshot {
-        schema: ryeos_state::objects::SCHEMA_VERSION,
+        schema: ryeos_state::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
         kind: "thread_snapshot".to_string(),
         thread_id: thread.thread_id.clone(),
         chain_root_id: thread.chain_root_id.clone(),
@@ -278,11 +345,46 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         error: None,
         budget: None,
         artifacts: vec![],
+        captured_history_policy: thread.captured_history_policy.clone(),
         facets: Default::default(),
         last_event_hash: None,
         last_chain_seq: 0,
         last_thread_seq: 0,
     }
+}
+
+fn authoritative_snapshot_for_transition(
+    inner: &Inner,
+    chain_root_id: &str,
+    thread_id: &str,
+) -> Result<ThreadSnapshot> {
+    inner
+        .state_db
+        .read_authoritative_thread_snapshot(chain_root_id, thread_id)?
+        .ok_or_else(|| {
+            anyhow!(
+                "authoritative snapshot missing for projected thread {thread_id} in chain {chain_root_id}"
+            )
+        })
+}
+
+fn continued_snapshot_for_transition(
+    inner: &Inner,
+    thread: &queries::ThreadRow,
+    now: &str,
+) -> Result<ThreadSnapshot> {
+    let mut snapshot =
+        authoritative_snapshot_for_transition(inner, &thread.chain_root_id, &thread.thread_id)?;
+    snapshot.status = ThreadStatus::Continued;
+    snapshot.updated_at = now.to_string();
+    snapshot.finished_at = Some(now.to_string());
+    snapshot.result = None;
+    snapshot.outcome_code = Some("continued".to_string());
+    snapshot.error = None;
+    snapshot.budget = None;
+    snapshot.artifacts.clear();
+    snapshot.facets.clear();
+    Ok(snapshot)
 }
 
 fn convert_events(
@@ -381,6 +483,7 @@ fn ephemeral_record(
 
 fn append_events_locked(
     g: &Inner,
+    cas_mutation_guard: Option<&ryeos_state::CasMutationGuard>,
     chain_root_id: &str,
     thread_id: &str,
     events: &[NewEventRecord],
@@ -399,13 +502,18 @@ fn append_events_locked(
     }
 
     if !durable_events.is_empty() {
+        let cas_mutation_guard = cas_mutation_guard.ok_or_else(|| {
+            anyhow!("durable event append requires an admitted CAS mutation guard")
+        })?;
         let te = convert_events(&durable_events, chain_root_id, thread_id);
-        let result = committed_value(g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             thread_id,
             te,
             vec![],
             g.signer.as_ref(),
+            &g.runtime_db,
+            cas_mutation_guard,
         )?);
         for (idx, record) in durable_indices
             .into_iter()
@@ -432,31 +540,303 @@ enum RunningContinuationKind<'a> {
     GraphFollowResume,
 }
 
+fn validate_thread_id_path_component(thread_id: &str) -> Result<()> {
+    let mut components = Path::new(thread_id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(component)), None)
+            if !component.is_empty() && component == std::ffi::OsStr::new(thread_id) =>
+        {
+            Ok(())
+        }
+        _ => bail!("invalid authoritative thread ID for runtime cleanup: {thread_id}"),
+    }
+}
+
+struct ThreadRuntimeRemoval {
+    threads_root: lillux::PinnedDirectory,
+    directory: lillux::PinnedDirectory,
+    name: std::ffi::OsString,
+}
+
+fn count_runtime_tree_entries(directory: &lillux::PinnedDirectory) -> Result<usize> {
+    let mut count = 1usize;
+    for name in directory.entry_names()? {
+        let child_count = if let Some(child) = directory.open_child_directory(&name)? {
+            count_runtime_tree_entries(&child)?
+        } else if directory.open_regular(&name, false)?.is_some() {
+            1
+        } else {
+            // An entry removed after enumeration is already absent. A link or
+            // special file fails in the no-follow regular-file open above.
+            continue;
+        };
+        count = count
+            .checked_add(child_count)
+            .ok_or_else(|| anyhow!("runtime file count overflow"))?;
+    }
+    Ok(count)
+}
+
+/// Resolve exactly the per-thread daemon state directories named by signed
+/// chain truth. This never walks the global thread directory and rejects a
+/// symlinked root/target or any path that escapes the canonical root.
+fn inspect_thread_runtime_files(
+    app_root: &Path,
+    thread_ids: &[String],
+) -> Result<Vec<ThreadRuntimeRemoval>> {
+    let app_directory = lillux::PinnedDirectory::open(app_root)?
+        .ok_or_else(|| anyhow!("app runtime root is absent: {}", app_root.display()))?;
+    let Some(threads_root) = app_directory.open_child_directory(std::ffi::OsStr::new("threads"))?
+    else {
+        // Distinguish absence from a regular, special, or symlinked entry.
+        if app_directory
+            .open_regular(std::ffi::OsStr::new("threads"), false)?
+            .is_some()
+        {
+            bail!("thread state root is not a directory");
+        }
+        return Ok(Vec::new());
+    };
+
+    let mut paths = Vec::new();
+    for thread_id in thread_ids {
+        validate_thread_id_path_component(thread_id)?;
+        let name = std::ffi::OsString::from(thread_id);
+        let Some(directory) = threads_root.open_child_directory(&name)? else {
+            if threads_root.open_regular(&name, false)?.is_some() {
+                bail!("thread runtime cleanup target is not a directory: {thread_id}");
+            }
+            continue;
+        };
+        // Inspect the complete tree before the signed head is unlinked. This
+        // fails closed on links/special entries while retaining exact handles
+        // for the later post-boundary cleanup.
+        let _entries = count_runtime_tree_entries(&directory)?;
+        paths.push(ThreadRuntimeRemoval {
+            threads_root: threads_root.try_clone()?,
+            directory,
+            name,
+        });
+    }
+    Ok(paths)
+}
+
+fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<usize> {
+    let mut deleted = 0usize;
+    for name in directory.entry_names()? {
+        if let Some(child) = directory.open_child_directory(&name)? {
+            deleted = deleted
+                .checked_add(delete_runtime_tree_contents(&child)?)
+                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+            if !directory.remove_empty_child_if_same(&name, &child)? {
+                bail!(
+                    "thread runtime directory changed during cleanup: {}",
+                    child.path().display()
+                );
+            }
+            deleted = deleted
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+        } else if let Some(file) = directory.open_regular(&name, false)? {
+            directory.remove_if_same(&name, &file)?;
+            deleted = deleted
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+        }
+    }
+    Ok(deleted)
+}
+
+fn delete_thread_runtime_files(paths: &[ThreadRuntimeRemoval]) -> Result<usize> {
+    let mut deleted = 0usize;
+    for target in paths {
+        deleted = deleted
+            .checked_add(delete_runtime_tree_contents(&target.directory)?)
+            .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+        if !target
+            .threads_root
+            .remove_empty_child_if_same(&target.name, &target.directory)?
+        {
+            bail!(
+                "thread runtime cleanup target changed during deletion: {}",
+                target.directory.path().display()
+            );
+        }
+        deleted = deleted
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+    }
+    Ok(deleted)
+}
+
 impl StateStore {
-    pub fn new(
+    /// Open production state with the trust authority used to verify every
+    /// authoritative chain head during baseline rebuild and journal replay.
+    pub fn new_with_head_trust(
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&runtime_state_dir)
-            .context("failed to create runtime_state_dir directory")?;
+        Self::open(
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier,
+            head_trust,
+            None,
+        )
+    }
 
+    /// Strict standalone verification store. Only established on-disk
+    /// authoritative/projection state is opened; runtime scaffolding is
+    /// in-memory and every mutation API is rejected at its common permit gate.
+    pub fn new_for_projection_verification(
+        runtime_state_dir: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+    ) -> Result<Self> {
         let projection_health = Arc::new(ThreadProjectionHealth::default());
-        let state_db = StateDb::open_with_projection_repair_sink(
-            &runtime_state_dir,
-            projection_health.clone(),
-        )?;
-        let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
-
+        let state_db = StateDb::open_for_projection_verification(&runtime_state_dir, head_trust)?;
+        let runtime_db = runtime_db::RuntimeDb::new_in_memory()?;
+        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         Ok(Self {
+            runtime_state_dir,
             inner: Mutex::new(Inner {
                 state_db,
                 runtime_db,
                 signer,
-                write_barrier,
             }),
             projection_health,
+            read_only: true,
+            allow_projection_rebuild: false,
+            write_barrier,
+        })
+    }
+
+    /// Offline projection-rebuild control store. Opens the authoritative roots,
+    /// durable recovery journal, and persisted RuntimeDb liveness state, but
+    /// deliberately does not read a generation pointer, replay a transition,
+    /// or build a baseline. The verified service invocation owns that one
+    /// explicit rebuild; all unrelated mutation APIs remain fail-closed.
+    pub fn new_for_projection_rebuild(
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+    ) -> Result<Self> {
+        let projection_health = Arc::new(ThreadProjectionHealth::default());
+        let runtime_db = runtime_db::RuntimeDb::open_existing_current(&runtime_db_path)?;
+        let cleared_launch_claims = runtime_db
+            .clear_all_launch_claims()
+            .context("clear stale launch claims before offline projection recovery")?;
+        if cleared_launch_claims > 0 {
+            tracing::info!(
+                cleared = cleared_launch_claims,
+                "cleared stale launch claims before offline projection recovery"
+            );
+        }
+        let state_db = StateDb::open_for_projection_rebuild(&runtime_state_dir, head_trust)?;
+        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
+        Ok(Self {
+            runtime_state_dir,
+            inner: Mutex::new(Inner {
+                state_db,
+                runtime_db,
+                signer,
+            }),
+            projection_health,
+            read_only: true,
+            allow_projection_rebuild: true,
+            write_barrier,
+        })
+    }
+
+    /// Open production state with trusted head verification plus observable,
+    /// cancellable projection recovery. The observer is called from the
+    /// blocking open task and must remain non-blocking.
+    pub fn new_with_head_trust_and_recovery_observer(
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
+    ) -> Result<Self> {
+        Self::open(
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier,
+            head_trust,
+            Some(recovery_observer),
+        )
+    }
+
+    fn open(
+        runtime_state_dir: PathBuf,
+        runtime_db_path: PathBuf,
+        signer: Arc<dyn Signer>,
+        write_barrier: WriteBarrier,
+        head_trust: Arc<ryeos_state::refs::TrustStore>,
+        recovery_observer: Option<Arc<dyn ryeos_state::ProjectionRecoveryObserver>>,
+    ) -> Result<Self> {
+        let _runtime_state_directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
+            .context("failed to establish no-follow runtime_state_dir")?;
+        ryeos_state::CasMutationGuard::ensure_anchor(&runtime_state_dir)
+            .context("initialize persistent CAS mutation lock anchor")?;
+        ryeos_state::gc::GcLock::ensure_anchor(&runtime_state_dir)
+            .context("initialize persistent GC lock anchor")?;
+
+        let projection_health = Arc::new(ThreadProjectionHealth::default());
+        // Runtime state must be readable before projection recovery can decide
+        // whether a headless Set's replaceable rows are safe to discard.
+        let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
+        // Launch claims are owned exclusively by tasks in one daemon process.
+        // Holding the process-wide state lock while opening a new RuntimeDb
+        // proves every persisted claim belongs to the previous process. Clear
+        // them before projection recovery consults runtime liveness; doing this
+        // after StateDb::open would let a stale claim falsely quarantine a
+        // headless transition during the open-time replay.
+        let cleared_launch_claims = runtime_db
+            .clear_all_launch_claims()
+            .context("clear stale launch claims before projection recovery")?;
+        if cleared_launch_claims > 0 {
+            tracing::info!(
+                cleared = cleared_launch_claims,
+                "cleared stale launch claims before projection recovery"
+            );
+        }
+        let state_db = match recovery_observer {
+            Some(recovery_observer) => StateDb::open_with_recovery_observer_and_runtime_liveness(
+                &runtime_state_dir,
+                projection_health.clone(),
+                head_trust,
+                recovery_observer,
+                &runtime_db,
+            )?,
+            None => StateDb::open_with_projection_repair_sink_and_runtime_liveness(
+                &runtime_state_dir,
+                projection_health.clone(),
+                head_trust,
+                &runtime_db,
+            )?,
+        };
+        projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
+        Ok(Self {
+            runtime_state_dir,
+            inner: Mutex::new(Inner {
+                state_db,
+                runtime_db,
+                signer,
+            }),
+            projection_health,
+            read_only: false,
+            allow_projection_rebuild: false,
+            write_barrier,
         })
     }
 
@@ -472,6 +852,39 @@ impl StateStore {
         Ok(g.state_db.refs_root().to_path_buf())
     }
 
+    pub fn pending_head_transition_status(&self) -> Result<PendingHeadTransitionStatus> {
+        let g = self.lock()?;
+        let transitions = g.state_db.pending_chain_transitions()?;
+        let oldest_prepared_at = transitions
+            .iter()
+            .map(|transition| transition.prepared_at.as_str())
+            .min()
+            .map(str::to_owned);
+        let oldest_age_seconds = oldest_prepared_at
+            .as_deref()
+            .map(|prepared_at| -> Result<u64> {
+                let prepared_at = parse_canonical_timestamp(prepared_at)
+                    .context("invalid pending transition prepared_at")?;
+                let now = parse_canonical_timestamp(&lillux::time::iso8601_now())
+                    .context("invalid current time while reading transition diagnostics")?;
+                Ok(now.signed_duration_since(prepared_at).num_seconds().max(0) as u64)
+            })
+            .transpose()?;
+        Ok(PendingHeadTransitionStatus {
+            pending: transitions.len(),
+            pending_sets: transitions
+                .iter()
+                .filter(|transition| transition.operation == ryeos_state::HeadOperation::Set)
+                .count(),
+            pending_removes: transitions
+                .iter()
+                .filter(|transition| transition.operation == ryeos_state::HeadOperation::Remove)
+                .count(),
+            oldest_prepared_at,
+            oldest_age_seconds,
+        })
+    }
+
     /// Run a closure with access to the underlying StateDb.
     pub fn with_state_db<F, T>(&self, f: F) -> Result<T>
     where
@@ -479,6 +892,64 @@ impl StateStore {
     {
         let g = self.lock()?;
         f(&g.state_db)
+    }
+
+    /// Strict, non-mutating verification of the selected projection against a
+    /// stable snapshot of trusted heads and CAS.
+    pub fn verify_projection_generation(
+        &self,
+    ) -> Result<ryeos_state::rebuild::ProjectionVerificationReport> {
+        let _cas_guard = if self.read_only {
+            ryeos_state::CasMutationGuard::acquire_existing_exclusive(&self.runtime_state_dir)?
+        } else {
+            ryeos_state::CasMutationGuard::acquire_exclusive(&self.runtime_state_dir)?
+        };
+        let _write_permit = self.write_barrier.try_acquire().map_err(|error| {
+            anyhow!("cannot acquire write permit for projection verification: {error}")
+        })?;
+        let g = self.lock()?;
+        g.state_db.verify_projection_generation()
+    }
+
+    /// Publish a freshly rebuilt projection generation and switch
+    /// this live store to it. The offline service path still obeys the global
+    /// mutation hierarchy so no direct/import publisher can overlap the head
+    /// snapshot or generation publication.
+    pub fn rebuild_projection_generation(&self) -> Result<ryeos_state::rebuild::RebuildReport> {
+        if !self.allow_projection_rebuild {
+            bail!(
+                "projection rebuild is available only in the authored offline rebuild bootstrap mode"
+            );
+        }
+        let cas_guard = ryeos_state::CasMutationGuard::acquire_exclusive(&self.runtime_state_dir)?;
+        let _write_permit = self.write_barrier.try_acquire().map_err(|error| {
+            anyhow!("cannot acquire write permit for projection rebuild: {error}")
+        })?;
+        let mut g = self.lock()?;
+        let Inner {
+            state_db,
+            runtime_db,
+            ..
+        } = &mut *g;
+        state_db.rebuild_projection_generation_admitted(Some(&*runtime_db), &cas_guard)
+    }
+
+    /// Consume a staged remote chain import through the normal mutation
+    /// hierarchy. The CAS guard is acquired before the StateStore mutex and is
+    /// passed into the journaled head publisher; StateDb never reacquires it
+    /// from beneath the mutex.
+    pub fn finalize_staged_chain_import(
+        &self,
+        staged: ryeos_state::sync::StagedChainImport,
+    ) -> Result<ryeos_state::sync::ImportResult> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        ryeos_state::sync::finalize_import(
+            &g.state_db,
+            staged,
+            g.signer.as_ref(),
+            permit.cas_guard(),
+        )
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
@@ -510,11 +981,71 @@ impl StateStore {
 
     /// Acquire a write permit from the write barrier.
     /// Fails if the daemon is quiescing for GC.
-    fn acquire_write_permit(&self) -> Result<WritePermit> {
-        let g = self.lock()?;
-        g.write_barrier
+    fn acquire_write_permit(&self) -> Result<StateMutationPermit> {
+        if self.read_only {
+            bail!("state store is open for strict read-only verification");
+        }
+        let cas_guard = ryeos_state::CasMutationGuard::acquire_shared(&self.runtime_state_dir)?;
+        let write_permit = self
+            .write_barrier
             .try_acquire()
-            .map_err(|e| anyhow!("cannot acquire write permit: {e}"))
+            .map_err(|e| anyhow!("cannot acquire write permit: {e}"))?;
+        Ok(StateMutationPermit {
+            cas_guard,
+            _write_permit: write_permit,
+        })
+    }
+
+    /// Serialize a terminal-GC dry-run with ordinary writers using only
+    /// already-established lock anchors. This retains the normal barrier and
+    /// lock order but cannot create recovery state merely by inspecting it.
+    fn acquire_gc_inspection_permit(&self) -> Result<StateMutationPermit> {
+        if self.read_only {
+            bail!("state store is open for strict read-only verification");
+        }
+        let cas_guard =
+            ryeos_state::CasMutationGuard::acquire_existing_shared(&self.runtime_state_dir)?;
+        let write_permit = self
+            .write_barrier
+            .try_acquire()
+            .map_err(|e| anyhow!("cannot acquire GC inspection permit: {e}"))?;
+        Ok(StateMutationPermit {
+            cas_guard,
+            _write_permit: write_permit,
+        })
+    }
+
+    /// Narrow mutation permit for converging journaled Remove records as part
+    /// of the authored offline projection-rebuild bootstrap. It does not widen
+    /// the common write gate, so unrelated StateStore mutations remain denied.
+    fn acquire_recovery_cleanup_permit(&self, dry_run: bool) -> Result<StateMutationPermit> {
+        if self.read_only && !self.allow_projection_rebuild {
+            bail!("state store is open for strict read-only verification");
+        }
+        let cas_guard = if dry_run {
+            ryeos_state::CasMutationGuard::acquire_existing_shared(&self.runtime_state_dir)?
+        } else {
+            ryeos_state::CasMutationGuard::acquire_shared(&self.runtime_state_dir)?
+        };
+        let write_permit = self
+            .write_barrier
+            .try_acquire()
+            .map_err(|e| anyhow!("cannot acquire recovery cleanup permit: {e}"))?;
+        Ok(StateMutationPermit {
+            cas_guard,
+            _write_permit: write_permit,
+        })
+    }
+
+    fn authorize_runtime_pin_for_thread(
+        g: &Inner,
+        thread_id: &str,
+    ) -> Result<ryeos_state::AuthoritativeRuntimePinAdmission> {
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("runtime-pin thread {thread_id} does not exist"))?;
+        g.state_db.authorize_runtime_pin(&thread.chain_root_id)
     }
 
     #[tracing::instrument(
@@ -527,27 +1058,81 @@ impl StateStore {
             item_ref = %thread.item_ref,
         )
     )]
-    pub fn create_thread(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+    pub(crate) fn create_child_thread_admitted(
+        &self,
+        thread: &NewThreadRecord,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        if thread.thread_id == thread.chain_root_id {
+            bail!("child persistence requires thread_id != chain_root_id");
+        }
+        if thread.captured_history_policy.is_some() {
+            bail!("non-root threads cannot carry a captured history policy");
+        }
+        self.create_thread_inner(thread)
+    }
+
+    /// Raw root persistence is crate-private. The only production callers are
+    /// lifecycle methods which first consume an opaque, current admission.
+    pub(crate) fn create_admitted_root_thread(
+        &self,
+        thread: &NewThreadRecord,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        if thread.thread_id != thread.chain_root_id {
+            bail!("admitted root persistence requires thread_id == chain_root_id");
+        }
+        if thread.captured_history_policy.is_none() {
+            bail!(
+                "new chain root {} has no verified captured history policy",
+                thread.thread_id
+            );
+        }
+        self.create_thread_inner(thread)
+    }
+
+    /// State-layer fixture for tests which exercise persistence below the
+    /// engine admission boundary. It is absent from production builds and
+    /// deliberately names the bypass; application/runtime tests should prefer
+    /// a real lifecycle admission.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_thread_for_test(
+        &self,
+        thread: &NewThreadRecord,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        if thread.thread_id == thread.chain_root_id {
+            self.create_admitted_root_thread(thread)
+        } else {
+            self.create_child_thread_admitted(thread)
+        }
+    }
+
+    fn create_thread_inner(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let snapshot = build_snapshot(thread);
 
         if thread.thread_id == thread.chain_root_id {
-            committed_value(g.state_db.create_chain(
+            committed_value(g.state_db.create_chain_admitted(
                 &thread.thread_id,
                 snapshot,
                 g.signer.as_ref(),
+                &g.runtime_db,
+                permit.cas_guard(),
             )?);
         } else {
-            committed_value(g.state_db.add_thread(
+            committed_value(g.state_db.add_thread_admitted(
                 &thread.chain_root_id,
                 snapshot,
                 g.signer.as_ref(),
+                &g.runtime_db,
+                permit.cas_guard(),
             )?);
         }
 
-        g.runtime_db
-            .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+        {
+            let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
+            g.runtime_db
+                .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+        }
 
         // Edge is derived from snapshot's upstream_thread_id during
         // project_thread_snapshot (see projection.rs). No direct write needed.
@@ -578,12 +1163,14 @@ impl StateStore {
             &thread.chain_root_id,
             &thread.thread_id,
         );
-        let result = committed_value(g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events_admitted(
             &thread.chain_root_id,
             &thread.thread_id,
             te,
             vec![],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         Ok(persisted_from_append(&result, &[create_event]))
@@ -603,7 +1190,7 @@ impl StateStore {
         thread: &NewThreadRecord,
         branch_payload: Value,
     ) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
 
         if thread.thread_id == thread.chain_root_id {
@@ -634,15 +1221,20 @@ impl StateStore {
         };
         let events_to_append = vec![create_event, branch_event];
         let te = convert_events(&events_to_append, &thread.chain_root_id, &thread.thread_id);
-        let result = committed_value(g.state_db.add_thread_with_events(
+        let result = committed_value(g.state_db.add_thread_with_events_admitted(
             &thread.chain_root_id,
             build_snapshot(thread),
             te,
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
-        g.runtime_db
-            .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+        {
+            let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
+            g.runtime_db
+                .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+        }
 
         Ok(persisted_from_add_thread_with_events(
             &result,
@@ -660,7 +1252,7 @@ impl StateStore {
         thread_id: &str,
         base_project_snapshot_hash: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
             .state_db
@@ -684,37 +1276,16 @@ impl StateStore {
         }
 
         let now = lillux::time::iso8601_now();
-        let updated_snapshot = ThreadSnapshot {
-            schema: ryeos_state::objects::SCHEMA_VERSION,
-            kind: "thread_snapshot".to_string(),
-            thread_id: thread_row.thread_id.clone(),
-            chain_root_id: thread_row.chain_root_id.clone(),
-            status: ThreadStatus::Running,
-            kind_name: thread_row.kind.clone(),
-            item_ref: thread_row.item_ref.clone(),
-            executor_ref: thread_row.executor_ref.clone(),
-            launch_mode: thread_row.launch_mode.clone(),
-            current_site_id: thread_row.current_site_id.clone(),
-            origin_site_id: thread_row.origin_site_id.clone(),
-            upstream_thread_id: thread_row.upstream_thread_id.clone(),
-            requested_by: thread_row.requested_by.clone(),
-            project_root: thread_row.project_root.as_ref().map(PathBuf::from),
-            base_project_snapshot_hash: base_project_snapshot_hash.map(String::from),
-            result_project_snapshot_hash: None,
-            created_at: thread_row.created_at.clone(),
-            updated_at: now.clone(),
-            started_at: Some(now.clone()),
-            finished_at: None,
-            result: None,
-            outcome_code: None,
-            error: None,
-            budget: None,
-            artifacts: vec![],
-            facets: Default::default(),
-            last_event_hash: None,
-            last_chain_seq: 0,
-            last_thread_seq: 0,
-        };
+        let mut updated_snapshot = authoritative_snapshot_for_transition(
+            &g,
+            &thread_row.chain_root_id,
+            &thread_row.thread_id,
+        )?;
+        updated_snapshot.status = ThreadStatus::Running;
+        updated_snapshot.updated_at.clone_from(&now);
+        updated_snapshot.started_at = Some(now.clone());
+        updated_snapshot.finished_at = None;
+        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash.map(String::from);
 
         let snapshot_update = SnapshotUpdate {
             thread_id: thread_id.to_string(),
@@ -732,12 +1303,14 @@ impl StateStore {
             &thread_row.chain_root_id,
             thread_id,
         );
-        let result = committed_value(g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events_admitted(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![snapshot_update],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         Ok(persisted_from_append(&result, &[event]))
@@ -753,7 +1326,12 @@ impl StateStore {
         thread_id: &str,
         update: &FinalizeThreadRecord,
     ) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+        let validated_final_cost = update
+            .final_cost
+            .as_ref()
+            .map(validate_final_cost)
+            .transpose()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
             .state_db
@@ -805,55 +1383,41 @@ impl StateStore {
             .map(|a| serde_json::to_value(a).unwrap())
             .collect();
 
-        let updated_snapshot = ThreadSnapshot {
-            schema: ryeos_state::objects::SCHEMA_VERSION,
-            kind: "thread_snapshot".to_string(),
-            thread_id: thread_row.thread_id.clone(),
-            chain_root_id: thread_row.chain_root_id.clone(),
-            status: terminal_status,
-            kind_name: thread_row.kind.clone(),
-            item_ref: thread_row.item_ref.clone(),
-            executor_ref: thread_row.executor_ref.clone(),
-            launch_mode: thread_row.launch_mode.clone(),
-            current_site_id: thread_row.current_site_id.clone(),
-            origin_site_id: thread_row.origin_site_id.clone(),
-            upstream_thread_id: thread_row.upstream_thread_id.clone(),
-            requested_by: thread_row.requested_by.clone(),
-            project_root: thread_row.project_root.as_ref().map(PathBuf::from),
-            base_project_snapshot_hash: None,
-            result_project_snapshot_hash: None,
-            created_at: thread_row.created_at.clone(),
-            updated_at: now.clone(),
-            started_at: thread_row.started_at.clone(),
-            finished_at: Some(now.clone()),
-            result: update.result_json.clone(),
-            outcome_code: update.outcome_code.clone(),
-            error: update.error_json.clone(),
-            budget: update.final_cost.as_ref().map(|cost| {
-                ThreadUsage {
-                    completed_turns: cost.turns as u32,
-                    input_tokens: cost.input_tokens as u64,
-                    output_tokens: cost.output_tokens as u64,
-                    spend_usd: cost.spend,
-                    spawns_used: 0, // not tracked in FinalCost
-                    started_at: thread_row
-                        .started_at
-                        .clone()
-                        .unwrap_or_else(|| thread_row.created_at.clone()),
-                    settled_at: now.clone(),
-                    last_settled_turn_seq: cost.turns as u64,
-                    elapsed_ms: 0, // daemon doesn't track wall-clock time
-                    provider_id: None,
-                    model: None,
-                    profile: None,
-                }
-            }),
-            artifacts: artifacts_json,
-            facets,
-            last_event_hash: None,
-            last_chain_seq: 0,
-            last_thread_seq: 0,
-        };
+        let mut updated_snapshot = authoritative_snapshot_for_transition(
+            &g,
+            &thread_row.chain_root_id,
+            &thread_row.thread_id,
+        )?;
+        let usage_started_at = updated_snapshot
+            .started_at
+            .clone()
+            .unwrap_or_else(|| updated_snapshot.created_at.clone());
+        updated_snapshot.status = terminal_status;
+        updated_snapshot.updated_at.clone_from(&now);
+        updated_snapshot.finished_at = Some(now.clone());
+        updated_snapshot.result.clone_from(&update.result_json);
+        updated_snapshot
+            .outcome_code
+            .clone_from(&update.outcome_code);
+        updated_snapshot.error.clone_from(&update.error_json);
+        updated_snapshot.budget = validated_final_cost.as_ref().map(|cost| {
+            ThreadUsage {
+                completed_turns: cost.completed_turns,
+                input_tokens: cost.input_tokens,
+                output_tokens: cost.output_tokens,
+                spend_usd: cost.spend_usd,
+                spawns_used: 0, // not tracked in FinalCost
+                started_at: usage_started_at.clone(),
+                settled_at: now.clone(),
+                last_settled_turn_seq: u64::from(cost.completed_turns),
+                elapsed_ms: 0, // daemon doesn't track wall-clock time
+                provider_id: None,
+                model: None,
+                profile: None,
+            }
+        });
+        updated_snapshot.artifacts = artifacts_json;
+        updated_snapshot.facets = facets;
 
         let snapshot_update = SnapshotUpdate {
             thread_id: thread_id.to_string(),
@@ -892,12 +1456,14 @@ impl StateStore {
         });
 
         let te = convert_events(&events_to_append, &thread_row.chain_root_id, thread_id);
-        let result = committed_value(g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events_admitted(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![snapshot_update],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         Ok(persisted_from_append(&result, &events_to_append))
@@ -912,14 +1478,14 @@ impl StateStore {
             source_thread_id = %source_thread_id,
         )
     )]
-    pub fn create_continuation(
+    pub(crate) fn create_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
         source_thread_id: &str,
         chain_root_id: &str,
         reason: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
             .state_db
@@ -962,37 +1528,7 @@ impl StateStore {
             Vec::new()
         } else {
             let now = lillux::time::iso8601_now();
-            let source_snapshot = ThreadSnapshot {
-                schema: ryeos_state::objects::SCHEMA_VERSION,
-                kind: "thread_snapshot".to_string(),
-                thread_id: source_row.thread_id.clone(),
-                chain_root_id: source_row.chain_root_id.clone(),
-                status: ThreadStatus::Continued,
-                kind_name: source_row.kind.clone(),
-                item_ref: source_row.item_ref.clone(),
-                executor_ref: source_row.executor_ref.clone(),
-                launch_mode: source_row.launch_mode.clone(),
-                current_site_id: source_row.current_site_id.clone(),
-                origin_site_id: source_row.origin_site_id.clone(),
-                upstream_thread_id: source_row.upstream_thread_id.clone(),
-                requested_by: source_row.requested_by.clone(),
-                project_root: source_row.project_root.as_ref().map(PathBuf::from),
-                base_project_snapshot_hash: None,
-                result_project_snapshot_hash: None,
-                created_at: source_row.created_at.clone(),
-                updated_at: now.clone(),
-                started_at: source_row.started_at.clone(),
-                finished_at: Some(now),
-                result: None,
-                outcome_code: Some("continued".to_string()),
-                error: None,
-                budget: None,
-                artifacts: vec![],
-                facets: Default::default(),
-                last_event_hash: None,
-                last_chain_seq: 0,
-                last_thread_seq: 0,
-            };
+            let source_snapshot = continued_snapshot_for_transition(&g, &source_row, &now)?;
             vec![SnapshotUpdate {
                 thread_id: source_thread_id.to_string(),
                 new_snapshot: source_snapshot,
@@ -1005,14 +1541,19 @@ impl StateStore {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        committed_value(g.state_db.add_thread(
+        committed_value(g.state_db.add_thread_admitted(
             chain_root_id,
             successor_snapshot,
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
-        g.runtime_db
-            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+        {
+            let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+            g.runtime_db
+                .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+        }
 
         // Edge is derived from successor snapshot's upstream_thread_id during
         // projection (see project_thread_snapshot in rye-state). No direct write needed.
@@ -1031,12 +1572,14 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = committed_value(g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let successor_event = NewEventRecord {
@@ -1054,12 +1597,14 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = committed_value(g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
@@ -1067,9 +1612,21 @@ impl StateStore {
         Ok(all_events)
     }
 
+    /// Raw continuation fixture for state-layer tests. Absent in production.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_continuation_for_test(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_continuation_admitted(successor, source_thread_id, chain_root_id, reason)
+    }
+
     /// Machine continuation handoff (limit cut-off) — the autonomous path.
     ///
-    /// Unlike [`Self::create_continuation`] (the operator follow-up, which
+    /// Unlike the operator-follow-up continuation path, which
     /// accepts a terminal source and leaves it as-is), this enforces the machine
     /// invariants atomically under the write permit + lock:
     ///
@@ -1137,7 +1694,7 @@ impl StateStore {
         chain_root_id: &str,
         kind: RunningContinuationKind<'_>,
     ) -> Result<Vec<PersistedEventRecord>> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
             .state_db
@@ -1230,55 +1787,30 @@ impl StateStore {
         // launch identity before any state-db successor snapshot or source
         // settle. If the seed fails, only an orphan runtime row exists — no
         // state-db successor edge, source untouched and still running.
-        g.runtime_db
-            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-        let successor_meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
-            .with_resume_context(source_resume_context);
-        g.runtime_db
-            .set_launch_metadata(&successor.thread_id, &successor_meta)?;
+        {
+            let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
+            g.runtime_db
+                .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+            let successor_meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_resume_context(source_resume_context);
+            g.runtime_db
+                .set_launch_metadata(&successor.thread_id, &successor_meta)?;
+        }
 
         // State-db successor snapshot (creates the upstream edge).
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        committed_value(g.state_db.add_thread(
+        committed_value(g.state_db.add_thread_admitted(
             chain_root_id,
             successor_snapshot,
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         // Settle the source to `continued` (running by the check above) in the
         // same append as its `thread_continued` event — the final state change.
         let now = lillux::time::iso8601_now();
-        let source_snapshot = ThreadSnapshot {
-            schema: ryeos_state::objects::SCHEMA_VERSION,
-            kind: "thread_snapshot".to_string(),
-            thread_id: source_row.thread_id.clone(),
-            chain_root_id: source_row.chain_root_id.clone(),
-            status: ThreadStatus::Continued,
-            kind_name: source_row.kind.clone(),
-            item_ref: source_row.item_ref.clone(),
-            executor_ref: source_row.executor_ref.clone(),
-            launch_mode: source_row.launch_mode.clone(),
-            current_site_id: source_row.current_site_id.clone(),
-            origin_site_id: source_row.origin_site_id.clone(),
-            upstream_thread_id: source_row.upstream_thread_id.clone(),
-            requested_by: source_row.requested_by.clone(),
-            project_root: source_row.project_root.as_ref().map(PathBuf::from),
-            base_project_snapshot_hash: None,
-            result_project_snapshot_hash: None,
-            created_at: source_row.created_at.clone(),
-            updated_at: now.clone(),
-            started_at: source_row.started_at.clone(),
-            finished_at: Some(now),
-            result: None,
-            outcome_code: Some("continued".to_string()),
-            error: None,
-            budget: None,
-            artifacts: vec![],
-            facets: Default::default(),
-            last_event_hash: None,
-            last_chain_seq: 0,
-            last_thread_seq: 0,
-        };
+        let source_snapshot = continued_snapshot_for_transition(&g, &source_row, &now)?;
         let edge_reason: Option<&str> = match &kind {
             RunningContinuationKind::Machine { sanitized_reason } => *sanitized_reason,
             RunningContinuationKind::GraphFollowResume => {
@@ -1298,7 +1830,7 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = committed_value(g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             source_thread_id,
             ste,
@@ -1307,6 +1839,8 @@ impl StateStore {
                 new_snapshot: source_snapshot,
             }],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let successor_event = NewEventRecord {
@@ -1323,12 +1857,14 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = committed_value(g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
@@ -1348,7 +1884,7 @@ impl StateStore {
     /// even if the daemon crashes before the runtime emits anything. A terminal
     /// (completed/failed) source keeps its status; a running source is settled
     /// `continued` (same as `create_continuation`).
-    pub fn create_or_get_continuation(
+    pub(crate) fn create_or_get_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
         source_thread_id: &str,
@@ -1357,7 +1893,7 @@ impl StateStore {
         request_fingerprint: &str,
         resume_context: Option<&crate::launch_metadata::ResumeContext>,
     ) -> Result<ContinuationOutcome> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
             .state_db
@@ -1410,37 +1946,7 @@ impl StateStore {
             Vec::new()
         } else {
             let now = lillux::time::iso8601_now();
-            let source_snapshot = ThreadSnapshot {
-                schema: ryeos_state::objects::SCHEMA_VERSION,
-                kind: "thread_snapshot".to_string(),
-                thread_id: source_row.thread_id.clone(),
-                chain_root_id: source_row.chain_root_id.clone(),
-                status: ThreadStatus::Continued,
-                kind_name: source_row.kind.clone(),
-                item_ref: source_row.item_ref.clone(),
-                executor_ref: source_row.executor_ref.clone(),
-                launch_mode: source_row.launch_mode.clone(),
-                current_site_id: source_row.current_site_id.clone(),
-                origin_site_id: source_row.origin_site_id.clone(),
-                upstream_thread_id: source_row.upstream_thread_id.clone(),
-                requested_by: source_row.requested_by.clone(),
-                project_root: source_row.project_root.as_ref().map(PathBuf::from),
-                base_project_snapshot_hash: None,
-                result_project_snapshot_hash: None,
-                created_at: source_row.created_at.clone(),
-                updated_at: now.clone(),
-                started_at: source_row.started_at.clone(),
-                finished_at: Some(now),
-                result: None,
-                outcome_code: Some("continued".to_string()),
-                error: None,
-                budget: None,
-                artifacts: vec![],
-                facets: Default::default(),
-                last_event_hash: None,
-                last_chain_seq: 0,
-                last_thread_seq: 0,
-            };
+            let source_snapshot = continued_snapshot_for_transition(&g, &source_row, &now)?;
             vec![SnapshotUpdate {
                 thread_id: source_thread_id.to_string(),
                 new_snapshot: source_snapshot,
@@ -1456,26 +1962,31 @@ impl StateStore {
         // A failure before the edge write leaves at most a runtime row + an
         // unlinked successor snapshot (no authoritative continuation edge), never
         // a `continued`/edge'd source pointing at a half-built successor.
-        g.runtime_db
-            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-
-        // Seed the operator launch context (a `ResumeContext`) on the successor so
-        // the row is relaunchable the instant it exists — a crash before the
-        // spawned launcher runs leaves a successor the operator can re-drive
-        // (idempotently, via the fingerprint) or reconcile can recover, rather
-        // than a stranded row with no launch information.
-        if let Some(rc) = resume_context {
-            let meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
-                .with_resume_context(rc.clone());
+        {
+            let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
-                .set_launch_metadata(&successor.thread_id, &meta)?;
+                .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+
+            // Seed the operator launch context (a `ResumeContext`) on the successor so
+            // the row is relaunchable the instant it exists — a crash before the
+            // spawned launcher runs leaves a successor the operator can re-drive
+            // (idempotently, via the fingerprint) or reconcile can recover, rather
+            // than a stranded row with no launch information.
+            if let Some(rc) = resume_context {
+                let meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
+                    .with_resume_context(rc.clone());
+                g.runtime_db
+                    .set_launch_metadata(&successor.thread_id, &meta)?;
+            }
         }
 
         let successor_snapshot = build_snapshot(&successor_with_upstream);
-        committed_value(g.state_db.add_thread(
+        committed_value(g.state_db.add_thread_admitted(
             chain_root_id,
             successor_snapshot,
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let source_event = NewEventRecord {
@@ -1492,12 +2003,14 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = committed_value(g.state_db.append_events(
+        let source_result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let successor_event = NewEventRecord {
@@ -1514,17 +2027,41 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_result = committed_value(g.state_db.append_events(
+        let successor_result = committed_value(g.state_db.append_events_admitted(
             chain_root_id,
             &successor.thread_id,
             sste,
             vec![],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let mut all_events = persisted_from_append(&source_result, &[source_event]);
         all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
         Ok(ContinuationOutcome::Created(all_events))
+    }
+
+    /// Raw idempotent continuation fixture for state-layer tests. Absent in
+    /// production.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_or_get_continuation_for_test(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+        request_fingerprint: &str,
+        resume_context: Option<&crate::launch_metadata::ResumeContext>,
+    ) -> Result<ContinuationOutcome> {
+        self.create_or_get_continuation_admitted(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            reason,
+            request_fingerprint,
+            resume_context,
+        )
     }
 
     /// The `successor_request_fingerprint` recorded on a source's
@@ -1600,6 +2137,7 @@ impl StateStore {
         surface: &str,
         client_ref: &str,
     ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread = g
             .state_db
@@ -1612,6 +2150,7 @@ impl StateStore {
         {
             bail!("seat thread {thread_id} is not a matching running owned seat");
         }
+        let _admission = g.state_db.authorize_runtime_pin(&thread.chain_root_id)?;
         if !g
             .runtime_db
             .touch_seat_lease(thread_id, owner, surface, client_ref)?
@@ -1622,7 +2161,9 @@ impl StateStore {
     }
 
     pub fn touch_existing_seat_lease(&self, thread_id: &str) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db.touch_existing_seat_lease(thread_id)
     }
 
@@ -1637,52 +2178,357 @@ impl StateStore {
     }
 
     pub fn claim_expired_seat_lease(&self, thread_id: &str, cutoff_ms: i64) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db.claim_expired_seat_lease(thread_id, cutoff_ms)
     }
 
-    pub fn retire_service_chains_before(
+    fn inspect_terminal_chain_pins<F>(
+        g: &Inner,
+        chain: &ryeos_state::AuthoritativeTerminalChain,
+        scheduler_pin_count: &F,
+    ) -> Result<runtime_db::ChainRecoveryPins>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        let mut pins = g
+            .runtime_db
+            .inspect_chain_recovery_pins(&chain.chain_root_id, &chain.thread_ids)?;
+        let members = chain
+            .thread_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        for (parent_thread_id, child_thread_id) in
+            g.runtime_db.chain_child_links(&chain.thread_ids)?
+        {
+            let parent_is_member = members.contains(parent_thread_id.as_str());
+            let child_is_member = members.contains(child_thread_id.as_str());
+            if parent_is_member && child_is_member {
+                continue;
+            }
+            let counterpart = if parent_is_member {
+                &child_thread_id
+            } else {
+                &parent_thread_id
+            };
+            // A missing counterpart while its operational edge remains is an
+            // inconsistent read, not proof of safety. Fail closed by retaining
+            // the chain. A terminal counterpart no longer needs cancellation
+            // cascade state and therefore does not pin this history.
+            if g.state_db
+                .get_thread(counterpart)?
+                .is_none_or(|thread| !is_terminal_status(&thread.status))
+            {
+                pins.child_links = pins
+                    .child_links
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("child-link recovery pin count overflow"))?;
+            }
+        }
+        pins.scheduler_fires = scheduler_pin_count(&chain.thread_ids)?;
+        Ok(pins)
+    }
+
+    fn finish_terminal_chain_removal(
+        g: &Inner,
+        chain: &ryeos_state::AuthoritativeTerminalChain,
+        chain_lock: &ChainLock,
+        runtime_paths: &[ThreadRuntimeRemoval],
+        head_already_absent: bool,
+        result: &mut TerminalChainRetirement,
+    ) -> Result<()> {
+        if !head_already_absent
+            && !g
+                .state_db
+                .remove_chain_head_ref(&chain.chain_root_id, chain_lock)?
+        {
+            bail!(
+                "authoritative chain head disappeared during retirement: {}",
+                chain.chain_root_id
+            );
+        }
+        result.deleted_runtime_rows += g
+            .runtime_db
+            .delete_chain_runtime(&chain.chain_root_id, &chain.thread_ids)?;
+        result.deleted_runtime_files += delete_thread_runtime_files(runtime_paths)?;
+        result.deleted_projection_rows += g
+            .state_db
+            .delete_chain_projection(&chain.chain_root_id, chain_lock)?;
+        if !g
+            .state_db
+            .acknowledge_chain_removal_cleanup(&chain.chain_root_id, chain_lock)?
+        {
+            bail!(
+                "pending chain removal disappeared before acknowledgement: {}",
+                chain.chain_root_id
+            );
+        }
+        Ok(())
+    }
+
+    fn recover_pending_terminal_chain_removals_with<F>(
         &self,
-        cutoff: &str,
+        now: &str,
+        app_root: &Path,
         dry_run: bool,
-    ) -> Result<ServiceChainRetirement> {
-        let _permit = self.acquire_write_permit()?;
-        let g = self.lock()?;
-        let candidates = g.state_db.terminal_service_chain_candidates(cutoff)?;
-        let mut result = ServiceChainRetirement {
-            candidate_chains: candidates.len(),
-            ..Default::default()
+        scheduler_pin_count: &F,
+    ) -> Result<TerminalChainRetirement>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        let mut result = TerminalChainRetirement::default();
+        let mut pending_removals = {
+            let g = self.lock()?;
+            g.state_db.pending_remove_cursor()?
         };
-        for chain_root_id in candidates {
-            if !g
+        while let Some(observed) = pending_removals.next_transition()? {
+            let chain_root_id = observed.chain_root_id.clone();
+            let _permit = self.acquire_recovery_cleanup_permit(dry_run)?;
+            let g = self.lock()?;
+            let chain_lock = if dry_run {
+                g.state_db.acquire_existing_chain_lock(&chain_root_id)?
+            } else {
+                g.state_db.acquire_chain_lock(&chain_root_id)?
+            };
+            let still_pending = g
                 .state_db
-                .terminal_service_chain_is_retirable(&chain_root_id, cutoff)?
-                || g.runtime_db.chain_has_live_state(&chain_root_id)?
-            {
+                .pending_chain_transition(&chain_root_id)?
+                .is_some_and(|pending| {
+                    pending.transition_id == observed.transition_id
+                        && pending.operation == ryeos_state::HeadOperation::Remove
+                });
+            if !still_pending {
                 continue;
             }
-            if dry_run {
-                result.retired_chains += 1;
-                continue;
+
+            match g.state_db.pending_chain_removal_head_state(
+                &chain_root_id,
+                &observed.transition_id,
+                &chain_lock,
+            )? {
+                ryeos_state::PendingRemoveHeadState::HeadAbsent => {
+                    let chain = g
+                        .state_db
+                        .pending_removed_terminal_chain_under_lock(&chain_root_id, &chain_lock)?
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "pending Remove for {chain_root_id} names a nonterminal or invalid closure"
+                            )
+                        })?;
+                    // The absent trusted head proves that this Remove crossed
+                    // its authoritative deletion boundary. Operational rows,
+                    // scheduler fires, follow state, and runtime files left by
+                    // a crash at that boundary are cleanup targets, not fresh
+                    // vetoes: new pin admission is already forbidden once the
+                    // Remove publishes. Rechecking them here would strand the
+                    // exact partial cleanup this replay owns forever.
+                    let runtime_paths = inspect_thread_runtime_files(app_root, &chain.thread_ids)?;
+                    result.pending_retirements_recovered += 1;
+                    if !dry_run {
+                        Self::finish_terminal_chain_removal(
+                            &g,
+                            &chain,
+                            &chain_lock,
+                            &runtime_paths,
+                            true,
+                            &mut result,
+                        )?;
+                    }
+                    continue;
+                }
+                ryeos_state::PendingRemoveHeadState::AdvancedHeadVisible { current_head_hash } => {
+                    result.pending_retirements_recovered += 1;
+                    tracing::warn!(
+                        chain_root_id,
+                        current_head_hash,
+                        "pending terminal-history Remove is stale against an advanced signed head; repairing the current head"
+                    );
+                    if dry_run {
+                        g.state_db.verify_advanced_head_after_stale_chain_removal(
+                            &chain_root_id,
+                            &observed.transition_id,
+                            &current_head_hash,
+                            &chain_lock,
+                        )?;
+                    } else {
+                        g.state_db.repair_advanced_head_after_stale_chain_removal(
+                            &chain_root_id,
+                            &observed.transition_id,
+                            &chain_lock,
+                        )?;
+                    }
+                    continue;
+                }
+                ryeos_state::PendingRemoveHeadState::ExpectedHeadVisible => {}
             }
-            // Serialize head removal with every append/import writer, then
-            // repeat the terminal/age/runtime checks under that lock. A writer
-            // which published a new head before us makes the chain recent; a
-            // writer behind us cannot publish until the ref is gone.
-            let _chain_lock = ChainLock::acquire(g.state_db.refs_root(), &chain_root_id)?;
-            if !g
+
+            let Some(chain) = g
                 .state_db
-                .terminal_service_chain_is_retirable(&chain_root_id, cutoff)?
-                || g.runtime_db.chain_has_live_state(&chain_root_id)?
-            {
+                .authoritative_terminal_chain_under_lock(&chain_root_id, &chain_lock)?
+            else {
+                result.pending_retirements_recovered += 1;
+                if !dry_run {
+                    g.state_db
+                        .cancel_pending_chain_removal(&chain_root_id, &chain_lock)?;
+                }
+                continue;
+            };
+            let due = chain.is_due_at(now)?;
+            let pins = Self::inspect_terminal_chain_pins(&g, &chain, scheduler_pin_count)?;
+            if !due || !pins.is_empty() {
+                result.pending_retirements_recovered += 1;
+                if !dry_run {
+                    g.state_db
+                        .cancel_pending_chain_removal(&chain_root_id, &chain_lock)?;
+                }
                 continue;
             }
-            // Ref first: a crash after this point leaves no live CAS root. The
-            // remaining runtime/projection cleanup is idempotent.
-            g.state_db.remove_chain_head_ref(&chain_root_id)?;
-            result.deleted_rows += g.runtime_db.delete_chain_runtime(&chain_root_id)?;
-            result.deleted_rows += g.state_db.delete_chain_projection(&chain_root_id)?;
+            let runtime_paths = inspect_thread_runtime_files(app_root, &chain.thread_ids)?;
+            result.pending_retirements_recovered += 1;
             result.retired_chains += 1;
+            if !dry_run {
+                Self::finish_terminal_chain_removal(
+                    &g,
+                    &chain,
+                    &chain_lock,
+                    &runtime_paths,
+                    false,
+                    &mut result,
+                )?;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Complete or cancel only the bounded durable Remove records left by an
+    /// interrupted retention transaction. Startup calls this before readiness;
+    /// it never scans current chain heads or selects new GC candidates.
+    pub fn recover_pending_terminal_chain_removals<F>(
+        &self,
+        now: &str,
+        app_root: &Path,
+        dry_run: bool,
+        scheduler_pin_count: F,
+    ) -> Result<TerminalChainRetirement>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        let result = self.recover_pending_terminal_chain_removals_with(
+            now,
+            app_root,
+            dry_run,
+            &scheduler_pin_count,
+        );
+        match self
+            .lock()
+            .and_then(|g| Ok(g.state_db.pending_chain_transitions()?.len()))
+        {
+            Ok(pending) => self.projection_health.observe_pending_transitions(pending),
+            Err(error) => self
+                .projection_health
+                .observe_pending_transition_error(&error),
+        }
+        result
+    }
+
+    /// Retire terminal chain history solely from the signed policy captured on
+    /// its root. Candidate rows are a bounded read-model optimization; every
+    /// destructive decision is repeated from the trust-verified CAS closure
+    /// under the global guard/permit/mutex/chain-lock hierarchy.
+    pub fn retire_due_terminal_chains<F>(
+        &self,
+        now: &str,
+        app_root: &Path,
+        dry_run: bool,
+        scheduler_pin_count: F,
+    ) -> Result<TerminalChainRetirement>
+    where
+        F: Fn(&[String]) -> Result<u64>,
+    {
+        const CANDIDATE_BATCH: usize = 128;
+        let mut result = self.recover_pending_terminal_chain_removals_with(
+            now,
+            app_root,
+            dry_run,
+            &scheduler_pin_count,
+        )?;
+        let mut cursor: Option<ryeos_state::DueTerminalChainCursor> = None;
+        loop {
+            let candidates = {
+                let g = self.lock()?;
+                g.state_db
+                    .list_due_terminal_chains(now, CANDIDATE_BATCH, cursor.as_ref())?
+            };
+            if candidates.is_empty() {
+                break;
+            }
+            result.candidate_chains += candidates.len();
+            cursor = candidates
+                .last()
+                .map(|candidate| ryeos_state::DueTerminalChainCursor {
+                    retire_after: candidate.retire_after,
+                    chain_root_id: candidate.chain_root_id.clone(),
+                });
+
+            for candidate in &candidates {
+                let _permit = if dry_run {
+                    self.acquire_gc_inspection_permit()?
+                } else {
+                    self.acquire_write_permit()?
+                };
+                let g = self.lock()?;
+                let chain_lock = if dry_run {
+                    g.state_db
+                        .acquire_existing_chain_lock(&candidate.chain_root_id)?
+                } else {
+                    g.state_db.acquire_chain_lock(&candidate.chain_root_id)?
+                };
+                // Any unresolved transition owns the chain's publication
+                // slot. In particular, a Prepared Set may still name a newer
+                // closure even while the old head/projection match this stale
+                // candidate row; retirement must never try to converge or
+                // overwrite that publication intent.
+                if g.state_db
+                    .pending_chain_transition(&candidate.chain_root_id)?
+                    .is_some()
+                {
+                    continue;
+                }
+                let Some(chain) = g.state_db.authoritative_terminal_chain_under_lock(
+                    &candidate.chain_root_id,
+                    &chain_lock,
+                )?
+                else {
+                    continue;
+                };
+                if chain.head_hash != candidate.indexed_chain_state_hash
+                    || chain.terminal_at != candidate.terminal_at
+                    || !chain.is_due_at(now)?
+                {
+                    continue;
+                }
+                let pins = Self::inspect_terminal_chain_pins(&g, &chain, &scheduler_pin_count)?;
+                if !pins.is_empty() {
+                    continue;
+                }
+                let runtime_paths = inspect_thread_runtime_files(app_root, &chain.thread_ids)?;
+                result.retired_chains += 1;
+                if !dry_run {
+                    Self::finish_terminal_chain_removal(
+                        &g,
+                        &chain,
+                        &chain_lock,
+                        &runtime_paths,
+                        false,
+                        &mut result,
+                    )?;
+                }
+            }
+            if candidates.len() < CANDIDATE_BATCH {
+                break;
+            }
         }
         Ok(result)
     }
@@ -1755,7 +2601,7 @@ impl StateStore {
         thread_id: &str,
         artifact: &NewArtifactRecord,
     ) -> Result<(ThreadArtifactRecord, PersistedEventRecord)> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
             .state_db
@@ -1781,12 +2627,14 @@ impl StateStore {
             &thread_row.chain_root_id,
             thread_id,
         );
-        let result = committed_value(g.state_db.append_events(
+        let result = committed_value(g.state_db.append_events_admitted(
             &thread_row.chain_root_id,
             thread_id,
             te,
             vec![],
             g.signer.as_ref(),
+            &g.runtime_db,
+            permit.cas_guard(),
         )?);
 
         let persisted = persisted_from_append(&result, &[event]);
@@ -2230,7 +3078,9 @@ impl StateStore {
         thread_id: &str,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db.set_launch_metadata(thread_id, launch_metadata)
     }
 
@@ -2246,6 +3096,7 @@ impl StateStore {
         pgid: i64,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         // Defensive: skip attach if the thread was already finalized
         // (e.g. cancelled while the runner was between spawn and attach).
@@ -2271,6 +3122,7 @@ impl StateStore {
                 );
             }
         }
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db
             .attach_process(thread_id, pid, pgid, launch_metadata)
     }
@@ -2284,7 +3136,9 @@ impl StateStore {
     /// Atomically bump the auto-resume counter and return the
     /// post-increment value.
     pub fn bump_resume_attempts(&self, thread_id: &str) -> Result<u32> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db.bump_resume_attempts(thread_id)
     }
 
@@ -2295,11 +3149,12 @@ impl StateStore {
         thread_id: &str,
         claim_id: &str,
         claimed_by: &str,
-        lease_ms: i64,
     ) -> Result<runtime_db::LaunchClaimOutcome> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db
-            .claim_thread_launch(thread_id, claim_id, claimed_by, lease_ms)
+            .claim_thread_launch(thread_id, claim_id, claimed_by)
     }
 
     /// Release a launch claim the caller owns (matched by `claim_id`).
@@ -2322,7 +3177,11 @@ impl StateStore {
         &self,
         seed: &runtime_db::NewFollowWaiter,
     ) -> Result<runtime_db::FollowWaiter> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = g
+            .state_db
+            .authorize_runtime_pin(&seed.parent_chain_root_id)?;
         g.runtime_db.reserve_follow(seed)
     }
 
@@ -2334,8 +3193,20 @@ impl StateStore {
         spec_hash: &str,
         child_thread_id: &str,
         child_chain_root_id: &str,
+        sealed_root_request: &crate::thread_lifecycle::SealedRootExecutionRequest,
     ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let waiter = g
+            .runtime_db
+            .get_follow_waiter_by_key(follow_key)?
+            .ok_or_else(|| anyhow!("follow waiter {follow_key} does not exist"))?;
+        let _admission = match g.state_db.authorize_runtime_pin(child_chain_root_id) {
+            Ok(admission) => admission,
+            Err(_) => g
+                .state_db
+                .authorize_future_runtime_pin(&waiter.parent_chain_root_id, child_chain_root_id)?,
+        };
         g.runtime_db.set_follow_child(
             follow_key,
             item_index,
@@ -2343,6 +3214,7 @@ impl StateStore {
             spec_hash,
             child_thread_id,
             child_chain_root_id,
+            sealed_root_request,
         )
     }
 
@@ -2441,14 +3313,6 @@ impl StateStore {
         g.runtime_db.clear_follow_waiter(follow_key)
     }
 
-    /// Delete all launch claims — startup cleanup so a stale claim from a crashed
-    /// daemon does not block a reconcile relaunch. See
-    /// [`runtime_db::RuntimeDb::clear_all_launch_claims`].
-    pub fn clear_all_launch_claims(&self) -> Result<usize> {
-        let g = self.lock()?;
-        g.runtime_db.clear_all_launch_claims()
-    }
-
     #[tracing::instrument(
         name = "state:append_events",
         skip(self, events),
@@ -2467,13 +3331,19 @@ impl StateStore {
         let has_cas_events = events
             .iter()
             .any(|event| event.storage_class != "ephemeral");
-        let _permit = if has_cas_events {
+        let permit = if has_cas_events {
             Some(self.acquire_write_permit()?)
         } else {
             None
         };
         let g = self.lock()?;
-        append_events_locked(&g, chain_root_id, thread_id, events)
+        append_events_locked(
+            &g,
+            permit.as_ref().map(StateMutationPermit::cas_guard),
+            chain_root_id,
+            thread_id,
+            events,
+        )
     }
 
     #[tracing::instrument(
@@ -2494,7 +3364,7 @@ impl StateStore {
         let has_cas_events = events
             .iter()
             .any(|event| event.storage_class != "ephemeral");
-        let _permit = if has_cas_events {
+        let permit = if has_cas_events {
             Some(self.acquire_write_permit()?)
         } else {
             None
@@ -2507,7 +3377,14 @@ impl StateStore {
             return Ok(None);
         }
 
-        append_events_locked(&g, chain_root_id, thread_id, events).map(Some)
+        append_events_locked(
+            &g,
+            permit.as_ref().map(StateMutationPermit::cas_guard),
+            chain_root_id,
+            thread_id,
+            events,
+        )
+        .map(Some)
     }
 
     /// The thread a live tail of `chain_root_id` should currently follow: the
@@ -2636,9 +3513,10 @@ impl StateStore {
         &self,
         request: ryeos_state::BundleEventAppendRequest,
     ) -> Result<ryeos_state::BundleEventAppendResult> {
-        let _permit = self.acquire_write_permit()?;
+        let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        g.state_db.append_bundle_event(request, g.signer.as_ref())
+        g.state_db
+            .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
     }
 
     pub fn read_bundle_event_chain(
@@ -2662,7 +3540,9 @@ impl StateStore {
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, &cmd.thread_id)?;
         g.runtime_db.submit_command(cmd)
     }
 
@@ -2672,7 +3552,9 @@ impl StateStore {
     }
 
     pub fn reset_resume_attempts(&self, thread_id: &str) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
         g.runtime_db.reset_resume_attempts(thread_id)
     }
 
@@ -2688,7 +3570,9 @@ impl StateStore {
         global_live_limit: Option<u32>,
         now_ms: i64,
     ) -> Result<Vec<String>> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let _admission = g.state_db.authorize_runtime_pin(child_chain_root_id)?;
         g.runtime_db
             .launch_window_insert(child_chain_root_id, window_key, width, now_ms)?;
         g.runtime_db
@@ -2704,8 +3588,10 @@ impl StateStore {
         width: u32,
         now_ms: i64,
     ) -> Result<bool> {
-        self.lock()?
-            .runtime_db
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = g.state_db.authorize_runtime_pin(child_chain_root_id)?;
+        g.runtime_db
             .launch_window_insert(child_chain_root_id, window_key, width, now_ms)
     }
 
@@ -2833,7 +3719,23 @@ impl StateStore {
         child_thread_id: &str,
         relation: &str,
     ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let parent = g
+            .state_db
+            .get_thread(parent_thread_id)?
+            .ok_or_else(|| anyhow!("parent thread {parent_thread_id} does not exist"))?;
+        let child = g
+            .state_db
+            .get_thread(child_thread_id)?
+            .ok_or_else(|| anyhow!("child thread {child_thread_id} does not exist"))?;
+        let mut chain_roots = vec![parent.chain_root_id, child.chain_root_id];
+        chain_roots.sort();
+        chain_roots.dedup();
+        let mut _admissions = Vec::with_capacity(chain_roots.len());
+        for chain_root_id in chain_roots {
+            _admissions.push(g.state_db.authorize_runtime_pin(&chain_root_id)?);
+        }
         g.runtime_db
             .record_child_link(parent_thread_id, child_thread_id, relation)
     }
@@ -2891,25 +3793,55 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    struct LocalTestSigner;
-
-    impl Signer for LocalTestSigner {
-        fn sign(&self, _data: &[u8]) -> Vec<u8> {
-            vec![1; 64]
+    fn final_cost(
+        turns: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        spend: f64,
+    ) -> ryeos_engine::contracts::FinalCost {
+        ryeos_engine::contracts::FinalCost {
+            turns,
+            input_tokens,
+            output_tokens,
+            spend,
+            provider: None,
+            basis: None,
+            metadata: None,
         }
+    }
 
-        fn fingerprint(&self) -> &str {
-            "fp:test"
-        }
+    #[test]
+    fn final_cost_is_checked_before_unsigned_usage_conversion() {
+        let maximum =
+            validate_final_cost(&final_cost(i64::from(u32::MAX), i64::MAX, i64::MAX, 0.0)).unwrap();
+        assert_eq!(maximum.completed_turns, u32::MAX);
+        assert_eq!(maximum.input_tokens, u64::try_from(i64::MAX).unwrap());
+
+        assert!(validate_final_cost(&final_cost(-1, 0, 0, 0.0)).is_err());
+        assert!(validate_final_cost(&final_cost(0, -1, 0, 0.0)).is_err());
+        assert!(validate_final_cost(&final_cost(0, 0, -1, 0.0)).is_err());
+        assert!(validate_final_cost(&final_cost(i64::from(u32::MAX) + 1, 0, 0, 0.0)).is_err());
+        assert!(validate_final_cost(&final_cost(0, 0, 0, -0.01)).is_err());
+        assert!(validate_final_cost(&final_cost(0, 0, 0, f64::NAN)).is_err());
+        assert!(validate_final_cost(&final_cost(0, 0, 0, f64::INFINITY)).is_err());
     }
 
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
-        StateStore::new(
+        let identity = crate::identity::NodeIdentity::create(&tmp.join("node-key.pem"))
+            .expect("test node identity");
+        let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            identity.verifying_key().clone(),
+        );
+        StateStore::new_with_head_trust(
             tmp.join("state"),
             tmp.join("runtime.sqlite3"),
-            Arc::new(LocalTestSigner),
+            signer,
             WriteBarrier::new(),
+            Arc::new(head_trust),
         )
         .expect("state store")
     }
@@ -2933,6 +3865,21 @@ mod tests {
     }
 
     fn thread_record(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "directive:test".to_string(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                },
+            }
+        });
         NewThreadRecord {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
@@ -2947,6 +3894,7 @@ mod tests {
             project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy,
         }
     }
 
@@ -2954,7 +3902,7 @@ mod tests {
     fn trace_branch_does_not_project_ordinary_upstream_edge() {
         let store = test_store();
         store
-            .create_thread(&thread_record("T-root", "T-root"))
+            .create_thread_for_test(&thread_record("T-root", "T-root"))
             .expect("root thread");
 
         let branch = thread_record("T-branch", "T-root");
@@ -2988,7 +3936,7 @@ mod tests {
     fn trace_branch_duplicate_explicit_child_id_does_not_append_events() {
         let store = test_store();
         store
-            .create_thread(&thread_record("T-root", "T-root"))
+            .create_thread_for_test(&thread_record("T-root", "T-root"))
             .expect("root thread");
 
         let branch = thread_record("T-branch", "T-root");

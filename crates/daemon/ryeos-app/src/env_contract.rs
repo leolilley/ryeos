@@ -144,10 +144,13 @@ impl DaemonRootEnv {
     pub fn from_resolution_roots(
         _roots: &ryeos_engine::item_resolution::ResolutionRoots,
         app_root: &std::path::Path,
-    ) -> Self {
-        Self {
-            app_root: Some(app_root.to_string_lossy().into_owned()),
-        }
+    ) -> anyhow::Result<Self> {
+        let app_root = app_root
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("daemon app root is not valid UTF-8"))?;
+        Ok(Self {
+            app_root: Some(app_root.to_owned()),
+        })
     }
 }
 

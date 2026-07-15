@@ -313,16 +313,44 @@ pub async fn handle(
     let Some(previous) = previous else {
         let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&directive)
             .map_err(|e| HandlerError::BadRequest(format!("directive ref: {e}")))?;
+        let preflight = crate::routes::launch::preflight_dispatch_launch(
+            &state,
+            &parsed_ref,
+            &project_path,
+            &parameters,
+            &ctx.fingerprint,
+            &ctx.scopes,
+            None,
+            "inline",
+            false,
+            None,
+            None,
+        )
+        .map_err(|error| {
+            HandlerError::BadRequest(format!("root launch admission failed: {error}"))
+        })?;
+        if !preflight.class.persists_pre_minted_root() {
+            return Err(HandlerError::BadRequest(
+                "thread input requires execution that persists a pre-minted thread root"
+                    .to_string(),
+            ));
+        }
+        let root_admission = preflight.root_admission.ok_or_else(|| {
+            HandlerError::Internal(
+                "threaded dispatch preflight returned no root admission".to_string(),
+            )
+        })?;
+        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(root_admission)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?;
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         let _handle = crate::routes::launch::spawn_dispatch_launch(
             &state,
             parsed_ref,
-            project_path,
             parameters,
             ctx.fingerprint.clone(),
             ctx.scopes.clone(),
             thread_id.clone(),
-            crate::routes::launch::DispatchLaunchOptions::default(),
+            launch_options,
         );
         return Ok(json!({
             "thread_id": thread_id,
@@ -352,6 +380,7 @@ pub async fn handle(
         project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: None,
     };
     // Inherit the predecessor's runtime identity so the successor reconstructs
     // the same launch without a per-item executor_id (delegate kinds carry none).
@@ -390,10 +419,12 @@ pub async fn handle(
         executor_ref: Some(previous.executor_ref.clone()),
         runtime_ref: prior_runtime_ref,
     };
-    let project_path_str = project_path.as_path().to_string_lossy();
+    let project_path_str = project_path.as_path().to_str().ok_or_else(|| {
+        HandlerError::BadRequest("canonical project_path is not valid UTF-8".to_string())
+    })?;
     let fingerprint = ryeos_app::thread_lifecycle::continuation_request_fingerprint(
         &directive,
-        project_path_str.as_ref(),
+        project_path_str,
         &ctx.fingerprint,
         &ctx.scopes,
         &previous.launch_mode,
