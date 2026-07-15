@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::Walker;
-use crate::model::NodeReceipt;
+use crate::model::{GraphStepStatus, GraphToolCallStatus, NodeReceipt};
 use crate::persistence;
 use ryeos_runtime::events::RuntimeEventType;
 
@@ -17,9 +17,12 @@ impl Walker {
     pub(super) async fn write_node_receipt_or_warn(
         &self,
         graph_run_id: &str,
-        receipt: &NodeReceipt,
+        receipt: NodeReceipt,
     ) {
-        let r = persistence::write_node_receipt(&self.client, graph_run_id, receipt).await;
+        if !self.accept_node_receipt(&receipt) {
+            return;
+        }
+        let r = persistence::write_node_receipt(&self.client, graph_run_id, &receipt).await;
         self.record_callback_warning("write_node_receipt", r.map(|_| ()))
     }
 
@@ -140,7 +143,7 @@ impl Walker {
         step: u32,
         current: &str,
         item_id: &str,
-        status: &str,
+        status: GraphToolCallStatus,
     ) {
         let r = self
             .client
@@ -156,7 +159,7 @@ impl Walker {
                     "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
                     "item_id": item_id,
-                    "status": status,
+                    "status": status.as_str(),
                 }),
             )
             .await;
@@ -168,7 +171,7 @@ impl Walker {
         graph_run_id: &str,
         step: u32,
         current: &str,
-        status: &str,
+        status: GraphStepStatus,
         error: Option<&str>,
     ) {
         let mut payload = json!({
@@ -178,7 +181,7 @@ impl Walker {
             "node": current,
             "node_ref": node_ref(&self.graph.definition_ref, current),
             "step": step,
-            "status": status,
+            "status": status.as_str(),
         });
         if let Some(err) = error {
             payload["error"] = json!(err);
@@ -187,7 +190,7 @@ impl Walker {
             .client
             .append_runtime_event(RuntimeEventType::GraphStepCompleted, payload)
             .await;
-        self.record_callback_warning("graph_step_completed", r);
+        self.record_callback_warning(RuntimeEventType::GraphStepCompleted.as_str(), r);
     }
 
     pub(super) async fn emit_graph_branch_taken(

@@ -32,4 +32,5 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

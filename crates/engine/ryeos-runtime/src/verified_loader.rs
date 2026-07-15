@@ -228,6 +228,7 @@ impl TrustStore {
 pub struct VerifiedLoader {
     project_root: PathBuf,
     bundle_roots: Vec<PathBuf>,
+    operator_trusted_keys_dir: PathBuf,
     trust_store: TrustStore,
 }
 
@@ -259,8 +260,17 @@ impl VerifiedLoader {
         Self {
             project_root,
             bundle_roots,
+            operator_trusted_keys_dir: operator_trusted_keys_dir.to_path_buf(),
             trust_store,
         }
+    }
+
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub fn operator_trusted_keys_dir(&self) -> &Path {
+        &self.operator_trusted_keys_dir
     }
 
     pub fn trust_store(&self) -> &TrustStore {
@@ -497,6 +507,38 @@ impl VerifiedLoader {
                 source: e,
             })?;
         Ok(Some(value))
+    }
+
+    /// Load one explicitly owned config file through the same verification and
+    /// typed-parse boundary as composed config loading. This is for configured
+    /// roots whose precedence is modeled by their consumer rather than by the
+    /// bundle/project config overlay (for example operator hook policy).
+    pub fn load_config_file_strict<T: DeserializeOwned>(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<Option<T>, ConfigLoadError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let verified =
+            self.load_verified("config", path)
+                .map_err(|source| ConfigLoadError::VerifyFailed {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        let raw_value: serde_yaml::Value =
+            serde_yaml::from_str(&verified.content).map_err(|source| {
+                ConfigLoadError::RawYamlParseFailed {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+        serde_yaml::from_value(raw_value)
+            .map(Some)
+            .map_err(|source| ConfigLoadError::TypedParseFailed {
+                path: path.to_path_buf(),
+                source,
+            })
     }
 
     /// Same as `load_config_strict` but also returns the set of source root

@@ -296,7 +296,11 @@ impl CallbackClient {
     /// Resume-critical: a handoff MUST reach the daemon. NOT advisory — a missing
     /// UDS client (disconnected) is a hard error, never a silent `Ok(null)` that
     /// would settle the thread `continued` with no successor.
-    pub async fn request_continuation(&self, log_reason: Option<&str>) -> Result<Value> {
+    pub async fn request_continuation(
+        &self,
+        log_reason: Option<&str>,
+        completion: TerminalCompletion,
+    ) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback request_continuation called without an inner UDS client \
@@ -304,7 +308,7 @@ impl CallbackClient {
             )
         })?;
         client
-            .request_continuation(&self.thread_id, log_reason)
+            .request_continuation(&self.thread_id, log_reason, completion)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -322,6 +326,7 @@ impl CallbackClient {
         child_item_ref: &str,
         child_parameters: Value,
         frontier_id: Option<String>,
+        completion: TerminalCompletion,
     ) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -340,6 +345,7 @@ impl CallbackClient {
             children: None,
             launch_window_width: None,
             frontier_id,
+            completion,
         };
         client
             .spawn_follow_child(request)
@@ -355,6 +361,7 @@ impl CallbackClient {
         children: Vec<crate::callback::FollowChildSpec>,
         launch_window_width: Option<u32>,
         frontier_id: Option<String>,
+        completion: TerminalCompletion,
     ) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| anyhow::anyhow!(
             "callback spawn_follow_children called without an inner UDS client (socket missing); the follow suspend cannot be recorded"
@@ -371,6 +378,7 @@ impl CallbackClient {
                 children: Some(children),
                 launch_window_width,
                 frontier_id,
+                completion,
             })
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -953,6 +961,7 @@ mod tests {
             &self,
             _thread_id: &str,
             _log_reason: Option<&str>,
+            _completion: TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
@@ -1258,7 +1267,7 @@ mod tests {
         let client = make_client();
         let err = client
             .finalize_thread(TerminalCompletion {
-                status: "completed".to_string(),
+                status: crate::ThreadTerminalStatus::Completed,
                 outcome_code: Some("success".to_string()),
                 result: None,
                 error: None,
@@ -1492,6 +1501,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }

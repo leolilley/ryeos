@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ryeos_runtime::envelope::RuntimeCost;
+use ryeos_runtime::events::RuntimeEventType;
+
+/// Default total node-transition budget for one graph run.
+pub(crate) const DEFAULT_GRAPH_MAX_STEPS: u32 = 100;
+/// Hard authoring ceiling for a graph's cumulative node-transition budget.
+pub(crate) const MAX_GRAPH_STEPS: u32 = 10_000;
+/// Hard authoring ceiling for one machine-continuation segment.
+pub(crate) const MAX_GRAPH_SEGMENT_STEPS: u32 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,10 +35,12 @@ pub struct GraphConfig {
     pub config_schema: Option<Value>,
     #[serde(default)]
     pub env_requires: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_state"
+    )]
     pub state: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_concurrency: Option<usize>,
     /// Per-thread step budget. When set and a run reaches it without hitting a
     /// terminal node, the walker checkpoints and cuts a machine continuation
     /// successor (which resumes mid-graph in a fresh thread) instead of running
@@ -41,7 +51,21 @@ pub struct GraphConfig {
 }
 
 fn default_max_steps() -> u32 {
-    100
+    DEFAULT_GRAPH_MAX_STEPS
+}
+
+fn deserialize_state<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "`config.state` must be a mapping; omit the field when no initial state is needed",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,7 +84,11 @@ pub struct GraphNode {
     pub node_type: NodeType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_assign"
+    )]
     pub assign: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<EdgeSpec>,
@@ -68,8 +96,6 @@ pub struct GraphNode {
     pub on_error: Option<String>,
     #[serde(default)]
     pub cache_result: bool,
-    #[serde(default, alias = "cache")]
-    pub cache: bool,
     /// FOLLOW node: instead of dispatching the action inline, the daemon launches
     /// it as a detached child and suspends this graph until the child's whole
     /// continuation chain reaches terminal, then resumes with its result. Only
@@ -88,8 +114,8 @@ pub struct GraphNode {
     #[serde(default)]
     pub detach: bool,
     /// Cohort/fleet tags stamped on a `detach` child at spawn — a map of
-    /// `key: "<template>"` interpolated per iteration
-    /// (e.g. `{fleet: "${graph_run_id}", game: "${item}"}`), so a detached child
+    /// `key: "<template>"` rendered per iteration
+    /// (e.g. `{fleet: "${_run.graph_run_id}", game: "${item}"}`), so a detached child
     /// is tagged by construction with no post-launch race. Ignored without
     /// `detach`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,9 +136,9 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     /// Return-node output template. A YAML scalar deserializes to a
-    /// `Value::String` and a YAML map/list to `Value::Object`/`Array`;
-    /// `interpolate` recurses through all of them, so both
-    /// `output: "${state.x}"` and `output: {id: "${state.id}"}` work.
+    /// `Value::String` and a YAML map/list to `Value::Object`/`Array`; the
+    /// compiled rye-expr/1 template tree recursively preserves native
+    /// whole-expression values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
     #[serde(default)]
@@ -126,9 +152,23 @@ pub struct GraphNode {
     pub retry: Option<RetryConfig>,
 }
 
+fn deserialize_assign<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_object() {
+        Ok(Some(value))
+    } else {
+        Err(serde::de::Error::custom(
+            "`assign` must be a mapping; omit the field when no assignment is needed",
+        ))
+    }
+}
+
 impl GraphNode {
     pub fn is_cacheable(&self) -> bool {
-        self.cache_result || self.cache
+        self.cache_result
     }
 
     pub fn foreach_var(&self) -> &str {
@@ -137,13 +177,13 @@ impl GraphNode {
 
     /// Fold the node's `detach` dispatch mode into a cloned action: set
     /// `thread: "detached"` and carry the node's `facets:` templates so they
-    /// interpolate alongside the action (per iteration under `over:`, with the
+    /// render alongside the action (per iteration under `over:`, with the
     /// item variable in scope) and the daemon stamps them on the child at
     /// spawn. No-op unless `detach: true`.
     ///
     /// Every action clone site that dispatches (plain action node, sequential
     /// foreach, parallel foreach) must route through this fold BEFORE
-    /// interpolation — `dispatch_action` defaults a missing `thread` to
+    /// compilation — `dispatch_action` defaults a missing `thread` to
     /// `"inline"`, and the callback boundary rejects an inline dispatch of a
     /// thread-run kind, so a site that skips the fold fails the node.
     pub fn fold_detach_into_action(&self, action: &mut Value) {
@@ -165,13 +205,17 @@ impl GraphNode {
     }
 }
 
+/// Maximum authored delay for any one graph retry backoff (five minutes).
+pub const MAX_RETRY_BACKOFF_MS: u64 = 300_000;
+
 /// Per-step retry policy on an action node.
 ///
 /// `attempts` is the TOTAL number of dispatches including the first, so
 /// `attempts: 3` means one initial dispatch plus up to two retries. The
 /// backoff before the retry that follows a failed attempt `n` (1-based) is
 /// `backoff_ms * 2^(n-1)`, capped at `max_backoff_ms` when set. Bounds
-/// (`attempts` 1..=10, `backoff_ms` > 0, `max_backoff_ms` >= `backoff_ms`)
+/// (`attempts` 1..=10, delay fields within `MAX_RETRY_BACKOFF_MS`, and
+/// `max_backoff_ms` >= `backoff_ms`)
 /// are enforced in `validation.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -190,10 +234,13 @@ impl RetryConfig {
         // clamped so a pathological attempt count can never overflow the shift.
         let exp = failed_attempt.saturating_sub(1).min(63);
         let grown = self.backoff_ms.saturating_mul(1u64 << exp);
-        match self.max_backoff_ms {
+        let authored = match self.max_backoff_ms {
             Some(cap) => grown.min(cap),
             None => grown,
-        }
+        };
+        // Defense in depth for programmatically constructed definitions that
+        // have not passed graph validation.
+        authored.min(MAX_RETRY_BACKOFF_MS)
     }
 }
 
@@ -218,8 +265,11 @@ pub enum EdgeSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConditionalEdge {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "ryeos_runtime::ExpressionCondition::is_absent"
+    )]
+    pub when: ryeos_runtime::ExpressionCondition,
     pub to: String,
 }
 
@@ -278,6 +328,9 @@ pub struct GraphDefinition {
     pub definition_hash: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
+    /// Immutable execution sidecar compiled once from the strict source shape.
+    /// The walker never parses expressions or scans templates at runtime.
+    pub(crate) compiled: crate::compiled_graph::CompiledGraph,
     /// Self-asserted action authority the graph declares for itself
     /// (`requires.capabilities.declared`). The daemon's
     /// `graph_permissions` composer reads the same path to populate
@@ -294,9 +347,21 @@ pub struct GraphDefinition {
 
 impl GraphDefinition {
     pub fn from_yaml(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
+        Self::from_yaml_with_hook_sources(
+            raw,
+            file_path,
+            ryeos_runtime::HookSources::default(),
+        )
+    }
+
+    pub fn from_yaml_with_hook_sources(
+        raw: &str,
+        file_path: Option<&str>,
+        mut hook_sources: ryeos_runtime::HookSources,
+    ) -> anyhow::Result<Self> {
         let cleaned = lillux::signature::strip_signature_lines(raw);
         let definition_hash = lillux::cas::sha256_hex(cleaned.as_bytes());
-        let file: GraphFile = serde_yaml::from_str(&cleaned)?;
+        let mut file: GraphFile = serde_yaml::from_str(&cleaned)?;
         let runtime_capability_requirements = match file.requires {
             Some(requires) => {
                 let caps = requires.capabilities;
@@ -310,6 +375,8 @@ impl GraphDefinition {
             .as_ref()
             .map(|caps| caps.declared.clone())
             .unwrap_or_default();
+        hook_sources.authored = std::mem::take(&mut file.config.hooks);
+        let compiled = crate::compiled_graph::CompiledGraph::compile(&file.config, hook_sources)?;
         let graph_id = if let Some(fp) = file_path {
             let stem = std::path::Path::new(fp)
                 .file_stem()
@@ -337,11 +404,84 @@ impl GraphDefinition {
             graph_id,
             file_path: file_path.map(String::from),
             config: file.config,
+            compiled,
             declared_permissions,
             runtime_capability_requirements,
         })
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphRunStatus {
+    Valid,
+    Invalid,
+    Completed,
+    CompletedWithErrors,
+    Continued,
+    Error,
+    MaxStepsExceeded,
+    Cancelled,
+    Killed,
+}
+
+impl GraphRunStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::Completed => "completed",
+            Self::CompletedWithErrors => "completed_with_errors",
+            Self::Continued => "continued",
+            Self::Error => "error",
+            Self::MaxStepsExceeded => "max_steps_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::Killed => "killed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphStepStatus {
+    Ok,
+    Error,
+    Retry,
+}
+
+impl GraphStepStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Retry => "retry",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphToolCallStatus {
+    Ok,
+    Error,
+    ExpressionFailed,
+    IntegrityFailed,
+    DispatchFailed,
+}
+
+impl GraphToolCallStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::ExpressionFailed => "expression_failed",
+            Self::IntegrityFailed => "integrity_failed",
+            Self::DispatchFailed => "dispatch_failed",
+        }
+    }
+}
+
+pub use ryeos_runtime::checkpoint::FanoutItemStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,7 +491,7 @@ pub struct GraphResult {
     pub definition_ref: String,
     pub definition_hash: String,
     pub graph_run_id: String,
-    pub status: String,
+    pub status: GraphRunStatus,
     pub steps: u32,
     pub state: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -370,6 +510,10 @@ pub struct GraphResult {
     /// when no node reported cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node_costs: Vec<NodeCostRecord>,
+    /// Cost incurred by observer hooks, retained separately from node actions
+    /// while still contributing to the graph's aggregate `cost`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hook_costs: Vec<HookCostRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +538,15 @@ pub struct NodeCostRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HookCostRecord {
+    pub event: RuntimeEventType,
+    /// Present for step/completion events and absent for `graph_started`.
+    pub step: Option<u32>,
+    pub cost: RuntimeCost,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeReceipt {
     pub node: String,
     pub step: u32,
@@ -412,56 +565,59 @@ pub struct NodeReceipt {
     pub fanout: Option<FanoutReceiptSummary>,
 }
 
+/// Dispatch observations held behind the node's expression fence. The child
+/// already exists, but its lineage/milestone events are not published by the
+/// execution phase; commit emits them after assignment and branch evaluation
+/// settle, including when that later expression fails.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct DispatchObservation {
+    pub(crate) item_id: String,
+    pub(crate) child_thread_id: Option<String>,
+    pub(crate) milestones: Vec<Value>,
+}
+
+impl DispatchObservation {
+    pub(crate) fn child_only(
+        item_id: impl Into<String>,
+        child_thread_id: Option<String>,
+    ) -> Option<Self> {
+        child_thread_id.map(|child_thread_id| Self {
+            item_id: item_id.into(),
+            child_thread_id: Some(child_thread_id),
+            milestones: Vec::new(),
+        })
+    }
+
+    pub(crate) fn from_success(
+        item_id: impl Into<String>,
+        child_thread_id: Option<String>,
+        result: &Value,
+    ) -> Option<Self> {
+        let milestones = result
+            .get("milestones")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if child_thread_id.is_none() && milestones.is_empty() {
+            None
+        } else {
+            Some(Self {
+                item_id: item_id.into(),
+                child_thread_id,
+                milestones,
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanoutReceiptSummary {
-    pub statuses: Vec<String>,
+    pub statuses: Vec<FanoutItemStatus>,
     pub failed: usize,
     pub expected: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<Vec<Value>>,
-}
-
-pub struct WalkContext {
-    pub state: Value,
-    pub inputs: Value,
-    pub result: Option<Value>,
-    pub execution: Option<Value>,
-    pub graph_run_id: Option<String>,
-}
-
-impl WalkContext {
-    pub fn as_context(&self) -> Value {
-        let mut ctx = serde_json::Map::new();
-        ctx.insert("state".into(), self.state.clone());
-        ctx.insert("inputs".into(), self.inputs.clone());
-        if let Some(ref r) = self.result {
-            ctx.insert("result".into(), r.clone());
-        }
-        if let Some(ref execution) = self.execution {
-            ctx.insert("_execution".into(), execution.clone());
-        }
-        if let Some(ref graph_run_id) = self.graph_run_id {
-            ctx.insert(
-                "_run".into(),
-                serde_json::json!({"graph_run_id": graph_run_id}),
-            );
-        }
-        ctx.insert("_now".into(), Value::String(lillux::time::iso8601_now()));
-        ctx.insert(
-            "_timestamp".into(),
-            Value::Number(lillux::time::timestamp_millis().into()),
-        );
-        Value::Object(ctx)
-    }
-
-    pub fn with_foreach_item(&self, var: &str, item: &Value) -> Value {
-        let mut ctx = self.as_context();
-        if let Value::Object(ref mut map) = ctx {
-            map.insert(var.to_string(), item.clone());
-        }
-        ctx
-    }
 }
 
 #[cfg(test)]
@@ -719,6 +875,16 @@ config:
     }
 
     #[test]
+    fn retry_delay_is_defensively_bounded_without_validation() {
+        let rc = RetryConfig {
+            attempts: 2,
+            backoff_ms: u64::MAX,
+            max_backoff_ms: None,
+        };
+        assert_eq!(rc.delay_ms(1), MAX_RETRY_BACKOFF_MS);
+    }
+
+    #[test]
     fn retry_block_parses_on_action_node() {
         let yaml = r#"
 version: "1.0.0"
@@ -777,5 +943,185 @@ config:
         assert_eq!(def.graph_id, "flow");
         assert_eq!(def.definition_ref, "graph:flow");
         assert!(!def.graph_id.starts_with('/'));
+    }
+
+    #[test]
+    fn initial_state_must_be_an_authored_mapping() {
+        for state in ["null", "[]", "1", "\"not-a-state-map\""] {
+            let yaml = format!(
+                r#"
+version: "1"
+category: test
+config:
+  start: done
+  state: {state}
+  nodes:
+    done: {{node_type: return}}
+"#
+            );
+            let error = GraphDefinition::from_yaml(&yaml, Some("test.yaml"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("config.state"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn assign_must_be_an_authored_mapping() {
+        for assign in ["null", "[]", "1", "\"state.value\""] {
+            let yaml = format!(
+                r#"
+version: "1"
+category: test
+config:
+  start: step
+  nodes:
+    step:
+      action: {{item_id: "tool:test/noop"}}
+      assign: {assign}
+"#
+            );
+            let error = GraphDefinition::from_yaml(&yaml, Some("test.yaml"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("assign"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn graph_load_compiles_templates_and_rejects_unknown_roots() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: step
+  nodes:
+    step:
+      action:
+        item_id: tool:test/noop
+        params: {secret: "${secrets.token}"}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("secrets"), "unexpected error: {error}");
+        assert!(error.contains("allowed roots"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn gate_condition_cannot_reference_result() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: gate
+  nodes:
+    gate:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: result.ok
+            to: done
+          - to: done
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("result"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn action_condition_can_reference_result_and_candidate_state() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: step
+  nodes:
+    step:
+      action: {item_id: tool:test/noop}
+      assign: {ready: "${result.ok}"}
+      next:
+        type: conditional
+        branches:
+          - when: result.ok && state.ready
+            to: done
+          - to: done
+    done: {node_type: return}
+"#;
+        GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+    }
+
+    #[test]
+    fn static_input_reference_must_be_declared_by_schema() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: step
+  config_schema:
+    type: object
+    properties:
+      declared: {type: string}
+  nodes:
+    step:
+      action:
+        item_id: tool:test/noop
+        params: {value: "${inputs.missing}"}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inputs.missing") || error.contains("input `missing`"));
+        assert!(error.contains("config_schema.properties"));
+    }
+
+    #[test]
+    fn foreach_variable_must_be_portable_and_unreserved() {
+        for variable in ["bad-name", "state", "true"] {
+            let yaml = format!(
+                r#"
+version: "1"
+category: test
+config:
+  start: each
+  nodes:
+    each:
+      node_type: foreach
+      over: "${{state.items}}"
+      as: {variable}
+      action: {{item_id: tool:test/noop}}
+"#
+            );
+            let error = GraphDefinition::from_yaml(&yaml, Some("test.yaml"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("iteration variable"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn conditional_edge_rejects_multiple_defaults() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: gate
+  nodes:
+    gate:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - {to: done}
+          - {to: done}
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than one default"), "unexpected error: {error}");
     }
 }

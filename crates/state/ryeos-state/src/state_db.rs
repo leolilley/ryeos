@@ -523,11 +523,8 @@ impl StateDb {
     }
 
     pub fn remove_chain_head_ref(&self, chain_root_id: &str) -> anyhow::Result<bool> {
-        let removed = crate::refs::remove_generic_head_ref(
-            &self.refs_root,
-            "chains",
-            chain_root_id,
-        )?;
+        let removed =
+            crate::refs::remove_generic_head_ref(&self.refs_root, "chains", chain_root_id)?;
         self.head_cache
             .lock()
             .expect("head_cache lock")
@@ -545,18 +542,40 @@ impl StateDb {
                 &format!("DELETE FROM event_replay_index WHERE thread_id IN ({thread_ids})"),
                 [chain_root_id],
             )?;
-            deleted += conn.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_edges WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_results WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_artifacts WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted +=
+                conn.execute("DELETE FROM events WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute(
+                "DELETE FROM thread_edges WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_results WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_artifacts WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
             deleted += conn.execute(
                 &format!("DELETE FROM thread_facets WHERE thread_id IN ({thread_ids})"),
                 [chain_root_id],
             )?;
-            deleted += conn.execute("DELETE FROM thread_usage_latest WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM thread_usage_subjects WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM projection_meta WHERE chain_root_id=?1", [chain_root_id])?;
-            deleted += conn.execute("DELETE FROM threads WHERE chain_root_id=?1", [chain_root_id])?;
+            deleted += conn.execute(
+                "DELETE FROM thread_usage_latest WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM thread_usage_subjects WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM projection_meta WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
+            deleted += conn.execute(
+                "DELETE FROM threads WHERE chain_root_id=?1",
+                [chain_root_id],
+            )?;
             Ok::<_, rusqlite::Error>(deleted)
         })();
         match result {

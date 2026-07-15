@@ -38,14 +38,6 @@ pub fn thread_knowledge_path(project_root: &Path, thread_id: &str) -> anyhow::Re
     Ok(path)
 }
 
-pub fn operator_hooks_path(app_root: &Path) -> PathBuf {
-    app_root.join(AI_DIR).join("config/agent/hooks.yaml")
-}
-
-pub fn project_hooks_path(project_root: &Path) -> PathBuf {
-    project_root.join(AI_DIR).join("config/agent/hooks.yaml")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

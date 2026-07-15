@@ -3065,13 +3065,9 @@ pub struct ExecutionArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalCost {
-    #[serde(default)]
-    pub turns: i64,
-    #[serde(default)]
-    pub input_tokens: i64,
-    #[serde(default)]
-    pub output_tokens: i64,
-    #[serde(default)]
+    pub turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
     pub spend: f64,
     #[serde(default)]
     pub provider: Option<String>,

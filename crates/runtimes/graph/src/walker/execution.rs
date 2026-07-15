@@ -1,15 +1,19 @@
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
+use crate::evaluation::{
+    validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value,
+    ExpressionScope,
+};
 use crate::model::*;
 use crate::{dispatch, edges, env_preflight};
 use ryeos_runtime::envelope::RuntimeCost;
-use ryeos_runtime::events::RuntimeEventType;
+use ryeos_runtime::RuntimeJsonArrayBudget;
 
 use super::outcome::{add_runtime_cost, RunNodeBodyContext, StepOutcome};
 use super::transitions::{resolve_next_on_error, retry_attempts_remaining};
-use super::{compute_cache_key, merge_into, strip_none_values, Walker};
+use super::{compute_cache_key, merge_into, Walker};
 
 impl Walker {
     /// Action node body: permission check → env preflight → dispatch
@@ -34,9 +38,10 @@ impl Walker {
             retry_attempt,
         } = ctx;
         let execution = exec_ctx.as_context_value();
+        let compiled = self.graph.compiled.node(current);
 
         // Cohort follow is an action-node state machine of its own. Split before
-        // generic action interpolation: the authored action may reference `as`.
+        // generic action rendering: the authored action may reference `as`.
         if node.follow && node.over.is_some() {
             return self
                 .run_follow_fanout(
@@ -52,42 +57,53 @@ impl Walker {
                 )
                 .await;
         }
-        let mut action = match &node.action {
-            Some(a) => a.clone(),
+        let action = match &compiled.action {
+            Some(action) => action,
             None => {
                 // Action node with no action — treat as terminal.
-                let next =
-                    edges::evaluate_next(node, state, inputs, Some(&execution), Some(graph_run_id));
+                let next = edges::evaluate_next(
+                    compiled,
+                    state,
+                    inputs,
+                    Some(&execution),
+                    Some(graph_run_id),
+                );
                 return match next {
-                    Some(n) => StepOutcome::ActionOk {
+                    Ok(Some(n)) => StepOutcome::ActionOk(Box::new(ActionOkOutcome {
                         item_id: String::new(),
                         result: json!({}),
                         assign: None,
                         next: Some(n),
+                        child_thread_id: None,
                         cache_hit: false,
+                        cache_write_key: None,
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         cost: None,
-                    },
-                    None => StepOutcome::Terminal {
-                        status: "completed",
+                    })),
+                    Ok(None) => StepOutcome::Terminal(TerminalOutcome {
+                        status: GraphRunStatus::Completed,
                         error: None,
-                    },
+                        origin: TerminalOrigin::Node,
+                        output: None,
+                    }),
+                    Err(error) => StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                        item_id: None,
+                        error: format!(
+                            "expression evaluation failed selecting `next` for node `{current}`: {error}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                        effects: ExpressionFailureEffects::default(),
+                    }),
                 };
             }
         };
 
-        // A `detach: true` node launches a lineage-linked, cohort-tagged child
-        // that runs concurrently while this walk continues — the native fanout
-        // primitive (`foreach → launch`). The fold routes it to the daemon's
-        // `spawn_detached_child` and carries the node's `facets:` for per-child
-        // stamping. `detach` and `follow` are mutually exclusive (enforced at
-        // validation); a detach node never suspends, so it flows straight to
-        // dispatch below.
-        node.fold_detach_into_action(&mut action);
-
-        let item_id = action
-            .get("item_id")
-            .and_then(|v| v.as_str())
+        let item_id = node
+            .action
+            .as_ref()
+            .and_then(|action| action.get("item_id").and_then(Value::as_str))
             .unwrap_or("")
             .to_string();
 
@@ -97,38 +113,35 @@ impl Walker {
         // caps at the callback boundary (enforce_callback_caps in
         // runtime_dispatch.rs). The walker is the executor only.
 
-        let ctx = WalkContext {
-            state: state.clone(),
-            inputs: inputs.clone(),
-            result: None,
-            execution: Some(execution.clone()),
-            graph_run_id: Some(graph_run_id.to_string()),
+        let rendered_action = match ExpressionScope::new(
+            state,
+            inputs,
+            Some(&execution),
+            Some(graph_run_id),
+        )
+        .render_action(action)
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                    item_id: Some(item_id),
+                    error: format!(
+                        "expression evaluation failed in action for node `{current}`: {err}"
+                    ),
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: elapsed,
+                    cost: None,
+                    effects: ExpressionFailureEffects::default(),
+                });
+            }
         };
 
-        let interpolated_action =
-            match ryeos_runtime::interpolate_action(&action, &ctx.as_context()) {
-                Ok(value) => value,
-                Err(err) => {
-                    // Interpolation failed before any dispatch — no cost, and
-                    // the interpolated item_id is unavailable, so report the
-                    // raw template item_id.
-                    return StepOutcome::DispatchHardError {
-                        item_id: Some(item_id),
-                        error: format!(
-                            "interpolation error in action for node `{current}`: {err:#}"
-                        ),
-                        next_on_error: resolve_next_on_error(node, cfg),
-                        elapsed_ms: elapsed,
-                        cost: None,
-                    };
-                }
-            };
-
-        let stripped_action = strip_none_values(&interpolated_action);
-        // The dispatched item_id is the interpolated one (item_id may itself
+        // Missing paths fail or are handled explicitly by `??`; authored
+        // `null` is data and must survive dispatch unchanged.
+        // The dispatched item_id is the rendered one (item_id may itself
         // contain `${...}`). Cost records and receipts for everything past
         // this point use it, not the raw template id.
-        let dispatched_item_id = stripped_action
+        let dispatched_item_id = rendered_action
             .get("item_id")
             .and_then(|v| v.as_str())
             .map(String::from)
@@ -154,13 +167,13 @@ impl Walker {
                 &node.env_requires,
             ) {
                 let err_msg = format!("env preflight failed: {env_err}");
-                return StepOutcome::DispatchHardError {
+                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: Some(dispatched_item_id),
                     error: err_msg,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     cost: None,
-                };
+                });
             }
         }
 
@@ -168,28 +181,41 @@ impl Walker {
         // action off to a detached child and suspend (handled in commit_step). The
         // result is consumed on resume, so nothing is dispatched or cached here.
         if node.follow && resumed_follow_envelope.is_none() {
-            return StepOutcome::FollowSuspend {
+            return StepOutcome::FollowSuspend(FollowSuspendOutcome {
                 item_id: dispatched_item_id,
-                params: stripped_action
+                params: rendered_action
                     .get("params")
                     .cloned()
                     .unwrap_or_else(|| json!({})),
-            };
+            });
         }
 
         // Dispatch. `dispatch_action` classifies the daemon envelope:
         //   Err            → transport/dispatch failure (hard error)
         //   Ok(Failure(d)) → leaf ran but failed (non-zero exit, etc.)
         //   Ok(Success(v)) → bare, envelope-unwrapped leaf result
-        // On follow resume, the stored child envelope is classified byte-for-byte
-        // like a live dispatch, so the resumed node runs the identical success/
-        // failure path (receipt, cost, assign land normally in commit_step).
+        // On follow resume, the stored child value must match the exact managed
+        // terminal-envelope contract before the resumed node enters the normal
+        // success/failure path (receipt, cost, and assign land in commit_step).
         let mut cache_hit = false;
+        let mut cache_write_key = None;
         let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> =
             if let Some(envelope) = resumed_follow_envelope {
-                Ok(dispatch::classify_follow_envelope(envelope))
+                match dispatch::classify_follow_envelope(envelope) {
+                    Ok(classified) => Ok(classified.outcome),
+                    Err(error) => {
+                        return StepOutcome::Terminal(TerminalOutcome {
+                            status: GraphRunStatus::Error,
+                            error: Some(format!(
+                                "follow node `{current}` resumed with invalid terminal envelope: {error}"
+                            )),
+                            origin: TerminalOrigin::RunControl,
+                            output: None,
+                        });
+                    }
+                }
             } else if node.is_cacheable() {
-                let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
+                let cache_key = compute_cache_key(&self.graph.graph_id, current, &rendered_action);
                 if let Some(cached) = cache.lookup(&cache_key) {
                     cache_hit = true;
                     // A cache hit replays the stored result and must NOT re-bill cost —
@@ -209,6 +235,8 @@ impl Walker {
                             ),
                             cost: None,
                             retryable: false,
+                            child_thread_id: None,
+                            integrity: true,
                         }))
                     } else {
                         Ok(dispatch::ActionOutcome::Success(
@@ -218,7 +246,7 @@ impl Walker {
                 } else {
                     match dispatch::dispatch_action(
                         &self.client,
-                        &stripped_action,
+                        &rendered_action,
                         &self.thread_id,
                         &self.project_path,
                         Some(exec_ctx),
@@ -226,11 +254,10 @@ impl Walker {
                     .await
                     {
                         Ok(dispatch::ActionOutcome::Success(success)) => {
-                            // Only successful dispatches are cached — never a
-                            // failure, which would otherwise replay a stale
-                            // error (or `null`) on the next run. The cache
-                            // stores only the result value; cost is per-run.
-                            cache.store(&cache_key, &success.result);
+                            // Reserve the key only. Commit persists the result
+                            // after its rye-expr bounds, complete assignment,
+                            // and normal-edge selection all succeed.
+                            cache_write_key = Some(cache_key);
                             Ok(dispatch::ActionOutcome::Success(success))
                         }
                         Ok(failure) => Ok(failure),
@@ -240,7 +267,7 @@ impl Walker {
             } else {
                 dispatch::dispatch_action(
                     &self.client,
-                    &stripped_action,
+                    &rendered_action,
                     &self.thread_id,
                     &self.project_path,
                     Some(exec_ctx),
@@ -257,7 +284,7 @@ impl Walker {
                 if dispatch_error.retryable {
                     if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
                         let rc = node.retry.as_ref().expect("retry present when scheduling");
-                        return StepOutcome::RetryScheduled {
+                        return StepOutcome::RetryScheduled(RetryScheduledOutcome {
                             item_id: dispatched_item_id,
                             error: dispatch_error.diagnostic,
                             failed_attempt,
@@ -266,25 +293,39 @@ impl Walker {
                             elapsed_ms: elapsed,
                             // Transport failed before the child returned — no cost.
                             cost: None,
-                        };
+                        });
                     }
                 }
-                StepOutcome::DispatchHardError {
+                StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: Some(dispatched_item_id),
                     error: dispatch_error.diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // Transport/dispatch failed before the child returned — no cost.
                     cost: None,
-                }
+                })
             }
             Ok(dispatch::ActionOutcome::Failure(failure)) => {
+                if failure.integrity {
+                    return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                        item_id: Some(dispatched_item_id.clone()),
+                        error: failure.diagnostic,
+                        elapsed_ms: elapsed,
+                        cost: failure.cost,
+                        effects: ExpressionFailureEffects::action(
+                            DispatchObservation::child_only(
+                                dispatched_item_id,
+                                failure.child_thread_id,
+                            ),
+                        ),
+                    });
+                }
                 // Authored retry is an attempt budget, not blanket permission.
                 // Only a failure explicitly classified retryable may consume it.
                 if failure.retryable {
                     if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
                         let rc = node.retry.as_ref().expect("retry present when scheduling");
-                        return StepOutcome::RetryScheduled {
+                        return StepOutcome::RetryScheduled(RetryScheduledOutcome {
                             item_id: dispatched_item_id,
                             error: failure.diagnostic,
                             failed_attempt,
@@ -292,17 +333,22 @@ impl Walker {
                             delay_ms: rc.delay_ms(failed_attempt),
                             elapsed_ms: elapsed,
                             cost: failure.cost,
-                        };
+                        });
                     }
                 }
-                StepOutcome::LeafSoftError {
+                let observation = DispatchObservation::child_only(
+                    dispatched_item_id.clone(),
+                    failure.child_thread_id,
+                );
+                StepOutcome::LeafSoftError(LeafSoftErrorOutcome {
                     item_id: dispatched_item_id,
                     error: failure.diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // A failed native child may have spent tokens — preserve it.
                     cost: failure.cost,
-                }
+                    observation,
+                })
             }
             Ok(dispatch::ActionOutcome::Success(success)) => {
                 let dispatch::ActionSuccess {
@@ -310,107 +356,113 @@ impl Walker {
                     cost,
                     child_thread_id,
                 } = success;
-                // Portable dispatch lineage: when this node spawned a native
-                // child thread (a directive or sub-graph), emit a
-                // `child_thread_spawned` event into THIS (parent) thread's stream
-                // so the edge lands in rebuild-safe history — the braid drill
-                // target and the derived `threads.children` edge both come from
-                // it. The daemon's `thread_child_link` (recorded at launch) is the
-                // separate, non-portable cascade copy. Do NOT set the child's
-                // `upstream_thread_id`: that is the continuation-predecessor link
-                // and stamping it cross-chain corrupts the child's resume.
-                if let Some(ref child_id) = child_thread_id {
-                    let r = self
-                        .client
-                        .append_runtime_event(
-                            RuntimeEventType::ChildThreadSpawned,
-                            json!({
-                                "child_thread_id": child_id,
-                                "node": current,
-                                "step": step,
-                                "item_id": dispatched_item_id,
-                                "spawn_reason": "dispatch",
-                            }),
-                        )
-                        .await;
-                    self.record_callback_warning("child_thread_spawned", r);
+                if let Err(error) = validate_runtime_value(
+                    &val,
+                    "graph action result",
+                ) {
+                    return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                        item_id: Some(dispatched_item_id.clone()),
+                        error: format!(
+                            "action result for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                        ),
+                        elapsed_ms: elapsed,
+                        cost,
+                        effects: ExpressionFailureEffects::action(
+                            DispatchObservation::child_only(
+                                dispatched_item_id,
+                                child_thread_id,
+                            ),
+                        ),
+                    });
                 }
-                // Domain milestones: a tool/directive result may carry a
-                // `milestones` array of `{kind, payload}`; emit one generic
-                // `milestone` event per entry into this thread's stream
-                // (runtime-on-behalf-of-tool — tools stay pure content, the engine
-                // owns only the generic event; a view styles the kinds via
-                // `projections.event_kinds`). `node`/`step` locate it in the braid.
-                if let Some(milestones) = val.get("milestones").and_then(|v| v.as_array()) {
-                    for entry in milestones {
-                        let Some(kind) = entry.get("kind").and_then(|v| v.as_str()) else {
-                            continue;
-                        };
-                        let r = self
-                            .client
-                            .append_runtime_event(
-                                RuntimeEventType::Milestone,
-                                json!({
-                                    "kind": kind,
-                                    "payload": entry.get("payload").cloned().unwrap_or(Value::Null),
-                                    "node": current,
-                                    "step": step,
-                                }),
-                            )
-                            .await;
-                        self.record_callback_warning("milestone", r);
-                    }
-                }
-                // Interpolate `assign` HERE (not in commit_step) so an
-                // interpolation failure becomes a node error that obeys
-                // on_error — never a suppressed error that merges the raw
-                // `${...}` template into graph state.
-                let assign = match &node.assign {
-                    Some(assign_tpl) => {
-                        let assign_ctx = WalkContext {
-                            state: state.clone(),
-                            inputs: inputs.clone(),
-                            result: Some(val.clone()),
-                            execution: Some(execution.clone()),
-                            graph_run_id: Some(graph_run_id.to_string()),
-                        };
-                        match ryeos_runtime::interpolate(assign_tpl, &assign_ctx.as_context()) {
-                            Ok(interpolated) => Some(interpolated),
-                            Err(e) => {
-                                // The child SUCCEEDED (and may have spent
-                                // tokens); only graph post-processing failed.
-                                // Carry the cost so it is still accounted.
-                                return StepOutcome::LeafSoftError {
-                                    item_id: dispatched_item_id,
-                                    error: format!(
-                                        "interpolation error in `assign` for node `{current}`: {e:#}"
-                                    ),
-                                    next_on_error: resolve_next_on_error(node, cfg),
-                                    elapsed_ms: elapsed,
-                                    cost,
-                                };
-                            }
+                let dispatch_observation = DispatchObservation::from_success(
+                    dispatched_item_id.clone(),
+                    child_thread_id.clone(),
+                    &val,
+                );
+                // Finish every expression before publishing transition effects.
+                // Assign values all read the unchanged pre-node state; only after
+                // the full object resolves do we build a candidate and select a
+                // branch against that candidate.
+                let assign = match &compiled.assign {
+                    Some(assign) => match ExpressionScope::new(
+                        state,
+                        inputs,
+                        Some(&execution),
+                        Some(graph_run_id),
+                    )
+                    .with_result(&val)
+                    .render_json(assign)
+                    {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                                item_id: Some(dispatched_item_id),
+                                error: format!(
+                                    "expression evaluation failed in `assign` for node `{current}`: {error}"
+                                ),
+                                next_on_error: resolve_next_on_error(node, cfg),
+                                elapsed_ms: elapsed,
+                                cost,
+                                effects: ExpressionFailureEffects::action(
+                                    dispatch_observation.clone(),
+                                ),
+                            });
                         }
-                    }
+                    },
                     None => None,
                 };
-                let next = edges::evaluate_next_with_result(
-                    node,
-                    state,
+                let mut candidate_state = state.clone();
+                if let Some(assign) = assign.as_ref() {
+                    merge_into(&mut candidate_state, assign);
+                }
+                if let Err(error) = validate_runtime_value(
+                    &candidate_state,
+                    "action candidate state",
+                ) {
+                    return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                        item_id: Some(dispatched_item_id),
+                        error: format!(
+                            "candidate state for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                        ),
+                        elapsed_ms: elapsed,
+                        cost,
+                        effects: ExpressionFailureEffects::action(dispatch_observation),
+                    });
+                }
+                let next = match edges::evaluate_next_with_result(
+                    compiled,
+                    &candidate_state,
                     inputs,
                     &val,
                     Some(&execution),
                     Some(graph_run_id),
-                );
-                StepOutcome::ActionOk {
+                ) {
+                    Ok(next) => next,
+                    Err(error) => {
+                        return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                            item_id: Some(dispatched_item_id),
+                            error: format!(
+                                "expression evaluation failed selecting `next` for node `{current}`: {error}"
+                            ),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: elapsed,
+                            cost,
+                            effects: ExpressionFailureEffects::action(dispatch_observation),
+                        });
+                    }
+                };
+                StepOutcome::ActionOk(Box::new(ActionOkOutcome {
                     item_id: dispatched_item_id,
                     result: val,
                     assign,
                     next,
+                    child_thread_id,
                     cache_hit,
+                    cache_write_key,
                     elapsed_ms: elapsed,
                     cost,
-                }
+                }))
             }
         }
     }
@@ -428,64 +480,60 @@ impl Walker {
         graph_run_id: &str,
         start: Instant,
     ) -> StepOutcome {
+        let compiled = self.graph.compiled.node(current);
         // Consume first. An armed successor must never repeat env preflight or
-        // interpolate/dispatch the child action.
+        // render or dispatch the child action.
         let resumed_state = self.take_follow_state(current);
         let checkpointed_items = resumed_state
             .as_ref()
             .and_then(|state| state.iteration_snapshot.clone());
         let resumed = resumed_state.and_then(|state| state.follow_result);
         if resumed.is_some() && checkpointed_items.is_none() {
-            return StepOutcome::LeafSoftError {
-                item_id: node
-                    .action
-                    .as_ref()
-                    .and_then(|a| a.get("item_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                error: format!("follow fanout node `{current}` resumed without iteration snapshot"),
-                next_on_error: resolve_next_on_error(node, cfg),
-                elapsed_ms: start.elapsed().as_millis() as u64,
-                cost: None,
-            };
+            return StepOutcome::Terminal(TerminalOutcome {
+                status: GraphRunStatus::Error,
+                error: Some(format!(
+                    "follow fanout node `{current}` resumed without iteration snapshot"
+                )),
+                origin: TerminalOrigin::RunControl,
+                output: None,
+            });
         }
-        let base_ctx = WalkContext {
-            state: state.clone(),
-            inputs: inputs.clone(),
-            result: None,
-            execution: Some(execution.clone()),
-            graph_run_id: Some(graph_run_id.to_string()),
-        };
         // An armed cohort resume is immutable: its iteration values are local
         // checkpoint facts and must not be re-resolved from mutable state.
         let over = if let Some(items) = checkpointed_items {
             items
         } else {
-            match ryeos_runtime::interpolate(
-                &Value::String(node.over.as_deref().unwrap_or_default().to_string()),
-                &base_ctx.as_context(),
-            ) {
+            let over = compiled
+                .over
+                .as_ref()
+                .expect("validated follow fanout has compiled over expression");
+            match ExpressionScope::new(state, inputs, Some(execution), Some(graph_run_id))
+                .render_template(over)
+            {
                 Ok(Value::Array(items)) => items,
                 Ok(other) => {
-                    return StepOutcome::DispatchHardError {
+                    return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
                         item_id: None,
                         error: format!(
-                        "follow fanout node `{current}` over must resolve to array, got {other}"
-                    ),
+                            "follow fanout node `{current}` `over` must evaluate to an array, got {other}"
+                        ),
                         next_on_error: resolve_next_on_error(node, cfg),
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         cost: None,
-                    }
+                        effects: ExpressionFailureEffects::default(),
+                    });
                 }
-                Err(e) => {
-                    return StepOutcome::DispatchHardError {
+                Err(error) => {
+                    return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
                         item_id: None,
-                        error: format!("interpolation error in `over` for node `{current}`: {e:#}"),
+                        error: format!(
+                            "expression evaluation failed in `over` for node `{current}`: {error}"
+                        ),
                         next_on_error: resolve_next_on_error(node, cfg),
                         elapsed_ms: start.elapsed().as_millis() as u64,
                         cost: None,
-                    }
+                        effects: ExpressionFailureEffects::default(),
+                    });
                 }
             }
         };
@@ -499,167 +547,266 @@ impl Walker {
             .to_string();
 
         if let Some(wrapper) = resumed {
-            if wrapper.get("fanout").and_then(Value::as_bool) != Some(true) {
-                return StepOutcome::LeafSoftError {
-                    item_id: raw_item_id,
-                    error: format!(
-                        "follow fanout node `{current}` resumed with malformed fanout wrapper"
-                    ),
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    cost: None,
-                };
+            if let Err(error) = validate_runtime_shape(
+                &wrapper,
+                "follow fanout resume envelope",
+            ) {
+                return StepOutcome::Terminal(TerminalOutcome {
+                    status: GraphRunStatus::Error,
+                    error: Some(format!(
+                        "follow fanout resume envelope for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                    )),
+                    origin: TerminalOrigin::RunControl,
+                    output: None,
+                });
             }
-            let Some(envelopes) = wrapper.get("items").and_then(Value::as_array) else {
-                return StepOutcome::LeafSoftError {
-                    item_id: raw_item_id,
-                    error: format!(
-                        "follow fanout node `{current}` resumed without fanout items wrapper"
-                    ),
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    cost: None,
-                };
+            let wrapper = match dispatch::classify_follow_fanout_envelope(wrapper, over.len()) {
+                Ok(wrapper) => wrapper,
+                Err(error) => {
+                    return StepOutcome::Terminal(TerminalOutcome {
+                        status: GraphRunStatus::Error,
+                        error: Some(format!(
+                            "follow fanout node `{current}` resumed with invalid terminal envelope: {error}"
+                        )),
+                        origin: TerminalOrigin::RunControl,
+                        output: None,
+                    });
+                }
             };
-            let expected = wrapper
-                .get("expected")
-                .and_then(Value::as_u64)
-                .and_then(|v| usize::try_from(v).ok());
-            let wrapper_statuses = wrapper.get("statuses").and_then(Value::as_array);
-            if expected != Some(envelopes.len())
-                || envelopes.len() != over.len()
-                || wrapper_statuses.map(Vec::len) != Some(envelopes.len())
-            {
-                return StepOutcome::LeafSoftError { item_id: raw_item_id, error: format!("follow fanout node `{current}` resumed with inconsistent expected/items/statuses/snapshot cardinality"), next_on_error: resolve_next_on_error(node, cfg), elapsed_ms: start.elapsed().as_millis() as u64, cost: None };
-            }
-            let mut results = vec![Value::Null; envelopes.len()];
-            let mut statuses = Vec::with_capacity(envelopes.len());
+            let item_count = wrapper.items.len();
+            let statuses = wrapper.statuses;
+            let mut results = vec![Value::Null; item_count];
             let mut errors = Vec::new();
-            let mut delta = Value::Object(serde_json::Map::new());
             let mut total_cost: Option<RuntimeCost> = None;
-            for (index, envelope) in envelopes.iter().cloned().enumerate() {
-                match dispatch::classify_follow_envelope(envelope) {
+            for (index, classified) in wrapper.items.into_iter().enumerate() {
+                match classified.outcome {
                     dispatch::ActionOutcome::Success(success) => {
-                        statuses.push("completed".to_string());
-                        results[index] = success.result.clone();
-                        add_runtime_cost(&mut total_cost, success.cost);
-                        if let (Some(assign), Some(item)) = (&node.assign, over.get(index)) {
-                            let assign_ctx = WalkContext {
-                                state: state.clone(),
-                                inputs: inputs.clone(),
-                                result: Some(success.result),
-                                execution: Some(execution.clone()),
-                                graph_run_id: Some(graph_run_id.to_string()),
-                            }
-                            .with_foreach_item(&var, item);
-                            match ryeos_runtime::interpolate(assign, &assign_ctx) {
-                                Ok(value) => merge_into(&mut delta, &value),
-                                Err(e) => {
-                                    statuses[index] = "failed".to_string();
-                                    results[index] = Value::Null;
-                                    errors.push(ErrorRecord { step, node: current.to_string(), error: format!("follow item {index} assign interpolation failed: {e:#}") });
-                                }
-                            }
+                        results[index] = success.result;
+                        if let Err(error) = add_runtime_cost(&mut total_cost, success.cost) {
+                            return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                                item_id: Some(raw_item_id),
+                                error: format!(
+                                    "follow fanout node `{current}` item {index} reported invalid cost: {error}"
+                                ),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                cost: total_cost,
+                                effects: ExpressionFailureEffects::fanout(
+                                    results, statuses, errors,
+                                ),
+                            });
                         }
                     }
                     dispatch::ActionOutcome::Failure(failure) => {
-                        statuses.push("failed".to_string());
-                        add_runtime_cost(&mut total_cost, failure.cost);
                         errors.push(ErrorRecord {
                             step,
                             node: current.to_string(),
                             error: format!("follow item {index} failed: {}", failure.diagnostic),
                         });
+                        if let Err(error) = add_runtime_cost(&mut total_cost, failure.cost) {
+                            return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                                item_id: Some(raw_item_id),
+                                error: format!(
+                                    "follow fanout node `{current}` item {index} reported invalid cost: {error}"
+                                ),
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                cost: total_cost,
+                                effects: ExpressionFailureEffects::fanout(
+                                    results, statuses, errors,
+                                ),
+                            });
+                        }
                     }
                 }
             }
-            let next = if errors.is_empty() {
-                edges::evaluate_next_with_result(
+            if let Err(error) = validate_runtime_array_shape(
+                &results,
+                "follow fanout collected results",
+            ) {
+                return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                    item_id: Some(raw_item_id),
+                    error: format!(
+                        "follow fanout results for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                    ),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: total_cost,
+                    effects: ExpressionFailureEffects::fanout(results, statuses, errors),
+                });
+            }
+            let route = resolve_next_on_error(node, cfg);
+            let evaluate_normal_branch = errors.is_empty()
+                || matches!(&route, super::outcome::NextOnError::PolicyContinue);
+            let next = if evaluate_normal_branch {
+                match evaluate_fanout_next(
+                    compiled,
                     node,
                     state,
                     inputs,
-                    &Value::Array(results.clone()),
-                    Some(execution),
-                    Some(graph_run_id),
-                )
+                    execution,
+                    graph_run_id,
+                    &results,
+                ) {
+                    Ok(next) => next,
+                    Err(FanoutNextError::Expression(error)) => {
+                        return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                            item_id: Some(raw_item_id),
+                            error: format!(
+                                "expression evaluation failed selecting `next` for follow fanout node `{current}`: {error}"
+                            ),
+                            next_on_error: route,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            cost: total_cost,
+                            effects: ExpressionFailureEffects::fanout(
+                                results,
+                                statuses,
+                                errors,
+                            ),
+                        });
+                    }
+                    Err(FanoutNextError::Integrity(error)) => {
+                        return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                            item_id: Some(raw_item_id),
+                            error: format!(
+                                "follow fanout candidate for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                            ),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            cost: total_cost,
+                            effects: ExpressionFailureEffects::fanout(
+                                results,
+                                statuses,
+                                errors,
+                            ),
+                        });
+                    }
+                }
             } else {
                 None
             };
-            return StepOutcome::FollowFanoutDone {
+            return StepOutcome::FollowFanoutDone(Box::new(FollowFanoutDoneOutcome {
                 results,
                 statuses,
                 errors,
-                assign_delta: delta,
                 collect_key: node.collect.clone(),
-                var_name: var,
                 item_id: raw_item_id,
                 next,
-                next_on_error: resolve_next_on_error(node, cfg),
+                next_on_error: route,
                 cost: total_cost,
                 elapsed_ms: start.elapsed().as_millis() as u64,
-            };
+            }));
         }
 
         if over.is_empty() {
-            return StepOutcome::FollowFanoutDone {
+            let next = match evaluate_fanout_next(
+                compiled,
+                node,
+                state,
+                inputs,
+                execution,
+                graph_run_id,
+                &[],
+            ) {
+                Ok(next) => next,
+                Err(FanoutNextError::Expression(error)) => {
+                    return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                        item_id: Some(raw_item_id),
+                        error: format!(
+                            "expression evaluation failed selecting `next` for follow fanout node `{current}`: {error}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                        effects: ExpressionFailureEffects::fanout(
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    });
+                }
+                Err(FanoutNextError::Integrity(error)) => {
+                    return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                        item_id: Some(raw_item_id),
+                        error: format!(
+                            "follow fanout candidate for node `{current}` exceeded rye-expr/1 bounds: {error}"
+                        ),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                        effects: ExpressionFailureEffects::fanout(
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    });
+                }
+            };
+            return StepOutcome::FollowFanoutDone(Box::new(FollowFanoutDoneOutcome {
                 results: vec![],
                 statuses: vec![],
                 errors: vec![],
-                assign_delta: Value::Object(serde_json::Map::new()),
                 collect_key: node.collect.clone(),
-                var_name: var,
                 item_id: raw_item_id,
-                next: edges::evaluate_next_with_result(
-                    node,
-                    state,
-                    inputs,
-                    &Value::Array(vec![]),
-                    Some(execution),
-                    Some(graph_run_id),
-                ),
+                next,
                 next_on_error: resolve_next_on_error(node, cfg),
                 cost: None,
                 elapsed_ms: start.elapsed().as_millis() as u64,
-            };
+            }));
         }
         if let Err(env_err) =
             env_preflight::check_env_requires(&cfg.env_requires, &node.env_requires)
         {
-            return StepOutcome::DispatchHardError {
+            return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                 item_id: Some(raw_item_id),
                 error: format!("env preflight failed: {env_err}"),
                 next_on_error: resolve_next_on_error(node, cfg),
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 cost: None,
-            };
+            });
         }
-        let mut children = Vec::with_capacity(over.len());
+        // Do not reserve the untrusted `over` cardinality up front. The
+        // aggregate budget below will usually admit far fewer child objects
+        // than the expression container ceiling when their payloads are large.
+        let mut children = Vec::new();
+        let mut launch_budget = RuntimeJsonArrayBudget::new("follow fanout launch cohort");
         for (index, item) in over.iter().enumerate() {
-            let item_ctx = base_ctx.with_foreach_item(&var, item);
-            let action =
-                match ryeos_runtime::interpolate_action(node.action.as_ref().unwrap(), &item_ctx) {
-                    Ok(v) => strip_none_values(&v),
-                    Err(e) => {
-                        return StepOutcome::DispatchHardError {
-                            item_id: Some(raw_item_id),
-                            error: format!("follow fanout action interpolation failed: {e:#}"),
-                            next_on_error: resolve_next_on_error(node, cfg),
-                            elapsed_ms: start.elapsed().as_millis() as u64,
-                            cost: None,
-                        }
-                    }
-                };
-            let facets = match &node.facets {
-                Some(value) => match ryeos_runtime::interpolate(value, &item_ctx) {
+            let scope = ExpressionScope::new(
+                state,
+                inputs,
+                Some(execution),
+                Some(graph_run_id),
+            )
+            .with_foreach(&var, item);
+            let mut action = match scope.render_action(
+                compiled
+                    .action
+                    .as_ref()
+                    .expect("validated follow fanout has compiled action"),
+            ) {
+                Ok(v) => v,
+                Err(error) => {
+                    return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                        item_id: Some(raw_item_id),
+                        error: format!(
+                            "expression evaluation failed in follow fanout action: {error}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                        effects: ExpressionFailureEffects::default(),
+                    });
+                }
+            };
+            let facets = match &compiled.facets {
+                Some(value) => match scope.render_json(value) {
                     Ok(v) => Some(v),
-                    Err(e) => {
-                        return StepOutcome::DispatchHardError {
+                    Err(error) => {
+                        return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
                             item_id: Some(raw_item_id),
-                            error: format!("follow fanout facets interpolation failed: {e:#}"),
+                            error: format!(
+                                "expression evaluation failed in follow fanout facets: {error}"
+                            ),
                             next_on_error: resolve_next_on_error(node, cfg),
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             cost: None,
-                        }
+                            effects: ExpressionFailureEffects::default(),
+                        });
                     }
                 },
                 None => None,
@@ -671,26 +818,69 @@ impl Walker {
                 .trim()
                 .to_string();
             if item_ref.is_empty() {
-                return StepOutcome::DispatchHardError {
+                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: None,
                     error: format!(
-                        "follow fanout item {index} has missing or empty interpolated item_id"
+                        "follow fanout item {index} has missing or empty rendered item_id"
                     ),
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     cost: None,
-                };
+                });
             }
+
+            // A bounded expression result per child is not enough: a large
+            // cohort of individually valid child specs can still retain an
+            // unbounded aggregate before the daemon handoff. Build the exact
+            // callback-shaped value once, account it under one cohort budget,
+            // then move its fields into FollowChildSpec without deep-cloning
+            // parameters or facets.
+            let parameters = action
+                .as_object_mut()
+                .and_then(|action| action.remove("params"))
+                .unwrap_or_else(|| json!({}));
+            let mut child_fields = Map::new();
+            child_fields.insert("item_ref".to_string(), Value::String(item_ref));
+            child_fields.insert("parameters".to_string(), parameters);
+            if let Some(facets) = facets {
+                child_fields.insert("facets".to_string(), facets);
+            }
+            let mut bounded_child = Value::Object(child_fields);
+            if let Err(error) = launch_budget.append(&bounded_child) {
+                return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                    item_id: Some(raw_item_id),
+                    error: format!(
+                        "follow fanout launch cohort for node `{current}` exceeded rye-expr/1 bounds at item {index}: {error}"
+                    ),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    cost: None,
+                    effects: ExpressionFailureEffects::default(),
+                });
+            }
+
+            let child_fields = bounded_child
+                .as_object_mut()
+                .expect("follow child budget value was constructed as an object");
+            let Value::String(item_ref) = child_fields
+                .remove("item_ref")
+                .expect("bounded follow child carries item_ref")
+            else {
+                unreachable!("bounded follow child item_ref was constructed as a string")
+            };
+            let parameters = child_fields
+                .remove("parameters")
+                .expect("bounded follow child carries parameters");
+            let facets = child_fields.remove("facets");
             children.push(ryeos_runtime::callback::FollowChildSpec {
                 item_ref,
-                parameters: action.get("params").cloned().unwrap_or_else(|| json!({})),
+                parameters,
                 facets,
             });
         }
         let width = match node.max_concurrency.map(u32::try_from).transpose() {
             Ok(width) => width,
             Err(_) => {
-                return StepOutcome::DispatchHardError {
+                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: None,
                     error: format!(
                         "follow fanout node `{current}` max_concurrency does not fit in u32"
@@ -698,13 +888,54 @@ impl Walker {
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     cost: None,
-                }
+                })
             }
         };
-        StepOutcome::FollowFanoutSuspend {
+        StepOutcome::FollowFanoutSuspend(Box::new(FollowFanoutSuspendOutcome {
             children,
             width,
             iteration_snapshot: over,
-        }
+        }))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_fanout_next(
+    compiled: &crate::compiled_graph::CompiledNode,
+    node: &GraphNode,
+    state: &Value,
+    inputs: &Value,
+    execution: &Value,
+    graph_run_id: &str,
+    results: &[Value],
+) -> Result<Option<String>, FanoutNextError> {
+    validate_runtime_array_shape(results, "follow fanout branch results")
+        .map_err(FanoutNextError::Integrity)?;
+    let mut candidate = state.clone();
+    if let Some(collect) = &node.collect {
+        if !candidate.is_object() {
+            candidate = Value::Object(serde_json::Map::new());
+        }
+        candidate.as_object_mut().unwrap().insert(
+            collect.clone(),
+            Value::Array(results.to_vec()),
+        );
+    }
+    validate_runtime_shape(&candidate, "follow fanout candidate state")
+        .map_err(FanoutNextError::Integrity)?;
+    let result = Value::Array(results.to_vec());
+    edges::evaluate_next_with_result(
+        compiled,
+        &candidate,
+        inputs,
+        &result,
+        Some(execution),
+        Some(graph_run_id),
+    )
+    .map_err(FanoutNextError::Expression)
+}
+
+enum FanoutNextError {
+    Integrity(ryeos_runtime::ExpressionError),
+    Expression(ryeos_runtime::ExpressionError),
 }

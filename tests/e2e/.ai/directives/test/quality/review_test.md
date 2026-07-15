@@ -38,12 +38,12 @@ End-to-end test for the review directive — verifies the full review flow with 
 <process>
   <step name="create_test_file">
     Write a small test Python file that the review will analyze.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/review_target.py", "content": "def add(a, b):\n    return a + b\n\ndef subtract(a, b):\n    return a - b\n", "create_dirs": true})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/review_target.py", "content": "def add(a, b):\n    return a + b\n\ndef subtract(a, b):\n    return a - b\n", "create_dirs": true})`
   </step>
 
   <step name="spawn_review">
     Spawn the review directive as a managed thread, passing the test file as a changed file.
-    `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": "fork", "changed_files": ["{input:output_dir|outputs}/review_target.py"]})`
+    `rye_execute(item_type="directive", item_id="rye/code/quality/review", parameters={"thread": "fork", "changed_files": ["${inputs.output_dir ?? 'outputs'}/review_target.py"]})`
     Wait for the thread to complete.
   </step>
 
@@ -56,9 +56,9 @@ End-to-end test for the review directive — verifies the full review flow with 
   </step>
 
   <step name="write_result">
-    Write the review test results to {input:output_dir|outputs}/review_test.txt.
+    Write the review test results to ${inputs.output_dir ?? "outputs"}/review_test.txt.
     Include: review verdict, reasoning summary, number of issues found, and whether all expected output fields were present.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/review_test.txt", "content": "<review test summary>", "create_dirs": true})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/review_test.txt", "content": "<review test summary>", "create_dirs": true})`
   </step>
 </process>
 

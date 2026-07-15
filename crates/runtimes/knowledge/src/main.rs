@@ -20,6 +20,7 @@ use std::io::Read;
 
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::method_wire::{MethodCallEnvelope, MethodCallError, MethodCallResult};
+use ryeos_runtime::ThreadTerminalStatus;
 
 use types::KnowledgeError;
 
@@ -124,7 +125,7 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
 
     let completion = if result.success {
         ryeos_runtime::TerminalCompletion {
-            status: "completed".to_string(),
+            status: ThreadTerminalStatus::Completed,
             outcome_code: Some("success".to_string()),
             result: result.output.clone(),
             error: None,
@@ -134,7 +135,7 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
         }
     } else {
         ryeos_runtime::TerminalCompletion {
-            status: "failed".to_string(),
+            status: ThreadTerminalStatus::Failed,
             outcome_code: Some("failed".to_string()),
             result: None,
             error: result

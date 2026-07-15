@@ -40,7 +40,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
     Here is the code to analyze:
 
     ```
-    {input:code_snippet}
+    ${inputs.code_snippet}
     ```
 
     Analyze the code and determine:
@@ -48,7 +48,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
     - The number of function/method definitions (def, async def, function, etc.)
     - A 2-3 sentence summary of what the code does
 
-    Write the result as a JSON object to `{project_path}/{input:output_path}` with keys: `language`, `function_count`, `summary`.
+    Write the result as a JSON object to `{project_path}/${inputs.output_path}` with keys: `language`, `function_count`, `summary`.
   </step>
 
   <step name="return_result">

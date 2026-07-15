@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 use crate::launch_envelope_types::RuntimeResult;
+#[cfg(test)]
+use crate::launch_envelope_types::RuntimeResultStatus;
 
 /// Maximum permitted size of a single streaming frame body.
 ///
@@ -324,7 +326,7 @@ mod tests {
     fn runtime_result_decoder_accepts_valid() {
         let rr = RuntimeResult {
             success: true,
-            status: "completed".into(),
+            status: RuntimeResultStatus::Completed,
             thread_id: "T-test".into(),
             result: None,
             outputs: serde_json::Value::Null,
@@ -346,6 +348,24 @@ mod tests {
     fn runtime_result_decoder_rejects_non_json() {
         let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, b"not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_result_decoder_rejects_success_status_contradiction() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "success": true,
+            "status": "failed",
+            "thread_id": "T-test",
+            "outputs": null,
+            "warnings": [],
+        }))
+        .unwrap();
+
+        let error = decode_stdout_terminal(StdoutShape::RuntimeResultV1, &bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("success"));
+        assert!(error.contains("contradicts `status` `failed`"));
     }
 
     fn write_frame(chunk: &StreamingChunk) -> Vec<u8> {

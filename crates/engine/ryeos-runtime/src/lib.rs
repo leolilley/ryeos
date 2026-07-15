@@ -6,14 +6,15 @@ pub mod callback_contract;
 pub mod callback_uds;
 pub mod checkpoint;
 pub mod command;
-pub mod condition;
+pub mod compiled_template;
 pub mod daemon_rpc;
 pub mod envelope;
 pub mod events;
+pub mod expression;
+pub mod expression_condition;
 pub mod framing;
 pub mod hooks_eval;
 pub mod hooks_loader;
-pub mod interpolation;
 pub mod method_wire;
 pub mod model_resolution;
 pub mod paths;
@@ -31,8 +32,8 @@ pub use authorizer::{
     CapabilityClause, CapabilityParseError,
 };
 pub use callback::{
-    client_from_env, ActionPayload, CallbackError, DispatchActionRequest, ReplayResponse,
-    ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
+    client_from_env, parse_hook_action, ActionPayload, CallbackError, DispatchActionRequest,
+    ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{
@@ -45,15 +46,26 @@ pub use command::{
     CommandRegistry, CommandRegistryError, ControlFlagBinding, FlagKeyNormalization,
     InvocationInputContract, InvocationInputField, InvocationInputType, MatchedCommand,
 };
-pub use condition::{apply_operator, matches, resolve_path};
+pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
 pub use daemon_rpc::{
     resolve_daemon_socket_path, DaemonRpcClient, RpcError, ThreadLifecycleClient,
 };
 pub use events::{RuntimeEventType, StorageClass};
+pub use expression::{
+    compile_and_render, compile_condition_for, compile_expression, compile_expression_for,
+    compile_template, compile_template_for, evaluate, evaluate_bool, render_template,
+    CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,
+    EvaluationLimits, EvaluationSession, ExpressionError, ExpressionValueType, Reference,
+    ReferenceSegment, ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan,
+    TemplatePart,
+};
+pub use expression_condition::ExpressionCondition;
 pub use framing::{recv_frame, send_frame};
-pub use hooks_eval::{merge_hooks, run_hooks, HookDispatcher};
-pub use hooks_loader::{HookDefinition, HooksLoader};
-pub use interpolation::{interpolate, interpolate_action, referenced_input_keys};
+pub use hooks_eval::{run_hooks, HookDispatcher, HookRunResult};
+pub use hooks_loader::{
+    compile_hooks, load_configured_hook_sources, CompiledHook, CompiledHookCondition,
+    HookCompilationError, HookContextSchema, HookDefinition, HookLayer, HookSources,
+};
 pub use lillux::crypto::SigningKey;
 pub use paths::{
     safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,
@@ -61,4 +73,5 @@ pub use paths::{
 pub use progress::{ProgressEvent, StatusEvent};
 pub use provider_snapshot::ResolvedProviderSnapshot;
 pub use resolver::{resolve_command, ResolveError, ResolvedCommand};
+pub use ryeos_engine::contracts::ThreadTerminalStatus;
 pub use transcript::{KnowledgeRenderOptions, Transcript};

@@ -16,4 +16,4 @@ requires:
       - ryeos.fetch.tool.*
       - ryeos.fetch.service.*
 ---
-{input:input}
+${inputs.input}

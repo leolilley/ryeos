@@ -303,12 +303,7 @@ impl RyeOsCore {
                     //   latency exceeds the hint-refetch cadence into a
                     //   permanent "loading" — every response would arrive
                     //   already superseded.
-                    let floor = self
-                        .data
-                        .source_floor
-                        .get(tile_id)
-                        .copied()
-                        .unwrap_or(0);
+                    let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
                         let old = self.data.sources.get(tile_id).cloned();

@@ -164,10 +164,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         thread_id: &str,
         log_reason: Option<&str>,
+        completion: crate::callback::TerminalCompletion,
     ) -> Result<Value, CallbackError> {
         let mut params = json!({
             "thread_id": thread_id,
             "reason": log_reason,
+            "completion": completion,
         });
         self.inject_callback_token(&mut params);
         self.rpc

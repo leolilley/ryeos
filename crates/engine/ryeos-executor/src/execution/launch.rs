@@ -20,14 +20,19 @@ use ryeos_app::event_store_service::{EventAppendItem, EventAppendParams};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
+use ryeos_runtime::checkpoint::{
+    checkpoint_shape_limits, validate_checkpoint_shape, FanoutItemStatus,
+};
 use ryeos_runtime::events::RuntimeEventType;
+use ryeos_runtime::RuntimeJsonArrayBudget;
 
 mod runtime_request;
 mod terminal;
 
 use runtime_request::{spawn_runtime, SpawnRuntimeParams};
 use terminal::{
-    fallback_finalization, is_runtime_terminal_status, normalize_runtime_terminal_status,
+    fallback_finalization, is_thread_terminal_status, reconcile_terminal_finalization,
+    runtime_terminal_status,
 };
 
 /// Typed error for native executor materialization failures.
@@ -1875,7 +1880,7 @@ async fn run_claimed_thread_row_inner(
     }
 
     // 11. Handle spawn result
-    let runtime_result = match spawn_result {
+    let mut runtime_result = match spawn_result {
         Ok(result) => result,
         Err(err) => {
             // Pre-runtime failure (provider/secret resolution, materialization,
@@ -1919,17 +1924,21 @@ async fn run_claimed_thread_row_inner(
     // otherwise streaming callers tailing until terminal degrade into a
     // misleading `thread_not_terminal` error.
     let mut thread_detail = state.threads.get_thread(&thread_id)?.unwrap_or(thread);
-    if !is_runtime_terminal_status(&thread_detail.status) {
-        let mut terminal_status = normalize_runtime_terminal_status(&runtime_result.status);
+    let already_finalized = is_thread_terminal_status(&thread_detail.status);
+    if !already_finalized {
+        let mut terminal_status = runtime_terminal_status(runtime_result.status);
         // Kill-intent: a subprocess SIGKILLed by a daemon-issued `kill` exits
-        // abnormally with no self-finalization, which normalizes to `failed`. If
+        // abnormally with no self-finalization, which maps to `failed`. If
         // a kill was requested for this thread, that stop was intentional —
         // settle `killed`, not `failed`, so the terminal reflects the operator's
         // action instead of looking like a crash.
-        if terminal_status == "failed" && state.state_store.thread_has_kill_command(&thread_id)? {
-            terminal_status = "killed";
+        if terminal_status == ryeos_state::objects::ThreadStatus::Failed
+            && state.state_store.thread_has_kill_command(&thread_id)?
+        {
+            terminal_status = ryeos_state::objects::ThreadStatus::Killed;
         }
         let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
+        runtime_result = fallback.runtime_result;
         let finalized = state
             .threads
             .finalize_thread_with_managed_envelope(&fallback.params, fallback.managed_envelope)?;
@@ -1939,6 +1948,17 @@ async fn run_claimed_thread_row_inner(
         kick_follow_resume_if_ready(state, &finalized.chain_root_id);
         kick_launch_window_for_terminal(state, &finalized.chain_root_id);
         thread_detail = finalized;
+    } else {
+        let authority = state
+            .threads
+            .get_thread_terminal_authority(&thread_id)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "already-finalized thread {thread_id} has no authoritative terminal snapshot"
+                ))
+            })?;
+        runtime_result = reconcile_terminal_finalization(&authority, &runtime_result)
+            .map_err(BuildAndLaunchError::Internal)?;
     }
 
     // The audit record follows the execution to its settled state: the real
@@ -3118,32 +3138,85 @@ pub async fn launch_follow_resume_successor(
     }
 }
 
-fn follow_resume_payload(fanout: bool, envelopes: Vec<Value>) -> Value {
-    if !fanout {
-        return envelopes.into_iter().next().unwrap_or(Value::Null);
+fn append_follow_terminal_envelope(
+    budget: &mut RuntimeJsonArrayBudget,
+    envelopes: &mut Vec<Value>,
+    envelope: Value,
+    index: u32,
+) -> Result<(), BuildAndLaunchError> {
+    budget.append(&envelope).map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: terminal-envelope cohort exceeded runtime JSON bounds at child index {index}: {error}"
+        ))
+    })?;
+    envelopes.push(envelope);
+    Ok(())
+}
+
+fn validate_follow_waiter_cardinality(
+    fanout: bool,
+    expected_children: u32,
+) -> Result<(), BuildAndLaunchError> {
+    if expected_children == 0 {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: waiter must declare at least one child"
+        )));
     }
-    let statuses: Vec<String> = envelopes
+    if !fanout && expected_children != 1 {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: non-fanout waiter must declare exactly one child, received {expected_children}"
+        )));
+    }
+    Ok(())
+}
+
+fn follow_resume_payload(
+    fanout: bool,
+    mut envelopes: Vec<Value>,
+) -> Result<Value, BuildAndLaunchError> {
+    if !fanout {
+        if envelopes.len() != 1 {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: non-fanout cohort must contain exactly one terminal envelope, received {}",
+                envelopes.len()
+            )));
+        }
+        let envelope = envelopes.pop().expect("cardinality checked above");
+        validate_checkpoint_shape(&envelope, "follow terminal envelope").map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: terminal envelope exceeded runtime JSON bounds: {error}"
+            ))
+        })?;
+        return Ok(envelope);
+    }
+    let statuses: Vec<FanoutItemStatus> = envelopes
         .iter()
         .map(|envelope| {
             if ryeos_runtime::envelope::envelope_succeeded(envelope) {
-                "completed".to_string()
+                FanoutItemStatus::Completed
             } else {
-                "failed".to_string()
+                FanoutItemStatus::Failed
             }
         })
         .collect();
     let failed = statuses
         .iter()
-        .filter(|status| status.as_str() == "failed")
+        .filter(|status| **status == FanoutItemStatus::Failed)
         .count();
     let expected = envelopes.len();
-    json!({
-        "fanout": true,
-        "items": envelopes,
-        "statuses": statuses,
-        "failed": failed,
-        "expected": expected,
-    })
+    let mut fields = serde_json::Map::with_capacity(5);
+    fields.insert("fanout".to_string(), Value::Bool(true));
+    fields.insert("items".to_string(), Value::Array(envelopes));
+    fields.insert("statuses".to_string(), serde_json::to_value(statuses)?);
+    fields.insert("failed".to_string(), serde_json::to_value(failed)?);
+    fields.insert("expected".to_string(), serde_json::to_value(expected)?);
+    let payload = Value::Object(fields);
+    validate_checkpoint_shape(&payload, "follow fanout resume payload").map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: fanout payload exceeded runtime JSON bounds: {error}"
+        ))
+    })?;
+    Ok(payload)
 }
 
 async fn launch_follow_resume_claimed(
@@ -3177,7 +3250,18 @@ async fn launch_follow_resume_claimed(
         return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
     }
 
-    let mut envelopes = Vec::with_capacity(waiter.expected_children as usize);
+    validate_follow_waiter_cardinality(waiter.fanout, waiter.expected_children)?;
+
+    // Do not reserve from database cardinality or retain independently-valid
+    // envelopes into an unbounded cohort. Each fanout child is admitted against
+    // the aggregate checkpoint shape before it enters the vector.
+    let mut envelopes = Vec::new();
+    let mut fanout_budget = waiter.fanout.then(|| {
+        RuntimeJsonArrayBudget::with_limits(
+            "follow fanout terminal-envelope cohort",
+            checkpoint_shape_limits(),
+        )
+    });
     for index in 0..waiter.expected_children {
         let child = state
             .state_store
@@ -3187,13 +3271,23 @@ async fn launch_follow_resume_claimed(
                     "follow-resume: missing child index {index}"
                 ))
             })?;
-        envelopes.push(child.terminal_envelope.ok_or_else(|| {
+        let envelope = child.terminal_envelope.ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "follow-resume: child index {index} has no terminal envelope"
             ))
-        })?);
+        })?;
+        if let Some(budget) = fanout_budget.as_mut() {
+            append_follow_terminal_envelope(budget, &mut envelopes, envelope, index)?;
+        } else {
+            validate_checkpoint_shape(&envelope, "follow terminal envelope").map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "follow-resume: terminal envelope at child index {index} exceeded runtime JSON bounds: {error}"
+                ))
+            })?;
+            envelopes.push(envelope);
+        }
     }
-    let terminal_envelope = follow_resume_payload(waiter.fanout, envelopes);
+    let terminal_envelope = follow_resume_payload(waiter.fanout, envelopes)?;
 
     // Mark resuming (ready→resuming; idempotent on resuming) BEFORE mutating the
     // successor's checkpoint, so a crash mid-resume is re-driven by reconcile.
@@ -3215,7 +3309,7 @@ async fn launch_follow_resume_claimed(
         &prev_dir,
         &succ_dir,
         ryeos_runtime::checkpoint::FOLLOW_RESULT_KEY,
-        &terminal_envelope,
+        terminal_envelope,
     )
     .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume splice: {e}")))?;
     if !spliced {
@@ -3267,6 +3361,74 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::execution::limits::{LimitCaps, LimitValues};
+
+    #[test]
+    fn follow_fanout_payload_uses_closed_item_statuses() {
+        let payload = follow_resume_payload(
+            true,
+            vec![
+                json!({
+                    "success": true,
+                    "status": "completed",
+                    "result": {"answer": 1},
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+                json!({
+                    "success": false,
+                    "status": "failed",
+                    "result": {"error": "boom"},
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+            ],
+        )
+        .unwrap();
+        let statuses: Vec<FanoutItemStatus> =
+            serde_json::from_value(payload["statuses"].clone()).unwrap();
+        assert_eq!(
+            statuses,
+            vec![FanoutItemStatus::Completed, FanoutItemStatus::Failed,]
+        );
+        assert_eq!(payload["failed"], 1);
+    }
+
+    #[test]
+    fn follow_cohort_rejects_aggregate_before_retaining_child() {
+        let limits = ryeos_runtime::EvaluationLimits {
+            max_result_bytes: 20,
+            ..ryeos_runtime::EvaluationLimits::default()
+        };
+        let mut budget = RuntimeJsonArrayBudget::with_limits("follow cohort", limits);
+        let mut envelopes = Vec::new();
+
+        append_follow_terminal_envelope(&mut budget, &mut envelopes, json!("first"), 0).unwrap();
+        let error = append_follow_terminal_envelope(
+            &mut budget,
+            &mut envelopes,
+            json!("second-is-too-large"),
+            1,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("child index 1"));
+        assert_eq!(envelopes, vec![json!("first")]);
+        assert_eq!(budget.elements(), 1);
+    }
+
+    #[test]
+    fn non_fanout_waiter_requires_exactly_one_child_before_collection() {
+        for expected_children in [0, 2, u32::MAX] {
+            let error = validate_follow_waiter_cardinality(false, expected_children).unwrap_err();
+            assert!(error.to_string().contains("exactly one child"));
+        }
+        validate_follow_waiter_cardinality(false, 1).unwrap();
+        let error = validate_follow_waiter_cardinality(true, 0).unwrap_err();
+        assert!(error.to_string().contains("at least one child"));
+        validate_follow_waiter_cardinality(true, 2).unwrap();
+    }
 
     fn caps(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

@@ -51,11 +51,11 @@ Review code changes for quality issues — runs gates then uses LLM analysis aga
   </step>
 
   <step name="get_diff">
-    Get the diff of changed files. If {input:changed_files} is provided, diff those files specifically.
-    Otherwise, diff against {input:base_ref} (defaulting to HEAD~1).
-    `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "diff", "args": ["{input:base_ref}"]})`
-    If {input:changed_files} is provided:
-    `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "diff", "args": ["{input:base_ref}", "--"] })`
+    Get the diff of changed files. If `${json(inputs.changed_files ?? [])}` is non-empty, diff those files specifically.
+    Otherwise, diff against `${inputs.base_ref ?? "HEAD~1"}`.
+    `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "diff", "args": ["${inputs.base_ref ?? 'HEAD~1'}"]})`
+    If `${json(inputs.changed_files ?? [])}` is non-empty:
+    `rye_execute(item_type="tool", item_id="rye/code/git/git", parameters={"action": "diff", "args": ["${inputs.base_ref ?? 'HEAD~1'}", "--"] })`
     with the changed files appended to args.
   </step>
 

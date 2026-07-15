@@ -27,7 +27,7 @@ Two-step directive that writes content to a file, then reads it back to verify t
   </inputs>
 
   <outputs>
-    <success>Content written to {input:file_path} and verified successfully.</success>
+    <success>Content written to ${inputs.file_path} and verified successfully.</success>
     <failure>Content mismatch detected after write — file contents do not match input.</failure>
   </outputs>
 </directive>
@@ -35,9 +35,9 @@ Two-step directive that writes content to a file, then reads it back to verify t
 
 <process>
   <step name="write_content">
-    Write the content "{input:content}" to `{input:file_path}`.
+    Write the content "${inputs.content}" to `${inputs.file_path}`.
   </step>
   <step name="read_and_verify">
-    Read `{input:file_path}` back and confirm the contents match the original input.
+    Read `${inputs.file_path}` back and confirm the contents match the original input.
   </step>
 </process>

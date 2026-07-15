@@ -9,6 +9,8 @@ mod budget;
 mod continuation;
 mod directive;
 mod dispatcher;
+#[cfg(test)]
+mod expression_inventory_tests;
 mod harness;
 mod knowledge;
 mod provider_adapter;
@@ -16,16 +18,18 @@ mod result_guard;
 mod resume;
 mod runner;
 
-use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
+use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
 use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 
-/// Compile and render the stimulus that opens a run, then append inputs the
-/// authored template did not reference directly.
-///
-/// Callers invoke this only on fresh launches and operator follow-ups. A
-/// suppressed machine continuation must not call it: its unused prompt is
-/// deliberately neither compiled nor rendered.
-fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<String> {
+/// Compile the directive-owned stimulus field and derive its exact input-key
+/// references from the AST. Inventory tests call this same boundary without
+/// manufacturing runtime values.
+fn compile_stimulus(
+    prompt_template: &str,
+) -> Result<(
+    ryeos_runtime::CompiledTemplate,
+    std::collections::BTreeSet<String>,
+)> {
     let compilation_limits = ryeos_runtime::CompilationLimits::default();
     let compiled = ryeos_runtime::compile_template_for(
         prompt_template,
@@ -58,10 +62,30 @@ fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<
         }
     }
 
-    let context = serde_json::json!({ "inputs": inputs });
+    Ok((compiled, referenced_inputs))
+}
+
+/// Render the stimulus that opens a run, then append inputs the authored
+/// template did not reference directly.
+///
+/// Callers invoke this only on fresh launches and operator follow-ups. A
+/// suppressed machine continuation must not call it: its unused prompt is
+/// deliberately neither compiled nor rendered.
+fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<String> {
     let evaluation_limits = ryeos_runtime::EvaluationLimits::default();
-    let mut session = ryeos_runtime::EvaluationSession::new(&context, &evaluation_limits);
-    let interpolated_prompt = match session.render_template(&compiled)? {
+    render_stimulus_with_limits(prompt_template, inputs, &evaluation_limits)
+}
+
+fn render_stimulus_with_limits(
+    prompt_template: &str,
+    inputs: &serde_json::Value,
+    evaluation_limits: &ryeos_runtime::EvaluationLimits,
+) -> Result<String> {
+    let (compiled, referenced_inputs) = compile_stimulus(prompt_template)?;
+
+    let context = ryeos_runtime::EvaluationContext::new().with_root("inputs", inputs);
+    let mut session = ryeos_runtime::EvaluationSession::with_context(&context, evaluation_limits);
+    let rendered_prompt = match session.render_template(&compiled)? {
         serde_json::Value::String(rendered) => rendered,
         other => anyhow::bail!("directive body expression produced a non-string value: {other}"),
     };
@@ -69,22 +93,38 @@ fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<
     // Surface only inputs the compiled AST did not place explicitly.
     let prompt = match inputs.as_object() {
         Some(obj) if !obj.is_empty() => {
-            let leftover: serde_json::Map<String, serde_json::Value> = obj
+            let leftover_count = obj
                 .iter()
                 .filter(|(key, _)| !referenced_inputs.contains(key.as_str()))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            if leftover.is_empty() {
-                interpolated_prompt
+                .count();
+            if leftover_count == 0 {
+                rendered_prompt
             } else {
-                format!(
-                    "{}\n\nInputs:\n{}",
-                    interpolated_prompt,
-                    serde_json::to_string_pretty(&serde_json::Value::Object(leftover))?
-                )
+                let field = "directive.user_prompt.unreferenced_inputs";
+                session.charge_container_elements(leftover_count, field)?;
+                session.charge_allocation(
+                    leftover_count
+                        .saturating_mul(std::mem::size_of::<(String, serde_json::Value)>()),
+                    field,
+                )?;
+                let mut leftover = serde_json::Map::with_capacity(leftover_count);
+                for (key, value) in obj
+                    .iter()
+                    .filter(|(key, _)| !referenced_inputs.contains(key.as_str()))
+                {
+                    let key = session.clone_string(key, field)?;
+                    let value = session.clone_value(value, field)?;
+                    leftover.insert(key, value);
+                }
+                let rendered_inputs =
+                    session.stringify_json(&serde_json::Value::Object(leftover), field)?;
+                session.assemble_string(
+                    &[&rendered_prompt, "\n\nInputs:\n", &rendered_inputs],
+                    "directive.user_prompt",
+                )?
             }
         }
-        _ => interpolated_prompt,
+        _ => rendered_prompt,
     };
     Ok(prompt)
 }
@@ -103,9 +143,12 @@ fn main() {
             let output = serde_json::to_string(&runtime_result).unwrap_or_else(|e| {
                 serde_json::to_string(&json!({
                     "success": false,
-                    "status": "errored",
+                    "status": RuntimeResultStatus::Failed,
                     "thread_id": "",
                     "result": format!("serialization error: {}", e),
+                    "outputs": {},
+                    "cost": null,
+                    "warnings": [],
                 }))
                 .unwrap()
             });
@@ -135,7 +178,7 @@ fn run_directive() -> Result<RuntimeResult> {
         Err(e) => {
             return Ok(RuntimeResult {
                 success: false,
-                status: "errored".to_string(),
+                status: RuntimeResultStatus::Failed,
                 thread_id: String::new(),
                 result: Some(json!(format!("invalid envelope: {}", e))),
                 outputs: json!({}),
@@ -257,7 +300,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     // launch, or operator follow-up). A MACHINE continuation suppresses it
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
-    let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
+    let runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
         let carry_turns = bootstrap_output
             .config
             .continuation_runtime
@@ -271,7 +314,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         if !resume_state.has_thread_usage_event {
             return Ok(RuntimeResult {
                 success: false,
-                status: "errored".to_string(),
+                status: RuntimeResultStatus::Failed,
                 thread_id: envelope.thread_id.clone(),
                 result: Some(json!(
                     "resume prerequisites unmet: no thread_usage event found in prior thread"
@@ -343,8 +386,15 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                     .continuation_runtime
                     .context_threshold_ratio,
                 sampling,
+                terminal_state_root: state_root.clone(),
+                terminal_source_path: envelope
+                    .resolution
+                    .root
+                    .source_path
+                    .to_string_lossy()
+                    .into_owned(),
             },
-        )
+        )?
     } else {
         // Fresh launch: render and emit the opening stimulus as a `cognition_in`
         // so a later turn can fold it from the chain.
@@ -424,59 +474,21 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 .continuation_runtime
                 .context_threshold_ratio,
             sampling,
+            terminal_state_root: state_root.clone(),
+            terminal_source_path: envelope
+                .resolution
+                .root
+                .source_path
+                .to_string_lossy()
+                .into_owned(),
         })
     };
-
-    let result = runner_inst.run().await;
-
-    // Persistence-first: the markdown transcript and capabilities
-    // manifest are part of the durable output of a directive run. A
-    // silent `let _ = …` swallowed I/O failure leaves the daemon
-    // believing a thread completed successfully while the on-disk
-    // transcript is missing — exactly the silent-fallback class of
-    // bug remediation R4/R7 closed elsewhere. Surface any transcript
-    // write failure as a non-success RuntimeResult; the daemon then
-    // routes it through the same finalize-as-failed path as any
-    // other terminal error.
-    if let Err(e) = crate::knowledge::write_thread_transcript(
-        &state_root,
-        &envelope.thread_id,
-        &envelope.resolution.root.source_path.to_string_lossy(),
-        runner_inst.messages(),
-    ) {
-        return Ok(RuntimeResult {
-            success: false,
-            status: "errored".to_string(),
-            thread_id: envelope.thread_id.clone(),
-            result: Some(json!(format!("transcript write failed: {e:#}"))),
-            outputs: json!({}),
-            cost: result.cost.clone(),
-            warnings: result.warnings.clone(),
-        });
-    }
-    if let Err(e) = crate::knowledge::write_capabilities(
-        &state_root,
-        &envelope.thread_id,
-        runner_inst.tools(),
-        None,
-    ) {
-        return Ok(RuntimeResult {
-            success: false,
-            status: "errored".to_string(),
-            thread_id: envelope.thread_id.clone(),
-            result: Some(json!(format!("capabilities write failed: {e:#}"))),
-            outputs: json!({}),
-            cost: result.cost.clone(),
-            warnings: result.warnings.clone(),
-        });
-    }
-
-    Ok(result)
+    Ok(runner_inst.run().await)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::render_stimulus;
+    use super::{render_stimulus, render_stimulus_with_limits};
     use serde_json::json;
 
     #[test]
@@ -489,7 +501,7 @@ mod tests {
 
         assert!(rendered.starts_with("Question: why? / why?"));
         assert!(!rendered.contains("\"question\""));
-        assert!(rendered.contains("\"depth\": 3"));
+        assert!(rendered.contains("\"depth\":3"));
     }
 
     #[test]
@@ -509,6 +521,37 @@ mod tests {
             .expect_err("non-input root must fail");
 
         assert!(error.to_string().contains("only `inputs` is allowed"));
+    }
+
+    #[test]
+    fn rendered_stimulus_rejects_removed_input_interpolation() {
+        let error = render_stimulus("Question: {input:question}", &json!({"question": "why?"}))
+            .expect_err("removed input interpolation must fail");
+
+        assert!(error.to_string().contains("removed `{input:...}`"));
+        assert!(error.to_string().contains("${inputs.name}"));
+    }
+
+    #[test]
+    fn removed_interpolation_text_inside_expression_string_is_data() {
+        let rendered = render_stimulus(r#"${"{input:question}"}"#, &json!({}))
+            .expect("literal expression string");
+
+        assert_eq!(rendered, "{input:question}");
+    }
+
+    #[test]
+    fn unreferenced_input_appendix_uses_the_evaluation_budget() {
+        let limits = ryeos_runtime::EvaluationLimits {
+            max_scalar_bytes: 4,
+            ..ryeos_runtime::EvaluationLimits::default()
+        };
+
+        let error = render_stimulus_with_limits("ok", &json!({"x": "too long"}), &limits)
+            .expect_err("oversized unused input must fail within the expression budget");
+
+        assert!(error.to_string().contains("scalar is"));
+        assert!(error.to_string().contains("unreferenced_inputs"));
     }
 
     #[test]

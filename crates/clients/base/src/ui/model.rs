@@ -174,9 +174,7 @@ fn patch_thread_record(
     if map.get("thread_id").and_then(serde_json::Value::as_str) != Some(thread_id) {
         return false;
     }
-    let current = map
-        .get("updated_at")
-        .and_then(serde_json::Value::as_str);
+    let current = map.get("updated_at").and_then(serde_json::Value::as_str);
     if current.is_some_and(|current| current > updated_at) {
         return false;
     }
@@ -185,7 +183,10 @@ fn patch_thread_record(
     if unchanged {
         return false;
     }
-    map.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+    map.insert(
+        "status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
     map.insert(
         "updated_at".to_string(),
         serde_json::Value::String(updated_at.to_string()),
@@ -854,7 +855,10 @@ impl RyeOsCore {
         let Some(status) = payload.get("status").and_then(serde_json::Value::as_str) else {
             return false;
         };
-        let Some(updated_at) = payload.get("updated_at").and_then(serde_json::Value::as_str) else {
+        let Some(updated_at) = payload
+            .get("updated_at")
+            .and_then(serde_json::Value::as_str)
+        else {
             return false;
         };
 
@@ -886,7 +890,10 @@ impl RyeOsCore {
                     }
                 }
             } else if is_thread_collection(
-                binding.source.as_ref().and_then(|source| source.collection.as_deref()),
+                binding
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.collection.as_deref()),
             ) {
                 let collection = binding
                     .source
@@ -1425,8 +1432,9 @@ impl RyeOsCore {
                 }
                 let signature = serde_json::to_string(entry).ok()?;
                 match previous_by_key.get(&source.key) {
-                    Some((old_signature, arrived)) if old_signature == &signature => arrived
-                        .filter(|at| self.runtime.now_ms.saturating_sub(*at) <= 2_000),
+                    Some((old_signature, arrived)) if old_signature == &signature => {
+                        arrived.filter(|at| self.runtime.now_ms.saturating_sub(*at) <= 2_000)
+                    }
                     _ => Some(self.runtime.now_ms),
                 }
             })
@@ -1744,9 +1752,8 @@ impl RyeOsCore {
             );
             changed = true;
         }
-        changed_rows.retain(|key, flash| {
-            live.contains(key) && now_ms.saturating_sub(flash.at_ms) <= 2_000
-        });
+        changed_rows
+            .retain(|key, flash| live.contains(key) && now_ms.saturating_sub(flash.at_ms) <= 2_000);
         if changed {
             self.bump_activity_pulse(0.35);
         }
@@ -1895,7 +1902,10 @@ fn projected_row_signatures(
                     "tone": record.tone,
                 })
                 .to_string();
-                (row_key(&record.raw, index), (signature, record.tone.clone()))
+                (
+                    row_key(&record.raw, index),
+                    (signature, record.tone.clone()),
+                )
             })
             .collect(),
         "table" => {
@@ -1912,7 +1922,10 @@ fn projected_row_signatures(
                         "tone": record.tone,
                     })
                     .to_string();
-                    (row_key(&record.raw, index), (signature, record.tone.clone()))
+                    (
+                        row_key(&record.raw, index),
+                        (signature, record.tone.clone()),
+                    )
                 })
                 .collect()
         }

@@ -27,16 +27,16 @@ Recursive child for spawn chain test. Writes a marker at its level, then spawns 
   </inputs>
 
   <outputs>
-    <success>Level {input:level} marker written. Next level spawned if below max.</success>
+    <success>Level ${inputs.level} marker written. Next level spawned if below max.</success>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="write_level_marker">
-    Write "Level {input:level} — child thread" to `chain_L{input:level}.txt`.
+    Write "Level ${inputs.level} — child thread" to `chain_L${inputs.level}.txt`.
   </step>
   <step name="maybe_spawn_next">
-    If {input:level} is less than {input:max_level}, spawn another child thread running `test/tools/threads/spawn_chain_child` with level incremented by 1 and the same max_level. If at max_level, report completion.
+    If ${inputs.level} is less than ${inputs.max_level}, spawn another child thread running `test/tools/threads/spawn_chain_child` with level incremented by 1 and the same max_level. If at max_level, report completion.
   </step>
 </process>

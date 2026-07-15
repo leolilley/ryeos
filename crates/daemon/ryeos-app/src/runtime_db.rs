@@ -677,12 +677,42 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "seat_lease",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "seat_thread_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "owner", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "surface", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "client_ref", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "last_seen_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "reaping_at_ms", col_type: "INTEGER", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec {
+                        name: "seat_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "surface",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "client_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_seen_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reaping_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],

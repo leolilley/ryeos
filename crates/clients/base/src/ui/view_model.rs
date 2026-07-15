@@ -1173,7 +1173,7 @@ fn bound_view_vm_keyed(
                             expanded: false,
                             detail: Vec::new(),
                             changed_at_ms: None,
-                    changed_tone: None,
+                            changed_tone: None,
                         });
                     }
                 }
@@ -1360,9 +1360,9 @@ fn bound_view_vm_keyed(
                 .sources
                 .iter()
                 .map(|source| {
-                    source
-                        .as_ref()
-                        .and_then(|source| arrival_by_key.get(source.key.as_str()).copied().flatten())
+                    source.as_ref().and_then(|source| {
+                        arrival_by_key.get(source.key.as_str()).copied().flatten()
+                    })
                 })
                 .collect();
             // The foldable section under the point — what a fold key toggles.
@@ -1581,7 +1581,7 @@ fn status_notice_rows(
             expanded: false,
             detail: Vec::new(),
             changed_at_ms: None,
-                    changed_tone: None,
+            changed_tone: None,
         })
         .collect()
 }

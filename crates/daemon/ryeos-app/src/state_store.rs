@@ -3,9 +3,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
+use ryeos_runtime::RuntimeJsonArrayBudget;
 use ryeos_state::chain::{ChainLock, SnapshotUpdate};
 use ryeos_state::objects::thread_snapshot::ThreadStatus;
 use ryeos_state::objects::ThreadSnapshot;
@@ -111,6 +113,397 @@ pub struct FinalizeThreadRecord {
     pub error_json: Option<Value>,
     pub artifacts: Vec<NewArtifactRecord>,
     pub final_cost: Option<ryeos_engine::contracts::FinalCost>,
+    /// Exact native runtime envelope received at callback/fallback settlement.
+    /// Persisted in the signed snapshot so later stdout reconciliation and API
+    /// responses have one payload authority, not a second process claim.
+    pub managed_envelope: Option<Value>,
+}
+
+/// Canonical terminal facts committed with a running-source continuation.
+///
+/// A continuation settles its source inside the same transaction that creates
+/// and seeds the successor, so it cannot use the ordinary finalization path.
+/// Carrying these facts into that transaction keeps the signed source snapshot
+/// authoritative for the exact runtime payload and cost returned on stdout.
+#[derive(Debug, Clone)]
+pub struct ContinuedThreadSettlement {
+    pub result_json: Option<Value>,
+    pub final_cost: Option<ryeos_engine::contracts::FinalCost>,
+    pub managed_envelope: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedTerminalEnvelope {
+    success: bool,
+    status: ryeos_runtime::envelope::RuntimeResultStatus,
+    result: Value,
+    outputs: Value,
+    warnings: Vec<String>,
+    /// Kept as `Value` so `cost` is a required key even when explicitly null.
+    cost: Value,
+}
+
+fn runtime_status_for_thread_status(
+    status: ThreadStatus,
+) -> Result<ryeos_runtime::envelope::RuntimeResultStatus> {
+    use ryeos_runtime::envelope::RuntimeResultStatus;
+
+    match status {
+        ThreadStatus::Completed => Ok(RuntimeResultStatus::Completed),
+        ThreadStatus::Failed => Ok(RuntimeResultStatus::Failed),
+        ThreadStatus::Cancelled => Ok(RuntimeResultStatus::Cancelled),
+        ThreadStatus::Killed => Ok(RuntimeResultStatus::Killed),
+        ThreadStatus::TimedOut => Ok(RuntimeResultStatus::TimedOut),
+        ThreadStatus::Continued => Ok(RuntimeResultStatus::Continued),
+        ThreadStatus::Created | ThreadStatus::Running => {
+            bail!("managed runtime envelope requires a terminal thread status")
+        }
+    }
+}
+
+fn validate_managed_terminal_envelope(
+    raw: &Value,
+    status: ThreadStatus,
+    result: Option<&Value>,
+    error: Option<&Value>,
+    final_cost: Option<&ryeos_engine::contracts::FinalCost>,
+) -> Result<()> {
+    validate_checkpoint_shape(raw, "managed runtime terminal envelope")
+        .context("validate managed runtime terminal envelope")?;
+    let envelope: ManagedTerminalEnvelope =
+        serde_json::from_value(raw.clone()).context("decode managed runtime terminal envelope")?;
+    let expected_runtime_status = runtime_status_for_thread_status(status)?;
+    if envelope.status != expected_runtime_status {
+        bail!(
+            "managed runtime envelope status `{}` contradicts settlement status `{}`",
+            envelope.status.as_str(),
+            status
+        );
+    }
+    if envelope.success != expected_runtime_status.is_success() {
+        bail!(
+            "managed runtime envelope success contradicts settlement status `{}`",
+            status
+        );
+    }
+    if status == ThreadStatus::Completed && error.is_some() {
+        bail!("completed settlement must not carry a terminal error");
+    }
+    if status == ThreadStatus::Continued && error.is_some() {
+        bail!("continued settlement must not carry a terminal error");
+    }
+    let expected_payload = result.or(error).cloned().unwrap_or(Value::Null);
+    if envelope.result != expected_payload {
+        bail!("managed runtime envelope result contradicts settlement result/error payload");
+    }
+
+    let envelope_cost = if envelope.cost.is_null() {
+        None
+    } else {
+        let cost: ryeos_runtime::envelope::RuntimeCost = serde_json::from_value(envelope.cost)
+            .context("decode managed runtime envelope cost")?;
+        cost.validate()
+            .context("validate managed runtime envelope cost")?;
+        Some(cost)
+    };
+    match (final_cost, envelope_cost.as_ref()) {
+        (None, None) => {}
+        (Some(final_cost), Some(runtime_cost))
+            if final_cost.input_tokens == runtime_cost.input_tokens
+                && final_cost.output_tokens == runtime_cost.output_tokens
+                && final_cost.spend == runtime_cost.total_usd
+                && final_cost.basis == runtime_cost.basis => {}
+        (Some(_), Some(_)) => {
+            bail!("managed runtime envelope cost contradicts settlement final cost")
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            bail!("managed runtime envelope cost presence contradicts settlement final cost")
+        }
+    }
+
+    // Deserializing these required fields is itself the contract check. Keep the
+    // reads explicit so future removal does not accidentally make them optional.
+    let _ = (&envelope.outputs, &envelope.warnings);
+    Ok(())
+}
+
+fn validate_final_cost_for_settlement(cost: &ryeos_engine::contracts::FinalCost) -> Result<()> {
+    if !cost.spend.is_finite() {
+        bail!("final cost spend must be finite");
+    }
+    if cost.spend < 0.0 {
+        bail!("final cost spend must be non-negative");
+    }
+    if cost.input_tokens > i64::MAX as u64 {
+        bail!("final cost input_tokens exceeds the settlement storage maximum");
+    }
+    if cost.output_tokens > i64::MAX as u64 {
+        bail!("final cost output_tokens exceeds the settlement storage maximum");
+    }
+    match cost.basis.as_deref() {
+        None | Some(ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP) => {}
+        Some(basis) => {
+            bail!("final cost basis `{basis}` is invalid; expected `rollup` or null");
+        }
+    }
+    Ok(())
+}
+
+fn terminal_facets(
+    final_cost: Option<&ryeos_engine::contracts::FinalCost>,
+    managed_envelope: Option<&Value>,
+) -> Result<BTreeMap<String, String>> {
+    let mut facets = BTreeMap::new();
+    if let Some(cost) = final_cost {
+        facets.insert("cost.turns".to_string(), cost.turns.to_string());
+        facets.insert(
+            "cost.input_tokens".to_string(),
+            cost.input_tokens.to_string(),
+        );
+        facets.insert(
+            "cost.output_tokens".to_string(),
+            cost.output_tokens.to_string(),
+        );
+        facets.insert("cost.spend".to_string(), cost.spend.to_string());
+        if let Some(provider) = cost.provider.as_ref() {
+            facets.insert("cost.provider".to_string(), provider.clone());
+        }
+        if let Some(basis) = cost.basis.as_ref() {
+            facets.insert("cost.basis".to_string(), basis.clone());
+        }
+        if let Some(metadata) = cost.metadata.as_ref() {
+            facets.insert(
+                "cost.metadata_json".to_string(),
+                serde_json::to_string(metadata).context("encode final cost metadata")?,
+            );
+        }
+    }
+    if let Some(envelope) = managed_envelope {
+        facets.insert(
+            "runtime.terminal_envelope_json".to_string(),
+            serde_json::to_string(envelope).context("encode managed runtime terminal envelope")?,
+        );
+    }
+    Ok(facets)
+}
+
+const FOLLOW_ENVELOPE_LIMIT_CODE: &str = "follow_terminal_envelope_limit_exceeded";
+
+fn follow_envelope_limit_failure(cost: Option<&Value>) -> Value {
+    let status = ryeos_runtime::envelope::RuntimeResultStatus::Failed;
+    json!({
+        "success": false,
+        "status": status,
+        "result": {
+            "code": FOLLOW_ENVELOPE_LIMIT_CODE,
+            "message": "follow child terminal envelope exceeded the bounded parent resume payload",
+        },
+        "outputs": Value::Null,
+        "warnings": [FOLLOW_ENVELOPE_LIMIT_CODE],
+        "cost": cost.cloned(),
+    })
+}
+
+fn follow_envelope_limit_reservation() -> Value {
+    let maximum_cost = json!({
+        "input_tokens": i64::MAX as u64,
+        "output_tokens": i64::MAX as u64,
+        "total_usd": f64::MAX,
+        "basis": ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP,
+    });
+    follow_envelope_limit_failure(Some(&maximum_cost))
+}
+
+fn validated_follow_candidate_cost(candidate: &Value) -> Result<Option<Value>> {
+    let Some(raw_cost) = candidate.get("cost") else {
+        return Ok(None);
+    };
+    if raw_cost.is_null() {
+        return Ok(None);
+    }
+    let cost: ryeos_runtime::envelope::RuntimeCost =
+        serde_json::from_value(raw_cost.clone()).context("decode follow terminal cost")?;
+    cost.validate().context("validate follow terminal cost")?;
+    Ok(Some(
+        serde_json::to_value(cost).context("encode validated follow terminal cost")?,
+    ))
+}
+
+fn validate_follow_reservation_shape(seed: &runtime_db::NewFollowWaiter) -> Result<()> {
+    let expected = usize::try_from(seed.expected_children)
+        .context("follow expected_children does not fit usize")?;
+    if expected == 0 {
+        bail!("follow waiter {} expects no children", seed.follow_key);
+    }
+    if !seed.fanout && expected != 1 {
+        bail!(
+            "non-fanout waiter {} must expect exactly one child",
+            seed.follow_key
+        );
+    }
+    let limits = checkpoint_shape_limits();
+    if expected > limits.max_container_elements {
+        bail!(
+            "follow waiter {} expects {expected} children; maximum is {}",
+            seed.follow_key,
+            limits.max_container_elements
+        );
+    }
+    if !seed.fanout {
+        validate_checkpoint_shape(
+            &follow_envelope_limit_reservation(),
+            "reserved follow parent resume payload",
+        )
+        .context("validate reserved follow parent resume payload")?;
+        return Ok(());
+    }
+
+    let pending = follow_envelope_limit_reservation();
+    let mut budget = follow_fanout_items_budget(expected)?;
+    for _ in 0..expected {
+        budget
+            .append(&pending)
+            .context("validate reserved follow fanout parent resume payload")?;
+    }
+    Ok(())
+}
+
+fn follow_fanout_items_budget(expected: usize) -> Result<RuntimeJsonArrayBudget> {
+    let mut limits = checkpoint_shape_limits();
+    // `"completed"` is the longest closed fanout status (11 serialized
+    // bytes); reserve one comma per entry as well, with the leading `[` taking
+    // the remaining byte in `1 + 12*n` (the closing `]` replaces the final
+    // comma reservation).
+    let status_bytes = 1usize
+        .checked_add(
+            12usize
+                .checked_mul(expected)
+                .context("follow status JSON byte count overflow")?,
+        )
+        .context("follow status JSON byte count overflow")?;
+    let fixed_payload = json!({
+        "fanout": true,
+        "items": [],
+        "statuses": [],
+        "failed": expected,
+        "expected": expected,
+    });
+    let fixed_bytes = serde_json::to_vec(&fixed_payload)
+        .context("encode follow fanout fixed payload")?
+        .len()
+        .checked_sub(4)
+        .expect("two empty JSON arrays contain four bytes");
+    limits.max_result_bytes = limits
+        .max_result_bytes
+        .checked_sub(fixed_bytes)
+        .and_then(|remaining| remaining.checked_sub(status_bytes))
+        .context("follow fanout fixed payload exceeds runtime JSON byte limit")?;
+    // Final nodes are the item-array nodes plus one status scalar per child,
+    // the status array, root object, fanout boolean, failed count, and expected
+    // count. The incremental budget owns the item array and its children.
+    limits.max_result_nodes = limits
+        .max_result_nodes
+        .checked_sub(expected)
+        .and_then(|remaining| remaining.checked_sub(5))
+        .context("follow fanout fixed payload exceeds runtime JSON node limit")?;
+    // The item budget treats its array as depth one; in the final payload that
+    // array is nested under the root object and therefore starts at depth two.
+    limits.max_result_depth = limits
+        .max_result_depth
+        .checked_sub(1)
+        .context("follow fanout root exceeds runtime JSON depth limit")?;
+    Ok(RuntimeJsonArrayBudget::with_limits(
+        "follow fanout terminal-envelope cohort",
+        limits,
+    ))
+}
+
+fn validate_prospective_follow_resume_payload(
+    waiter: &runtime_db::FollowWaiter,
+    child_chain_root_id: &str,
+    candidate: &Value,
+) -> Result<()> {
+    let limits = checkpoint_shape_limits();
+    let expected = usize::try_from(waiter.expected_children)
+        .context("follow expected_children does not fit usize")?;
+    if expected == 0 {
+        bail!("follow waiter {} expects no children", waiter.follow_key);
+    }
+    if expected > limits.max_container_elements {
+        bail!(
+            "follow waiter {} expects {expected} children; maximum is {}",
+            waiter.follow_key,
+            limits.max_container_elements
+        );
+    }
+    if !waiter.fanout && expected != 1 {
+        bail!(
+            "non-fanout waiter {} must expect exactly one child",
+            waiter.follow_key
+        );
+    }
+
+    let mut children = HashMap::with_capacity(waiter.children.len());
+    for child in &waiter.children {
+        if children.insert(child.item_index, child).is_some() {
+            bail!(
+                "follow waiter {} has duplicate child index {}",
+                waiter.follow_key,
+                child.item_index
+            );
+        }
+    }
+    let pending = follow_envelope_limit_reservation();
+    let mut found_candidate = false;
+    let mut budget = waiter
+        .fanout
+        .then(|| follow_fanout_items_budget(expected))
+        .transpose()?;
+    for item_index in 0..waiter.expected_children {
+        let envelope = match children.get(&item_index) {
+            Some(child) if child.child_chain_root_id == child_chain_root_id => {
+                found_candidate = true;
+                candidate
+            }
+            Some(child) => child.terminal_envelope.as_ref().unwrap_or(&pending),
+            None => &pending,
+        };
+        if let Some(budget) = budget.as_mut() {
+            budget.append(envelope)?;
+        } else {
+            validate_checkpoint_shape(envelope, "follow parent resume payload")?;
+        }
+    }
+    if !found_candidate {
+        bail!(
+            "follow waiter {} does not contain child chain {child_chain_root_id}",
+            waiter.follow_key
+        );
+    }
+
+    Ok(())
+}
+
+fn admit_follow_terminal_envelope(
+    waiter: &runtime_db::FollowWaiter,
+    child_chain_root_id: &str,
+    candidate: &Value,
+) -> Result<(Value, bool)> {
+    match validate_prospective_follow_resume_payload(waiter, child_chain_root_id, candidate) {
+        Ok(()) => Ok((candidate.clone(), false)),
+        Err(candidate_error) => {
+            let cost = validated_follow_candidate_cost(candidate)?;
+            let degraded = follow_envelope_limit_failure(cost.as_ref());
+            validate_prospective_follow_resume_payload(waiter, child_chain_root_id, &degraded)
+                .with_context(|| {
+                    format!(
+                        "follow terminal envelope exceeded bounds ({candidate_error}); bounded failure envelope also did not fit"
+                    )
+                })?;
+            Ok((degraded, true))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +579,19 @@ pub struct ThreadResultRecord {
     pub result: Option<Value>,
     pub error: Option<Value>,
     pub metadata: Option<Value>,
+}
+
+/// CAS-authoritative terminal fields used to reconcile a runtime's process
+/// result with an earlier callback finalization. This deliberately reads the
+/// signed thread snapshot rather than treating subprocess stdout as a second
+/// terminal authority.
+#[derive(Debug, Clone)]
+pub struct ThreadTerminalAuthority {
+    pub status: ryeos_state::objects::ThreadStatus,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+    pub final_cost: Option<ryeos_engine::contracts::FinalCost>,
+    pub managed_envelope: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -753,6 +1159,23 @@ impl StateStore {
         thread_id: &str,
         update: &FinalizeThreadRecord,
     ) -> Result<Vec<PersistedEventRecord>> {
+        let terminal_status = ThreadStatus::from_str_lossy(&update.status)
+            .ok_or_else(|| anyhow!("invalid terminal status: {}", update.status))?;
+        if !terminal_status.is_terminal() {
+            bail!("finalize_thread requires a terminal status");
+        }
+        if let Some(cost) = update.final_cost.as_ref() {
+            validate_final_cost_for_settlement(cost)?;
+        }
+        if let Some(envelope) = update.managed_envelope.as_ref() {
+            validate_managed_terminal_envelope(
+                envelope,
+                terminal_status,
+                update.result_json.as_ref(),
+                update.error_json.as_ref(),
+                update.final_cost.as_ref(),
+            )?;
+        }
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
@@ -769,35 +1192,7 @@ impl StateStore {
         }
 
         let now = lillux::time::iso8601_now();
-        let terminal_status = ThreadStatus::from_str_lossy(&update.status)
-            .ok_or_else(|| anyhow!("invalid terminal status: {}", update.status))?;
-
-        let mut facets = BTreeMap::new();
-        if let Some(ref cost) = update.final_cost {
-            facets.insert("cost.turns".to_string(), cost.turns.to_string());
-            facets.insert(
-                "cost.input_tokens".to_string(),
-                cost.input_tokens.to_string(),
-            );
-            facets.insert(
-                "cost.output_tokens".to_string(),
-                cost.output_tokens.to_string(),
-            );
-            facets.insert("cost.spend".to_string(), cost.spend.to_string());
-            if let Some(ref provider) = cost.provider {
-                facets.insert("cost.provider".to_string(), provider.clone());
-            }
-            // Derived-vs-incurred marker (e.g. a graph's child rollup): kept
-            // beside the figures so no reader mistakes a rollup for own-spend.
-            if let Some(ref basis) = cost.basis {
-                facets.insert("cost.basis".to_string(), basis.clone());
-            }
-            if let Some(ref metadata) = cost.metadata {
-                if let Ok(s) = serde_json::to_string(metadata) {
-                    facets.insert("cost.metadata_json".to_string(), s);
-                }
-            }
-        }
+        let facets = terminal_facets(update.final_cost.as_ref(), update.managed_envelope.as_ref())?;
 
         let artifacts_json: Vec<Value> = update
             .artifacts
@@ -831,9 +1226,9 @@ impl StateStore {
             error: update.error_json.clone(),
             budget: update.final_cost.as_ref().map(|cost| {
                 ThreadUsage {
-                    completed_turns: cost.turns as u32,
-                    input_tokens: cost.input_tokens as u64,
-                    output_tokens: cost.output_tokens as u64,
+                    completed_turns: cost.turns,
+                    input_tokens: cost.input_tokens,
+                    output_tokens: cost.output_tokens,
                     spend_usd: cost.spend,
                     spawns_used: 0, // not tracked in FinalCost
                     started_at: thread_row
@@ -841,7 +1236,7 @@ impl StateStore {
                         .clone()
                         .unwrap_or_else(|| thread_row.created_at.clone()),
                     settled_at: now.clone(),
-                    last_settled_turn_seq: cost.turns as u64,
+                    last_settled_turn_seq: u64::from(cost.turns),
                     elapsed_ms: 0, // daemon doesn't track wall-clock time
                     provider_id: None,
                     model: None,
@@ -1089,6 +1484,7 @@ impl StateStore {
         source_thread_id: &str,
         chain_root_id: &str,
         reason: Option<&str>,
+        settlement: &ContinuedThreadSettlement,
     ) -> Result<Vec<PersistedEventRecord>> {
         // The machine handoff carries a free-form runtime LOG reason. Scrub ALL
         // daemon-reserved markers so a runtime cannot mint an edge the chain-depth
@@ -1100,6 +1496,7 @@ impl StateStore {
             source_thread_id,
             chain_root_id,
             RunningContinuationKind::Machine { sanitized_reason },
+            settlement,
         )
     }
 
@@ -1114,12 +1511,14 @@ impl StateStore {
         successor: &NewThreadRecord,
         source_thread_id: &str,
         chain_root_id: &str,
+        settlement: &ContinuedThreadSettlement,
     ) -> Result<Vec<PersistedEventRecord>> {
         self.create_running_continuation_successor(
             successor,
             source_thread_id,
             chain_root_id,
             RunningContinuationKind::GraphFollowResume,
+            settlement,
         )
     }
 
@@ -1136,7 +1535,18 @@ impl StateStore {
         source_thread_id: &str,
         chain_root_id: &str,
         kind: RunningContinuationKind<'_>,
+        settlement: &ContinuedThreadSettlement,
     ) -> Result<Vec<PersistedEventRecord>> {
+        if let Some(cost) = settlement.final_cost.as_ref() {
+            validate_final_cost_for_settlement(cost)?;
+        }
+        validate_managed_terminal_envelope(
+            &settlement.managed_envelope,
+            ThreadStatus::Continued,
+            settlement.result_json.as_ref(),
+            None,
+            settlement.final_cost.as_ref(),
+        )?;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
@@ -1248,6 +1658,10 @@ impl StateStore {
         // Settle the source to `continued` (running by the check above) in the
         // same append as its `thread_continued` event — the final state change.
         let now = lillux::time::iso8601_now();
+        let facets = terminal_facets(
+            settlement.final_cost.as_ref(),
+            Some(&settlement.managed_envelope),
+        )?;
         let source_snapshot = ThreadSnapshot {
             schema: ryeos_state::objects::SCHEMA_VERSION,
             kind: "thread_snapshot".to_string(),
@@ -1268,13 +1682,29 @@ impl StateStore {
             created_at: source_row.created_at.clone(),
             updated_at: now.clone(),
             started_at: source_row.started_at.clone(),
-            finished_at: Some(now),
-            result: None,
-            outcome_code: Some("continued".to_string()),
+            finished_at: Some(now.clone()),
+            result: settlement.result_json.clone(),
+            outcome_code: Some(ThreadStatus::Continued.as_str().to_string()),
             error: None,
-            budget: None,
+            budget: settlement.final_cost.as_ref().map(|cost| ThreadUsage {
+                completed_turns: cost.turns,
+                input_tokens: cost.input_tokens,
+                output_tokens: cost.output_tokens,
+                spend_usd: cost.spend,
+                spawns_used: 0,
+                started_at: source_row
+                    .started_at
+                    .clone()
+                    .unwrap_or_else(|| source_row.created_at.clone()),
+                settled_at: now.clone(),
+                last_settled_turn_seq: u64::from(cost.turns),
+                elapsed_ms: 0,
+                provider_id: None,
+                model: None,
+                profile: None,
+            }),
             artifacts: vec![],
-            facets: Default::default(),
+            facets,
             last_event_hash: None,
             last_chain_seq: 0,
             last_thread_seq: 0,
@@ -1715,6 +2145,79 @@ impl StateStore {
             None => None,
         };
         Ok(result)
+    }
+
+    pub fn get_thread_terminal_authority(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ThreadTerminalAuthority>> {
+        let g = self.lock()?;
+        let Some(thread) = g.state_db.get_thread(thread_id)? else {
+            return Ok(None);
+        };
+        let Some(status) = ThreadStatus::from_str_lossy(&thread.status) else {
+            bail!("thread {thread_id} has unknown status `{}`", thread.status);
+        };
+        if !status.is_terminal() {
+            return Ok(None);
+        }
+
+        let mut head_cache = ryeos_state::HeadCache::new();
+        let snapshot = ryeos_state::chain::read_thread_snapshot(
+            g.state_db.cas_root(),
+            g.state_db.refs_root(),
+            &thread.chain_root_id,
+            thread_id,
+            &mut head_cache,
+        )?
+        .snapshot
+        .ok_or_else(|| anyhow!("terminal thread {thread_id} is missing its CAS snapshot"))?;
+        let ThreadSnapshot {
+            status: snapshot_status,
+            result,
+            error,
+            budget,
+            facets,
+            ..
+        } = snapshot;
+        if snapshot_status != status {
+            bail!(
+                "terminal thread {thread_id} projection status `{status}` contradicts CAS status `{}`",
+                snapshot_status
+            );
+        }
+
+        let final_cost = budget
+            .map(|usage| {
+                let metadata = facets
+                    .get("cost.metadata_json")
+                    .map(|raw| serde_json::from_str(raw))
+                    .transpose()
+                    .context("decode authoritative final cost metadata")?;
+                Ok::<_, anyhow::Error>(ryeos_engine::contracts::FinalCost {
+                    turns: usage.completed_turns,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    spend: usage.spend_usd,
+                    provider: facets.get("cost.provider").cloned(),
+                    basis: facets.get("cost.basis").cloned(),
+                    metadata,
+                })
+            })
+            .transpose()?;
+        let managed_envelope = facets
+            .get("runtime.terminal_envelope_json")
+            .map(|raw| serde_json::from_str(raw))
+            .transpose()
+            .context("decode authoritative managed runtime terminal envelope")?;
+
+        Ok(Some(ThreadTerminalAuthority {
+            status,
+            result,
+            error,
+            final_cost,
+            managed_envelope,
+        }))
     }
 
     pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
@@ -2322,6 +2825,7 @@ impl StateStore {
         &self,
         seed: &runtime_db::NewFollowWaiter,
     ) -> Result<runtime_db::FollowWaiter> {
+        validate_follow_reservation_shape(seed)?;
         let g = self.lock()?;
         g.runtime_db.reserve_follow(seed)
     }
@@ -2383,11 +2887,27 @@ impl StateStore {
         terminal_envelope: &serde_json::Value,
     ) -> Result<bool> {
         let g = self.lock()?;
+        let Some(waiter) = g
+            .runtime_db
+            .get_follow_waiter_by_child_chain(child_chain_root_id)?
+        else {
+            return Ok(false);
+        };
+        let (terminal_envelope, degraded) =
+            admit_follow_terminal_envelope(&waiter, child_chain_root_id, terminal_envelope)?;
+        if degraded {
+            tracing::warn!(
+                child_chain_root_id,
+                child_terminal_thread_id,
+                follow_key = %waiter.follow_key,
+                "follow child terminal envelope exceeded parent resume bounds; storing bounded failure envelope"
+            );
+        }
         g.runtime_db.mark_follow_child_terminal(
             child_chain_root_id,
             child_terminal_thread_id,
             child_terminal_status,
-            terminal_envelope,
+            &terminal_envelope,
         )
     }
 
@@ -2930,6 +3450,133 @@ mod tests {
             .with_projection(|_| Ok(()))
             .expect_err("stale projection read must fail");
         assert!(error.to_string().contains("not current"));
+    }
+
+    #[test]
+    fn settlement_cost_boundary_rejects_invalid_values() {
+        let valid = ryeos_engine::contracts::FinalCost {
+            turns: 0,
+            input_tokens: 1,
+            output_tokens: 2,
+            spend: 0.01,
+            provider: None,
+            basis: None,
+            metadata: None,
+        };
+        assert!(validate_final_cost_for_settlement(&valid).is_ok());
+
+        for invalid in [
+            ryeos_engine::contracts::FinalCost {
+                spend: -0.01,
+                ..valid.clone()
+            },
+            ryeos_engine::contracts::FinalCost {
+                spend: f64::NAN,
+                ..valid.clone()
+            },
+            ryeos_engine::contracts::FinalCost {
+                input_tokens: i64::MAX as u64 + 1,
+                ..valid.clone()
+            },
+            ryeos_engine::contracts::FinalCost {
+                output_tokens: i64::MAX as u64 + 1,
+                ..valid.clone()
+            },
+            ryeos_engine::contracts::FinalCost {
+                basis: Some("estimated".to_string()),
+                ..valid.clone()
+            },
+        ] {
+            assert!(validate_final_cost_for_settlement(&invalid).is_err());
+        }
+    }
+
+    fn follow_waiter_for_admission() -> runtime_db::FollowWaiter {
+        runtime_db::FollowWaiter {
+            follow_key: "follow-key".to_string(),
+            parent_thread_id: "T-parent".to_string(),
+            parent_chain_root_id: "T-parent".to_string(),
+            parent_successor_thread_id: Some("T-successor".to_string()),
+            follow_node: "fanout".to_string(),
+            graph_run_id: "run-1".to_string(),
+            step_count: 1,
+            frontier_id: None,
+            fanout: true,
+            expected_children: 2,
+            children: vec![runtime_db::FollowWaiterChild {
+                item_index: 0,
+                item_ref: "tool:test/one".to_string(),
+                spec_hash: "spec".to_string(),
+                child_thread_id: "T-child".to_string(),
+                child_chain_root_id: "T-child".to_string(),
+                terminal_thread_id: None,
+                terminal_status: None,
+                terminal_envelope: None,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            }],
+            phase: runtime_db::follow_phase::RESERVED.to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn follow_terminal_admission_reserves_space_for_pending_children() {
+        let waiter = follow_waiter_for_admission();
+        let candidate = json!({
+            "success": true,
+            "status": "completed",
+            "result": 1,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+
+        validate_prospective_follow_resume_payload(&waiter, "T-child", &candidate).unwrap();
+    }
+
+    #[test]
+    fn oversized_follow_terminal_is_replaced_before_persistence() {
+        let waiter = follow_waiter_for_admission();
+        let candidate = json!({
+            "success": true,
+            "status": "completed",
+            "result": "x".repeat(checkpoint_shape_limits().max_result_bytes),
+            "outputs": null,
+            "warnings": [],
+            "cost": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_usd": 0.03,
+            },
+        });
+
+        let (admitted, degraded) =
+            admit_follow_terminal_envelope(&waiter, "T-child", &candidate).unwrap();
+        assert!(degraded);
+        assert_eq!(admitted["success"], false);
+        assert_eq!(admitted["result"]["code"], FOLLOW_ENVELOPE_LIMIT_CODE);
+        assert_eq!(admitted["cost"]["input_tokens"], 11);
+        assert_eq!(admitted["cost"]["output_tokens"], 7);
+    }
+
+    #[test]
+    fn impossible_follow_cohort_is_rejected_before_reservation() {
+        let seed = runtime_db::NewFollowWaiter {
+            follow_key: "too-wide".to_string(),
+            parent_thread_id: "T-parent".to_string(),
+            parent_chain_root_id: "T-parent".to_string(),
+            follow_node: "fanout".to_string(),
+            graph_run_id: "run-1".to_string(),
+            step_count: 1,
+            frontier_id: None,
+            fanout: true,
+            expected_children: u32::MAX,
+        };
+
+        let error = validate_follow_reservation_shape(&seed).unwrap_err();
+        assert!(error.to_string().contains("maximum"));
     }
 
     fn thread_record(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {

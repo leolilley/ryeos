@@ -12,7 +12,8 @@ mod integration_tests {
     use std::sync::Arc;
 
     use ryeos_app::state_store::{
-        FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, StateStore,
+        ContinuedThreadSettlement, FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord,
+        StateStore,
     };
     use ryeos_app::write_barrier::WriteBarrier;
     use tempfile::TempDir;
@@ -58,6 +59,21 @@ mod integration_tests {
             project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
+        }
+    }
+
+    fn continued_settlement() -> ContinuedThreadSettlement {
+        ContinuedThreadSettlement {
+            result_json: None,
+            final_cost: None,
+            managed_envelope: serde_json::json!({
+                "success": false,
+                "status": "continued",
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            }),
         }
     }
 
@@ -256,6 +272,7 @@ mod integration_tests {
                 &make_thread("S", "P", "graph", "test/graph", Some("P")),
                 "P",
                 "P",
+                &continued_settlement(),
             )
             .unwrap();
         store
@@ -301,6 +318,7 @@ mod integration_tests {
                 &make_thread("S", "P", "graph", "test/graph", Some("P")),
                 "P",
                 "P",
+                &continued_settlement(),
             )
             .unwrap();
         assert!(store
@@ -412,6 +430,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
 
         let persisted = store
@@ -437,6 +456,141 @@ mod integration_tests {
     }
 
     #[test]
+    fn managed_finalization_rejects_terminal_authority_contradictions() {
+        let (_tmpdir, store) = setup_state_store();
+        let thread = make_thread(
+            "T-managed-contract",
+            "T-managed-contract",
+            "directive",
+            "test/item",
+            None,
+        );
+        store.create_thread(&thread).expect("create thread");
+        store
+            .mark_thread_running("T-managed-contract", None)
+            .expect("mark running");
+
+        let error = serde_json::json!({"code": "runtime_failed"});
+        let cost = ryeos_engine::contracts::FinalCost {
+            turns: 0,
+            input_tokens: 11,
+            output_tokens: 4,
+            spend: 0.25,
+            provider: None,
+            basis: None,
+            metadata: None,
+        };
+        let valid_envelope = serde_json::json!({
+            "success": false,
+            "status": "failed",
+            "result": error.clone(),
+            "outputs": {"partial": true},
+            "warnings": ["runtime fallback"],
+            "cost": {
+                "input_tokens": 11,
+                "output_tokens": 4,
+                "total_usd": 0.25,
+            },
+        });
+        let valid = FinalizeThreadRecord {
+            status: "failed".to_string(),
+            outcome_code: Some("failed".to_string()),
+            result_json: None,
+            error_json: Some(error),
+            artifacts: vec![],
+            final_cost: Some(cost),
+            managed_envelope: Some(valid_envelope.clone()),
+        };
+
+        for (label, envelope) in [
+            (
+                "status",
+                serde_json::json!({
+                    "success": false,
+                    "status": "cancelled",
+                    "result": valid.error_json.clone().unwrap(),
+                    "outputs": {"partial": true},
+                    "warnings": ["runtime fallback"],
+                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
+                }),
+            ),
+            (
+                "success",
+                serde_json::json!({
+                    "success": true,
+                    "status": "failed",
+                    "result": valid.error_json.clone().unwrap(),
+                    "outputs": {"partial": true},
+                    "warnings": ["runtime fallback"],
+                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
+                }),
+            ),
+            (
+                "result",
+                serde_json::json!({
+                    "success": false,
+                    "status": "failed",
+                    "result": {"code": "different"},
+                    "outputs": {"partial": true},
+                    "warnings": ["runtime fallback"],
+                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
+                }),
+            ),
+            (
+                "cost",
+                serde_json::json!({
+                    "success": false,
+                    "status": "failed",
+                    "result": valid.error_json.clone().unwrap(),
+                    "outputs": {"partial": true},
+                    "warnings": ["runtime fallback"],
+                    "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.5},
+                }),
+            ),
+        ] {
+            let mut contradictory = valid.clone();
+            contradictory.managed_envelope = Some(envelope);
+            assert!(
+                store
+                    .finalize_thread("T-managed-contract", &contradictory)
+                    .is_err(),
+                "{label} contradiction must be rejected"
+            );
+        }
+
+        let mut missing_required_field = valid.clone();
+        let mut envelope = valid_envelope.clone();
+        envelope.as_object_mut().unwrap().remove("outputs");
+        missing_required_field.managed_envelope = Some(envelope);
+        assert!(store
+            .finalize_thread("T-managed-contract", &missing_required_field)
+            .is_err());
+
+        let mut completed_with_error = valid.clone();
+        completed_with_error.status = "completed".to_string();
+        completed_with_error.managed_envelope = Some(serde_json::json!({
+            "success": true,
+            "status": "completed",
+            "result": completed_with_error.error_json.clone().unwrap(),
+            "outputs": null,
+            "warnings": [],
+            "cost": {"input_tokens": 11, "output_tokens": 4, "total_usd": 0.25},
+        }));
+        assert!(store
+            .finalize_thread("T-managed-contract", &completed_with_error)
+            .is_err());
+
+        store
+            .finalize_thread("T-managed-contract", &valid)
+            .expect("coherent managed finalization");
+        let authority = store
+            .get_thread_terminal_authority("T-managed-contract")
+            .unwrap()
+            .unwrap();
+        assert_eq!(authority.managed_envelope, Some(valid_envelope));
+    }
+
+    #[test]
     fn state_store_reads_back_structured_error_as_object() {
         let (_tmpdir, store) = setup_state_store();
 
@@ -457,6 +611,7 @@ mod integration_tests {
             error_json: Some(err.clone()),
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
         store
             .finalize_thread("T-err-1", &finalize)
@@ -568,6 +723,7 @@ mod integration_tests {
                 metadata: None,
             }],
             final_cost: None,
+            managed_envelope: None,
         };
 
         store
@@ -662,6 +818,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
@@ -725,6 +882,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
@@ -777,13 +935,20 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
 
         let successor = make_thread("T-mc-done-2", "T-mc-done-1", "directive", "test/item", None);
         let err = store
-            .create_machine_continuation(&successor, "T-mc-done-1", "T-mc-done-1", Some("limit"))
+            .create_machine_continuation(
+                &successor,
+                "T-mc-done-1",
+                "T-mc-done-1",
+                Some("limit"),
+                &continued_settlement(),
+            )
             .expect_err("machine continuation must refuse a terminal source");
         assert!(
             err.to_string().contains("requires a running source"),
@@ -821,7 +986,13 @@ mod integration_tests {
 
         let successor = make_thread("T-mc-run-2", "T-mc-run-1", "directive", "test/item", None);
         let err = store
-            .create_machine_continuation(&successor, "T-mc-run-1", "T-mc-run-1", Some("limit"))
+            .create_machine_continuation(
+                &successor,
+                "T-mc-run-1",
+                "T-mc-run-1",
+                Some("limit"),
+                &continued_settlement(),
+            )
             .expect_err("machine continuation must require a captured ResumeContext");
         assert!(
             err.to_string().contains("no captured ResumeContext"),
@@ -848,6 +1019,154 @@ mod integration_tests {
     }
 
     #[test]
+    fn machine_continuation_rejects_managed_authority_contradictions_without_mutation() {
+        let (_tmpdir, store) = setup_state_store();
+        let source = make_thread(
+            "T-mc-invalid-1",
+            "T-mc-invalid-1",
+            "directive",
+            "test/item",
+            None,
+        );
+        store.create_thread(&source).expect("create source");
+        seed_continuable(&store, "T-mc-invalid-1", "directive");
+        let successor = make_thread(
+            "T-mc-invalid-2",
+            "T-mc-invalid-1",
+            "directive",
+            "test/item",
+            Some("T-mc-invalid-1"),
+        );
+
+        let mut wrong_status = continued_settlement();
+        wrong_status.managed_envelope["status"] = serde_json::json!("failed");
+        assert!(store
+            .create_machine_continuation(
+                &successor,
+                "T-mc-invalid-1",
+                "T-mc-invalid-1",
+                Some("segment limit"),
+                &wrong_status,
+            )
+            .is_err());
+
+        let mut wrong_result = continued_settlement();
+        wrong_result.managed_envelope["result"] = serde_json::json!({"unexpected": true});
+        assert!(store
+            .create_machine_continuation(
+                &successor,
+                "T-mc-invalid-1",
+                "T-mc-invalid-1",
+                Some("segment limit"),
+                &wrong_result,
+            )
+            .is_err());
+
+        let mut unexpected_cost = continued_settlement();
+        unexpected_cost.managed_envelope["cost"] = serde_json::json!({
+            "input_tokens": 1,
+            "output_tokens": 0,
+            "total_usd": 0.0,
+        });
+        assert!(store
+            .create_machine_continuation(
+                &successor,
+                "T-mc-invalid-1",
+                "T-mc-invalid-1",
+                Some("segment limit"),
+                &unexpected_cost,
+            )
+            .is_err());
+
+        assert_eq!(
+            store.get_thread("T-mc-invalid-1").unwrap().unwrap().status,
+            "running"
+        );
+        assert!(store.get_thread("T-mc-invalid-2").unwrap().is_none());
+    }
+
+    #[test]
+    fn machine_continuation_persists_exact_terminal_authority() {
+        let (_tmpdir, store) = setup_state_store();
+        let source = make_thread(
+            "T-mc-authority-1",
+            "T-mc-authority-1",
+            "directive",
+            "test/item",
+            None,
+        );
+        store.create_thread(&source).expect("create source");
+        seed_continuable(&store, "T-mc-authority-1", "directive");
+
+        let result = serde_json::json!({"checkpoint": "cut-off"});
+        let raw_cost = serde_json::json!({
+            "input_tokens": 17,
+            "output_tokens": 5,
+            "total_usd": 0.125,
+            "basis": "rollup",
+        });
+        let envelope = serde_json::json!({
+            "success": false,
+            "status": "continued",
+            "result": result.clone(),
+            "outputs": {"partial": true},
+            "warnings": ["near segment limit"],
+            "cost": raw_cost,
+        });
+        let settlement = ContinuedThreadSettlement {
+            result_json: Some(result),
+            final_cost: Some(ryeos_engine::contracts::FinalCost {
+                turns: 3,
+                input_tokens: 17,
+                output_tokens: 5,
+                spend: 0.125,
+                provider: Some("test-provider".to_string()),
+                basis: Some("rollup".to_string()),
+                metadata: Some(serde_json::json!({"source": "runtime"})),
+            }),
+            managed_envelope: envelope.clone(),
+        };
+        let successor = make_thread(
+            "T-mc-authority-2",
+            "T-mc-authority-1",
+            "directive",
+            "test/item",
+            Some("T-mc-authority-1"),
+        );
+
+        store
+            .create_machine_continuation(
+                &successor,
+                "T-mc-authority-1",
+                "T-mc-authority-1",
+                Some("segment limit"),
+                &settlement,
+            )
+            .expect("machine continuation");
+
+        let authority = store
+            .get_thread_terminal_authority("T-mc-authority-1")
+            .expect("read terminal authority")
+            .expect("continued source is terminal");
+        assert_eq!(
+            authority.status,
+            ryeos_state::objects::ThreadStatus::Continued
+        );
+        assert_eq!(authority.managed_envelope, Some(envelope));
+        let cost = authority.final_cost.expect("authoritative final cost");
+        assert_eq!(cost.turns, 3);
+        assert_eq!(cost.input_tokens, 17);
+        assert_eq!(cost.output_tokens, 5);
+        assert_eq!(cost.spend, 0.125);
+        assert_eq!(cost.provider.as_deref(), Some("test-provider"));
+        assert_eq!(cost.basis.as_deref(), Some("rollup"));
+        assert_eq!(
+            cost.metadata,
+            Some(serde_json::json!({"source": "runtime"}))
+        );
+    }
+
+    #[test]
     fn create_or_get_continuation_dedups_by_fingerprint() {
         use ryeos_app::state_store::ContinuationOutcome;
         let (_tmpdir, store) = setup_state_store();
@@ -866,6 +1185,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");
@@ -1012,7 +1332,13 @@ mod integration_tests {
             let id = format!("D{i}");
             let succ = make_thread(&id, "D0", "directive", "test/item", Some(&source));
             store
-                .create_machine_continuation(&succ, &source, "D0", Some("turn_limit"))
+                .create_machine_continuation(
+                    &succ,
+                    &source,
+                    "D0",
+                    Some("turn_limit"),
+                    &continued_settlement(),
+                )
                 .unwrap_or_else(|e| panic!("machine link #{i} must be allowed: {e}"));
             make_continuable(&id);
             source = id;
@@ -1023,7 +1349,13 @@ mod integration_tests {
         // runtime fails terminal.
         let over = make_thread("D-over", "D0", "directive", "test/item", Some(&source));
         let err = store
-            .create_machine_continuation(&over, &source, "D0", Some("turn_limit"))
+            .create_machine_continuation(
+                &over,
+                &source,
+                "D0",
+                Some("turn_limit"),
+                &continued_settlement(),
+            )
             .expect_err("continuation past the cap must be refused");
         assert!(
             err.to_string().contains("continuation depth limit reached"),
@@ -1044,7 +1376,7 @@ mod integration_tests {
         // apply. It is created (not launched) and settles the source `continued`.
         let follow_succ = make_thread("D-follow", "D0", "directive", "test/item", Some(&source));
         store
-            .create_follow_resume_successor(&follow_succ, &source, "D0")
+            .create_follow_resume_successor(&follow_succ, &source, "D0", &continued_settlement())
             .expect("follow-resume must be allowed at the machine cap");
         let fs = store
             .get_thread("D-follow")
@@ -1130,6 +1462,7 @@ mod integration_tests {
                     &src,
                     &src,
                     Some(spoof),
+                    &continued_settlement(),
                 )
                 .expect("machine continuation");
             assert_eq!(
@@ -1155,6 +1488,7 @@ mod integration_tests {
                 &make_thread("F-succ", "F-root", "directive", "test/item", Some("F-root")),
                 "F-root",
                 "F-root",
+                &continued_settlement(),
             )
             .expect("follow-resume");
 
@@ -1216,6 +1550,7 @@ mod integration_tests {
                     &make_thread("F-dup", "F-root", "directive", "test/item", Some("F-root")),
                     "F-root",
                     "F-root",
+                    &continued_settlement(),
                 )
                 .is_err(),
             "a second successor off a settled source must be rejected"
@@ -1232,6 +1567,7 @@ mod integration_tests {
                     "R-cr",
                     "R-cr",
                     Some("turn_limit"),
+                    &continued_settlement(),
                 )
                 .is_err(),
             "machine continuation requires a running source"
@@ -1251,6 +1587,7 @@ mod integration_tests {
                     "R-nr",
                     "R-nr",
                     Some("turn_limit"),
+                    &continued_settlement(),
                 )
                 .is_err(),
             "missing source ResumeContext must fail"
@@ -1286,6 +1623,7 @@ mod integration_tests {
                     ),
                     "G-root",
                     "G-root",
+                    &continued_settlement(),
                 )
                 .is_err(),
             "successor with a foreign chain root must be rejected"
@@ -1308,6 +1646,7 @@ mod integration_tests {
                     ),
                     "G-root",
                     "G-root",
+                    &continued_settlement(),
                 )
                 .is_err(),
             "successor declaring a foreign upstream must be rejected"
@@ -1410,6 +1749,7 @@ mod integration_tests {
                 metadata: Some(serde_json::json!({"lines": 10})),
             }],
             final_cost: None,
+            managed_envelope: None,
         };
 
         store
@@ -1552,6 +1892,7 @@ mod integration_tests {
                 basis: None,
                 metadata: None,
             }),
+            managed_envelope: None,
         };
         store.finalize_thread("T-e2e", &finalize).expect("finalize");
 
@@ -1654,6 +1995,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
         store
             .finalize_thread("T-skip-attach", &finalize)
@@ -1703,6 +2045,7 @@ mod integration_tests {
             error_json: Some(serde_json::json!({"reason": "test_cancel"})),
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
 
         let persisted = store
@@ -1745,6 +2088,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
         store
             .finalize_thread("T-double", &finalize)
@@ -1758,6 +2102,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
         let err = store
             .finalize_thread("T-double", &cancel_finalize)
@@ -1789,6 +2134,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             final_cost: None,
+            managed_envelope: None,
         };
 
         let persisted = store

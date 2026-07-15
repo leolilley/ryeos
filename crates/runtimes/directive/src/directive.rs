@@ -49,7 +49,7 @@ pub struct DirectiveHeader {
     #[serde(default)]
     pub context: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
-    pub hooks: Option<Vec<Value>>,
+    pub hooks: Option<Vec<ryeos_runtime::HookDefinition>>,
     #[serde(default)]
     pub continuation: ContinuationConfig,
     /// Opt-in corrective turn: when the directive declares `outputs` and a
@@ -372,7 +372,10 @@ pub struct BootstrapConfig {
     pub context_before: Option<String>,
     pub context_after: Option<String>,
     pub context_positions: HashMap<String, Vec<String>>,
-    pub hooks: Vec<ryeos_runtime::HookDefinition>,
+    /// Execution-ready hooks. Source hook definitions are merged and compiled
+    /// during bootstrap and never reach the runner.
+    #[serde(skip)]
+    pub hooks: Vec<ryeos_runtime::CompiledHook>,
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(default)]
     pub return_nudge: ReturnNudge,
@@ -555,6 +558,43 @@ mod tests {
             .return_nudge
             .message(&outs)
             .contains("directive_return"));
+    }
+
+    #[test]
+    fn directive_header_hooks_use_the_typed_scalar_condition_grammar() {
+        let header: DirectiveHeader = serde_yaml::from_str(
+            r#"
+hooks:
+  - id: selected
+    event: after_step
+    condition: "turn >= 2"
+    action: {item_id: "tool:test/hook"}
+"#,
+        )
+        .unwrap();
+        let hooks = header.hooks.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert!(matches!(
+            &hooks[0].condition,
+            ryeos_runtime::ExpressionCondition::Expression(source) if source == "turn >= 2"
+        ));
+
+        let error = serde_yaml::from_str::<DirectiveHeader>(
+            r#"
+hooks:
+  - id: legacy
+    event: after_step
+    condition: {path: turn, op: gte, value: 2}
+    action: {item_id: "tool:test/hook"}
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("structured path/op/value conditions are not supported"),
+            "expected the structured condition to be rejected, got: {error}"
+        );
     }
 
     // A config that omits the retry knobs must inherit the same sane values

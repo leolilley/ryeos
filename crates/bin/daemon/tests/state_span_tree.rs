@@ -78,6 +78,7 @@ fn state_store_write_path_emits_state_spans() {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .expect("finalize_thread");

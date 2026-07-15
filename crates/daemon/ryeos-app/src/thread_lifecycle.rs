@@ -13,9 +13,9 @@ use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
-    FinalizeThreadRecord, NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord,
-    StateStore, ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadListItem,
-    ThreadResultRecord,
+    ContinuedThreadSettlement, FinalizeThreadRecord, NewArtifactRecord, NewEventRecord,
+    NewThreadRecord, PersistedEventRecord, StateStore, ThreadArtifactRecord, ThreadDetail,
+    ThreadEdgeRecord, ThreadListItem, ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
@@ -498,6 +498,65 @@ pub struct ThreadContinuationParams {
     /// autonomous by construction — it carries no reason/gate/mode.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Exact terminal payload the runtime will emit after this atomic handoff.
+    pub completion: ryeos_runtime::TerminalCompletion,
+}
+
+fn continued_settlement(
+    completion: &ryeos_runtime::TerminalCompletion,
+) -> Result<ContinuedThreadSettlement> {
+    use ryeos_engine::contracts::ThreadTerminalStatus;
+
+    if completion.status != ThreadTerminalStatus::Continued {
+        bail!(
+            "continuation completion status must be `{}`, received `{}`",
+            ThreadTerminalStatus::Continued.as_str(),
+            completion.status.as_str()
+        );
+    }
+    if completion.error.is_some() {
+        bail!("continued completion must not carry a terminal error");
+    }
+    if let Some(outcome_code) = completion.outcome_code.as_deref() {
+        if outcome_code != ThreadTerminalStatus::Continued.as_str() {
+            bail!(
+                "continued completion outcome_code must be `{}`, received `{outcome_code}`",
+                ThreadTerminalStatus::Continued.as_str()
+            );
+        }
+    }
+
+    let runtime_cost = completion
+        .cost
+        .as_ref()
+        .map(|raw| serde_json::from_value::<ryeos_runtime::envelope::RuntimeCost>(raw.clone()))
+        .transpose()
+        .context("decode continued runtime cost")?;
+    if let Some(cost) = runtime_cost.as_ref() {
+        cost.validate().context("validate continued runtime cost")?;
+    }
+    let final_cost = runtime_cost.as_ref().map(|cost| FinalCost {
+        turns: 0,
+        input_tokens: cost.input_tokens,
+        output_tokens: cost.output_tokens,
+        spend: cost.total_usd,
+        provider: None,
+        basis: cost.basis.clone(),
+        metadata: None,
+    });
+    let managed_envelope = managed_runtime_envelope(
+        completion.status.as_str(),
+        completion.result.as_ref(),
+        None,
+        completion.cost.as_ref(),
+        &completion.outputs,
+        &completion.warnings,
+    );
+    Ok(ContinuedThreadSettlement {
+        result_json: completion.result.clone(),
+        final_cost,
+        managed_envelope,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -939,6 +998,7 @@ impl ThreadLifecycleService {
                     .map(artifact_to_record)
                     .collect(),
                 final_cost: completion.final_cost.clone(),
+                managed_envelope: managed_envelope.clone(),
             },
         )?;
         self.publish_records(&persisted);
@@ -1063,6 +1123,7 @@ impl ThreadLifecycleService {
                 error_json: params.error.clone(),
                 artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
                 final_cost: params.final_cost.clone(),
+                managed_envelope: managed_envelope.clone(),
             },
         )?;
         self.publish_records(&persisted);
@@ -1655,6 +1716,13 @@ impl ThreadLifecycleService {
         self.state_store.get_thread_result(thread_id)
     }
 
+    pub fn get_thread_terminal_authority(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<crate::state_store::ThreadTerminalAuthority>> {
+        self.state_store.get_thread_terminal_authority(thread_id)
+    }
+
     pub fn list_thread_artifacts(&self, thread_id: &str) -> Result<Vec<ThreadArtifactRecord>> {
         self.state_store.list_thread_artifacts(thread_id)
     }
@@ -1722,6 +1790,7 @@ impl ThreadLifecycleService {
             &source.thread_id,
             &source.chain_root_id,
             params.reason.as_deref(),
+            &continued_settlement(&params.completion)?,
         )?;
         self.publish_records(&persisted);
 
@@ -1747,11 +1816,13 @@ impl ThreadLifecycleService {
         successor: &NewThreadRecord,
         source_thread_id: &str,
         chain_root_id: &str,
+        completion: &ryeos_runtime::TerminalCompletion,
     ) -> Result<()> {
         let persisted = self.state_store.create_follow_resume_successor(
             successor,
             source_thread_id,
             chain_root_id,
+            &continued_settlement(completion)?,
         )?;
         self.publish_records(&persisted);
         Ok(())
@@ -2013,6 +2084,7 @@ fn degraded_follow_envelope(
     child_error: Option<&Value>,
     final_cost: Option<&ryeos_engine::contracts::FinalCost>,
 ) -> Value {
+    let status = ryeos_runtime::envelope::RuntimeResultStatus::Failed;
     let raw_cost = final_cost.map(|c| {
         json!({
             "input_tokens": c.input_tokens,
@@ -2022,7 +2094,7 @@ fn degraded_follow_envelope(
     });
     json!({
         "success": false,
-        "status": "failed",
+        "status": status,
         "result": {
             "code": DEGRADED_FOLLOW_ENVELOPE_CODE,
             "message": "follow child finalized without a canonical runtime envelope; \

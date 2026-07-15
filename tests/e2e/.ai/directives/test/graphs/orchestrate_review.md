@@ -43,26 +43,26 @@ Orchestrates a multi-step code review by spawning nested LLM threads for analysi
     Here is the code to review:
 
     ```
-    {input:code_snippet}
+    ${inputs.code_snippet}
     ```
 
-    Spawn a nested thread to analyze the code using the `test/graphs/analyze_code` directive with the code above as `code_snippet` and output path `{input:output_dir}/orchestrated_analysis.json`. Use limit overrides: turns=6, spend=0.05.
+    Spawn a nested thread to analyze the code using the `test/graphs/analyze_code` directive with the code above as `code_snippet` and output path `${inputs.output_dir}/orchestrated_analysis.json`. Use limit overrides: turns=6, spend=0.05.
 
     Wait for the result. Note the thread_id from the response.
   </step>
 
   <step name="read_analysis">
-    Read the analysis file from `{input:output_dir}/orchestrated_analysis.json`.
+    Read the analysis file from `${inputs.output_dir}/orchestrated_analysis.json`.
   </step>
 
   <step name="summarize">
-    Spawn another nested thread to summarize the analysis JSON using the `test/graphs/summarize_text` directive with the analysis content as `text` and output path `{input:output_dir}/orchestrated_summary.md`. Use limit overrides: turns=4, spend=0.03.
+    Spawn another nested thread to summarize the analysis JSON using the `test/graphs/summarize_text` directive with the analysis content as `text` and output path `${inputs.output_dir}/orchestrated_summary.md`. Use limit overrides: turns=4, spend=0.03.
 
     Wait for the result. Note the thread_id.
   </step>
 
   <step name="write_review">
-    Write a comprehensive review to `{input:output_dir}/orchestrated_review.md` that includes:
+    Write a comprehensive review to `${inputs.output_dir}/orchestrated_review.md` that includes:
     1. The original code (from the input)
     2. The analysis results (from the analysis thread)
     3. The summary (from the summary thread)

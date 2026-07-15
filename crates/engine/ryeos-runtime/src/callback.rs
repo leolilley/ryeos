@@ -91,6 +91,9 @@ pub struct SpawnFollowChildRequest {
     /// Optional graph frontier id, recorded on the waiter for diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontier_id: Option<String>,
+    /// Exact `continued` terminal payload the graph will emit on stdout after
+    /// the daemon atomically records the follow handoff.
+    pub completion: TerminalCompletion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,7 +113,7 @@ pub struct FollowChildSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalCompletion {
-    pub status: String,
+    pub status: crate::ThreadTerminalStatus,
     #[serde(default)]
     pub outcome_code: Option<String>,
     #[serde(default)]
@@ -122,12 +125,9 @@ pub struct TerminalCompletion {
     /// The runtime's `RuntimeResult.outputs` — its structured return value,
     /// distinct from the terminal `result` (which some runtimes set to a sentinel
     /// while the real values ride here). Carried so a detached child's outputs are
-    /// persisted for a follow parent to consume; defaults to null when unsent
-    /// (degraded).
-    #[serde(default)]
+    /// persisted for a follow parent to consume.
     pub outputs: Value,
     /// The runtime's `RuntimeResult.warnings` accumulated before finalize.
-    #[serde(default)]
     pub warnings: Vec<String>,
 }
 
@@ -161,6 +161,71 @@ pub struct ActionPayload {
     pub launch_window: Option<LaunchWindow>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HookActionPrimary {
+    Execute,
+}
+
+/// Authored hook actions use the shared execute-action grammar, with two
+/// deliberate conveniences at this pre-callback boundary: `primary: execute`
+/// is accepted as the hook source's routing declaration and `thread` defaults
+/// to `inline`. Once parsed, the callback receives the exact [`ActionPayload`]
+/// used by every other dispatch path.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoredHookAction {
+    #[serde(default)]
+    primary: Option<HookActionPrimary>,
+    item_id: String,
+    #[serde(default)]
+    params: Value,
+    #[serde(default = "inline_thread")]
+    thread: String,
+    #[serde(default)]
+    call: Option<MethodCall>,
+    #[serde(default)]
+    facets: Option<Value>,
+    #[serde(default)]
+    launch_window: Option<LaunchWindow>,
+}
+
+fn inline_thread() -> String {
+    "inline".to_string()
+}
+
+/// Parse the one canonical hook-action shape shared by every runtime.
+///
+/// Missing/empty `item_id`, empty `thread`, unknown fields, an unsupported
+/// `primary`, and malformed typed blocks all fail before any callback occurs.
+pub fn parse_hook_action(action: Value) -> Result<ActionPayload, String> {
+    let authored: AuthoredHookAction =
+        serde_json::from_value(action).map_err(|error| format!("invalid hook action: {error}"))?;
+    let AuthoredHookAction {
+        primary: _primary,
+        item_id,
+        params,
+        thread,
+        call,
+        facets,
+        launch_window,
+    } = authored;
+    if item_id.trim().is_empty() {
+        return Err("invalid hook action: `item_id` must be a non-empty string".to_string());
+    }
+    if thread.trim().is_empty() {
+        return Err("invalid hook action: `thread` must be a non-empty string".to_string());
+    }
+    Ok(ActionPayload {
+        item_id,
+        params,
+        thread,
+        call,
+        facets,
+        launch_window,
+    })
+}
+
 /// See [`ActionPayload::launch_window`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,11 +235,11 @@ pub struct LaunchWindow {
 }
 
 /// Wire keys of [`ActionPayload`], for code that handles an action as a raw
-/// `Value` map (the graph walker builds/folds/interpolates actions untyped
+/// `Value` map (the graph walker compiles and renders selected action fields
 /// before dispatch). One source of truth: adding a field to `ActionPayload`
-/// means adding its key here and deciding whether `interpolate_action`
-/// resolves templates inside it — a literal that drifts from the struct is
-/// how `facets` shipped uninterpolated.
+/// means adding its key here and deciding whether `CompiledActionTemplate`
+/// accepts templates inside it — a literal that drifts from the struct is how
+/// `facets` once shipped unresolved.
 pub mod action_keys {
     pub const ITEM_ID: &str = "item_id";
     pub const PARAMS: &str = "params";
@@ -183,10 +248,10 @@ pub mod action_keys {
     pub const FACETS: &str = "facets";
     pub const LAUNCH_WINDOW: &str = "launch_window";
 
-    /// Keys whose values may carry `${…}` templates and are resolved by
-    /// `interpolate_action`. `THREAD` stays literal (a dispatch mode, never
-    /// a template); `CALL.method` is literal but `CALL.args` interpolates,
-    /// so the whole block is included.
+    /// Keys whose values may carry `${…}` templates and are rendered by
+    /// `CompiledActionTemplate`. `THREAD` stays literal (a dispatch mode,
+    /// never a template); the callback-owned `CALL` block may contain
+    /// templates, so the whole block is included.
     pub const INTERPOLATED: &[&str] = &[ITEM_ID, PARAMS, CALL, FACETS];
 }
 
@@ -233,6 +298,7 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         &self,
         thread_id: &str,
         log_reason: Option<&str>,
+        completion: TerminalCompletion,
     ) -> Result<Value, CallbackError>;
 
     /// Daemon-managed follow handoff: suspend the calling parent and launch a
@@ -406,12 +472,38 @@ mod tests {
     }
 
     #[test]
+    fn hook_action_uses_shared_execute_shape_and_defaults_inline() {
+        let payload = parse_hook_action(json!({
+            "primary": "execute",
+            "item_id": "tool:t/echo",
+            "params": {"message": "hi"}
+        }))
+        .unwrap();
+        assert_eq!(payload.item_id, "tool:t/echo");
+        assert_eq!(payload.thread, "inline");
+        assert_eq!(payload.params["message"], "hi");
+    }
+
+    #[test]
+    fn hook_action_rejects_drift_and_malformed_required_fields() {
+        for invalid in [
+            json!({"item_id": ""}),
+            json!({"params": {}}),
+            json!({"item_id": "tool:t/echo", "thread": ""}),
+            json!({"primary": "dispatch", "item_id": "tool:t/echo"}),
+            json!({"item_id": "tool:t/echo", "legacy": true}),
+        ] {
+            assert!(parse_hook_action(invalid).is_err());
+        }
+    }
+
+    #[test]
     fn terminal_completion_serializes_outputs_and_warnings() {
         // The UDS client serializes the WHOLE completion (anti-drift), so the wire
         // must carry outputs + warnings — a hand-listed param set previously
         // dropped them, losing a follow child's structured return.
         let completion = TerminalCompletion {
-            status: "completed".to_string(),
+            status: crate::ThreadTerminalStatus::Completed,
             outcome_code: Some("success".to_string()),
             result: Some(json!("directive_return")),
             error: None,
@@ -425,11 +517,8 @@ mod tests {
     }
 
     #[test]
-    fn terminal_completion_defaults_outputs_and_warnings() {
-        // An old runtime sending no outputs/warnings still deserializes (degraded).
+    fn terminal_completion_requires_outputs_and_warnings() {
         let wire = json!({ "status": "completed" });
-        let completion: TerminalCompletion = serde_json::from_value(wire).unwrap();
-        assert!(completion.outputs.is_null());
-        assert!(completion.warnings.is_empty());
+        assert!(serde_json::from_value::<TerminalCompletion>(wire).is_err());
     }
 }

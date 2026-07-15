@@ -326,10 +326,11 @@ fn handle_attach_process(
 ///
 /// `cost` is the runtime's own cost JSON (`{input_tokens, output_tokens,
 /// total_usd}`); it is mapped into a [`FinalCost`] before finalization.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuntimeFinalizeParams {
     thread_id: String,
-    status: String,
+    status: ryeos_engine::contracts::ThreadTerminalStatus,
     #[serde(default)]
     outcome_code: Option<String>,
     #[serde(default)]
@@ -337,77 +338,81 @@ struct RuntimeFinalizeParams {
     #[serde(default)]
     error: Option<serde_json::Value>,
     #[serde(default)]
-    cost: Option<serde_json::Value>,
+    cost: Option<RuntimeFinalizeCost>,
     /// The runtime's structured outputs + warnings. Preserved into the canonical
     /// managed envelope so a detached follow child's return data survives to the
-    /// parent's resume. Absent from older runtimes → degraded (empty).
-    #[serde(default)]
+    /// parent's resume.
     outputs: serde_json::Value,
-    #[serde(default)]
     warnings: Vec<String>,
 }
 
-/// Map a runtime self-reported terminal status. Timeout is daemon-owned — the
-/// launch supervisor finalizes timed-out runs via the fallback path — so a
-/// runtime never self-reports `timed_out` here, and any unrecognized status is
-/// rejected rather than guessed.
-fn terminal_status_from_str(status: &str) -> Result<ryeos_engine::contracts::ThreadTerminalStatus> {
-    use ryeos_engine::contracts::ThreadTerminalStatus;
-    Ok(match status {
-        "completed" => ThreadTerminalStatus::Completed,
-        "failed" => ThreadTerminalStatus::Failed,
-        "cancelled" => ThreadTerminalStatus::Cancelled,
-        "continued" => ThreadTerminalStatus::Continued,
-        "killed" => ThreadTerminalStatus::Killed,
-        other => anyhow::bail!("invalid terminal status: {other}"),
-    })
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeFinalizeCost {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basis: Option<String>,
 }
 
-fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contracts::FinalCost {
-    ryeos_engine::contracts::FinalCost {
+fn final_cost_from_runtime(
+    cost: &RuntimeFinalizeCost,
+) -> std::result::Result<
+    ryeos_engine::contracts::FinalCost,
+    ryeos_runtime::envelope::RuntimeCostError,
+> {
+    let runtime_cost = ryeos_runtime::envelope::RuntimeCost {
+        input_tokens: cost.input_tokens,
+        output_tokens: cost.output_tokens,
+        total_usd: cost.total_usd,
+        basis: cost.basis.clone(),
+    };
+    runtime_cost.validate()?;
+    Ok(ryeos_engine::contracts::FinalCost {
         turns: 0,
-        input_tokens: cost
-            .get("input_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        output_tokens: cost
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        spend: cost
-            .get("total_usd")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
+        input_tokens: runtime_cost.input_tokens,
+        output_tokens: runtime_cost.output_tokens,
+        spend: runtime_cost.total_usd,
         provider: None,
-        basis: cost
-            .get("basis")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
+        basis: runtime_cost.basis,
         metadata: None,
-    }
+    })
 }
 
 fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
+    let final_cost = params
+        .cost
+        .as_ref()
+        .map(final_cost_from_runtime)
+        .transpose()
+        .context("invalid runtime.finalize_thread cost")?;
+    let raw_cost = params
+        .cost
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .context("failed to encode validated runtime.finalize_thread cost")?;
     // Build the canonical managed envelope from the RAW runtime fields (raw cost,
     // outputs, warnings) BEFORE `completion` moves result/error, so a followed
     // child's structured return survives to the parent's resume.
     let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
-        &params.status,
+        params.status.as_str(),
         params.result.as_ref(),
         params.error.as_ref(),
-        params.cost.as_ref(),
+        raw_cost.as_ref(),
         &params.outputs,
         &params.warnings,
     );
     let completion = ryeos_engine::contracts::ExecutionCompletion {
-        status: terminal_status_from_str(&params.status)?,
+        status: params.status,
         outcome_code: params.outcome_code,
         result: params.result,
         error: params.error,
         artifacts: Vec::new(),
-        final_cost: params.cost.as_ref().map(final_cost_from_runtime_json),
+        final_cost,
         continuation_request: None,
         metadata: None,
     };
@@ -878,7 +883,7 @@ mod tests {
     use ryeos_app::identity::NodeIdentity;
     use ryeos_app::kind_profiles::KindProfileRegistry;
     use ryeos_app::state::AppState;
-    use ryeos_app::state_store::StateStore;
+    use ryeos_app::state_store::{ContinuedThreadSettlement, StateStore};
     use ryeos_app::thread_lifecycle::{
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
@@ -888,6 +893,21 @@ mod tests {
     use tempfile::TempDir;
 
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
+
+    fn continued_settlement() -> ContinuedThreadSettlement {
+        ContinuedThreadSettlement {
+            result_json: None,
+            final_cost: None,
+            managed_envelope: json!({
+                "success": false,
+                "status": "continued",
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            }),
+        }
+    }
 
     fn test_provenance(state: &AppState, path: &str) -> TestProvenance {
         ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
@@ -1163,6 +1183,8 @@ mod tests {
                     "outcome_code": "success",
                     "result": "4",
                     "cost": {"input_tokens": 10, "output_tokens": 2, "total_usd": 0.01},
+                    "outputs": null,
+                    "warnings": [],
                 }),
             ),
             &state,
@@ -1179,6 +1201,114 @@ mod tests {
             .expect("thread result row present after finalize");
         assert_eq!(persisted.outcome_code.as_deref(), Some("success"));
         assert_eq!(persisted.result, Some(json!("4")));
+        let authority = state
+            .threads
+            .get_thread_terminal_authority("T-1")
+            .unwrap()
+            .expect("terminal authority present");
+        let envelope = authority
+            .managed_envelope
+            .expect("managed runtime envelope persisted in signed snapshot");
+        assert_eq!(envelope["result"], "4");
+        assert_eq!(envelope["outputs"], Value::Null);
+        assert_eq!(envelope["warnings"], json!([]));
+    }
+
+    #[test]
+    fn runtime_finalize_uses_closed_terminal_status_enum() {
+        for status in ["timed_out", "running", "done"] {
+            let value = json!({
+                "thread_id": "T-test",
+                "status": status,
+                "outputs": null,
+                "warnings": [],
+            });
+            assert!(serde_json::from_value::<RuntimeFinalizeParams>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_finalize_requires_outputs_and_warnings() {
+        let complete = json!({
+            "thread_id": "T-test",
+            "status": "completed",
+            "outputs": null,
+            "warnings": [],
+        });
+        let mut missing_outputs = complete.clone();
+        missing_outputs
+            .as_object_mut()
+            .expect("runtime finalize object")
+            .remove("outputs");
+        let mut missing_warnings = complete;
+        missing_warnings
+            .as_object_mut()
+            .expect("runtime finalize object")
+            .remove("warnings");
+
+        assert!(serde_json::from_value::<RuntimeFinalizeParams>(missing_outputs).is_err());
+        assert!(serde_json::from_value::<RuntimeFinalizeParams>(missing_warnings).is_err());
+    }
+
+    #[test]
+    fn runtime_finalize_cost_shape_is_strict() {
+        for cost in [
+            json!({"input_tokens": 1, "total_usd": 0.01}),
+            json!({"input_tokens": -1, "output_tokens": 2, "total_usd": 0.01}),
+            json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": 0.01,
+                "unexpected": true,
+            }),
+        ] {
+            let value = json!({
+                "thread_id": "T-test",
+                "status": "completed",
+                "cost": cost,
+                "outputs": null,
+                "warnings": [],
+            });
+            assert!(serde_json::from_value::<RuntimeFinalizeParams>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_finalize_cost_rejects_invalid_values_and_storage_overflow() {
+        for cost in [
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_usd: -0.01,
+                basis: None,
+            },
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_usd: f64::INFINITY,
+                basis: None,
+            },
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_usd: 0.01,
+                basis: Some("estimate".to_string()),
+            },
+            RuntimeFinalizeCost {
+                input_tokens: i64::MAX as u64 + 1,
+                output_tokens: 2,
+                total_usd: 0.01,
+                basis: None,
+            },
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: i64::MAX as u64 + 1,
+                total_usd: 0.01,
+                basis: None,
+            },
+        ] {
+            assert!(final_cost_from_runtime(&cost).is_err());
+        }
     }
 
     // ── runtime.spawn_follow_child: auth + admission rejections ──────────
@@ -1240,6 +1370,15 @@ mod tests {
             "step_count": 0,
             "child_item_ref": child,
             "child_parameters": {},
+            "completion": {
+                "status": "continued",
+                "outcome_code": "continued",
+                "result": null,
+                "error": null,
+                "cost": null,
+                "outputs": null,
+                "warnings": [],
+            },
         })
     }
 
@@ -1324,7 +1463,12 @@ mod tests {
             .unwrap();
         state
             .state_store
-            .create_follow_resume_successor(&new_successor_record("S", "P", Some("P")), "P", "P")
+            .create_follow_resume_successor(
+                &new_successor_record("S", "P", Some("P")),
+                "P",
+                "P",
+                &continued_settlement(),
+            )
             .unwrap();
         state.threads.mark_running("S").unwrap();
     }
@@ -1633,6 +1777,7 @@ mod tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .unwrap();
@@ -2483,6 +2628,8 @@ mod tests {
                     "thread_id": "T-events-1",
                     "status": "completed",
                     "outcome_code": "test",
+                    "outputs": null,
+                    "warnings": [],
                 }),
             ),
             &state,

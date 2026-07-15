@@ -48,9 +48,9 @@ End-to-end test for the build_with_review orchestrator — verifies the full bui
   </step>
 
   <step name="write_result">
-    Write the test results to {input:output_dir|outputs}/build_with_review_test.txt.
+    Write the test results to ${inputs.output_dir ?? "outputs"}/build_with_review_test.txt.
     Include: orchestrator status, number of attempts, review verdict, and whether the scrap-and-retry knowledge was present in context.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/build_with_review_test.txt", "content": "<orchestrator test summary>", "create_dirs": true})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/build_with_review_test.txt", "content": "<orchestrator test summary>", "create_dirs": true})`
   </step>
 </process>
 

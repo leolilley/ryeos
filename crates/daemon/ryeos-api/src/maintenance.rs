@@ -90,8 +90,9 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                 state.state_store.remove_seat_lease(&thread_id)?;
                 continue;
             }
-            state.threads.finalize_thread(
-                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+            state
+                .threads
+                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
                     thread_id,
                     status: "completed".to_string(),
                     outcome_code: Some("seat_lease_expired".to_string()),
@@ -101,8 +102,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                     artifacts: Vec::new(),
                     final_cost: None,
                     summary_json: None,
-                },
-            )?;
+                })?;
             state.state_store.remove_seat_lease(&detail.thread_id)?;
             reaped_seats += 1;
         }

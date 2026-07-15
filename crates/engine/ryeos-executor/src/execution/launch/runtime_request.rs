@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::{EnvelopeCallback, LaunchEnvelope, RuntimeResult};
+use ryeos_runtime::envelope::RuntimeResultStatus;
 
 pub(super) struct SpawnRuntimeParams<'a> {
     pub descriptor: &'a ryeos_engine::protocols::ProtocolDescriptor,
@@ -154,7 +155,11 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
 fn runtime_failure_result(stderr: &str, timed_out: bool) -> RuntimeResult {
     RuntimeResult {
         success: false,
-        status: if timed_out { "timed_out" } else { "failed" }.to_string(),
+        status: if timed_out {
+            RuntimeResultStatus::TimedOut
+        } else {
+            RuntimeResultStatus::Failed
+        },
         thread_id: String::new(),
         result: Some(json!(stderr)),
         outputs: Value::Null,
@@ -168,9 +173,17 @@ fn decode_runtime_stdout(stdout: &str) -> Result<RuntimeResult> {
         anyhow::anyhow!(
             "failed to parse runtime stdout: {}\nstdout: {}",
             error,
-            &stdout[..stdout.len().min(500)]
+            stdout_prefix(stdout, 500)
         )
     })
+}
+
+fn stdout_prefix(stdout: &str, max_bytes: usize) -> &str {
+    let mut end = stdout.len().min(max_bytes);
+    while !stdout.is_char_boundary(end) {
+        end -= 1;
+    }
+    &stdout[..end]
 }
 
 #[cfg(test)]
@@ -182,14 +195,17 @@ mod tests {
         let result = runtime_failure_result("permission denied", false);
 
         assert!(!result.success);
-        assert_eq!(result.status, "failed");
+        assert_eq!(result.status, RuntimeResultStatus::Failed);
         assert_eq!(result.result, Some(json!("permission denied")));
         assert_eq!(result.outputs, Value::Null);
     }
 
     #[test]
     fn subprocess_timeout_uses_timed_out_status() {
-        assert_eq!(runtime_failure_result("deadline", true).status, "timed_out");
+        assert_eq!(
+            runtime_failure_result("deadline", true).status,
+            RuntimeResultStatus::TimedOut
+        );
     }
 
     #[test]
@@ -198,5 +214,30 @@ mod tests {
 
         assert!(error.contains("failed to parse runtime stdout"));
         assert!(error.contains("stdout: not-json"));
+    }
+
+    #[test]
+    fn stdout_decode_rejects_success_status_contradiction() {
+        let stdout = serde_json::json!({
+            "success": false,
+            "status": "completed",
+            "thread_id": "T-test",
+            "outputs": null,
+            "warnings": [],
+        })
+        .to_string();
+
+        let error = decode_runtime_stdout(&stdout).unwrap_err().to_string();
+        assert!(error.contains("failed to parse runtime stdout"));
+        assert!(error.contains("contradicts `status` `completed`"));
+    }
+
+    #[test]
+    fn stdout_decode_error_truncates_on_utf8_boundary() {
+        let stdout = format!("{}é", "x".repeat(499));
+
+        let error = decode_runtime_stdout(&stdout).unwrap_err().to_string();
+        assert!(error.contains("failed to parse runtime stdout"));
+        assert!(error.contains(&"x".repeat(499)));
     }
 }
