@@ -151,5 +151,9 @@ bundles/*/PUBLISHER_TRUST.toml
 !bundles/.ai/PUBLISHER_TRUST.toml
 bundles/.*.lock
 
+# Persistent advisory flock anchors for atomic source-bundle publication.
+# Publisher coordination only: not bundle content, CAS state, or dependency locks.
+bundles/.publisher-locks/
+
 # Local daemon state from dev/test runs
 .local/
