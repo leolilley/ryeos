@@ -39,7 +39,7 @@ use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 use crate::kind_registry::KindRegistry;
 use crate::launch_preparers::LaunchPreparerRunner;
 use crate::parsers::{DuplicateRef, ParserRegistry};
-use crate::protocols::builder::{build_subprocess_spec, BuildRequest};
+use crate::protocols::builder::{build_subprocess_spec, BuildRequest, CallbackBindings};
 use crate::protocols::ProtocolRegistry;
 use crate::resolution::TrustClass;
 use crate::runtime_registry::{
@@ -185,6 +185,9 @@ pub enum BootIssue {
         handler_id: String,
         detail: String,
     },
+    /// A kind schema declares a subprocess protocol that is absent from the
+    /// verified protocol registry.
+    DanglingProtocolRef { kind: String, protocol_ref: String },
 }
 
 /// Run the cross-registry validation. Returns `Ok(())` if no issues
@@ -252,7 +255,12 @@ pub fn validate_boot(
                         HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
                             parser_config: descriptor.parser_config.clone(),
                         });
-                    match run_handler_subprocess(h, &request, VALIDATION_SUBPROCESS_TIMEOUT) {
+                    match run_handler_subprocess(
+                        h,
+                        &request,
+                        VALIDATION_SUBPROCESS_TIMEOUT,
+                        handler_registry.launch_runtime(),
+                    ) {
                         Ok(HandlerResponse::ValidateOk) => {}
                         Ok(HandlerResponse::ValidateErr { message }) => {
                             issues.push(BootIssue::InvalidParserConfig {
@@ -360,7 +368,12 @@ pub fn validate_boot(
         let request = HandlerRequest::ValidateComposerConfig(ValidateComposerConfigRequest {
             composer_config: schema.composer_config.clone(),
         });
-        match run_handler_subprocess(handler, &request, VALIDATION_SUBPROCESS_TIMEOUT) {
+        match run_handler_subprocess(
+            handler,
+            &request,
+            VALIDATION_SUBPROCESS_TIMEOUT,
+            handler_registry.launch_runtime(),
+        ) {
             Ok(HandlerResponse::ValidateOk) => {}
             Ok(HandlerResponse::ValidateErr { message }) => {
                 issues.push(BootIssue::InvalidComposerConfig {
@@ -705,8 +718,9 @@ fn runtime_fact_kind_wire(kind: RuntimeFactKind) -> RuntimeFactKindWire {
 /// sources, duplicate keys, stdin-serialize failures) at boot time
 /// instead of at first user request.
 ///
-/// Also checks that runtime and streaming_tool kinds reference their
-/// expected protocol descriptors.
+/// Also checks every schema-declared subprocess protocol against the verified
+/// registry. Protocol behavior comes from the descriptor; kind names never bind
+/// to specific protocol refs in code.
 pub fn validate_protocol_builder(
     kinds: &KindRegistry,
     protocols: &ProtocolRegistry,
@@ -720,6 +734,10 @@ pub fn validate_protocol_builder(
             Err(_) => continue,
         };
         let dummy_path = std::path::Path::new("/nonexistent");
+        let callback = CallbackBindings {
+            socket_path: "/nonexistent/ryeosd.sock".to_string(),
+            token: "boot-check-callback".to_string(),
+        };
 
         let request = BuildRequest {
             item_ref: &synthetic_ref,
@@ -727,19 +745,21 @@ pub fn validate_protocol_builder(
             args: &[],
             cwd: dummy_path,
             project_path: dummy_path,
+            callback_project_path: dummy_path,
             thread_id: "boot-check",
-            callback: None,
-            vault_bindings: &[],
-            // Pass None for the envelope. Descriptors that require one
-            // will produce EnvelopeRequired (accepted). Descriptors that
-            // accept opaque stdin will succeed. This avoids needing to
-            // construct a valid ResolutionOutput synthetically.
+            // Supplying synthetic callback authority lets callback-capable
+            // descriptors exercise their declared injection sources. A
+            // callback-free descriptor simply ignores these bindings.
+            callback: Some(&callback),
+            // Pass None for the envelope. The builder validates every env
+            // source first, then launch-envelope descriptors produce the
+            // accepted EnvelopeRequired result. This avoids fabricating a
+            // ResolutionOutput without skipping env-contract validation.
             launch_envelope: None,
             timeout: Duration::from_secs(30),
             acting_principal: "boot-check",
             cas_root: dummy_path,
-            app_root: dummy_path,
-            thread_auth_token: "boot-check-tat",
+            thread_auth_token: Some("boot-check-tat"),
         };
 
         match build_subprocess_spec(&verified.descriptor, &request) {
@@ -748,6 +768,11 @@ pub fn validate_protocol_builder(
                 // Acceptable: the descriptor requires an envelope and
                 // the synthetic one may not satisfy every field. This is
                 // a descriptor shape issue, not a regression.
+            }
+            Err(crate::protocols::builder::BuildError::MethodEnvelopeRequired(_)) => {
+                // Method-call protocols are exercised by their dedicated
+                // typed builder at dispatch; synthetic boot input has no
+                // resolved method payload to serialize.
             }
             Err(e) => {
                 issues.push(BootIssue::ProtocolBuilderRejected {
@@ -758,9 +783,9 @@ pub fn validate_protocol_builder(
         }
     }
 
-    // 2. Cross-registry coherence: runtime kinds must reference
-    //    runtime_v1, streaming_tool kinds must reference
-    //    tool_streaming_v1.
+    // 2. Cross-registry coherence: every schema-declared subprocess protocol
+    //    must resolve. Its verified descriptor is the behavior contract; there
+    //    is no kind-name-to-protocol-name table here.
     for kind_name in kinds.kinds() {
         let schema = match kinds.get(kind_name) {
             Some(s) => s,
@@ -770,28 +795,34 @@ pub fn validate_protocol_builder(
             Some(e) => e,
             None => continue,
         };
-        let terminator = match &exec.terminator {
-            Some(t) => t,
-            None => continue,
-        };
-
-        if let crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref } = terminator {
-            match kind_name {
-                "runtime" if protocol_ref != "protocol:ryeos/core/runtime_v1" => {
-                    issues.push(BootIssue::RuntimeProtocolMismatch {
-                        kind: kind_name.to_string(),
-                        protocol_ref: protocol_ref.clone(),
-                        expected: "protocol:ryeos/core/runtime_v1".to_string(),
-                    });
+        if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref }) =
+            &exec.terminator
+        {
+            if protocols.get(protocol_ref).is_none() {
+                issues.push(BootIssue::DanglingProtocolRef {
+                    kind: kind_name.to_string(),
+                    protocol_ref: protocol_ref.clone(),
+                });
+            }
+        }
+        if let Some(method_dispatch) = &exec.method_dispatch {
+            match protocols.get(&method_dispatch.protocol) {
+                None => issues.push(BootIssue::DanglingProtocolRef {
+                    kind: kind_name.to_string(),
+                    protocol_ref: method_dispatch.protocol.clone(),
+                }),
+                Some(protocol) => {
+                    if let Err(reason) =
+                        crate::protocols::validate_method_runtime_protocol(&protocol.descriptor)
+                    {
+                        issues.push(BootIssue::ProtocolBuilderRejected {
+                            protocol_ref: method_dispatch.protocol.clone(),
+                            reason: format!(
+                                "kind '{kind_name}' selects this for method dispatch but it {reason}"
+                            ),
+                        });
+                    }
                 }
-                "streaming_tool" if protocol_ref != "protocol:ryeos/core/tool_streaming_v1" => {
-                    issues.push(BootIssue::StreamingToolProtocolMismatch {
-                        kind: kind_name.to_string(),
-                        protocol_ref: protocol_ref.clone(),
-                        expected: "protocol:ryeos/core/tool_streaming_v1".to_string(),
-                    });
-                }
-                _ => {}
             }
         }
     }
@@ -1807,15 +1838,14 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            callback_project_path: dummy,
             thread_id: "test",
             callback: None,
-            vault_bindings: &[],
             launch_envelope: None,
             timeout: Duration::from_secs(30),
             acting_principal: "test",
             cas_root: dummy,
-            app_root: dummy,
-            thread_auth_token: "test-tat",
+            thread_auth_token: Some("test-tat"),
         };
 
         let result = build_subprocess_spec(&desc, &request);
@@ -1867,15 +1897,14 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            callback_project_path: dummy,
             thread_id: "test",
             callback: None,
-            vault_bindings: &[],
             launch_envelope: None, // <-- triggers EnvelopeRequired
             timeout: Duration::from_secs(30),
             acting_principal: "test",
             cas_root: dummy,
-            app_root: dummy,
-            thread_auth_token: "test-tat",
+            thread_auth_token: Some("test-tat"),
         };
 
         match build_subprocess_spec(&desc, &request) {
@@ -1884,10 +1913,9 @@ composed_value_contract:
         }
     }
 
-    /// Cross-registry coherence: a runtime kind referencing the wrong
-    /// protocol should produce RuntimeProtocolMismatch.
+    /// Empty registries have no dangling schema-declared protocol refs.
     #[test]
-    fn runtime_protocol_mismatch_detected() {
+    fn empty_registries_have_no_protocol_issues() {
         let kinds = crate::kind_registry::KindRegistry::empty();
         let protocols = crate::protocols::ProtocolRegistry::empty();
 

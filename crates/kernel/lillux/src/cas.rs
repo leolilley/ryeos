@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::io::{ErrorKind, Write};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
@@ -323,7 +323,7 @@ impl CasStore {
     pub fn store_blob(&self, data: &[u8]) -> Result<String> {
         let hash = sha256_hex(data);
         let dest = shard_path(&self.root, "blobs", &hash, "");
-        if dest.exists() {
+        if verify_existing_cas_entry(&dest, &hash, "blob")? {
             return Ok(hash);
         }
         atomic_write(&dest, data)?;
@@ -334,12 +334,48 @@ impl CasStore {
         let json = canonical_json(value)?;
         let hash = sha256_hex(json.as_bytes());
         let dest = shard_path(&self.root, "objects", &hash, ".json");
-        if dest.exists() {
+        if verify_existing_cas_entry(&dest, &hash, "object")? {
             return Ok(hash);
         }
         atomic_write(&dest, json.as_bytes())?;
         Ok(hash)
     }
+}
+
+/// Verify a pre-existing content-addressed entry before deduplicating a write.
+///
+/// Path existence alone is not evidence that the content at that address is
+/// intact. A corrupt or substituted entry must fail closed; otherwise a
+/// publisher can successfully emit a signed manifest that resolves to bytes
+/// different from the hashes it commits to.
+fn verify_existing_cas_entry(path: &Path, expected_hash: &str, kind: &str) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect existing CAS {kind} {}", path.display()))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!(
+            "existing CAS {kind} at {} is not a regular file",
+            path.display()
+        );
+    }
+
+    let bytes =
+        fs::read(path).with_context(|| format!("read existing CAS {kind} {}", path.display()))?;
+    let actual_hash = sha256_hex(&bytes);
+    if actual_hash != expected_hash {
+        bail!(
+            "existing CAS {kind} integrity failure at {}: address is {}, content hashes to {}",
+            path.display(),
+            expected_hash,
+            actual_hash
+        );
+    }
+    Ok(true)
 }
 
 // ── CLI interface ──────────────────────────────────────────────────

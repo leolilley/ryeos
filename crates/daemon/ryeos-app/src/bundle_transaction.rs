@@ -1,5 +1,6 @@
 //! Crash-recoverable coordination for installed bundle trees and registrations.
 
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -51,8 +52,56 @@ pub struct BundleTransaction {
     _lock: lillux::ExclusiveFileLock,
 }
 
+/// Node-wide serialization for mutations of the installed bundle registry.
+///
+/// Every operation that can reconcile, re-plan, activate, register, or remove
+/// an installed bundle must acquire this lock before acquiring a bundle's
+/// per-name transaction lock. Keeping that order global -> per-name prevents
+/// deadlocks while making each prospective plan exact until its mutation is
+/// committed.
+pub struct BundleRegistryMutationLock {
+    app_root: PathBuf,
+    _lock: lillux::ExclusiveFileLock,
+}
+
+/// A per-name bundle transaction tied to a held node-wide registry lock.
+///
+/// The borrow makes it impossible for normal callers to drop the registry lock
+/// while continuing to mutate through this transaction.
+pub struct BundleMutationTransaction<'a> {
+    transaction: BundleTransaction,
+    _registry_lock: &'a BundleRegistryMutationLock,
+}
+
+impl BundleRegistryMutationLock {
+    pub fn acquire(app_root: &Path) -> Result<Self> {
+        let target = app_root.join(".ai/bundles");
+        let lock = lillux::ExclusiveFileLock::acquire(&target)?;
+        Ok(Self {
+            app_root: app_root.to_path_buf(),
+            _lock: lock,
+        })
+    }
+
+    /// Acquire a bundle's per-name transaction lock after the node-wide lock.
+    pub fn acquire_bundle(&self, name: &str) -> Result<BundleMutationTransaction<'_>> {
+        Ok(BundleMutationTransaction {
+            transaction: BundleTransaction::acquire(&self.app_root, name)?,
+            _registry_lock: self,
+        })
+    }
+}
+
+impl Deref for BundleMutationTransaction<'_> {
+    type Target = BundleTransaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
 impl BundleTransaction {
-    pub fn acquire(app_root: &Path, name: &str) -> Result<Self> {
+    fn acquire(app_root: &Path, name: &str) -> Result<Self> {
         if !valid_bundle_name(name) {
             anyhow::bail!("invalid bundle transaction name: {name}");
         }
@@ -315,6 +364,7 @@ pub fn reconcile_all_bundle_transactions(
     app_root: &Path,
     signing_key: &SigningKey,
 ) -> Result<Vec<String>> {
+    let registry_lock = BundleRegistryMutationLock::acquire(app_root)?;
     let diagnostics = inspect_bundle_transactions(app_root)?;
     if !diagnostics.invalid.is_empty() {
         anyhow::bail!(
@@ -323,7 +373,7 @@ pub fn reconcile_all_bundle_transactions(
         );
     }
     for name in &diagnostics.pending {
-        BundleTransaction::acquire(app_root, name)?.reconcile(signing_key)?;
+        registry_lock.acquire_bundle(name)?.reconcile(signing_key)?;
     }
     Ok(diagnostics.pending)
 }

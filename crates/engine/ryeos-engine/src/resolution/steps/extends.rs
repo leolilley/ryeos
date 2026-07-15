@@ -108,6 +108,7 @@ fn walk(
             alias_resolution: alias_hop,
             added_by: ResolutionStepName::ResolveExtendsChain,
             raw_content: loaded.raw_content,
+            source_content_digest: loaded.source_content_digest,
             raw_content_digest: loaded.raw_content_digest,
         }];
         return Err(ResolutionError::CycleDetected {

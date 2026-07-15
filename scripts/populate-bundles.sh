@@ -189,7 +189,8 @@ PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
 PUBLISHER_FP="$(publisher_fingerprint)"
 
 # Bin-managed bundles for this set come from the shared definition (central-auth
-# is excluded — it owns no compiled binaries and is published unconditionally
+# is excluded — its Python implementation is tool support rather than a
+# target-triple binary, and it is published unconditionally
 # below, so it must never be cleaned/staged here).
 BUNDLE_DIRS=()
 while IFS= read -r _bundle_name; do

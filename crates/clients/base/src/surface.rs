@@ -36,6 +36,7 @@ pub struct SurfaceProvenanceNode {
     pub trust_class: String,
     pub alias_resolution: Option<serde_json::Value>,
     pub added_by: String,
+    pub source_content_digest: String,
     pub raw_content_digest: String,
 }
 
@@ -792,6 +793,7 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
             trust_class: "unsigned".into(),
             alias_resolution: None,
             added_by: "pipeline_init".into(),
+            source_content_digest: String::new(),
             raw_content_digest: String::new(),
         },
         ancestors: Vec::new(),
@@ -1004,6 +1006,7 @@ mod tests {
             "trust_class": "trusted_bundle",
             "alias_resolution": null,
             "added_by": added_by,
+            "source_content_digest": "0".repeat(64),
             "raw_content_digest": "0".repeat(64),
         })
     }

@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-05-30T01:38:08Z:fd5728479454d7b0d514f6318419c7119c08f7693a0c12c2458d243f375f2bea:ElS9B6A2TX10izDwHgBClwXFi4ZFSR0Xu+1N3p3Cka+IkcQC9lKJqnPqdlL11RxOsGwqW4dfV32PzuHN1aJ/AQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-14T10:12:37Z:25cfbf6f5e862669a92315504d9cf5f2a64bc2238072dd8e63896964c79fe6f1:K0aGS96nCkegloTp8otnafOhJMlBeWKnFalfjJgLx58ZxvJel17YGcbpOok+nRlqb7rXSV9ty/pwi7OFeKz6BA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
 title: Distributed Substrate Deferred Advanced Implementation
 entry_type: implementation_guide
-version: "0.1.0"
+version: "0.4.0"
 author: amp
 created_at: 2026-05-30T00:00:00Z
 description: Future implementation notes intentionally left out of the immediate distributed substrate hardening path, with triggers for when to pull them forward.
@@ -69,6 +69,38 @@ Each job should record:
 - failure reason.
 
 Durable jobs are the bridge from synchronous operator commands to cloud/federation operation. They unlock retry, crash recovery, observability, async remote execution, and cluster repair.
+
+### Hosted execution isolation handoff
+
+Pull forward the handoff contract when remote jobs begin executing code for a
+principal outside the node owner's trust boundary. Signed admission establishes
+who requested work and what object closure was admitted; it does not by itself
+make that code safe to co-locate with other principals.
+
+The current node-owned RyeOS strict sandbox is the inner execution boundary and
+the integration seam for this future work. A hostile-workload scheduler must
+add, per principal or job:
+
+- CPU, memory, and process-count cgroup limits, accounting, and authoritative
+  whole-workload teardown across descendant process groups and sessions;
+- a VM, microVM, or dedicated outer worker selected by the deployment threat
+  model;
+- preservation of the current bounded stdout/stderr supervision, plus bounded
+  event capture and optional private spooling that cannot be exhausted by
+  guest output rate;
+- principal-scoped workspace, cache, secret, and egress authority;
+- durable worker identity, audit, cancellation, cleanup, and retry semantics;
+  and
+- an admitted immutable image/snapshot or closure policy when live read-only
+  transitive imports and assets are not acceptable.
+
+Host PIDs and same-UID signals are not isolated by the current inner sandbox.
+The outer worker design must remove that shared authority rather than claiming
+Bubblewrap alone solved it. Durable job records should therefore carry an
+explicit isolation class and worker/cgroup identity once this path is activated.
+That outer identity also closes the spawn-to-durable-attachment crash window:
+if a node dies after creating a process but before committing its exact birth
+tuple, the worker/cgroup remains an independently nameable teardown boundary.
 
 ### CAS attribution and staging metadata
 

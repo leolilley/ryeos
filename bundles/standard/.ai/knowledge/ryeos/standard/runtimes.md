@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:65c468a5d25609fd66cbe5f71e80b9700e56acba6655505a3c646d421392e22b:eYz5GawnXvYEAZgBVsLR3FOUvtRQeLyzKCABTtoC2Igj0olMgkfDme6XCITcZm0j1gDWdeKlUJv69ZhoCE5EBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:94f706955fb5d8dddb461640ce4db33925b72d5254944646b90251849f7f9c7d:XkbCoLEUDALKItZPKE3v5bgJpw/ZZmYUB9h7Mpnybwgt57WdrMrWTyL4rsk4Ip2hrLnhgr20+o0GjbjKj0zjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The three runtimes that ship with the standard bundle —
   directive-runtime, graph-runtime, and knowledge-runtime.
@@ -10,9 +10,14 @@ description: >
 
 # Standard Bundle Runtimes
 
-The standard bundle declares three runtime binaries, each serving a
-different kind of workflow. They are native Linux x86_64 executables
-that communicate with the daemon via the `runtime_v1` protocol.
+The standard bundle declares three runtime binaries, each serving a different
+kind of workflow. They are native Linux x86_64 executables. Directive and graph
+use the ordinary `runtime_v1` workflow wire; knowledge uses the signed
+`method_runtime_v1` wire selected by its kind schema.
+
+Authorized runtime subprocesses are wrapped by the node's immutable sandbox
+snapshot when policy is enforced; runtime/item metadata cannot enable or
+weaken it. See [Execution Sandbox](../core/node/execution-sandbox.md).
 
 ## Directive Runtime (`runtime:directive-runtime`)
 
@@ -66,21 +71,38 @@ It performs graph traversal natively in Rust.
 
 See [Graphs](graphs/graphs.md) for the full graph YAML format.
 
+The graph node-result cache uses `RYEOS_CACHE_DIR/<graph-id>` when that variable
+is set; otherwise it uses `$TMPDIR/ryeos-graph-cache/<graph-id>`. Enforced mode
+normalizes `TMPDIR=/tmp` and gives each sandbox launch a private `/tmp` tmpfs,
+so the default cache is ephemeral and cannot be relied on across runtime
+processes. Native-resume durability comes from `RYEOS_CHECKPOINT_DIR` and the
+policy's daemon-validated `{checkpoint_dir}` mount instead. A custom
+`RYEOS_CACHE_DIR` persists only when node policy exposes that path writable.
+
 ## Knowledge Runtime (`runtime:knowledge-runtime`)
 
 **Serves:** `knowledge` (default)
 **Binary:** `bin/x86_64-unknown-linux-gnu/ryeos-knowledge-runtime`
 **Required caps:** `runtime.execute`
-**Status:** V5.3 stub — full functionality in V5.4
+**Protocol:** schema-selected `method_runtime_v1`
 
-The knowledge runtime handles knowledge composition operations.
-Currently a placeholder that will be fully implemented in V5.4.
+The knowledge runtime handles bounded knowledge composition operations. The
+runtime registry selects this implementation binary, while the signed
+`knowledge` kind schema selects the `MethodCallEnvelope`/`MethodCallResult`
+wire used for both declared methods and composition launch augmentation. It is
+not directly launchable through the unrelated `runtime_v1` protocol.
 
-### Planned Operations
+### Operations
 - `compose` — assemble knowledge entries into a prompt context block
   within a token budget
-- `compose_positions` — compose knowledge at specific prompt positions
-  with per-position budgets
+- `query` — search the verified knowledge corpus
+- `graph` — inspect verified knowledge relationships
+- `validate` — validate the verified corpus and requested roots
+
+The daemon also invokes `compose_positions` through the private
+`compose_context_positions` launch augmentation to render specific prompt
+positions with per-position budgets. It is intentionally not a generically
+dispatchable method in the kind schema.
 
 ## Runtime Selection
 
@@ -90,11 +112,18 @@ When the daemon dispatches a directive or graph execution:
 3. The runtime registry finds a runtime that `serves` the kind
 4. The daemon spawns the runtime subprocess via `runtime_v1` protocol
 
+Method-bearing kinds use a parallel schema-driven path: the registry selects
+the runtime binary, and `execution.method_dispatch.protocol` selects the signed
+method wire. The daemon does not infer that protocol from the runtime name or
+kind name.
+
 Each kind has exactly one default runtime. Additional runtimes for
 the same kind can be registered but are not yet selected automatically.
 
 ## ABI Version
 
-All runtimes use ABI version `v1`. The `LaunchEnvelope` and
-`RuntimeResult` structures are versioned — breaking changes require
-a new ABI version.
+All runtime declarations use binary ABI version `v1`. The signed protocol
+selected for an invocation independently versions its wire:
+`runtime_v1` carries `LaunchEnvelope`/`RuntimeResult`, while
+`method_runtime_v1` carries `MethodCallEnvelope`/`MethodCallResult`. A breaking
+change requires a new applicable ABI/protocol version.

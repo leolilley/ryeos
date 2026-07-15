@@ -38,8 +38,21 @@ pub struct ReachableSet {
 ///       → item_source (content_blob_hash) → blob
 ///   project_snapshot.parent_hashes → walk history
 pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableSet> {
+    collect_reachable_with_extra_roots(cas_root, refs_root, &[])
+}
+
+/// Walk signed heads plus daemon-authoritative transient roots.
+///
+/// Extra roots are intentionally not part of any public GC request schema;
+/// the online daemon derives them from active runtime launch metadata so a
+/// resumable process's immutable project pin cannot be swept mid-lifecycle.
+pub fn collect_reachable_with_extra_roots(
+    cas_root: &Path,
+    refs_root: &Path,
+    extra_roots: &[String],
+) -> Result<ReachableSet> {
     let mut set = ReachableSet::default();
-    let mut roots: Vec<String> = Vec::new();
+    let mut roots: Vec<String> = extra_roots.to_vec();
 
     // Seed from chain heads
     let chains_dir = refs_root.join("generic/chains");

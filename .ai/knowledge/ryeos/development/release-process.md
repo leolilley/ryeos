@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-04T08:48:16Z:14bbf2e57c05819a1614191599ec53c75b4340c23c03d66cf8141180cecb6b9e:l0vX/danV2O4V/QJl/MxpWJnNfawXMSudEO5OrMRMEOimh+WH2kpqZzSxzr1w81UFdxp+Kd605mm5YEn1zp9Bg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-14T03:42:05Z:6376652de30c17f12c4f2d64dac07dcc8a510517567fded1479b9ad4d102d3ed:LXh8IhHYmD5+dBxQKwnOmBtTB3Q3m4X7GBbyoaRj1SFKQS6optuFrUkybwSNP1PaHPyD9J/n0P9R9W0uQO81AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # RyeOS Release Process
@@ -311,6 +311,30 @@ git ls-remote --heads origin next main
 git ls-remote --tags origin "v$new"
 ```
 
+## Interrupted release recovery
+
+The release workflow never overwrites immutable image tags or GitHub release
+assets. It may resume only when the existing artifact identity is independently
+verified: an image must have the expected keyless workflow signature, source
+provenance, and SBOM; an existing bundle archive and checksum are downloaded
+and verified again; and an archive-only upload may remain canonical after its
+officially signed bundle contents pass structural and cryptographic preflight.
+Mutable `latest` tags move only after every immutable output passes again.
+
+Two ambiguous states require operator intervention:
+
+- If an immutable image tag exists without the expected workflow signature,
+  quarantine it. Confirm the exact digest and absence of the signature, then
+  normally burn the incomplete version and cut a new release. Delete that
+  registry version only when repository policy explicitly permits reuse and
+  you have confirmed it is the incomplete unsigned digest. Never replace a
+  signed immutable version.
+- If a GitHub release has a checksum but no archive, remove only the confirmed
+  orphan checksum through release asset controls and rerun. The checksum cannot
+  establish which missing bytes should be restored. This differs from an
+  archive-only state, where the archive itself can be verified and its missing
+  checksum derived.
+
 ## 8. GHCR release channel
 
 GHCR is the active deployment channel. The Docker release workflow builds from
@@ -360,7 +384,7 @@ runtime layout:
 Default behavior:
 
 ```bash
-./scripts/pkg/install-local-direct.sh
+./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 The script will:
@@ -512,7 +536,7 @@ Before tagging:
 
 After local install validation:
 
-- [ ] `./scripts/pkg/install-local-direct.sh` completes.
+- [ ] `./scripts/pkg/install-local-direct.sh --trust-source-publishers` completes.
 - [ ] `ryeos node status` checked explicitly.
 - [ ] If daemon was not running before install, `ryeos start` run manually if
   startup validation is needed.

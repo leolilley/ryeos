@@ -48,11 +48,22 @@ pub async fn handle(
     ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
         .map_err(map_dispatch_error)?;
 
-    let project_path = req.project_path.ok_or_else(|| {
+    let requested_project_path = req.project_path.ok_or_else(|| {
         HandlerError::BadRequest(
             "env-check requires a project: run inside a project directory".into(),
         )
     })?;
+    let project_path = std::fs::canonicalize(&requested_project_path).map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "could not resolve project path `{requested_project_path}`: {error}"
+        ))
+    })?;
+    if !project_path.is_dir() {
+        return Err(HandlerError::BadRequest(format!(
+            "project path is not a directory: {}",
+            project_path.display()
+        )));
+    }
 
     let canonical =
         ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {
@@ -99,7 +110,7 @@ pub async fn handle(
             scopes: ctx.scopes.clone(),
         }),
         project_context: ProjectContext::LocalPath {
-            path: std::path::PathBuf::from(&project_path),
+            path: project_path.clone(),
         },
         current_site_id: state.threads.site_id().to_string(),
         origin_site_id: state.threads.site_id().to_string(),
@@ -149,8 +160,7 @@ pub async fn handle(
     }
     names.sort();
     names.dedup();
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(std::path::Path::new(&project_path)));
+    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path.as_path()));
     let report = ryeos_app::vault::resolve_secret_sources(
         state.vault.as_ref(),
         &ctx.fingerprint,
@@ -182,9 +192,41 @@ pub async fn handle(
     // runs a bounded subprocess, so it goes off the async runtime.
     let import_report = {
         let engine = state.engine.clone();
+        let sandbox = state.sandbox.clone();
+        let sandbox_bundle_roots = engine
+            .resolution_roots(Some(project_path.clone()))
+            .ordered
+            .iter()
+            .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+            .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
+            .collect::<Vec<_>>();
+        let sandbox_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+        let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+            source_path: verified.resolved.source_path.clone(),
+            content_hash: verified.resolved.content_hash.clone(),
+        }];
+        let sandbox_item_ref = req.item_ref.clone();
         let probe_names = names.clone();
         tokio::task::spawn_blocking(move || {
-            ryeos_app::env_probe::import_dry_run(&engine, &plan_ctx, &verified, &probe_names)
+            ryeos_app::env_probe::import_dry_run(
+                &engine,
+                &plan_ctx,
+                &verified,
+                &probe_names,
+                &sandbox,
+                ryeos_engine::sandbox::SandboxLaunchContext {
+                    project_path: &project_path,
+                    project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &sandbox_bundle_roots,
+                    node_trusted_keys_dir: Some(&sandbox_node_trusted_keys_dir),
+                    verified_code: &sandbox_verified_code,
+                    item_ref: &sandbox_item_ref,
+                    thread_id: "tool-env-check",
+                },
+            )
         })
         .await
         .unwrap_or_else(|e| {

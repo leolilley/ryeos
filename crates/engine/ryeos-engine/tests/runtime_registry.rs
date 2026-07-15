@@ -129,9 +129,6 @@ launch_contract:
   required_runtime_data: []
   runtime_facts: {}
 description: Default directive runtime
-schema:
-  envelope: LaunchEnvelope
-  result: RuntimeResult
 ";
 
 const MINIMAL_RUNTIME_YAML: &str = "\
@@ -203,9 +200,6 @@ fn parse_runtime_yaml_success() {
         yaml.description.as_deref(),
         Some("Default directive runtime")
     );
-    let schema = yaml.schema.expect("schema present");
-    assert_eq!(schema.envelope, "LaunchEnvelope");
-    assert_eq!(schema.result, "RuntimeResult");
 }
 
 #[test]
@@ -467,15 +461,14 @@ fn registry_tampered_yaml_aborts_build() {
     }
 }
 
-/// η: runtime YAML whose `serves` kind has a terminator pointing at a
-/// different protocol (opaque instead of runtime_v1) must fail boot with
-/// `RuntimeProtocolMismatch`.
+/// A runtime registry validates executable kind membership without imposing a
+/// built-in protocol ref. The signed kind schema remains the protocol authority.
 #[test]
-fn runtime_serves_kind_with_wrong_protocol_fails() {
+fn runtime_serves_kind_uses_schema_declared_protocol() {
     let bundle = tempdir();
 
-    // Write a kind schema for "fake_kind" that uses opaque protocol,
-    // NOT runtime_v1.
+    // Write a kind schema whose protocol is intentionally not a built-in
+    // runtime descriptor. Registry construction must not rewrite that choice.
     let kinds_dir = bundle.join(".ai/node/engine/kinds/fake_kind");
     fs::create_dir_all(&kinds_dir).unwrap();
     let schema_body = r##"category: "engine/kinds/fake_kind"
@@ -532,26 +525,16 @@ abi_version: "v1"
 "#, "fake_kind"),
     );
 
-    let err = RuntimeRegistry::build_from_bundles(
+    let registry = RuntimeRegistry::build_from_bundles(
         &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &kinds,
     )
-    .unwrap_err();
-    match err {
-        EngineError::RuntimeProtocolMismatch {
-            runtime,
-            kind,
-            expected,
-            found,
-        } => {
-            assert_eq!(kind, "fake_kind");
-            assert_eq!(expected, "protocol:ryeos/core/runtime_v1");
-            assert_eq!(found, "protocol:ryeos/core/opaque");
-            assert!(runtime.contains("wrong-protocol-rt"));
-        }
-        other => panic!("expected RuntimeProtocolMismatch, got: {other:?}"),
-    }
+    .unwrap();
+    assert!(registry.lookup_for("fake_kind").is_ok_and(|runtime| runtime
+        .canonical_ref
+        .to_string()
+        .contains("wrong-protocol-rt")));
 }
 
 /// ε: runtime YAML whose `serves` kind has no execution block at all

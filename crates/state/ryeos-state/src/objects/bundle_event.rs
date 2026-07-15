@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use super::{validate_object_kind, SCHEMA_VERSION};
 
 pub const BUNDLE_EVENT_KIND: &str = "bundle_event";
+/// Maximum canonical JSON size of one bundle event CAS object.
+pub const MAX_BUNDLE_EVENT_SERIALIZED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Attribution captured for a bundle event append.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -87,6 +89,14 @@ impl BundleEventObject {
         }
         if let Some(hash) = &self.request_fingerprint {
             validate_canonical_hash("request_fingerprint", hash)?;
+        }
+        let serialized_bytes = lillux::canonical_json(&self.to_value()).len();
+        if serialized_bytes > MAX_BUNDLE_EVENT_SERIALIZED_BYTES {
+            anyhow::bail!(
+                "bundle event is {} serialized bytes (max {})",
+                serialized_bytes,
+                MAX_BUNDLE_EVENT_SERIALIZED_BYTES
+            );
         }
         Ok(())
     }

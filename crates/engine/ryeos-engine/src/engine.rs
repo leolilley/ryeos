@@ -33,6 +33,8 @@ pub struct EffectiveItemRequest {
 #[serde(deny_unknown_fields)]
 pub struct EffectiveItemSource {
     pub path: PathBuf,
+    /// Whole-file SHA-256 of the exact root bytes used by resolution.
+    pub content_hash: String,
     /// The installed bundle root (parent of `.ai/`) when the item
     /// came from an installed bundle space. `None` for project-space
     /// items, or when the resolver cannot determine
@@ -78,7 +80,12 @@ pub struct EffectiveItem {
 pub struct Engine {
     pub kinds: KindRegistry,
     pub parser_dispatcher: ParserDispatcher,
+    /// Combined item trust for the current project/request.
     pub trust_store: TrustStore,
+    /// Persistent node trust used exclusively for installed bundle
+    /// schemas, handlers, protocols, and native executable manifests. Project
+    /// keys and caller-scoped overlays never enter this store.
+    pub node_trust_store: TrustStore,
     /// Per-kind composer registry — owned by the engine so boot
     /// validation and the daemon-side resolution pipeline see the
     /// **same** instance (no split-brain between launcher and
@@ -121,6 +128,7 @@ impl Engine {
             kinds,
             parser_dispatcher,
             trust_store: TrustStore::empty(),
+            node_trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
             runtimes: RuntimeRegistry::default(),
             launch_preparers: LaunchPreparerRegistry::default(),
@@ -132,6 +140,11 @@ impl Engine {
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
+        self
+    }
+
+    pub fn with_node_trust_store(mut self, trust_store: TrustStore) -> Self {
+        self.node_trust_store = trust_store;
         self
     }
 
@@ -442,6 +455,7 @@ impl Engine {
             root_trust_class: output.root.trust_class,
             source: EffectiveItemSource {
                 path: output.root.source_path,
+                content_hash: output.root.source_content_digest,
                 bundle_root,
             },
             provenance,
@@ -501,6 +515,7 @@ impl Engine {
             roots: &roots,
             registry_fingerprint: &effective_fp,
             trust_store: &trust_store,
+            node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
         })
     }

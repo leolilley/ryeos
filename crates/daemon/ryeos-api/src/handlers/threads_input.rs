@@ -27,7 +27,9 @@ use serde_json::{json, Value};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::live_input_queue::EnqueueOutcome;
+use ryeos_app::live_input_queue::{
+    serialized_live_input_bytes, EnqueueOutcome, MAX_LIVE_INPUT_SERIALIZED_BYTES,
+};
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_state::objects::{LiveInput, LiveInputIntent, ThreadStatus};
@@ -445,6 +447,14 @@ pub async fn handle(
     if input.trim().is_empty() {
         return Err(HandlerError::BadRequest("input is empty".to_string()));
     }
+    let is_interrupt = intent.is_interrupt();
+    let operator_input = LiveInput::new(input.clone(), intent);
+    let input_bytes = serialized_live_input_bytes(&operator_input);
+    if input_bytes > MAX_LIVE_INPUT_SERIALIZED_BYTES {
+        return Err(HandlerError::BadRequest(format!(
+            "operator input is {input_bytes} serialized bytes; maximum is {MAX_LIVE_INPUT_SERIALIZED_BYTES}"
+        )));
+    }
 
     // Full daemon-authored execution facts for a kind — every arm returns both
     // so the client gates the operator-input affordance on
@@ -481,6 +491,11 @@ pub async fn handle(
             let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
                 .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let launch_provenance =
+                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                    project_path.as_path().to_path_buf(),
+                    state.engine.clone(),
+                );
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_ref,
@@ -489,6 +504,7 @@ pub async fn handle(
                 ctx.fingerprint.clone(),
                 ctx.scopes.clone(),
                 thread_id.clone(),
+                launch_provenance,
                 crate::routes::launch::DispatchLaunchOptions {
                     ref_bindings,
                     launch_mode: "inline".to_string(),
@@ -567,8 +583,10 @@ pub async fn handle(
                 // the runtime next polls), then — for an interrupt — nudge the
                 // runtime to cut its current cognition.
                 FollowUpDecision::Live => {
-                    let input = LiveInput::new(input.clone(), intent);
-                    let pending = match state.live_input.enqueue(&detail.thread_id, input) {
+                    let pending = match state
+                        .live_input
+                        .enqueue(&detail.thread_id, operator_input.clone())
+                    {
                         EnqueueOutcome::Accepted { pending } => pending,
                         EnqueueOutcome::Full { pending } => {
                             return Ok(json!({
@@ -597,6 +615,11 @@ pub async fn handle(
                                 "execution": exec_facts(&detail.kind),
                             }));
                         }
+                        EnqueueOutcome::TooLarge { bytes, max } => {
+                            return Err(HandlerError::BadRequest(format!(
+                                "operator input is {bytes} serialized bytes; maximum is {max}"
+                            )));
+                        }
                     };
 
                     // Default notice reports the staged depth so the operator can
@@ -607,9 +630,12 @@ pub async fn handle(
                     // Interrupt: cut the in-flight cognition. The input is
                     // already enqueued, so on any signal failure we degrade to a
                     // cooperative steer (it still folds at the next boundary).
-                    if intent.is_interrupt() {
-                        let outcome = match detail.runtime.pgid {
-                            Some(pgid) => ryeos_app::process::interrupt_process_group(pgid),
+                    if is_interrupt {
+                        let outcome = match detail.runtime.process_identity.as_ref() {
+                            Some(identity) => ryeos_app::process::interrupt_process(identity),
+                            None if detail.runtime.pgid.is_some() => {
+                                ryeos_app::process::SignalResult::MissingIdentity
+                            }
                             None => ryeos_app::process::SignalResult::MissingPgid,
                         };
                         if outcome != ryeos_app::process::SignalResult::Delivered {

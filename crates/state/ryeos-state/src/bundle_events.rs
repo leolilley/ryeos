@@ -10,13 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::objects::{
     hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
-    BUNDLE_EVENT_KIND, SCHEMA_VERSION,
+    BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES, SCHEMA_VERSION,
 };
 use crate::refs;
 use crate::signer::Signer;
 
 const BUNDLE_EVENTS_NAMESPACE: &str = "bundle_events";
 const MAX_BUNDLE_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// Maximum filesystem entries a single paged cross-chain scan may inspect while
+/// selecting the next lexicographic chain. `read_dir` order is unspecified, so
+/// correctness requires examining the whole directory; rejecting an oversized
+/// namespace gives that operation a hard CPU/syscall bound until chain heads
+/// gain an indexed ordering structure.
+pub const MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES: usize = 4_096;
 
 #[derive(Debug, Clone)]
 pub struct BundleEventAppendRequest {
@@ -46,6 +52,30 @@ pub struct BundleEventAppendResult {
 pub struct BundleEventRecord {
     pub event_hash: String,
     pub event: BundleEventObject,
+}
+
+/// A newest-first page from one bundle event chain. `next_cursor`, when
+/// present, is the exact hash of the next older event.
+#[derive(Debug, Clone)]
+pub struct BundleEventChainPage {
+    pub records: Vec<BundleEventRecord>,
+    pub next_cursor: Option<String>,
+}
+
+/// Stable keyset cursor for a cross-chain bundle event scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleEventScanCursor {
+    pub chain_id: String,
+    pub event_hash: String,
+}
+
+/// A newest-first page from one chain in a cross-chain scan. Chains are
+/// visited in lexicographic `chain_id` order.
+#[derive(Debug, Clone)]
+pub struct BundleEventScanPage {
+    pub records: Vec<BundleEventRecord>,
+    pub next_cursor: Option<BundleEventScanCursor>,
 }
 
 struct BundleEventChainLock {
@@ -322,6 +352,280 @@ pub fn scan_bundle_events(
     Ok(records)
 }
 
+/// Read a bounded, newest-first page from one chain.
+pub fn read_bundle_event_chain_page(
+    cas_root: &Path,
+    refs_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    chain_id: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<BundleEventChainPage> {
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", event_kind)?;
+    validate_bundle_identifier("chain_id", chain_id)?;
+    validate_bundle_event_page_bounds(limit, max_serialized_bytes)?;
+
+    let start_hash = if let Some(cursor) = cursor {
+        validate_canonical_hash("bundle event chain cursor", cursor)?;
+        Some(cursor.to_string())
+    } else {
+        refs::read_generic_head_ref(
+            refs_root,
+            BUNDLE_EVENTS_NAMESPACE,
+            &chain_ref_name(bundle_id, event_kind, chain_id),
+        )?
+        .map(|head| head.target_hash)
+    };
+
+    read_bundle_event_chain_page_from_hash(
+        cas_root,
+        bundle_id,
+        event_kind,
+        chain_id,
+        start_hash,
+        limit,
+        max_serialized_bytes,
+    )
+}
+
+/// Scan bounded pages across bundle event chains without collecting every
+/// signed head or every event under the StateStore lock.
+pub fn scan_bundle_events_page(
+    cas_root: &Path,
+    refs_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    cursor: Option<&BundleEventScanCursor>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<BundleEventScanPage> {
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", event_kind)?;
+    validate_bundle_event_page_bounds(limit, max_serialized_bytes)?;
+
+    let Some((chain_id, start_hash)) = (match cursor {
+        Some(cursor) => {
+            validate_bundle_identifier("scan cursor chain_id", &cursor.chain_id)?;
+            validate_canonical_hash("scan cursor event_hash", &cursor.event_hash)?;
+            Some((cursor.chain_id.clone(), cursor.event_hash.clone()))
+        }
+        None => next_bundle_event_chain_head(refs_root, bundle_id, event_kind, None)?,
+    }) else {
+        return Ok(BundleEventScanPage {
+            records: Vec::new(),
+            next_cursor: None,
+        });
+    };
+
+    let page = read_bundle_event_chain_page_from_hash(
+        cas_root,
+        bundle_id,
+        event_kind,
+        &chain_id,
+        Some(start_hash),
+        limit,
+        max_serialized_bytes,
+    )?;
+
+    let next_cursor = if let Some(event_hash) = page.next_cursor {
+        Some(BundleEventScanCursor {
+            chain_id,
+            event_hash,
+        })
+    } else {
+        next_bundle_event_chain_head(refs_root, bundle_id, event_kind, Some(&chain_id))?.map(
+            |(chain_id, event_hash)| BundleEventScanCursor {
+                chain_id,
+                event_hash,
+            },
+        )
+    };
+
+    Ok(BundleEventScanPage {
+        records: page.records,
+        next_cursor,
+    })
+}
+
+fn read_bundle_event_chain_page_from_hash(
+    cas_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    chain_id: &str,
+    mut next_hash: Option<String>,
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<BundleEventChainPage> {
+    let mut records = Vec::with_capacity(limit.min(64));
+    let mut serialized_bytes = 0usize;
+    let mut expected_seq = None;
+
+    while records.len() < limit {
+        let Some(hash) = next_hash.take() else {
+            break;
+        };
+        let record = read_bundle_event_by_hash(cas_root, &hash)?;
+        if record.event.bundle_id != bundle_id
+            || record.event.event_kind != event_kind
+            || record.event.chain_id != chain_id
+        {
+            anyhow::bail!("bundle event chain cursor contains mismatched event metadata");
+        }
+        if let Some(expected_seq) = expected_seq {
+            if record.event.chain_seq != expected_seq {
+                anyhow::bail!(
+                    "bundle event chain {}/{}/{} has sequence gap: expected {}, got {}",
+                    bundle_id,
+                    event_kind,
+                    chain_id,
+                    expected_seq,
+                    record.event.chain_seq
+                );
+            }
+        }
+        match &record.event.prev_chain_event_hash {
+            Some(_) if record.event.chain_seq == 1 => anyhow::bail!(
+                "bundle event chain {}/{}/{} has a predecessor at sequence 1",
+                bundle_id,
+                event_kind,
+                chain_id
+            ),
+            None if record.event.chain_seq != 1 => anyhow::bail!(
+                "bundle event chain {}/{}/{} ends at sequence {}",
+                bundle_id,
+                event_kind,
+                chain_id,
+                record.event.chain_seq
+            ),
+            _ => {}
+        }
+
+        let record_bytes = serde_json::to_vec(&record)
+            .context("failed to measure serialized bundle event record")?
+            .len();
+        let next_serialized_bytes = serialized_bytes
+            .checked_add(record_bytes)
+            .context("bundle event page serialized byte count overflow")?;
+        if next_serialized_bytes > max_serialized_bytes {
+            if records.is_empty() {
+                anyhow::bail!(
+                    "single bundle event requires {} serialized bytes (page budget {})",
+                    record_bytes,
+                    max_serialized_bytes
+                );
+            }
+            next_hash = Some(hash);
+            break;
+        }
+
+        expected_seq = record.event.chain_seq.checked_sub(1);
+        next_hash = record.event.prev_chain_event_hash.clone();
+        serialized_bytes = next_serialized_bytes;
+        records.push(record);
+    }
+
+    Ok(BundleEventChainPage {
+        records,
+        next_cursor: next_hash,
+    })
+}
+
+fn next_bundle_event_chain_head(
+    refs_root: &Path,
+    bundle_id: &str,
+    event_kind: &str,
+    after_chain_id: Option<&str>,
+) -> anyhow::Result<Option<(String, String)>> {
+    let chains_root = refs_root
+        .join("generic")
+        .join(BUNDLE_EVENTS_NAMESPACE)
+        .join(bundle_id)
+        .join(event_kind)
+        .join("chains");
+    let entries = match std::fs::read_dir(&chains_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", chains_root.display()))
+        }
+    };
+
+    // read_dir order is unspecified, so retain only the smallest eligible id
+    // instead of collecting and sorting chain heads. The inspection ceiling is
+    // intentionally independent of the response page size: an adversarial refs
+    // directory must not make a one-record callback scan walk unbounded entries
+    // while the StateStore lock is held.
+    let mut next_chain_id: Option<String> = None;
+    let mut inspected_entries = 0usize;
+    for entry in entries {
+        if inspected_entries >= MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES {
+            anyhow::bail!(
+                "bundle event scan exceeds the {}-entry chain directory inspection limit",
+                MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES
+            );
+        }
+        inspected_entries += 1;
+        let entry = entry.context("failed to read bundle event chain directory entry")?;
+        if !entry
+            .file_type()
+            .context("failed to inspect bundle event chain directory entry")?
+            .is_dir()
+        {
+            continue;
+        }
+        let chain_id = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("bundle event chain directory name is not valid UTF-8"))?;
+        validate_bundle_identifier("chain_id", &chain_id)?;
+        if let Some(after_chain_id) = after_chain_id {
+            if chain_id.as_str() <= after_chain_id {
+                continue;
+            }
+        }
+        if match next_chain_id.as_ref() {
+            Some(current) => chain_id < *current,
+            None => true,
+        } {
+            next_chain_id = Some(chain_id);
+        }
+    }
+
+    let Some(chain_id) = next_chain_id else {
+        return Ok(None);
+    };
+    let head = refs::read_generic_head_ref(
+        refs_root,
+        BUNDLE_EVENTS_NAMESPACE,
+        &chain_ref_name(bundle_id, event_kind, &chain_id),
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "bundle event chain {}/{}/{} has no signed head",
+            bundle_id,
+            event_kind,
+            chain_id
+        )
+    })?;
+    Ok(Some((chain_id, head.target_hash)))
+}
+
+fn validate_bundle_event_page_bounds(
+    limit: usize,
+    max_serialized_bytes: usize,
+) -> anyhow::Result<()> {
+    if limit == 0 {
+        anyhow::bail!("bundle event page limit must be greater than zero");
+    }
+    if max_serialized_bytes == 0 {
+        anyhow::bail!("bundle event page byte budget must be greater than zero");
+    }
+    Ok(())
+}
+
 fn validate_bundle_event_chain_links(
     bundle_id: &str,
     event_kind: &str,
@@ -365,8 +669,27 @@ pub fn read_bundle_event_by_hash(
 ) -> anyhow::Result<BundleEventRecord> {
     validate_canonical_hash("event_hash", event_hash)?;
     let path = lillux::shard_path(cas_root, "objects", event_hash, ".json");
+    let object_bytes = std::fs::metadata(&path)
+        .with_context(|| format!("failed to inspect bundle event object {}", path.display()))?
+        .len();
+    if object_bytes > MAX_BUNDLE_EVENT_SERIALIZED_BYTES as u64 {
+        anyhow::bail!(
+            "bundle event object {} is {} serialized bytes (max {})",
+            event_hash,
+            object_bytes,
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES
+        );
+    }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read bundle event object {}", path.display()))?;
+    if content.len() > MAX_BUNDLE_EVENT_SERIALIZED_BYTES {
+        anyhow::bail!(
+            "bundle event object {} is {} serialized bytes (max {})",
+            event_hash,
+            content.len(),
+            MAX_BUNDLE_EVENT_SERIALIZED_BYTES
+        );
+    }
     let event: BundleEventObject = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse bundle event {}", event_hash))?;
     event.validate()?;

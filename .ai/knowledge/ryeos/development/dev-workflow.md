@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-23T03:27:13Z:043aa37d1a4c9e506fddf81f28135268585615f605df7bb991bc0f66bc682586:5pD2HlCBXwV8ljYylwGErGsU5vN20vYjtCq4xZZBjtgtNNfVmAWptgxIdFZc/4m7+BfT3k5voFqzgiAdmX7hDg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-13T07:43:47Z:a111e8406d9c9dc5b56e2cfe960c749618ec5b0d94fcee8abc3aff4732fafed9:w3ZYx6kcJV1nLlrXxXVkY1VXr/7/1ZMVMa2Xro1F+ign0n47egRPp7Skg00smf9s4aMFpQgGi26+yniczw0vAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "dev-workflow"
@@ -21,7 +21,7 @@ signing, and install commands, prefer `development/build-and-test.md`.
 | Rust that affects bundled binaries | `./scripts/gate.sh --no-tests`, then targeted/full tests |
 | Anything under `bundles/` | `./scripts/gate.sh` unless intentionally skipping tests |
 | Daemon/CLI behavior with installed bundles | `./scripts/dev-up.sh` for repo-local `.local/ryeos` |
-| System packaged-layout repair | `./scripts/pkg/install-local-direct.sh` |
+| System packaged-layout repair | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 
 Default rule: if a test or runtime loads bundle items, refresh/sign bundles
 first. Stale bundle bin/CAS/signature state is the most common false failure.

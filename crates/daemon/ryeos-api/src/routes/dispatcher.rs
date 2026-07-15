@@ -110,6 +110,7 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
         body_raw: body_raw.clone(),
         input: serde_json::Value::Null,
         principal: None,
+        workspace_lifeline: None,
         state: app_state.clone(),
         webhook_dedupe: webhook_dedupe.clone(),
     };

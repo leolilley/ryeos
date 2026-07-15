@@ -1481,7 +1481,7 @@ pub fn build_request_body(
     let template = provider.body_template.as_ref().unwrap_or_else(|| {
         unreachable!(
             "ProviderConfig::validate() rejects providers without body_template \
-              at config-load time (preflight_resolve → bootstrap, launch). \
+              during launch preparation before bootstrap and provider launch. \
              If this fires, either:\n  \
              1. validate() was not called on the path that produced this config, OR\n  \
              2. a code path constructed ProviderConfig directly without validation.\n  \
@@ -2456,7 +2456,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
     // ── Real golden-wire tests ────────────────────────────────────────
     //
     // These tests load the ACTUAL signed bundled provider YAML through
-    // VerifiedLoader, resolve the matching profile via preflight_resolve,
+    // VerifiedLoader, resolve the matching profile from the prepared provider snapshot,
     // and build the request body. They catch:
     //   - Bundled YAML signature / parse failures
     //   - Profile-match resolution regressions

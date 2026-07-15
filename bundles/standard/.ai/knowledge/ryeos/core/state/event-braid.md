@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-03T01:06:01Z:ede5395b72c93c513dacaa41f467f5645d0b2f9100e0ee402139aad0a30a83bd:Cr4+tlvOExflh6edHvfnxx5pxzS5bSByj9rpLBGTfGMAA4vvJgr6qoBR5E0lJWafVja6/zNe2BHciQ/ieocwDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:3d7e3ae559afd0f34ef0f9e8b17a075be6ad4b321a63441d445e84c6207b32dc:pRZUCQMM5ZB7hqe5WHN0w97oYNHTwGCrcZOU1sh60E3Ck1o/egGj3BH0zw962u4Utq1/DtRmCYMQ3FT+B0aVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
 tags: [architecture, events, braid, chain, thread, durability, replay]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The dual hash-linked event braid — two independent hash chains in a
   single event stream, enabling efficient global and per-thread replay.
@@ -108,9 +108,12 @@ ryeos events chain-replay <chain_root_id> --limit 200
 
 ### Pagination
 
-Both endpoints use `chain_seq` as a monotonic cursor. If the result set
-equals the requested limit, a `next_cursor` is returned (the `chain_seq`
-of the last event). Default limit: 200.
+Both endpoints use `chain_seq` as a monotonic cursor. `next_cursor` is the
+`chain_seq` of the last returned event whenever another event remains. A page
+can therefore carry a cursor even when it is shorter than the requested count:
+the daemon also enforces a 6 MiB conservative serialized-response budget.
+Public services default to 200 records and accept limits from 1 through 500;
+runtime UDS callbacks use the tighter 32-record ceiling.
 
 ### Projection Rebuild
 
@@ -163,8 +166,8 @@ Runtime callback operations:
 | Operation | Capability checked | Purpose |
 |---|---|---|
 | `bundle_events_append` | `ryeos.append.bundle-events.<bundle>/<event_kind>` | Append one event to a bundle chain. |
-| `bundle_events_read_chain` | `ryeos.scan.bundle-events.<bundle>/<event_kind>` | Read one chain for an event kind. |
-| `bundle_events_scan` | `ryeos.scan.bundle-events.<bundle>/<event_kind>` | Scan all records for an event kind. |
+| `bundle_events_read_chain` | `ryeos.scan.bundle-events.<bundle>/<event_kind>` | Read a bounded, newest-first page from one chain. |
+| `bundle_events_scan` | `ryeos.scan.bundle-events.<bundle>/<event_kind>` | Page across chains for an event kind. |
 
 `read_chain` is covered by the `scan` manifest operation in the current
 schema. If a future manifest adds an explicit `read` or `read_chain`
@@ -192,7 +195,9 @@ Read-chain request shape:
 ```json
 {
   "event_kind": "example_event",
-  "chain_id": "example_123"
+  "chain_id": "example_123",
+  "cursor": null,
+  "limit": 16
 }
 ```
 
@@ -200,9 +205,19 @@ Scan request shape:
 
 ```json
 {
-  "event_kind": "example_event"
+  "event_kind": "example_event",
+  "cursor": null,
+  "limit": 16
 }
 ```
+
+Both operations return `events` and `next_cursor`, enforce at most 16 records
+and 8 MiB of serialized records per page, and may return a short page when the
+byte budget is reached. Read-chain cursors are event hashes. Scan cursors are
+`{chain_id, event_hash}` objects. Scan visits chain ids lexically and walks each
+chain newest-first; callers continue until `next_cursor` is null. Selecting the
+next chain inspects at most 4,096 chain-directory entries and rejects a larger
+namespace rather than holding the state lock for an unbounded filesystem walk.
 
 The daemon adds `thread_id` and callback authentication on the UDS
 request. Tool authors should use the runtime callback client available to

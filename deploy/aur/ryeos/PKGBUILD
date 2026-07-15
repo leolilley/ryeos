@@ -1,7 +1,7 @@
 # Maintainer: Leo Lilley <leo.lml.lilley@gmail.com>
 pkgname=ryeos
-# Release template. scripts/release/prepare-aur.sh replaces both placeholders
-# only after verifying the signed tag and hashing the exact source archive.
+# Release template. scripts/release/prepare-aur.sh replaces all placeholders
+# only after verifying the signed tag and hashing both immutable release inputs.
 pkgver=RELEASE_VERSION
 pkgrel=1
 pkgdesc="Portable operating system for AI — persistent, signed workspace for LLMs"
@@ -16,14 +16,23 @@ install=ryeos.install
 # disable strip (and `lto` for the same reason).
 options=('!strip' '!lto')
 
-# SQLite is bundled (libsqlite3-sys), TLS via rustls — no runtime system deps
-depends=('bubblewrap' 'gcc-libs' 'glibc')
+# SQLite is bundled (libsqlite3-sys) and TLS uses rustls. Bubblewrap is needed
+# only when the operator changes the strict sandbox policy to `mode: enforce`.
+depends=('gcc-libs' 'glibc')
+optdepends=('bubblewrap>=0.11.0: enforce the node subprocess sandbox policy')
 
 # cc needed for bundled libsqlite3-sys C compilation
 makedepends=('rust' 'cargo' 'cc')
+checkdepends=('bubblewrap>=0.11.0')
 
-source=("$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('RELEASE_ARCHIVE_SHA256')
+source=(
+    "$pkgname-$pkgver.tar.gz::https://github.com/leolilley/ryeos/archive/refs/tags/v${pkgver}.tar.gz"
+    "ryeos-bundles-$pkgver-x86_64.tar.gz::https://github.com/leolilley/ryeos/releases/download/v${pkgver}/ryeos-bundles-${pkgver}-x86_64.tar.gz"
+)
+sha256sums=(
+    'RELEASE_ARCHIVE_SHA256'
+    'RELEASE_BUNDLE_ARCHIVE_SHA256'
+)
 
 build() {
     cd "ryeos-${pkgver}"
@@ -38,6 +47,16 @@ check() {
 package() {
     cd "ryeos-${pkgver}"
 
+    # Bundle sources are a separate official release artifact. Its seeds,
+    # manifests, CAS, and embedded payload binaries were populated and signed
+    # by the release pipeline under the publisher key built into `ryeos init`.
+    # Never regenerate or re-sign this production content in makepkg.
+    local bundle_source="$srcdir/ryeos-bundles-${pkgver}-x86_64"
+    [[ -d "$bundle_source/.ai" ]] || {
+        error "official bundle artifact is missing its source-root .ai directory"
+        return 1
+    }
+
     # ── User-facing binaries ──────────────────────────────────
     # Only the primary entry points go in /usr/bin/.
     # All handler/runtime/tool binaries live inside bundles
@@ -47,24 +66,18 @@ package() {
     install -Dm755 target/release/ryeos                 "$pkgdir/usr/bin/ryeos"
     install -Dm755 target/release/lillux                "$pkgdir/usr/bin/lillux"
 
-    # ── Bundle YAML data ────────────────────────────────────
-    # Ship each bundle under /usr/share/ryeos/<name>/.ai/.
+    # ── Official signed bundle data ──────────────────────────
     # Plain `ryeos init` uses /usr/share/ryeos as its default source and
-    # discovers immediate children containing .ai/. The loop below ships every
-    # bundle directory present under bundles/ — currently core, central-auth,
-    # standard, web, browser, ryeos-ui, hosted-node — so it never drifts from the
-    # tree. (The shell installers enumerate sets from scripts/pkg/bundle-sets.sh;
-    # this package build simply ships all of them.)
+    # verifies this material against its hardcoded official publisher key.
     mkdir -p "$pkgdir/usr/share/ryeos"
-    cp -ra bundles/.ai "$pkgdir/usr/share/ryeos/.ai"
-    for bundle_dir in bundles/*/; do
+    cp -a "$bundle_source/.ai" "$pkgdir/usr/share/ryeos/.ai"
+    for bundle_dir in "$bundle_source"/*/; do
         [[ -d "$bundle_dir/.ai" ]] || continue
         name=$(basename "$bundle_dir")
         mkdir -p "$pkgdir/usr/share/ryeos/$name"
-        cp -ra "$bundle_dir/.ai" "$pkgdir/usr/share/ryeos/$name/.ai"
-        # Ship the per-bundle PUBLISHER_TRUST.toml alongside .ai so
-        # operators can pin the bundle's signer at `ryeos init` time
-        # via --trust-file.
+        cp -a "$bundle_dir/.ai" "$pkgdir/usr/share/ryeos/$name/.ai"
+        # Publisher documents are informational metadata. Production init does
+        # not import them as authority; it verifies with the compiled-in key.
         if [[ -f "$bundle_dir/PUBLISHER_TRUST.toml" ]]; then
             install -Dm644 "$bundle_dir/PUBLISHER_TRUST.toml" \
                 "$pkgdir/usr/share/ryeos/$name/PUBLISHER_TRUST.toml"

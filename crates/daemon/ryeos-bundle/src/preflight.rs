@@ -18,7 +18,7 @@ use crate::manifest::{
 
 mod structure;
 
-use structure::{collect_files_recursive, is_runtime_support_file};
+use structure::{collect_files_recursive, is_runtime_support_file, validate_regular_tree};
 
 const IDENTITY_COMPOSER: &str = "handler:ryeos/core/identity";
 
@@ -128,20 +128,77 @@ pub fn preflight_verify_bundle(source_path: &Path, app_root: &Path) -> Result<()
             .into_iter()
             .map(|record| record.bundle_root)
             .collect();
-    let operator_config_root =
-        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
-    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, &operator_config_root)
+    let node_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(app_root)
+            .context("preflight: load node sandbox policy")?,
+    );
+    preflight_verify_bundle_in_context(
+        source_path,
+        &installed_bundle_roots,
+        &node_config_root,
+        sandbox,
+    )
 }
 
 pub fn preflight_verify_bundle_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    operator_config_root: &Path,
+    node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_report_in_context(
         source_path,
         dependency_bundle_roots,
-        operator_config_root,
+        node_config_root,
+        sandbox,
+    )?;
+    Ok(())
+}
+
+/// Verify a candidate bundle whose prospective installed name may differ from
+/// its source directory name.
+///
+/// Install planning supplies the name explicitly so manifest identity is
+/// checked against the requested registration name while retaining the source
+/// freshness check used for author trees.
+pub fn preflight_verify_named_bundle_in_context(
+    source_path: &Path,
+    expected_bundle_name: &str,
+    dependency_bundle_roots: &[PathBuf],
+    node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+) -> Result<()> {
+    let _report = preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        node_config_root,
+        Some(expected_bundle_name),
+        true,
+        sandbox,
+    )?;
+    Ok(())
+}
+
+/// Re-verify a completed install staging tree using the final bundle identity.
+///
+/// Staging directories deliberately have temporary filesystem names, so the
+/// expected bundle name is supplied separately for manifest identity checks.
+/// All other verification reads exclusively from the completed staging tree.
+pub fn preflight_verify_bundle_staging_in_context(
+    staging_path: &Path,
+    expected_bundle_name: &str,
+    dependency_bundle_roots: &[PathBuf],
+    node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+) -> Result<()> {
+    let _report = preflight_verify_bundle_in_context_inner(
+        staging_path,
+        dependency_bundle_roots,
+        node_config_root,
+        Some(expected_bundle_name),
+        false,
+        sandbox,
     )?;
     Ok(())
 }
@@ -154,7 +211,8 @@ pub fn preflight_verify_bundle_in_context(
 pub fn preflight_verify_bundle_report_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    operator_config_root: &Path,
+    node_config_root: &Path,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<PreflightReport> {
     // The core logic below populates `failures` (blocking) and
     // `warnings` (non-blocking). We lift the loop into this function
@@ -162,7 +220,10 @@ pub fn preflight_verify_bundle_report_in_context(
     preflight_verify_bundle_in_context_inner(
         source_path,
         dependency_bundle_roots,
-        operator_config_root,
+        node_config_root,
+        None,
+        true,
+        sandbox,
     )
 }
 
@@ -170,12 +231,18 @@ pub fn preflight_verify_bundle_report_in_context(
 fn preflight_verify_bundle_in_context_inner(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    operator_config_root: &Path,
+    node_config_root: &Path,
+    expected_bundle_name: Option<&str>,
+    check_source_mtime: bool,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
-    if !ai_dir.is_dir() {
-        bail!("preflight: source has no .ai/ at {}", source_path.display());
-    }
+    validate_regular_tree(&ai_dir).with_context(|| {
+        format!(
+            "preflight: source has an invalid .ai control tree at {}",
+            source_path.display()
+        )
+    })?;
 
     let mut schema_roots = Vec::new();
     for root in dependency_bundle_roots {
@@ -197,15 +264,18 @@ fn preflight_verify_bundle_in_context_inner(
         );
     }
 
-    let trust_store = TrustStore::load(None, operator_config_root)
-        .context("preflight: load operator trust store")?;
+    let trust_store =
+        TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
     if trust_store.is_empty() {
         bail!(
-            "preflight: operator trust store is empty — run `ryeos init` to \
+            "preflight: node trust store is empty — run `ryeos init` to \
              pin the platform author key, or `ryeos trust pin <fingerprint>` \
              to pin a third-party publisher"
         );
     }
+
+    ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
+        .context("preflight: verify node-authorized bundle executables")?;
 
     let kinds = KindRegistry::load_base(&schema_roots, &trust_store)
         .context("preflight: load kind schemas")?;
@@ -232,10 +302,12 @@ fn preflight_verify_bundle_in_context_inner(
             &mut seen_roots,
         );
     }
-    // Candidate bundle being verified (last, so installed content takes precedence).
+    // The candidate is a prospective installed bundle and therefore receives
+    // bundle trust semantics during admission. It is last so dependency
+    // content retains the same deterministic precedence as boot.
     push_unique(
         source_path.to_path_buf(),
-        ryeos_engine::resolution::TrustClass::TrustedProject,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
         &mut parser_search_roots,
         &mut seen_roots,
     );
@@ -260,7 +332,7 @@ fn preflight_verify_bundle_in_context_inner(
         &kinds,
     )
     .context("preflight: load parser tools")?;
-    let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store)
+    let handler_registry = HandlerRegistry::load_base(&parser_search_roots, &trust_store, sandbox)
         .context("preflight: load handler descriptors")?;
     let parser_dispatcher = ParserDispatcher::new(parser_tools, Arc::new(handler_registry));
 
@@ -353,7 +425,7 @@ fn preflight_verify_bundle_in_context_inner(
                 Some(header) => {
                     if !trust_store.is_trusted(&header.signer_fingerprint) {
                         failures.push(format!(
-                            "{}: signer {} not in operator trust store \
+                            "{}: signer {} not in node trust store \
                              (run `ryeos trust pin {}` to trust this publisher)",
                             rel.display(),
                             header.signer_fingerprint,
@@ -413,8 +485,17 @@ fn preflight_verify_bundle_in_context_inner(
         bail!("{msg}");
     }
 
-    verify_manifest_signature(&ai_dir, source_path, &trust_store)
-        .context("preflight: bundle manifest verification")?;
+    match expected_bundle_name {
+        Some(expected_bundle_name) => verify_manifest_signature_for_bundle_name(
+            &ai_dir,
+            source_path,
+            expected_bundle_name,
+            &trust_store,
+            check_source_mtime,
+        ),
+        None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
+    }
+    .context("preflight: bundle manifest verification")?;
 
     if !warnings.is_empty() {
         tracing::info!(
@@ -436,10 +517,35 @@ pub fn verify_manifest_signature(
     source_path: &Path,
     trust_store: &TrustStore,
 ) -> Result<()> {
+    let expected_bundle_name = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("source_path has no directory name"))?;
+    verify_manifest_signature_for_bundle_name(
+        ai_dir,
+        source_path,
+        expected_bundle_name,
+        trust_store,
+        true,
+    )
+}
+
+fn verify_manifest_signature_for_bundle_name(
+    ai_dir: &Path,
+    source_path: &Path,
+    expected_bundle_name: &str,
+    trust_store: &TrustStore,
+    check_source_mtime: bool,
+) -> Result<()> {
     let manifest_path = ai_dir.join("manifest.yaml");
     let manifest_meta = match fs::symlink_metadata(&manifest_path) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "bundle '{}' has no regular signed .ai/manifest.yaml; installable bundles require a published manifest",
+                expected_bundle_name
+            )
+        }
         Err(e) => {
             return Err(e).with_context(|| format!("stat manifest {}", manifest_path.display()));
         }
@@ -466,7 +572,7 @@ pub fn verify_manifest_signature(
 
     if !trust_store.is_trusted(&sig_header.signer_fingerprint) {
         bail!(
-            "manifest.yaml: signer {} not in operator trust store \
+            "manifest.yaml: signer {} not in node trust store \
              (run `ryeos trust pin {}` to trust this publisher)",
             sig_header.signer_fingerprint,
             sig_header.signer_fingerprint
@@ -513,16 +619,12 @@ pub fn verify_manifest_signature(
         )
     })?;
 
-    let dir_name = source_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("source_path has no directory name"))?;
-    if manifest.name != dir_name {
+    if manifest.name != expected_bundle_name {
         bail!(
             "manifest identity mismatch: manifest.yaml name is '{}' but \
              bundle directory is '{}' — the manifest must be regenerated",
             manifest.name,
-            dir_name
+            expected_bundle_name
         );
     }
 
@@ -558,7 +660,10 @@ pub fn verify_manifest_signature(
         if !source_meta.file_type().is_file() {
             bail!("manifest.source.yaml must be a regular file, not a symlink or directory");
         }
-        if source_meta.modified()? > manifest_meta.modified()? {
+        // Copying into an install staging tree does not preserve source mtimes,
+        // so completed-staging verification relies on the exact materialized
+        // manifest comparison below instead of temporary copy order.
+        if check_source_mtime && source_meta.modified()? > manifest_meta.modified()? {
             bail!(
                 "manifest.yaml is older than manifest.source.yaml — regenerate and re-sign manifest.yaml"
             );
@@ -568,7 +673,7 @@ pub fn verify_manifest_signature(
         let source_body = lillux::signature::strip_signature_lines(&source_raw);
         let source_manifest: BundleManifestSource = serde_yaml::from_str(&source_body)
             .with_context(|| format!("parse manifest source {}", source_manifest_path.display()))?;
-        let expected_manifest = materialize_manifest(source_manifest, ai_dir, dir_name)
+        let expected_manifest = materialize_manifest(source_manifest, ai_dir, expected_bundle_name)
             .context("materialize manifest.source.yaml for staleness check")?;
         if manifest != expected_manifest {
             bail!(
@@ -1136,7 +1241,7 @@ fn validate_node_config_item(
         .context("node config item has no valid signature line")?;
     if !trust_store.is_trusted(&header.signer_fingerprint) {
         bail!(
-            "signer {} not in operator trust store",
+            "signer {} not in node trust store",
             header.signer_fingerprint
         );
     }
@@ -1432,7 +1537,7 @@ mod tests {
         source: PathBuf,
         ai_dir: PathBuf,
         signing_key: SigningKey,
-        operator_config_root: PathBuf,
+        node_config_root: PathBuf,
     }
 
     impl BundleLayout {
@@ -1444,8 +1549,8 @@ mod tests {
             let signing_key = SigningKey::generate(&mut OsRng);
 
             let app_root = tmp.path().join("app");
-            let operator_config_root = app_root.join(".ai/config");
-            let trust_dir = operator_config_root.join("keys/trusted");
+            let node_config_root = app_root.join(".ai/config");
+            let trust_dir = node_config_root.join("keys/trusted");
             fs::create_dir_all(&trust_dir).unwrap();
 
             ryeos_engine::trust::pin_key(
@@ -1461,12 +1566,12 @@ mod tests {
                 source,
                 ai_dir,
                 signing_key,
-                operator_config_root,
+                node_config_root,
             }
         }
 
         fn trust_store(&self) -> TrustStore {
-            TrustStore::load(None, &self.operator_config_root).unwrap()
+            TrustStore::load(None, &self.node_config_root).unwrap()
         }
 
         fn add_kind_schema(&self, kind_name: &str) {
@@ -1625,13 +1730,11 @@ description: "fixed parser handler for preflight tests"
             let cas = lillux::cas::CasStore::new(self.ai_dir.join("objects"));
             let bytes = fs::read(bin_path).unwrap();
             let blob_hash = cas.store_blob(&bytes).unwrap();
-            let fingerprint =
-                ryeos_engine::trust::compute_fingerprint(&self.signing_key.verifying_key());
             let item_source = serde_json::json!({
+                "kind": "item_source",
                 "item_ref": item_ref,
                 "content_blob_hash": blob_hash,
                 "integrity": format!("sha256:{blob_hash}"),
-                "signature_info": { "fingerprint": fingerprint },
                 "mode": 0o755,
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
@@ -1647,6 +1750,7 @@ description: "fixed parser handler for preflight tests"
             .unwrap();
             let item_source_hash = cas.store_object(&item_source).unwrap();
             let manifest = serde_json::json!({
+                "kind": "source_manifest",
                 "item_source_hashes": {
                     item_ref: item_source_hash,
                 }
@@ -1654,7 +1758,16 @@ description: "fixed parser handler for preflight tests"
             let manifest_hash = cas.store_object(&manifest).unwrap();
             let manifest_ref = self.ai_dir.join("refs/bundles/manifest");
             fs::create_dir_all(manifest_ref.parent().unwrap()).unwrap();
-            fs::write(manifest_ref, manifest_hash).unwrap();
+            let signed_ref = lillux::signature::sign_content(
+                &format!(
+                    "{}\n{manifest_hash}\n",
+                    ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+                ),
+                &self.signing_key,
+                "#",
+                None,
+            );
+            fs::write(manifest_ref, signed_ref).unwrap();
         }
 
         fn write_signed_item(&self, rel: &str, body: &str) {
@@ -1740,7 +1853,7 @@ description: "fixed parser handler for preflight tests"
         let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("not in operator trust store"),
+            msg.contains("not in node trust store"),
             "should reject untrusted signer: {msg}"
         );
     }
@@ -2094,13 +2207,11 @@ system_source_caps:
     }
 
     #[test]
-    fn verify_manifest_passes_without_manifest() {
+    fn verify_manifest_rejects_missing_manifest() {
         let layout = BundleLayout::new("test-bundle");
         let ts = layout.trust_store();
-        assert!(
-            verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok(),
-            "no manifest should pass (optional)"
-        );
+        let error = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        assert!(error.to_string().contains("has no regular signed"));
     }
 
     fn add_real_preflight_fixture(
@@ -2114,6 +2225,9 @@ system_source_caps:
         layout.add_fixed_parser_descriptor();
         layout.add_fixed_parser_handler(parsed_value);
         layout.write_signed_item("items/demo.yaml", "name: demo\n");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - mykind\n  - parser\nrequires_kinds: []\nuses_kinds: []\n",
+        );
     }
 
     #[test]
@@ -2138,7 +2252,8 @@ optional: {}
         let err = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.operator_config_root,
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -2170,7 +2285,8 @@ optional: {}
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.operator_config_root,
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         )
         .expect("non-identity composer should skip pre-composition contract validation");
 
@@ -2197,7 +2313,8 @@ strict_fields: warn
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.operator_config_root,
+            &layout.node_config_root,
+            Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
         )
         .expect("warnings should not fail preflight");
 

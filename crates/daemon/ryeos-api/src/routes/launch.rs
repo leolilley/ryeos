@@ -103,6 +103,7 @@ pub(crate) fn spawn_dispatch_launch(
     principal_id: String,
     principal_scopes: Vec<String>,
     pre_minted_thread_id: String,
+    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     options: DispatchLaunchOptions,
 ) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
     spawn_dispatch_launch_inner(
@@ -113,6 +114,7 @@ pub(crate) fn spawn_dispatch_launch(
         principal_id,
         principal_scopes,
         pre_minted_thread_id,
+        provenance,
         options,
         None,
     )
@@ -129,6 +131,7 @@ pub(crate) fn spawn_dispatch_launch_with_handoff(
     principal_id: String,
     principal_scopes: Vec<String>,
     pre_minted_thread_id: String,
+    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     options: DispatchLaunchOptions,
 ) -> (
     tokio::task::JoinHandle<Result<(), LaunchSpawnError>>,
@@ -143,6 +146,7 @@ pub(crate) fn spawn_dispatch_launch_with_handoff(
         principal_id,
         principal_scopes,
         pre_minted_thread_id,
+        provenance,
         options,
         Some(handoff),
     );
@@ -158,11 +162,17 @@ fn spawn_dispatch_launch_inner(
     principal_id: String,
     principal_scopes: Vec<String>,
     pre_minted_thread_id: String,
+    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     options: DispatchLaunchOptions,
     launch_handoff: Option<ryeos_executor::execution::launch::LaunchHandoff>,
 ) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
     let state_clone = state.clone();
     let project_path_buf = project_path.into_path_buf();
+    assert_eq!(
+        provenance.effective_path(),
+        project_path_buf,
+        "spawn_dispatch_launch provenance/project path mismatch"
+    );
     // Resolve the effective target_site_id for the dispatch request.
     // Self-target (target == current) is normalized to None so local
     // protocol capability checks don't reject it.
@@ -205,11 +215,6 @@ fn spawn_dispatch_launch_inner(
             plan_ctx,
             requested_call: call,
         };
-
-        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_path_buf.clone(),
-            state_clone.engine.clone(),
-        );
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: &launch_mode,

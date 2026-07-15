@@ -8,7 +8,6 @@
 //! profile and bounded streaming I/O.
 
 use std::collections::{BTreeSet, HashMap};
-use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -25,7 +24,7 @@ use crate::error::EngineError;
 use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 use crate::resolution::TrustClass;
 use crate::runtime_registry::{LaunchPreparationDecl, RuntimeRegistry};
-use crate::subprocess_spec::load_node_sandbox_policy;
+use crate::sandbox::SandboxRuntime;
 
 pub const LAUNCH_PREPARER_REQUEST_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub const LAUNCH_PREPARER_STDOUT_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -166,17 +165,17 @@ impl LaunchPreparerRegistry {
 /// live launch preparation.
 #[derive(Debug, Clone)]
 pub struct LaunchPreparerRunner {
-    bubblewrap_path: PathBuf,
+    bubblewrap: Arc<std::fs::File>,
 }
 
 impl LaunchPreparerRunner {
-    /// Load only the node-owned absolute backend path. All other policy fields
-    /// are deliberately ignored because launch preparation has a fixed profile
-    /// that descriptors and operator sandbox policy cannot widen.
-    pub fn from_node_policy(app_root: &Path) -> Result<Self, EngineError> {
-        let policy = load_node_sandbox_policy(app_root)?;
-        let bubblewrap_path = validate_bubblewrap_backend(&policy.backend_path)?;
-        Ok(Self { bubblewrap_path })
+    /// Capture the backend from the daemon's immutable node-sandbox snapshot.
+    /// All widenable policy fields remain deliberately ignored because launch
+    /// preparation always uses its own fixed profile.
+    pub fn from_sandbox_runtime(sandbox: &SandboxRuntime) -> Result<Self, EngineError> {
+        Ok(Self {
+            bubblewrap: sandbox.capture_mandatory_bubblewrap_backend()?,
+        })
     }
 
     pub(crate) fn run_launch_preparer_subprocess(
@@ -235,7 +234,14 @@ impl LaunchPreparerRunner {
                 detail: error.to_string(),
             }
         })?;
-        let mut command = Command::new(&self.bubblewrap_path);
+        #[cfg(unix)]
+        let bubblewrap_command = {
+            use std::os::fd::AsRawFd as _;
+            format!("/proc/self/fd/{}", self.bubblewrap.as_raw_fd())
+        };
+        #[cfg(not(unix))]
+        let bubblewrap_command = String::new();
+        let mut command = Command::new(bubblewrap_command);
         command
             .args(args)
             .current_dir("/tmp")
@@ -248,7 +254,13 @@ impl LaunchPreparerRunner {
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
             unsafe {
-                command.pre_exec(apply_launch_preparer_rlimits);
+                let bubblewrap_fd = self.bubblewrap.as_raw_fd();
+                command.pre_exec(move || {
+                    if libc::fcntl(bubblewrap_fd, libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    apply_launch_preparer_rlimits()
+                });
             }
         }
         #[cfg(not(unix))]
@@ -445,60 +457,6 @@ fn apply_launch_preparer_rlimits() -> std::io::Result<()> {
     ))
 }
 
-fn validate_bubblewrap_backend(configured: &Path) -> Result<PathBuf, EngineError> {
-    if !configured.is_absolute() {
-        return Err(EngineError::SandboxPolicyRefused {
-            reason: "launch-preparer Bubblewrap backend must be absolute".to_owned(),
-        });
-    }
-    let canonical = std::fs::canonicalize(configured).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
-            reason: format!(
-                "launch-preparer Bubblewrap backend {} cannot be resolved: {error}",
-                configured.display()
-            ),
-        }
-    })?;
-    let metadata = std::fs::metadata(&canonical).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
-            reason: format!(
-                "launch-preparer Bubblewrap backend {} cannot be inspected: {error}",
-                canonical.display()
-            ),
-        }
-    })?;
-    if !metadata.is_file() {
-        return Err(EngineError::SandboxPolicyRefused {
-            reason: format!(
-                "launch-preparer Bubblewrap backend {} is not a file",
-                canonical.display()
-            ),
-        });
-    }
-    let name = canonical.file_name().and_then(OsStr::to_str).unwrap_or("");
-    if !matches!(name, "bwrap" | "bubblewrap") {
-        return Err(EngineError::SandboxPolicyRefused {
-            reason: format!(
-                "launch-preparer backend {} is not Bubblewrap",
-                canonical.display()
-            ),
-        });
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(EngineError::SandboxPolicyRefused {
-                reason: format!(
-                    "launch-preparer Bubblewrap backend {} is not executable",
-                    canonical.display()
-                ),
-            });
-        }
-    }
-    Ok(canonical)
-}
-
 fn fixed_bubblewrap_args(handler_binary: &Path) -> Result<Vec<String>, EngineError> {
     let command_path = std::fs::canonicalize(handler_binary).map_err(|error| {
         EngineError::SandboxPolicyRefused {
@@ -518,15 +476,7 @@ fn fixed_bubblewrap_args(handler_binary: &Path) -> Result<Vec<String>, EngineErr
         "/".to_owned(),
     ];
 
-    let library_mounts = ["/lib", "/lib64", "/usr/lib", "/usr/lib64"]
-        .into_iter()
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-        .map(|destination| {
-            let source = std::fs::canonicalize(&destination).unwrap_or(destination.clone());
-            (source, destination)
-        })
-        .collect::<Vec<_>>();
+    let library_mounts = exact_runtime_library_mounts(&command_path)?;
     let mut directories = BTreeSet::new();
     for destination in library_mounts
         .iter()
@@ -565,6 +515,236 @@ fn fixed_bubblewrap_args(handler_binary: &Path) -> Result<Vec<String>, EngineErr
     args.push("--".to_owned());
     args.push(command_path.to_string_lossy().into_owned());
     Ok(args)
+}
+
+/// Resolve the verified preparer's exact dynamic-loader closure without
+/// executing the preparer. The ELF interpreter's `--list` mode asks the loader
+/// to resolve `DT_NEEDED` entries with an empty environment; only the returned
+/// regular files are mounted into the private namespace. A static ELF has no
+/// interpreter and therefore needs no runtime-library mounts.
+#[cfg(target_os = "linux")]
+fn exact_runtime_library_mounts(
+    command_path: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>, EngineError> {
+    let image = std::fs::read(command_path).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer binary {} cannot be inspected: {error}",
+                command_path.display()
+            ),
+        }
+    })?;
+    let Some(interpreter) = elf_interpreter(&image)? else {
+        return Ok(Vec::new());
+    };
+    if !interpreter.is_absolute() {
+        return Err(EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer ELF interpreter {} is not absolute",
+                interpreter.display()
+            ),
+        });
+    }
+    let canonical_interpreter = canonical_runtime_file("ELF interpreter", &interpreter)?;
+    let output = Command::new(&canonical_interpreter)
+        .arg("--list")
+        .arg(command_path)
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer ELF dependency inspection via {} failed: {error}",
+                canonical_interpreter.display()
+            ),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer ELF dependency inspection failed with status {}; stderr: {}",
+                output.status,
+                stderr.chars().take(512).collect::<String>()
+            ),
+        });
+    }
+
+    let listing = std::str::from_utf8(&output.stdout).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!("launch-preparer ELF dependency listing is not UTF-8: {error}"),
+        }
+    })?;
+    let mut destinations = BTreeSet::new();
+    destinations.insert(interpreter);
+    for line in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some((_, resolved)) = line.split_once("=>") {
+            let resolved = resolved.trim();
+            if resolved.starts_with("not found") {
+                return Err(EngineError::SandboxPolicyRefused {
+                    reason: format!("launch-preparer dependency is unavailable: {line}"),
+                });
+            }
+            if let Some(path) = resolved.split_whitespace().next() {
+                if path.starts_with('/') {
+                    destinations.insert(PathBuf::from(path));
+                }
+            }
+            continue;
+        }
+        if let Some(path) = line.split_whitespace().next() {
+            if path.starts_with('/') {
+                destinations.insert(PathBuf::from(path));
+            }
+        }
+    }
+
+    destinations
+        .into_iter()
+        .map(|destination| {
+            let source = canonical_runtime_file("runtime library", &destination)?;
+            Ok((source, destination))
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exact_runtime_library_mounts(
+    _command_path: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>, EngineError> {
+    Err(EngineError::SandboxPolicyRefused {
+        reason: "launch-preparer Bubblewrap isolation requires Linux".to_owned(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn canonical_runtime_file(label: &str, path: &Path) -> Result<PathBuf, EngineError> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!("launch-preparer {label} {} cannot be resolved: {error}", path.display()),
+        }
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| {
+        EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer {label} {} cannot be inspected: {error}",
+                canonical.display()
+            ),
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer {label} {} is not a regular file",
+                canonical.display()
+            ),
+        });
+    }
+    Ok(canonical)
+}
+
+#[cfg(target_os = "linux")]
+fn elf_interpreter(image: &[u8]) -> Result<Option<PathBuf>, EngineError> {
+    const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
+    const PT_INTERP: u32 = 3;
+    if image.get(..4) != Some(ELF_MAGIC.as_slice()) {
+        return Err(EngineError::SandboxPolicyRefused {
+            reason: "launch-preparer executable is not an ELF image".to_owned(),
+        });
+    }
+    let class = *image.get(4).ok_or_else(invalid_elf)?;
+    let little_endian = match image.get(5).copied() {
+        Some(1) => true,
+        Some(2) => false,
+        _ => return Err(invalid_elf()),
+    };
+    let (phoff, phentsize, phnum, offset_field, size_field) = match class {
+        1 => (
+            elf_integer(image, 28, 4, little_endian)?,
+            elf_integer(image, 42, 2, little_endian)?,
+            elf_integer(image, 44, 2, little_endian)?,
+            4,
+            16,
+        ),
+        2 => (
+            elf_integer(image, 32, 8, little_endian)?,
+            elf_integer(image, 54, 2, little_endian)?,
+            elf_integer(image, 56, 2, little_endian)?,
+            8,
+            32,
+        ),
+        _ => return Err(invalid_elf()),
+    };
+    let phoff = usize::try_from(phoff).map_err(|_| invalid_elf())?;
+    let phentsize = usize::try_from(phentsize).map_err(|_| invalid_elf())?;
+    let phnum = usize::try_from(phnum).map_err(|_| invalid_elf())?;
+    if phentsize == 0 || phnum == 0 {
+        return Ok(None);
+    }
+    for index in 0..phnum {
+        let header = phoff
+            .checked_add(index.checked_mul(phentsize).ok_or_else(invalid_elf)?)
+            .ok_or_else(invalid_elf)?;
+        if elf_integer(image, header, 4, little_endian)? != u64::from(PT_INTERP) {
+            continue;
+        }
+        let offset = usize::try_from(elf_integer(
+            image,
+            header.checked_add(offset_field).ok_or_else(invalid_elf)?,
+            if class == 1 { 4 } else { 8 },
+            little_endian,
+        )?)
+        .map_err(|_| invalid_elf())?;
+        let size = usize::try_from(elf_integer(
+            image,
+            header.checked_add(size_field).ok_or_else(invalid_elf)?,
+            if class == 1 { 4 } else { 8 },
+            little_endian,
+        )?)
+        .map_err(|_| invalid_elf())?;
+        if size == 0 || size > 4096 {
+            return Err(invalid_elf());
+        }
+        let bytes = image
+            .get(offset..offset.checked_add(size).ok_or_else(invalid_elf)?)
+            .ok_or_else(invalid_elf)?;
+        let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+        let value = std::str::from_utf8(bytes).map_err(|_| invalid_elf())?;
+        if value.is_empty() || value.as_bytes().contains(&0) {
+            return Err(invalid_elf());
+        }
+        return Ok(Some(PathBuf::from(value)));
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn elf_integer(
+    image: &[u8],
+    offset: usize,
+    width: usize,
+    little_endian: bool,
+) -> Result<u64, EngineError> {
+    let bytes = image
+        .get(offset..offset.checked_add(width).ok_or_else(invalid_elf)?)
+        .ok_or_else(invalid_elf)?;
+    let mut value = 0_u64;
+    if little_endian {
+        for (shift, byte) in bytes.iter().enumerate() {
+            value |= u64::from(*byte) << (shift * 8);
+        }
+    } else {
+        for byte in bytes {
+            value = (value << 8) | u64::from(*byte);
+        }
+    }
+    Ok(value)
+}
+
+#[cfg(target_os = "linux")]
+fn invalid_elf() -> EngineError {
+    EngineError::SandboxPolicyRefused {
+        reason: "launch-preparer executable has an invalid ELF program-header table".to_owned(),
+    }
 }
 
 #[derive(Debug, Clone)]

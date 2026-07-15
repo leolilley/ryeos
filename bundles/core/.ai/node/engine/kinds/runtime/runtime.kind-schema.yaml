@@ -1,4 +1,3 @@
-# ryeos:signed:2026-07-15T00:27:45Z:6adf3a85ed3935594f1148e6be225c2c9c2ec113ce63937ab4e5466d1fe4c071:BbMF8n0vUR2vEmLOCiiEccILXOGmwT0OFAGdkI8owf2A+fZ+uD6uBHWlHIbdx5HH60umDNmzBa8UOFRkh7AvBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # rye:unsigned
 category: "engine/kinds/runtime"
 version: "1.0.0"
@@ -77,14 +76,6 @@ composed_value_contract:
       prim: sequence
       elements: { type: single, prim: string }
     description: { type: single, prim: string }
-    schema:
-      type: single
-      prim: mapping
-      contract:
-        root_type: mapping
-        required:
-          envelope: { type: single, prim: string }
-          result: { type: single, prim: string }
 metadata:
   rules:
     version:

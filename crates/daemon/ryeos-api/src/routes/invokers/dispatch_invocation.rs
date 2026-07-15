@@ -171,7 +171,8 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_path.clone(),
             ctx.state.engine.clone(),
-        );
+        )
+        .with_workspace_lifeline(ctx.workspace_lifeline.clone());
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: "inline",

@@ -3,17 +3,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-const DEFAULT_SANDBOX_POLICY: &str = r#"version: 1
-backend_path: /usr/bin/bwrap
-allow_network: true
-writable_paths:
-  - "{project}"
-allowed_env:
-  - "*"
-max_open_files: 1024
-max_processes: 256
-"#;
-
 struct NodeDefaultPaths {
     sandbox_policy: PathBuf,
     ingest_dir: PathBuf,
@@ -28,7 +17,9 @@ impl NodeDefaultPaths {
         let ingest_dir = node.join("ingest");
         let sync_dir = node.join("sync");
         Self {
-            sandbox_policy: node.join("sandbox.yaml"),
+            sandbox_policy: app_root
+                .join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::sandbox::SANDBOX_POLICY_RELATIVE_PATH),
             ignore_config: ingest_dir.join("ignore.yaml"),
             ingest_dir,
             sync_policy: sync_dir.join("policy.yaml"),
@@ -44,13 +35,17 @@ pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
     let paths = NodeDefaultPaths::under(app_root);
 
     if !paths.sandbox_policy.exists() {
-        lillux::atomic_write_private(&paths.sandbox_policy, DEFAULT_SANDBOX_POLICY.as_bytes())
-            .with_context(|| {
+        let policy =
+            serde_yaml::to_string(&ryeos_engine::sandbox::SandboxPolicy::default_disabled())
+                .context("serialize default sandbox policy")?;
+        lillux::atomic_write_private(&paths.sandbox_policy, policy.as_bytes()).with_context(
+            || {
                 format!(
                     "write default sandbox policy {}",
                     paths.sandbox_policy.display()
                 )
-            })?;
+            },
+        )?;
     }
 
     if !paths.ignore_config.exists() {
@@ -100,11 +95,39 @@ mod tests {
 
     #[test]
     fn sandbox_default_preserves_execution_policy() {
-        assert!(DEFAULT_SANDBOX_POLICY.contains("backend_path: /usr/bin/bwrap"));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("allow_network: true"));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("  - \"{project}\""));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("  - \"*\""));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("max_open_files: 1024"));
-        assert!(DEFAULT_SANDBOX_POLICY.contains("max_processes: 256"));
+        let policy = ryeos_engine::sandbox::SandboxPolicy::default_disabled();
+
+        assert_eq!(policy.version, 1);
+        assert_eq!(policy.mode, ryeos_engine::sandbox::SandboxMode::Disabled);
+        assert_eq!(
+            policy.backend.kind,
+            ryeos_engine::sandbox::SandboxBackendKind::Bubblewrap
+        );
+        assert_eq!(policy.backend.executable, Path::new("/usr/bin/bwrap"));
+        assert_eq!(
+            policy.filesystem.readable,
+            vec![
+                "{node_public_identity}".to_string(),
+                "{daemon_socket}".to_string(),
+                "{bundle_roots}".to_string(),
+                "{node_trusted_keys}".to_string(),
+                "{verified_code}".to_string(),
+            ]
+        );
+        assert_eq!(
+            policy.filesystem.writable,
+            vec!["{project}".to_string(), "{checkpoint_dir}".to_string()]
+        );
+        assert_eq!(
+            policy.network.mode,
+            ryeos_engine::sandbox::SandboxNetworkMode::Host
+        );
+        assert_eq!(policy.environment.allow, vec!["*".to_string()]);
+        assert_eq!(policy.limits.open_files, Some(1024));
+        assert_eq!(policy.limits.stdout_bytes, 8_388_608);
+        assert_eq!(policy.limits.stderr_bytes, 8_388_608);
+        assert_eq!(policy.limits.verified_artifact_file_bytes, 67_108_864);
+        assert_eq!(policy.limits.verified_artifact_total_bytes, 268_435_456);
+        assert_eq!(policy.limits.verified_artifact_files, 4_096);
     }
 }

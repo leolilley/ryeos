@@ -323,14 +323,46 @@ impl<'a> BootstrapLoader<'a> {
         section_table: &SectionTable,
         bundles: &[BundleRecord],
     ) -> Result<NodeConfigSnapshot> {
+        self.load_full_inner(section_table, bundles, false)
+    }
+
+    /// Load the full node-config graph against an authoritative prospective
+    /// bundle registry.
+    ///
+    /// Bundle registration files on disk still describe the live generation
+    /// during pre-activation admission, so the normal full pass cannot model a
+    /// replacement or removal exactly. This variant substitutes `bundles` for
+    /// the `bundles` section while scanning every other system and bundle
+    /// section normally.
+    pub fn load_full_prospective(
+        &self,
+        section_table: &SectionTable,
+        bundles: &[BundleRecord],
+    ) -> Result<NodeConfigSnapshot> {
+        self.load_full_inner(section_table, bundles, true)
+    }
+
+    fn load_full_inner(
+        &self,
+        section_table: &SectionTable,
+        bundles: &[BundleRecord],
+        prospective_bundle_registry: bool,
+    ) -> Result<NodeConfigSnapshot> {
         let command_registration_policy = self.load_command_registration_policy(section_table)?;
-        let mut loaded_bundles: Vec<BundleRecord> = Vec::new();
+        let mut loaded_bundles = if prospective_bundle_registry {
+            validate_prospective_bundle_records(bundles)?
+        } else {
+            Vec::new()
+        };
         let mut routes: Vec<RawRouteSpec> = Vec::new();
         let mut commands: Vec<CommandRecord> = Vec::new();
         let mut hosted_node_policies: Vec<HostedNodePolicyRecord> = Vec::new();
 
         for section_name in section_table.section_names() {
             if section_name == "command_registration" {
+                continue;
+            }
+            if prospective_bundle_registry && section_name == "bundles" {
                 continue;
             }
             let section = section_table.get(section_name).context(format!(
@@ -659,6 +691,37 @@ fn strip_signature(content: &str) -> String {
         .join("\n")
         .trim_start()
         .to_string()
+}
+
+fn validate_prospective_bundle_records(records: &[BundleRecord]) -> Result<Vec<BundleRecord>> {
+    let mut validated = Vec::with_capacity(records.len());
+    for record in records {
+        if !record.path.is_absolute() {
+            bail!(
+                "prospective bundle '{}' path must be absolute, got {}",
+                record.name,
+                record.path.display()
+            );
+        }
+        if !record.path.is_dir() {
+            bail!(
+                "prospective bundle '{}' path '{}' does not exist or is not a directory",
+                record.name,
+                record.path.display()
+            );
+        }
+        let mut record = record.clone();
+        record.path = record.path.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize prospective bundle '{}' path '{}'",
+                record.name,
+                record.path.display()
+            )
+        })?;
+        validated.push(record);
+    }
+    check_bundle_collisions(&validated)?;
+    Ok(validated)
 }
 
 /// Fail-closed collision detection for bundle records.

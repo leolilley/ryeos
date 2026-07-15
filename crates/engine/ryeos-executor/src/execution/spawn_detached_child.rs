@@ -77,6 +77,31 @@ pub async fn spawn_detached_child(
     // it against authoritative state before minting a linked child.
     cap.assert_chain_root(&parent.chain_root_id)?;
 
+    // A borrowed daemon workspace cannot be reconstructed safely from its old
+    // path: manufacturing a second TempDirGuard would race the parent's real
+    // guard. Inherit only the parent's immutable snapshot and reconstruct the
+    // child into a fresh non-lineage checkout after a crash/queued launch.
+    let inherited_snapshot_hash = if cap.provenance.workspace_lifeline().is_some() {
+        Some(
+            state
+                .state_store
+                .get_launch_metadata(&parent_thread_id)?
+                .and_then(|metadata| metadata.resume_context)
+                .and_then(|resume| {
+                    resume
+                        .durable_project_snapshot_hash()
+                        .map(str::to_owned)
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "detach: parent {parent_thread_id} owns an ephemeral workspace but has no durable project snapshot"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
     // Execute authority over the child was already enforced at the callback trust
     // boundary (`enforce_callback_caps` in the dispatch handler) against this same
     // item_id; no second check is needed here — the parent's `effective_caps`
@@ -164,7 +189,7 @@ pub async fn spawn_detached_child(
         project_context: ProjectContext::LocalPath {
             path: cap.provenance.effective_path().to_path_buf(),
         },
-        original_snapshot_hash: None,
+        original_snapshot_hash: inherited_snapshot_hash,
         // A detached child borrows the parent's workspace; it never owns snapshot
         // lineage, so no pushed-head identity is seeded.
         original_pushed_head_ref: None,
@@ -185,6 +210,58 @@ pub async fn spawn_detached_child(
     state
         .state_store
         .seed_launch_metadata(&child_thread_id, &meta)?;
+    let inherited_stop =
+        match state
+            .state_store
+            .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
+        {
+            Ok(inherited_stop) => inherited_stop,
+            Err(error) => {
+                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                    state,
+                    &child_thread_id,
+                    json!({
+                        "code": "child_link_failed",
+                        "reason": error.to_string(),
+                    }),
+                );
+                match cleanup {
+                    Ok(outcome) if outcome.is_settled() => {
+                        crate::execution::launch::kick_follow_resume_if_ready(
+                            state,
+                            &child_thread_id,
+                        );
+                        crate::execution::launch::kick_launch_window_for_terminal(
+                            state,
+                            &child_thread_id,
+                        );
+                    }
+                    Ok(outcome) => tracing::warn!(
+                        child_thread_id,
+                        ?outcome,
+                        "preserved concurrently advanced detached child after lineage failure"
+                    ),
+                    Err(cleanup_error) => {
+                        return Err(anyhow::anyhow!(
+                            "detach: record child lineage under parent {parent_thread_id}: \
+                             {error}; conditional child cleanup also failed: {cleanup_error}"
+                        ));
+                    }
+                }
+                return Err(error).context(format!(
+                    "detach: record child lineage under parent {parent_thread_id}"
+                ));
+            }
+        };
+    if inherited_stop.is_some() {
+        crate::execution::process_attachment::finalize_requested_stop_if_present(
+            state,
+            &child_thread_id,
+        )?;
+        anyhow::bail!(
+            "detach: parent {parent_thread_id} was stop-requested during child admission"
+        );
+    }
 
     // ── Cohort facets ───────────────────────────────────────────────────────
     // Stamp `(key, value)` tags BEFORE launch so a `threads.list --facet` query

@@ -13,16 +13,19 @@
 //! loaded from the verified node-config snapshot. Unsigned, tampered, or untrusted
 //! node config fails before any offline execution path is selected.
 
+mod params;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItem;
-use ryeos_runtime::{CommandDef, CommandDispatch, CommandProjectResolution, CommandRegistry};
+use ryeos_runtime::{CommandDef, CommandDispatch, CommandRegistry};
 use serde_json::Value;
 
 use crate::error::CliError;
+use params::{bind_params_minimal, bind_params_with_schema, expand_template};
 
 #[derive(Debug)]
 pub enum OfflineDispatchOutcome {
@@ -89,7 +92,19 @@ pub async fn try_offline_dispatch(
         ..Default::default()
     })
     .map_err(local_err)?;
-    let engine = boot_engine(&node_config, project_path, &bundle_roots)?;
+    let sandbox = std::sync::Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&node_config.app_root).map_err(|error| {
+            CliError::Local {
+                detail: format!("load node sandbox policy: {error}"),
+            }
+        })?,
+    );
+    let engine = boot_engine(
+        &node_config,
+        project_path,
+        &bundle_roots,
+        std::sync::Arc::clone(&sandbox),
+    )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
@@ -116,7 +131,7 @@ pub async fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
-            node_config.sandbox_enabled,
+            &sandbox,
         );
     }
 
@@ -129,7 +144,7 @@ pub async fn try_offline_dispatch(
             params,
             app_root,
             project_path,
-            node_config.sandbox_enabled,
+            &sandbox,
         )
         .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
@@ -145,6 +160,7 @@ fn boot_engine(
     config: &ryeos_app::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
+    sandbox: std::sync::Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -157,6 +173,7 @@ fn boot_engine(
         bundle_roots,
         project_root.as_deref(),
         None, // no trust overlay
+        sandbox,
     )
     .map_err(local_err)
 }
@@ -281,7 +298,7 @@ async fn exec_client(
         bundle_root,
         |fp| {
             engine
-                .trust_store
+                .node_trust_store
                 .get(fp)
                 .map(|signer| signer.verifying_key)
         },
@@ -392,7 +409,7 @@ fn exec_tool(
     params: Value,
     app_root: &Path,
     project_path: &str,
-    sandbox_enabled: bool,
+    sandbox: &ryeos_engine::sandbox::SandboxRuntime,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
     let executor_id = item
@@ -410,6 +427,16 @@ fn exec_tool(
             });
         }
     }
+
+    // Offline engine resolution may accept a cwd-relative spelling, but the
+    // enforced namespace contract uses one stable absolute destination for
+    // templates, cwd, and mount authority.
+    let project_path_buf =
+        std::fs::canonicalize(project_path).map_err(|error| CliError::Local {
+            detail: format!("resolve offline project path `{project_path}`: {error}"),
+        })?;
+    let project_path_owned = project_path_buf.to_string_lossy().into_owned();
+    let project_path = project_path_owned.as_str();
 
     let config = item
         .composed_value
@@ -452,7 +479,7 @@ fn exec_tool(
         bundle_root,
         |fp| {
             engine
-                .trust_store
+                .node_trust_store
                 .get(fp)
                 .map(|signer| signer.verifying_key)
         },
@@ -483,10 +510,15 @@ fn exec_tool(
         .map(|t| expand_template(t, &params_json, project_path))
         .transpose()?;
 
-    let cwd = match config.get("cwd").and_then(|v| v.as_str()) {
-        Some(cwd) => Some(expand_template(cwd, &params_json, project_path)?),
-        None => Some(project_path.to_string()),
+    let expanded_cwd = match config.get("cwd").and_then(|v| v.as_str()) {
+        Some(cwd) => expand_template(cwd, &params_json, project_path)?,
+        None => project_path.to_string(),
     };
+    let cwd = Some(resolve_offline_cwd(
+        tool_ref_str,
+        &expanded_cwd,
+        &project_path_buf,
+    )?);
 
     let inherit_stdio = config
         .get("inherit_stdio")
@@ -528,24 +560,49 @@ fn exec_tool(
         }
     }
 
-    let request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
-        lillux::SubprocessRequest {
-            cmd: resolved.absolute_path.to_string_lossy().into_owned(),
-            args,
-            cwd,
-            envs,
-            stdin_data,
-            timeout: timeout as f64,
+    let sandbox_verified_code = [
+        ryeos_engine::sandbox::SandboxVerifiedCode {
+            source_path: item.source.path.clone(),
+            content_hash: item.source.content_hash.clone(),
         },
-        sandbox_enabled,
-        app_root,
-        Path::new(project_path),
-        tool_ref_str,
-        "offline-cli",
-    )
-    .map_err(|error| CliError::Local {
-        detail: format!("offline tool sandbox refused execution: {error}"),
-    })?;
+        ryeos_engine::sandbox::SandboxVerifiedCode {
+            source_path: resolved.absolute_path.clone(),
+            content_hash: resolved.content_hash.clone(),
+        },
+    ];
+    let request = sandbox
+        .apply(
+            lillux::SubprocessRequest {
+                cmd: resolved.absolute_path.to_string_lossy().into_owned(),
+                args,
+                cwd,
+                envs,
+                stdin_data,
+                timeout: timeout as f64,
+                limits: None,
+                inherited_fds: Vec::new(),
+                supervised_status: None,
+            },
+            ryeos_engine::sandbox::SandboxLaunchContext {
+                project_path: Path::new(project_path),
+                project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
+                state_root: None,
+                checkpoint_dir: None,
+                daemon_socket_path: None,
+                bundle_roots: std::slice::from_ref(bundle_root),
+                node_trusted_keys_dir: Some(
+                    &app_root
+                        .join(ryeos_engine::AI_DIR)
+                        .join("config/keys/trusted"),
+                ),
+                verified_code: &sandbox_verified_code,
+                item_ref: tool_ref_str,
+                thread_id: "offline-cli",
+            },
+        )
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool sandbox refused execution: {error}"),
+        })?;
 
     if inherit_stdio {
         return exec_inherited(
@@ -554,6 +611,8 @@ fn exec_tool(
             &request.args,
             request.cwd.as_deref(),
             &request.envs,
+            request.limits.as_ref(),
+            &request.inherited_fds,
             false,
         );
     }
@@ -586,7 +645,7 @@ fn dispatch_service(
     tail: &[String],
     app_root: &Path,
     project_path: &str,
-    sandbox_enabled: bool,
+    sandbox: &ryeos_engine::sandbox::SandboxRuntime,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
     let availability = item
@@ -668,7 +727,7 @@ fn dispatch_service(
         params,
         app_root,
         project_path,
-        sandbox_enabled,
+        sandbox,
     )
     .map(|result| result.map(OfflineDispatchOutcome::Json))
 }
@@ -753,157 +812,8 @@ fn resolve_ryeosd_binary() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Parameter binding
-// ---------------------------------------------------------------------------
-
-fn bind_params_minimal(
-    tail: &[String],
-    command: &CommandDef,
-    project_path: &str,
-) -> Result<Value, CliError> {
-    // Shared with daemon dispatch so the two paths cannot drift:
-    // `--input` is only honored when the descriptor declares an input
-    // flag (clean cut from the old always-on offline behavior), and
-    // declared single-JSON-object binding now works offline too.
-    if let Some(input) = crate::arg_bind::bind_declared_shortcuts(tail, command)? {
-        return Ok(input);
-    }
-
-    let mut params = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
-        .map_err(|e| CliError::Local { detail: e })?;
-
-    // Project resolution
-    let resolution = command_project_resolution(command);
-    if resolution != CommandProjectResolution::None {
-        let mut canonical_tail = params_to_tail(&params);
-        let default_project = (project_path != ".").then(|| Path::new(project_path));
-        match resolution {
-            CommandProjectResolution::None => {}
-            CommandProjectResolution::Optional => {
-                canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
-                    &canonical_tail,
-                    default_project,
-                )?;
-            }
-            CommandProjectResolution::Required => {
-                if canonical_tail.iter().any(|t| t == "--no-project") {
-                    return Err(CliError::Local {
-                        detail: "this command requires a project; do not pass --no-project".into(),
-                    });
-                }
-                canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
-                    &canonical_tail,
-                    default_project,
-                )?;
-                if canonical_tail.iter().any(|t| t == "--no-project") {
-                    return Err(CliError::Local {
-                        detail: format!(
-                            "this command requires a project; run it from a directory containing \
-                             {} or pass --project <path>",
-                            ryeos_engine::AI_DIR
-                        ),
-                    });
-                }
-            }
-        }
-        params = ryeos_runtime::bind_argv(&canonical_tail);
-    }
-
-    Ok(params)
-}
-
-fn bind_params_with_schema(
-    tail: &[String],
-    command: &CommandDef,
-    service_schema: &HashMap<String, String>,
-    project_path: &str,
-) -> Result<Value, CliError> {
-    let mut params = bind_params_minimal(tail, command, project_path)?;
-
-    // Normalize project → project_path
-    params = normalize_project_param(params, service_schema, project_path);
-
-    // Reject unknown flags
-    if let Some(obj) = params.as_object() {
-        for key in obj.keys() {
-            if key.starts_with('_') {
-                continue;
-            }
-            let normalized_key = key.replace('_', "-");
-            if !service_schema.contains_key(key.as_str())
-                && !service_schema.contains_key(&normalized_key)
-                && key != "input"
-            {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "unknown parameter --{normalized_key} for this command{}",
-                        if service_schema.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " (expected: {})",
-                                service_schema
-                                    .keys()
-                                    .map(|k| format!("--{}", k.replace('_', "-")))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        }
-                    ),
-                });
-            }
-        }
-    }
-
-    Ok(params)
-}
-
-fn normalize_project_param(
-    mut params: Value,
-    service_schema: &HashMap<String, String>,
-    default_project_path: &str,
-) -> Value {
-    let Some(obj) = params.as_object_mut() else {
-        return params;
-    };
-
-    if service_schema.contains_key("project_path") && !service_schema.contains_key("project") {
-        if let Some(project) = obj.remove("project") {
-            obj.entry("project_path".to_string()).or_insert(project);
-        }
-    }
-
-    if !obj.contains_key("project")
-        && !obj.contains_key("project_path")
-        && !obj.contains_key("no_project")
-    {
-        if service_schema.contains_key("project_path") {
-            obj.insert(
-                "project_path".to_string(),
-                Value::String(default_project_path.to_string()),
-            );
-        } else if service_schema.contains_key("project") {
-            obj.insert(
-                "project".to_string(),
-                Value::String(default_project_path.to_string()),
-            );
-        }
-    }
-
-    params
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {
-    command
-        .project
-        .as_ref()
-        .map(|p| p.resolution)
-        .unwrap_or_default()
-}
 
 fn local_err(error: anyhow::Error) -> CliError {
     CliError::Local {
@@ -911,65 +821,38 @@ fn local_err(error: anyhow::Error) -> CliError {
     }
 }
 
-fn expand_template(
-    template: &str,
-    params_json: &str,
-    project_path: &str,
+fn resolve_offline_cwd(
+    tool_ref: &str,
+    expanded_cwd: &str,
+    project_root: &Path,
 ) -> Result<String, CliError> {
-    let mut rest = template;
-    while let Some(start) = rest.find('{') {
-        if let Some(end) = rest[start + 1..].find('}') {
-            let token = &rest[start + 1..start + 1 + end];
-            if token != "params_json" && token != "project_path" && token != "triple" {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "offline tool template references unsupported token {{{token}}}"
-                    ),
-                });
-            }
-            rest = &rest[start + 1 + end + 1..];
-        } else {
-            return Err(CliError::Local {
-                detail: "offline tool template contains an unterminated token".into(),
-            });
-        }
-    }
-
-    let mut out = template.replace("{params_json}", params_json);
-    out = out.replace("{project_path}", project_path);
-    Ok(out)
-}
-
-fn params_to_tail(params: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(obj) = params.as_object() else {
-        return out;
+    let configured = Path::new(expanded_cwd);
+    let candidate = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        project_root.join(configured)
     };
-    let mut keys: Vec<&String> = obj.keys().collect();
-    keys.sort();
-    for key in keys {
-        emit_param(&mut out, key, &obj[key]);
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| CliError::Local {
+        detail: format!(
+            "offline tool `{tool_ref}` cwd `{expanded_cwd}` does not resolve to an existing directory: {error}"
+        ),
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| CliError::Local {
+        detail: format!(
+            "inspect offline tool `{tool_ref}` cwd `{}`: {error}",
+            canonical.display()
+        ),
+    })?;
+    if !metadata.is_dir() {
+        return Err(CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref}` cwd `{expanded_cwd}` resolves to `{}`, which is not a directory",
+                canonical.display()
+            ),
+        });
     }
-    out
-}
 
-fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
-    match value {
-        Value::Bool(true) => out.push(format!("--{}", key.replace('_', "-"))),
-        Value::Bool(false) | Value::Null => {}
-        Value::Array(values) => {
-            for v in values {
-                emit_param(out, key, v);
-            }
-        }
-        other => {
-            out.push(format!("--{}", key.replace('_', "-")));
-            out.push(match other {
-                Value::String(s) => s.clone(),
-                _ => other.to_string(),
-            });
-        }
-    }
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 fn exec_inherited(
@@ -978,6 +861,8 @@ fn exec_inherited(
     args: &[String],
     cwd: Option<&str>,
     envs: &[(String, String)],
+    limits: Option<&lillux::SubprocessLimits>,
+    inherited_fds: &[std::sync::Arc<std::fs::File>],
     inherit_env: bool,
 ) -> Result<Option<Value>, CliError> {
     let mut command = std::process::Command::new(cmd);
@@ -995,6 +880,19 @@ fn exec_inherited(
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+
+    lillux::configure_subprocess_limits(&mut command, limits).map_err(|error| CliError::Local {
+        detail: format!(
+            "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
+        ),
+    })?;
+    lillux::configure_inherited_fds(&mut command, inherited_fds).map_err(|error| {
+        CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref}` could not retain sandbox descriptors: {error}"
+            ),
+        }
+    })?;
 
     let status = command
         .status()
@@ -1020,6 +918,75 @@ mod tests {
     use super::*;
     use lillux::crypto::{EncodePrivateKey, SigningKey};
     use rand::rngs::OsRng;
+
+    #[test]
+    fn inherited_exec_rejects_invalid_limits_before_spawn() {
+        let limits = lillux::SubprocessLimits {
+            max_open_files: Some(u64::MAX),
+            ..lillux::SubprocessLimits::default()
+        };
+
+        let error = exec_inherited(
+            "tool:test/inherited",
+            Path::new("unused"),
+            &[],
+            None,
+            &[],
+            Some(&limits),
+            &[],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("resource limits"));
+    }
+
+    #[test]
+    fn offline_cwd_resolves_relative_to_canonical_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+
+        let resolved = resolve_offline_cwd("tool:test/cwd", "nested", &project).unwrap();
+
+        assert_eq!(
+            PathBuf::from(resolved),
+            std::fs::canonicalize(nested).unwrap()
+        );
+    }
+
+    #[test]
+    fn offline_cwd_canonicalizes_absolute_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let spelling = nested.join("..").join("nested");
+
+        let resolved =
+            resolve_offline_cwd("tool:test/cwd", spelling.to_str().unwrap(), &project).unwrap();
+
+        assert_eq!(
+            PathBuf::from(resolved),
+            std::fs::canonicalize(nested).unwrap()
+        );
+    }
+
+    #[test]
+    fn offline_cwd_rejects_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("file"), "not a directory").unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+
+        let error = resolve_offline_cwd("tool:test/cwd", "file", &project).unwrap_err();
+
+        assert!(error.to_string().contains("not a directory"));
+    }
 
     fn expect_json(outcome: OfflineDispatchOutcome) -> Value {
         match outcome {
@@ -1059,11 +1026,13 @@ mod tests {
             std::fs::create_dir_all(&node_identity_dir).unwrap();
             std::fs::write(
                 node_identity_dir.parent().unwrap().join("sandbox.yaml"),
-                "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\n\
-                 writable_paths:\n  - \"{project}\"\nallowed_env:\n  - \"*\"\n\
-                 max_open_files: 128\nmax_processes: 32\n",
+                "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\n\
+                 filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n\
+                 network:\n  mode: isolated\nenvironment:\n  allow:\n    - \"*\"\n\
+                 limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             )
             .unwrap();
+            std::fs::write(node_identity_dir.join("public-identity.json"), "{}").unwrap();
             let pem = key.to_pkcs8_pem(Default::default()).unwrap();
             std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
             let dev_trust = std::fs::read_to_string(
@@ -1282,11 +1251,11 @@ mod tests {
             let content_blob_hash = lillux::sha256_hex(script);
             let item_ref = format!("bin/{triple}/{name}");
             let item_source = serde_json::json!({
+                "kind": "item_source",
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
-                "signature_info": {
-                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
-                }
+                "integrity": format!("sha256:{content_blob_hash}"),
+                "mode": 0o755,
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
             let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
@@ -1298,8 +1267,18 @@ mod tests {
             let item_source_hash = cas.store_object(&item_source).unwrap();
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
-                let manifest_hash = std::fs::read_to_string(&ref_path).unwrap();
-                cas.get_object(manifest_hash.trim())
+                let signed_ref = std::fs::read_to_string(&ref_path).unwrap();
+                let fingerprint = lillux::signature::compute_fingerprint(&self.key.verifying_key());
+                let verified_ref =
+                    ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+                        &signed_ref,
+                        |candidate| {
+                            (candidate == fingerprint.as_str()).then(|| self.key.verifying_key())
+                        },
+                        ryeos_engine::resolution::TrustClass::TrustedBundle,
+                    )
+                    .unwrap();
+                cas.get_object(&verified_ref.manifest_hash)
                     .unwrap()
                     .and_then(|manifest| manifest.get("item_source_hashes").cloned())
                     .and_then(|value| {
@@ -1310,10 +1289,22 @@ mod tests {
                 serde_json::Map::new()
             };
             item_source_hashes.insert(item_ref, Value::String(item_source_hash));
-            let manifest = serde_json::json!({ "item_source_hashes": item_source_hashes });
+            let manifest = serde_json::json!({
+                "kind": "source_manifest",
+                "item_source_hashes": item_source_hashes,
+            });
             let manifest_hash = cas.store_object(&manifest).unwrap();
             std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
-            std::fs::write(ref_path, manifest_hash).unwrap();
+            let signed_ref = lillux::signature::sign_content(
+                &format!(
+                    "{}\n{manifest_hash}\n",
+                    ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+                ),
+                &self.key,
+                "#",
+                None,
+            );
+            std::fs::write(ref_path, signed_ref).unwrap();
         }
 
         fn write_client_kind_schema(&self) {

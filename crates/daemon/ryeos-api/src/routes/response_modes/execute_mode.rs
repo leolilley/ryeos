@@ -281,13 +281,61 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         let site_id = state.threads.site_id();
         let project_source = request.project_source.clone().unwrap_or_default();
+        let checkout_id = format!(
+            "pre-{}-{:08x}",
+            lillux::time::timestamp_millis(),
+            rand::random::<u32>()
+        );
+        let mut no_project_guard = None;
         // For PushedHead, the client MUST send a canonical path so
         // push and execute hash the same string. resolve_project_context
         // re-runs canonical_project_ref defensively, but we still need
         // a PathBuf here to feed it.
         //
         let project_path = match &request.project_path {
-            Some(p) => std::path::PathBuf::from(p),
+            Some(p) => {
+                let path = std::path::PathBuf::from(p);
+                if p == NO_PROJECT_SENTINEL {
+                    if matches!(project_source, ProjectSource::PushedHead) {
+                        path
+                    } else {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({
+                                "error": "the no-project sentinel is valid only for pushed_head execution"
+                            })),
+                        )
+                            .into_response());
+                    }
+                } else {
+                    if !path.is_absolute() {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": "project_path must be absolute" })),
+                        )
+                            .into_response());
+                    }
+                    if matches!(project_source, ProjectSource::LiveFs) {
+                        match std::fs::canonicalize(&path) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                return Ok((
+                                    StatusCode::BAD_REQUEST,
+                                    axum::Json(json!({
+                                        "error": format!(
+                                            "live project_path '{}' cannot be resolved: {error}",
+                                            path.display()
+                                        )
+                                    })),
+                                )
+                                    .into_response());
+                            }
+                        }
+                    } else {
+                        path
+                    }
+                }
+            }
             None => {
                 if matches!(project_source, ProjectSource::PushedHead) {
                     return Ok((
@@ -295,9 +343,71 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
                     ).into_response());
                 }
-                state.config.app_root.clone()
+                let execution_root = state.config.runtime_root().cache().join("executions");
+                std::fs::create_dir_all(&execution_root).map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "create execution workspace root {}: {error}",
+                        execution_root.display()
+                    ))
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(
+                        &execution_root,
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .map_err(|error| {
+                        RouteDispatchError::Internal(format!(
+                            "protect execution workspace root {}: {error}",
+                            execution_root.display()
+                        ))
+                    })?;
+                }
+                let workspace = execution_root.join(format!("no-project-{checkout_id}"));
+                std::fs::create_dir(&workspace).map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "create isolated no-project workspace {}: {error}",
+                        workspace.display()
+                    ))
+                })?;
+                let guard = std::sync::Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
+                    workspace.clone(),
+                ));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|error| {
+                            RouteDispatchError::Internal(format!(
+                                "protect isolated no-project workspace {}: {error}",
+                                workspace.display()
+                            ))
+                        })?;
+                }
+                std::fs::create_dir(workspace.join(ryeos_engine::AI_DIR)).map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "initialize isolated no-project workspace {}: {error}",
+                        workspace.display()
+                    ))
+                })?;
+                no_project_guard = Some(guard);
+                workspace
             }
         };
+
+        if request.project_path.is_some()
+            && matches!(project_source, ProjectSource::LiveFs)
+            && !project_path.join(ryeos_engine::AI_DIR).is_dir()
+        {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({
+                    "error": "live project_path must name a project root containing .ai"
+                })),
+            )
+                .into_response());
+        }
 
         // Reject validate_only + pushed_head.
         if request.validate_only && matches!(project_source, ProjectSource::PushedHead) {
@@ -310,8 +420,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // ── Runtime state-root override ─────────────────────────────
         // Validate the deliberate `state_root` control before it reaches
         // provenance: live-fs + inline only, explicit project required,
-        // absolute path. The directory is created here so `/tmp/...` smoke
-        // roots work without a client-side mkdir.
+        // absolute path. The directory must already exist: callers cannot use
+        // this field to make the daemon create arbitrary host paths. Enforced
+        // sandbox launches additionally require it to fall under an explicit
+        // operator-declared writable root.
         let state_root: Option<std::path::PathBuf> = match &request.state_root {
             None => None,
             Some(raw) => {
@@ -343,10 +455,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 // The override's whole purpose is keeping runtime state OUT
                 // of the executed source tree; a state root inside (or equal
                 // to) the project recreates the pollution with extra
-                // indirection. Lexical check first (so a rejected path is
-                // never even created), then the canonical check below —
-                // after creation, when both paths exist — so symlinked
-                // spellings can't sneak one in.
+                // indirection. Lexical check first, then canonicalize both
+                // existing paths so symlinked spellings cannot sneak one in.
                 if path.starts_with(&project_path) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
@@ -359,13 +469,27 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     )
                         .into_response());
                 }
-                if let Err(e) = std::fs::create_dir_all(&path) {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(json!({ "error": format!("state_root '{raw}' could not be created: {e}") })),
-                    ).into_response());
-                }
-                let canonical_state = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                let canonical_state = match std::fs::canonicalize(&path) {
+                    Ok(path) if path.is_dir() => path,
+                    Ok(_) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": format!(
+                                "state_root '{raw}' must name an existing directory"
+                            ) })),
+                        )
+                            .into_response());
+                    }
+                    Err(error) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": format!(
+                                "state_root '{raw}' must name an existing directory: {error}"
+                            ) })),
+                        )
+                            .into_response());
+                    }
+                };
                 let canonical_project =
                     std::fs::canonicalize(&project_path).unwrap_or_else(|_| project_path.clone());
                 if canonical_state.starts_with(&canonical_project) {
@@ -380,17 +504,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     )
                         .into_response());
                 }
-                Some(path)
+                Some(canonical_state)
             }
         };
 
         // Resolve project execution context.
-        let checkout_id = format!(
-            "pre-{}-{:08x}",
-            lillux::time::timestamp_millis(),
-            rand::random::<u32>()
-        );
-        let project_ctx = match project_source::resolve_project_context(
+        let mut project_ctx = match project_source::resolve_project_context(
             &state,
             &project_source,
             &project_path,
@@ -413,6 +532,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 return Ok(dispatch_error_response(dispatch_err));
             }
         };
+        if let Some(guard) = no_project_guard {
+            project_ctx.temp_dir = Some(guard);
+        }
 
         // Build plan context.
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
@@ -478,6 +600,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     project_ctx.effective_path.clone(),
                     project_ctx.request_engine.clone(),
                 )
+                .with_workspace_lifeline(project_ctx.temp_dir.clone())
                 .with_state_root(state_root.clone())
             }
             ProjectSource::PushedHead => {
@@ -762,6 +885,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 caller_principal_id.clone(),
                 caller_scopes.clone(),
                 thread_id.clone(),
+                provenance.clone(),
                 crate::routes::launch::DispatchLaunchOptions {
                     ref_bindings: request.ref_bindings.clone(),
                     launch_mode: "inline".to_string(),
@@ -773,6 +897,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     previous_thread_id: None,
                 },
             );
+            // No-project execution uses a request-owned scratch workspace.
+            // Keep its guard alive until the accepted background launch has
+            // actually finished, not merely until this HTTP response returns.
+            let workspace_guard = project_ctx.temp_dir.clone();
 
             let ready_thread_id = tokio::select! {
                 biased;
@@ -801,6 +929,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
 
             tokio::spawn(async move {
+                let _workspace_guard = workspace_guard;
                 match handle.await {
                     Ok(Ok(())) => {
                         tracing::debug!(thread_id = %thread_id, "accepted execute background dispatch completed");

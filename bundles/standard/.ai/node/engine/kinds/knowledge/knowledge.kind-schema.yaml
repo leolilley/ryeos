@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T01:05:59Z:b0f14eebd5ae369c13ecb22fab52b7f42a6d0737a3dae3a0c40fb869c251848d:/vq4tMwovyOEWtjagHfd/IXG5M4O8nJZcfVsJ8VQrPqoOFTV15fLHrsbY2vkgLPTkEtG6EJbNzcc6K2NNdTRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T10:12:30Z:1ca54b5bf302f75df833fb1eb13438e41ce84b19337651f049cb7b61b07a2d71:evgL268NWCnR2ca1TK6/hcG6WSkcmz8AYC+7ZT+SI6zhsiLkRO4MEP8AAdw7iYrJC7I5c8qFkpkyvZ2IKGKGCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -10,7 +10,9 @@ effective_trust:
 execution:
   # Method-dispatch execution model. The daemon resolves the requested
   # method (default: `compose`) against the declared methods, validates
-  # args, then spawns the kind's runtime with a MethodCallEnvelope.
+  # args, then spawns the kind's runtime with the exact signed protocol below:
+  # MethodCallEnvelope on stdin and MethodCallResult on terminal stdout. The
+  # runtime registry selects only the implementation binary.
   # Mixed-dispatch reject forbids `methods` + `delegate`/`terminator`.
   #
   # `methods:` lists the GENERICALLY-DISPATCHABLE methods (invocable via
@@ -23,6 +25,7 @@ execution:
   # is cleanly rejected as undeclared.
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime_v1
     default: compose
   methods:
     compose:
