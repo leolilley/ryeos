@@ -6,6 +6,7 @@ description = "Native policy engine for Rye OS — resolution, trust, planning"
 license.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 base64 = { workspace = true }
 directories = { workspace = true }
 jsonschema = { workspace = true }

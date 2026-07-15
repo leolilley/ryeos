@@ -2515,6 +2515,9 @@ pub(crate) fn execution_params_from_sealed_root_request(
         effective_caps: resume.effective_caps.clone(),
         provenance,
         runtime_ref: Some(sealed.runtime_ref().to_string()),
+        // The created row already carries any operational parent link. This
+        // reconstruction must not try to attach it a second time at launch.
+        parent_thread_id: None,
     })
 }
 

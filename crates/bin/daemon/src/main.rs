@@ -276,7 +276,7 @@ async fn main() -> Result<()> {
     // publication boundary.
     tokio::task::yield_now().await;
 
-    let daemon_result: Result<()> = {
+    let daemon_result: (Result<()>, bool, bool) = {
         let daemon_work = async {
             startup.phase(
                 ryeos_node::StartupPhase::Bootstrapping,

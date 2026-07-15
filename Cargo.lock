@@ -2356,6 +2356,7 @@ dependencies = [
  "form_urlencoded",
  "glob",
  "hmac",
+ "libc",
  "lillux",
  "rand 0.8.6",
  "regex",
@@ -2600,6 +2601,7 @@ dependencies = [
 name = "ryeos-engine"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64",
  "directories",
  "jsonschema",
@@ -2779,6 +2781,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "glob",
  "libc",
  "lillux",
@@ -2787,6 +2790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "tracing",
 ]

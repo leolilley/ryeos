@@ -1,6 +1,5 @@
 //! Bundle event chains backed by CAS objects and signed refs.
 
-#[cfg(test)]
 use std::path::Path;
 
 use anyhow::Context;
@@ -22,7 +21,6 @@ const MAX_BUNDLE_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// gain an indexed ordering structure.
 pub const MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES: usize = 4_096;
 
-#[cfg(test)]
 fn pin_bundle_event_authority(
     cas_root: &Path,
     refs_root: &Path,
@@ -407,8 +405,9 @@ pub(crate) fn scan_bundle_events_pinned(
 
 /// Read a bounded, newest-first page from one chain.
 pub fn read_bundle_event_chain_page(
-    cas_root: &Path,
-    refs_root: &Path,
+    cas: &lillux::CasStore,
+    refs_directory: &lillux::PinnedDirectory,
+    trust_store: &refs::TrustStore,
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
@@ -425,16 +424,17 @@ pub fn read_bundle_event_chain_page(
         validate_canonical_hash("bundle event chain cursor", cursor)?;
         Some(cursor.to_string())
     } else {
-        refs::read_generic_head_ref(
-            refs_root,
+        refs::read_verified_generic_head_ref_in_directory(
+            refs_directory,
             BUNDLE_EVENTS_NAMESPACE,
             &chain_ref_name(bundle_id, event_kind, chain_id),
+            trust_store,
         )?
         .map(|head| head.target_hash)
     };
 
     read_bundle_event_chain_page_from_hash(
-        cas_root,
+        cas,
         bundle_id,
         event_kind,
         chain_id,
@@ -447,8 +447,9 @@ pub fn read_bundle_event_chain_page(
 /// Scan bounded pages across bundle event chains without collecting every
 /// signed head or every event under the StateStore lock.
 pub fn scan_bundle_events_page(
-    cas_root: &Path,
-    refs_root: &Path,
+    cas: &lillux::CasStore,
+    refs_directory: &lillux::PinnedDirectory,
+    trust_store: &refs::TrustStore,
     bundle_id: &str,
     event_kind: &str,
     cursor: Option<&BundleEventScanCursor>,
@@ -465,7 +466,9 @@ pub fn scan_bundle_events_page(
             validate_canonical_hash("scan cursor event_hash", &cursor.event_hash)?;
             Some((cursor.chain_id.clone(), cursor.event_hash.clone()))
         }
-        None => next_bundle_event_chain_head(refs_root, bundle_id, event_kind, None)?,
+        None => {
+            next_bundle_event_chain_head(refs_directory, bundle_id, event_kind, None, trust_store)?
+        }
     }) else {
         return Ok(BundleEventScanPage {
             records: Vec::new(),
@@ -474,7 +477,7 @@ pub fn scan_bundle_events_page(
     };
 
     let page = read_bundle_event_chain_page_from_hash(
-        cas_root,
+        cas,
         bundle_id,
         event_kind,
         &chain_id,
@@ -489,12 +492,17 @@ pub fn scan_bundle_events_page(
             event_hash,
         })
     } else {
-        next_bundle_event_chain_head(refs_root, bundle_id, event_kind, Some(&chain_id))?.map(
-            |(chain_id, event_hash)| BundleEventScanCursor {
-                chain_id,
-                event_hash,
-            },
-        )
+        next_bundle_event_chain_head(
+            refs_directory,
+            bundle_id,
+            event_kind,
+            Some(&chain_id),
+            trust_store,
+        )?
+        .map(|(chain_id, event_hash)| BundleEventScanCursor {
+            chain_id,
+            event_hash,
+        })
     };
 
     Ok(BundleEventScanPage {
@@ -504,7 +512,7 @@ pub fn scan_bundle_events_page(
 }
 
 fn read_bundle_event_chain_page_from_hash(
-    cas_root: &Path,
+    cas: &lillux::CasStore,
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
@@ -520,7 +528,7 @@ fn read_bundle_event_chain_page_from_hash(
         let Some(hash) = next_hash.take() else {
             break;
         };
-        let record = read_bundle_event_by_hash(cas_root, &hash)?;
+        let record = read_bundle_event_by_hash_with_cas(cas, &hash)?;
         if record.event.bundle_id != bundle_id
             || record.event.event_kind != event_kind
             || record.event.chain_id != chain_id
@@ -587,24 +595,32 @@ fn read_bundle_event_chain_page_from_hash(
 }
 
 fn next_bundle_event_chain_head(
-    refs_root: &Path,
+    refs_directory: &lillux::PinnedDirectory,
     bundle_id: &str,
     event_kind: &str,
     after_chain_id: Option<&str>,
+    trust_store: &refs::TrustStore,
 ) -> anyhow::Result<Option<(String, String)>> {
-    let chains_root = refs_root
-        .join("generic")
-        .join(BUNDLE_EVENTS_NAMESPACE)
-        .join(bundle_id)
-        .join(event_kind)
-        .join("chains");
-    let entries = match std::fs::read_dir(&chains_root) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(err).with_context(|| format!("failed to read {}", chains_root.display()))
-        }
-    };
+    let mut chains_directory =
+        match refs_directory.open_child_directory(std::ffi::OsStr::new("generic"))? {
+            Some(directory) => directory,
+            None => return Ok(None),
+        };
+    for component in [BUNDLE_EVENTS_NAMESPACE, bundle_id, event_kind, "chains"] {
+        chains_directory =
+            match chains_directory.open_child_directory(std::ffi::OsStr::new(component))? {
+                Some(directory) => directory,
+                None => return Ok(None),
+            };
+    }
+    let entries =
+        chains_directory.entry_names_bounded(MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES + 1)?;
+    if entries.len() > MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES {
+        anyhow::bail!(
+            "bundle event scan exceeds the {}-entry chain directory inspection limit",
+            MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES
+        );
+    }
 
     // read_dir order is unspecified, so retain only the smallest eligible id
     // instead of collecting and sorting chain heads. The inspection ceiling is
@@ -612,25 +628,11 @@ fn next_bundle_event_chain_head(
     // directory must not make a one-record callback scan walk unbounded entries
     // while the StateStore lock is held.
     let mut next_chain_id: Option<String> = None;
-    let mut inspected_entries = 0usize;
     for entry in entries {
-        if inspected_entries >= MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES {
-            anyhow::bail!(
-                "bundle event scan exceeds the {}-entry chain directory inspection limit",
-                MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES
-            );
-        }
-        inspected_entries += 1;
-        let entry = entry.context("failed to read bundle event chain directory entry")?;
-        if !entry
-            .file_type()
-            .context("failed to inspect bundle event chain directory entry")?
-            .is_dir()
-        {
-            continue;
-        }
+        chains_directory
+            .open_child_directory(&entry)?
+            .ok_or_else(|| anyhow::anyhow!("bundle event chain directory disappeared"))?;
         let chain_id = entry
-            .file_name()
             .into_string()
             .map_err(|_| anyhow::anyhow!("bundle event chain directory name is not valid UTF-8"))?;
         validate_bundle_identifier("chain_id", &chain_id)?;
@@ -650,10 +652,11 @@ fn next_bundle_event_chain_head(
     let Some(chain_id) = next_chain_id else {
         return Ok(None);
     };
-    let head = refs::read_generic_head_ref(
-        refs_root,
+    let head = refs::read_verified_generic_head_ref_in_directory(
+        refs_directory,
         BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(bundle_id, event_kind, &chain_id),
+        trust_store,
     )?
     .ok_or_else(|| {
         anyhow::anyhow!(

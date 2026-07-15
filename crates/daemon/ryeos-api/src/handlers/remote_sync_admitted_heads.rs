@@ -133,27 +133,30 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             }
             Ok(mirrored)
         })?;
-        let cas_read = state.acquire_cas_read()?;
-        let mut missing = Vec::new();
-        for (head, subject_hash) in &candidates {
-            let complete_locally = if mirrored_targets.contains(&head.target_hash) {
-                let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
-                    cas_read.cas(),
-                    [head.target_hash.clone()],
-                    ryeos_state::object_closure::ObjectClosureLimits::unbounded_for_local_maintenance(),
-                )?;
-                report.is_complete()
-            } else {
-                false
-            };
-            if !complete_locally {
-                missing.push((*head, subject_hash.clone()));
+        let missing = {
+            let cas_read = state.acquire_cas_read()?;
+            let mut missing = Vec::new();
+            for (head, subject_hash) in &candidates {
+                let complete_locally = if mirrored_targets.contains(&head.target_hash) {
+                    let report =
+                        ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+                            cas_read.cas(),
+                            [head.target_hash.clone()],
+                            ryeos_state::object_closure::ObjectClosureLimits::unbounded_for_local_maintenance(),
+                        )?;
+                    report.is_complete()
+                } else {
+                    false
+                };
+                if !complete_locally {
+                    missing.push((*head, subject_hash.clone()));
+                }
             }
-        }
-        // The durable Mirrored rows are GC roots. The read capability is only
-        // needed to make each closure decision atomic with respect to a sweep;
-        // do not retain it across remote I/O or staged import work.
-        drop(cas_read);
+            // The durable Mirrored rows are GC roots. The read capability is
+            // scoped to the closure decision and cannot cross remote I/O or
+            // staged import work.
+            missing
+        };
         let already_mirrored = candidates.len().saturating_sub(missing.len());
         let missing_count = missing.len();
         let max_imports = req.max_imports.unwrap_or(DEFAULT_MAX_IMPORTS);

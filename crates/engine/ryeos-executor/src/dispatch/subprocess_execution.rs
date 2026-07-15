@@ -945,16 +945,18 @@ async fn dispatch_tool_subprocess(
     let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
             engine: &ctx.engine,
+            node_history_policy: &state.node_history_policy,
             site_id: &ctx.plan_ctx.current_site_id,
             project_path: request.project_path,
             item_ref: &item_ref,
             launch_mode: request.launch_mode,
             parameters: request.params.clone(),
-            requested_by: Some(request.acting_principal.to_string()),
+            requested_by: request.acting_principal.to_string(),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             caller_scopes: ctx.caller_scopes.clone(),
             validate_only: request.validate_only,
+            creates_chain_root: true,
         },
     )?;
 

@@ -277,7 +277,7 @@ impl DurableCasUploadStage {
         publication_key: &DurableCasPublicationKey,
         expected_previous_hash: Option<&str>,
     ) -> Result<()> {
-        if self.record.publication_key != publication_key {
+        if self.record.publication_key != *publication_key {
             anyhow::bail!("durable upload stage is bound to another publication target");
         }
         if self.record.expected_previous_hash.as_deref() != expected_previous_hash {

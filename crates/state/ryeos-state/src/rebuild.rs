@@ -876,7 +876,7 @@ fn verify_fingerprint_sets(
             actual.len()
         );
     }
-    for (expected, actual) in expected.iter().zip(&actual) {
+    for (expected, actual) in expected.iter().zip(actual.iter()) {
         if expected != actual {
             anyhow::bail!(
                 "projection table mismatch for {}: expected rows={}, digest={}; got rows={}, digest={}",

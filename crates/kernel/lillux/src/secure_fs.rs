@@ -974,7 +974,7 @@ impl PinnedDirectory {
                 open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
                     anyhow::anyhow!("secure child directory disappeared: {}", path.display())
                 })?;
-            let current_metadata = current.directory.metadata()?;
+            let current_metadata = current.metadata()?;
             let expected_metadata = expected.directory.metadata()?;
             if current_metadata.dev() != expected_metadata.dev()
                 || current_metadata.ino() != expected_metadata.ino()

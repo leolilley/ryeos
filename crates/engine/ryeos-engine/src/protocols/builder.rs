@@ -132,8 +132,8 @@ pub enum BuildError {
     #[error("stdin envelope serialize failed: {0}")]
     StdinSerialize(String),
 
-    #[error("{source} path is not valid UTF-8")]
-    NonUtf8Path { source: &'static str },
+    #[error("{path_kind} path is not valid UTF-8")]
+    NonUtf8Path { path_kind: &'static str },
 }
 
 /// Build a `SubprocessSpec` from a protocol descriptor and dispatch inputs.
@@ -190,20 +190,24 @@ pub fn build_subprocess_spec(
             EnvInjectionSource::ProjectPath => request
                 .project_path
                 .to_str()
-                .ok_or(BuildError::NonUtf8Path { source: "project" })?
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "project",
+                })?
                 .to_owned(),
             EnvInjectionSource::CallbackProjectPath => request
                 .callback_project_path
                 .to_str()
                 .ok_or(BuildError::NonUtf8Path {
-                    source: "callback project",
+                    path_kind: "callback project",
                 })?
                 .to_owned(),
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request
                 .cas_root
                 .to_str()
-                .ok_or(BuildError::NonUtf8Path { source: "CAS root" })?
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "CAS root",
+                })?
                 .to_owned(),
             EnvInjectionSource::ThreadAuthToken => request
                 .thread_auth_token

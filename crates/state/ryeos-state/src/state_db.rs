@@ -3901,9 +3901,11 @@ impl StateDb {
         limit: usize,
         max_serialized_bytes: usize,
     ) -> anyhow::Result<BundleEventChainPage> {
+        let cas = self.pinned_cas()?;
         bundle_events::read_bundle_event_chain_page(
-            &self.cas_root,
-            &self.refs_root,
+            &cas,
+            &self._refs_directory,
+            self.trust_store.as_ref(),
             bundle_id,
             event_kind,
             chain_id,
@@ -3921,9 +3923,11 @@ impl StateDb {
         limit: usize,
         max_serialized_bytes: usize,
     ) -> anyhow::Result<BundleEventScanPage> {
+        let cas = self.pinned_cas()?;
         bundle_events::scan_bundle_events_page(
-            &self.cas_root,
-            &self.refs_root,
+            &cas,
+            &self._refs_directory,
+            self.trust_store.as_ref(),
             bundle_id,
             event_kind,
             cursor,

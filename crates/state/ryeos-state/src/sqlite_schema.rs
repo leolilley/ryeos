@@ -379,7 +379,7 @@ fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
          WHERE name NOT LIKE 'sqlite_stat%'
          ORDER BY type, name",
     )?;
-    statement
+    let entries = statement
         .query_map([], |row| {
             let sql: Option<String> = row.get(3)?;
             Ok(SchemaSqlEntry {
@@ -394,7 +394,8 @@ fn schema_sql_entries(conn: &Connection) -> Result<Vec<SchemaSqlEntry>> {
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .context("read complete SQLite schema SQL")
+        .context("read complete SQLite schema SQL")?;
+    Ok(entries)
 }
 
 /// Verify the complete SQLite schema against a same-library reference built

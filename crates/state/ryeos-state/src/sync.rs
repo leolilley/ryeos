@@ -504,7 +504,7 @@ pub fn finalize_import(
         // ChainState transition again at the publication boundary, including
         // hashes of already-local descendants. StateDb repeats this under the
         // chain lock and anchors it to any current signed head before publication.
-        crate::rebuild::verify_repair_closure_with_cas(
+        crate::rebuild::verified_repair_closure_with_cas(
             &cas,
             &staged.chain_root_id,
             &staged.chain_head_hash,
@@ -550,13 +550,12 @@ pub fn finalize_import(
 /// This pins the complete authority once at entry. Already-open StateDb
 /// callers should use [`collect_local_hashes_pinned`].
 pub fn collect_local_hashes(
-    cas_root: &Path,
-    refs_root: &Path,
+    runtime_state_dir: &Path,
     chain_root_id: &str,
     trust_store: &crate::refs::TrustStore,
 ) -> Result<HashSet<String>> {
     let (_cas_mutation_guard, cas, refs_directory) =
-        pin_standalone_export_authority(cas_root, refs_root)?;
+        pin_standalone_export_authority(runtime_state_dir)?;
     collect_local_hashes_pinned(&cas, &refs_directory, chain_root_id, trust_store)
 }
 

@@ -569,7 +569,7 @@ where
 {
     let mut chunks = Vec::new();
     let mut start = 0;
-    let mut size = 256;
+    let mut size: usize = 256;
     for (index, entry) in entries.iter().enumerate() {
         let entry_size = encoded_size(entry);
         if index > start && size.saturating_add(entry_size) > OBJECTS_PUT_BODY_BUDGET_BYTES {
