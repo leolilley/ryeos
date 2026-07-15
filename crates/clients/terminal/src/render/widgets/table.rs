@@ -8,7 +8,7 @@ use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
-use super::super::text::{letterspace, truncate};
+use super::super::text::{display_width, truncate};
 use super::super::theme::{
     active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
     tone_style, ACCENT,
@@ -56,7 +56,7 @@ pub fn draw_table(
             surface.draw_text(
                 left + GUTTER + i * col_w,
                 y,
-                &truncate(&letterspace(header), cell_w),
+                &truncate(header, cell_w),
                 style_muted(),
             );
         }
@@ -212,13 +212,51 @@ fn draw_row(
         } else {
             style_muted()
         };
-        surface.draw_text(
-            left + GUTTER + i * col_w,
-            y,
-            &truncate(cell, cell_w),
-            cell_style,
-        );
+        let cell_x = left + GUTTER + i * col_w;
+        if i == 0 {
+            if let Some(tree) = &row.hierarchy {
+                let prefix = hierarchy_prefix(tree);
+                let prefix_width = display_width(&prefix).min(cell_w);
+                surface.draw_text(cell_x, y, &truncate(&prefix, cell_w), cell_style);
+                if prefix_width < cell_w {
+                    surface.draw_text(
+                        cell_x + prefix_width,
+                        y,
+                        &truncate(cell, cell_w - prefix_width),
+                        cell_style,
+                    );
+                }
+                continue;
+            }
+        }
+        surface.draw_text(cell_x, y, &truncate(cell, cell_w), cell_style);
     }
+}
+
+fn hierarchy_prefix(tree: &ryeos_client_base::ui::view_model::RyeOsTableHierarchyVm) -> String {
+    let depth = tree.ancestor_continues.len();
+    let mut prefix = String::new();
+    for continues in tree
+        .ancestor_continues
+        .iter()
+        .copied()
+        .take(depth.saturating_sub(1))
+    {
+        prefix.push_str(if continues { "│ " } else { "  " });
+    }
+    if depth > 0 {
+        prefix.push_str(if tree.is_last { "└─" } else { "├─" });
+    }
+    prefix.push_str(if tree.has_children {
+        if tree.collapsed {
+            "▸ "
+        } else {
+            "▾ "
+        }
+    } else {
+        "· "
+    });
+    prefix
 }
 
 fn row_height(row: &RyeOsTableRowVm) -> usize {
@@ -228,12 +266,13 @@ fn row_height(row: &RyeOsTableRowVm) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTone};
+    use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTableHierarchyVm, RyeOsTone};
 
     fn trow(tone: RyeOsTone, cells: &[&str]) -> RyeOsTableRowVm {
         RyeOsTableRowVm {
             id: cells.first().copied().unwrap_or_default().to_string(),
             cells: cells.iter().map(|c| c.to_string()).collect(),
+            hierarchy: None,
             cell_tones: Vec::new(),
             tone,
             intent: None,
@@ -287,18 +326,15 @@ mod tests {
             &[trow(RyeOsTone::Neutral, &["T-ab", "ops/base", "running"])],
             0,
         );
-        // Headers render letterspaced/uppercased (house style); normalise to
-        // compare against the declared column names.
         let header = row_text(&s, 60, 0);
-        let flat = header.to_lowercase().replace(' ', "");
-        assert!(flat.contains("thread"), "header rendered: {header:?}");
-        assert!(flat.contains("item"), "header rendered: {header:?}");
-        assert!(flat.contains("status"), "header rendered: {header:?}");
-
-        // Each cell starts at the same x as its column header.
         let ncols = 3usize;
         let col_w = (60 - GUTTER) / ncols;
         let cell_x = |i: usize| GUTTER + i * col_w;
+        assert!(from_col(&header, cell_x(0)).starts_with("thread"));
+        assert!(from_col(&header, cell_x(1)).starts_with("item"));
+        assert!(from_col(&header, cell_x(2)).starts_with("status"));
+
+        // Each cell starts at the same x as its column header.
         let body = row_text(&s, 60, 1);
         assert!(
             from_col(&body, cell_x(0)).starts_with("T-ab"),
@@ -329,6 +365,28 @@ mod tests {
         );
         assert!(row_text(&s, 60, 1).contains("T-ab"));
         assert!(row_text(&s, 60, 2).contains("T-cd"));
+    }
+
+    #[test]
+    fn hierarchy_prefix_carries_guides_connector_and_fold_state() {
+        assert_eq!(
+            hierarchy_prefix(&RyeOsTableHierarchyVm {
+                ancestor_continues: vec![true, false],
+                is_last: false,
+                has_children: true,
+                collapsed: true,
+            }),
+            "│ ├─▸ "
+        );
+        assert_eq!(
+            hierarchy_prefix(&RyeOsTableHierarchyVm {
+                ancestor_continues: vec![],
+                is_last: true,
+                has_children: false,
+                collapsed: false,
+            }),
+            "· "
+        );
     }
 
     #[test]

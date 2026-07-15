@@ -1,0 +1,14 @@
+id: ui/api/ryeos-ui/thread/tree
+path: /ui/api/ryeos-ui/thread/tree
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 15000
+  concurrent_max: 32
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/thread/tree"

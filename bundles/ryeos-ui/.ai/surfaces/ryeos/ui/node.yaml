@@ -28,6 +28,7 @@ library:
   - group: Threads
     views:
       - view:ryeos/node/threads/history
+      - view:ryeos/thread/tree
   - group: Node
     views:
       - view:ryeos/projects/list

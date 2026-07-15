@@ -418,6 +418,7 @@ mod tests {
             rows: vec![RyeOsTableRowVm {
                 id: "T-ab".into(),
                 cells: vec!["T-ab".into()],
+                hierarchy: None,
                 cell_tones: Vec::new(),
                 tone: RyeOsTone::Neutral,
                 intent: None,

@@ -26,6 +26,7 @@ library:
     views:
       - view:ryeos/threads/history
       - view:ryeos/node/threads/history
+      - view:ryeos/thread/tree
   - group: Node
     views:
       - view:ryeos/node/events

@@ -42,6 +42,7 @@ library:
     views:
       - view:ryeos/threads/history
       - view:ryeos/node/threads/history
+      - view:ryeos/thread/tree
       - view:ryeos/thread/transcript
       - view:ryeos/threads/detail
   - group: Project
