@@ -89,7 +89,9 @@ fn draw_row(
     style = shimmer_style(
         style,
         row.changed_at_ms,
-        row.changed_tone.map(|tone| tone_style(tone).fg).unwrap_or(ACCENT),
+        row.changed_tone
+            .map(|tone| tone_style(tone).fg)
+            .unwrap_or(ACCENT),
         now_ms,
     );
     fill_line(surface, left, y, width, style);

@@ -123,6 +123,7 @@ pub async fn handle(
             &source,
             &dependency_roots,
             &operator_config_root,
+            std::sync::Arc::clone(&state.sandbox),
         ) {
             Ok(report) => report
                 .warnings

@@ -296,8 +296,44 @@ impl CompiledResponseMode for CompiledHandlerMode {
             ))
         })?;
 
+        // The bundle root is resolution authority, not a writable project.
+        // Handler mode invokes CompiledDispatchInvoker directly (it does not
+        // pass through execute mode), so allocate a narrow request-owned
+        // workspace here and hold its guard across the complete invocation.
+        let workspace = std::env::temp_dir().join(format!(
+            "ryeos-route-handler-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let workspace_guard = Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
+            workspace.clone(),
+        ));
+        std::fs::create_dir(&workspace).map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "create isolated handler workspace {}: {error}",
+                workspace.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    RouteDispatchError::Internal(format!(
+                        "protect isolated handler workspace {}: {error}",
+                        workspace.display()
+                    ))
+                },
+            )?;
+        }
+        std::fs::create_dir_all(workspace.join(ryeos_engine::AI_DIR)).map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "create isolated handler workspace {}: {error}",
+                workspace.display()
+            ))
+        })?;
         let input = json!({
-            "project_path": self.project_root,
+            "project_path": workspace.to_string_lossy(),
             "parameters": parameters,
         });
 
@@ -310,6 +346,7 @@ impl CompiledResponseMode for CompiledHandlerMode {
             body_raw: ctx.body_raw,
             input,
             principal: Some(ctx.principal),
+            workspace_lifeline: Some(workspace_guard),
             state: ctx.state,
             webhook_dedupe: ctx.webhook_dedupe,
         };

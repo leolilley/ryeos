@@ -331,18 +331,25 @@ pub fn sweep_fire_jsonl(
     dry_run: bool,
     result: &mut GcResult,
 ) -> Result<Vec<FireRetentionTarget>> {
-    let Some(policy) = policy else {
-        return Ok(Vec::new());
-    };
-    // Pin every namespace component before enumeration. A pathname preflight
-    // followed by read_dir can be rebound between syscalls and redirect this
-    // source-of-truth rewrite into another schedule tree.
     let state_directory = lillux::PinnedDirectory::open(state_dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "schedule state directory is absent: {}",
             state_dir.display()
         )
     })?;
+    sweep_fire_jsonl_in_directory(&state_directory, policy, dry_run, result)
+}
+
+/// Age/count-bound schedule journals beneath one already-pinned runtime root.
+pub fn sweep_fire_jsonl_in_directory(
+    state_directory: &lillux::PinnedDirectory,
+    policy: Option<FireRetentionPolicy>,
+    dry_run: bool,
+    result: &mut GcResult,
+) -> Result<Vec<FireRetentionTarget>> {
+    let Some(policy) = policy else {
+        return Ok(Vec::new());
+    };
     let Some(schedules_directory) =
         state_directory.open_child_directory(std::ffi::OsStr::new("schedules"))?
     else {

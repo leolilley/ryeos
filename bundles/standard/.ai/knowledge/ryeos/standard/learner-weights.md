@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T01:05:59Z:dc03c911fc405930b9b73b41080f7e1c8e20f9c8bc1067eab2be46e1af41fc6f:in+/MWVA0Ja11b4h1PRWmerx5CMRQ/L5qkaTed/xiWLt1MJkVe1MPZsYbmQZPh8vYTIsbGkILUvlLrodV2dRBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:137c15ba76134a39c430473ce407f661f42bdeef46762195e95859a570594793:xfC04SAHabhFis24q3uS9Yi5IYhoe3GQcHyMo2aYL7pIVMaCWHwbfEjOMKgUI2bjMKNCcvdX5JOg/4yhOAzzAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [learner, weights, vault, bundle-events, durable, agents, learning]
 version: "1.0.0"
@@ -116,10 +116,17 @@ The runtime-vault callbacks are **not symmetric** — `put` and `list` take
 | put | `{ "namespace": "learner_weights", "key": "<key>", "value": "<json>" }` |
 | get | `{ "ref": "vault://bundle/<bundle_id>/learner_weights/<key>" }` |
 | delete | `{ "ref": "vault://bundle/<bundle_id>/learner_weights/<key>" }` |
-| list | `{ "namespace": "learner_weights" }` |
+| list | `{ "namespace": "learner_weights", "cursor": null, "limit": 64 }` |
 
-`<bundle_id>` is the agent's effective bundle id. `list` returns the keys
-in the namespace (use it to enumerate checkpoints).
+`<bundle_id>` is the agent's effective bundle id. `list` returns
+`{"namespace", "keys", "next_cursor"}` in lexical key order. The cursor is
+exclusive; pass a non-null `next_cursor` into the next request until the
+response returns `null`. `limit` defaults to 64 and may not exceed 128; the
+serialized response is capped at 64 KiB.
+
+Pagination bounds the returned page and response size, but it is not narrow
+storage I/O with the current backend. Each page still opens and validates the
+complete bounded sealed envelope before filtering this namespace.
 
 ## Lifecycle
 
@@ -148,6 +155,12 @@ crash between steps leaves `latest` pointing at a checkpoint that exists.
 
 ## Scale limit
 
-The runtime vault suits compact JSON weights or small policy nets. If the
-payload grows beyond a few MB, store the weights blob in CAS / object
-storage and keep only a digest/pointer (plus metrics) in the vault value.
+The runtime vault suits compact JSON weights or small policy nets. A single
+value is capped at 256 KiB. The shared sealed envelope is capped at 1,024
+entries, 4 MiB of plaintext, and 6 MiB on disk; these limits include operator
+secrets and other bundles' internally represented runtime-vault entries.
+
+Store larger weights blobs in CAS / object storage and keep only a
+digest/pointer (plus metrics) in the vault value. A future first-class scoped
+or sharded backend can make bundle/namespace access narrow without changing
+the logical `vault://bundle/...` refs.

@@ -49,9 +49,22 @@ pub fn collect_reachable(
     refs_root: &Path,
     trust_store: &TrustStore,
 ) -> Result<ReachableSet> {
+    collect_reachable_with_extra_roots(cas_root, refs_root, trust_store, &[])
+}
+
+/// Walk verified signed heads plus daemon-authoritative transient roots.
+///
+/// Extra roots are supplied only by the daemon from active runtime launch
+/// metadata; they are not part of the public maintenance request schema.
+pub fn collect_reachable_with_extra_roots(
+    cas_root: &Path,
+    refs_root: &Path,
+    trust_store: &TrustStore,
+    extra_roots: &[String],
+) -> Result<ReachableSet> {
     crate::refs::validate_authoritative_ref_namespaces(refs_root)?;
     let mut set = ReachableSet::default();
-    let mut roots = BTreeSet::new();
+    let mut roots: BTreeSet<String> = extra_roots.iter().cloned().collect();
 
     // Every namespace-neutral signed head is an authoritative CAS root. This
     // deliberately does not enumerate a fixed list of kinds: admissions,

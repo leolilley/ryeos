@@ -25,6 +25,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     if req.policy.is_empty() {
         anyhow::bail!("admission policy must not be empty");
     }
+    let cas_read = state.acquire_cas_read()?;
 
     let head = state.state_store.with_state_db(|db| {
         db.read_generic_head_ref(&format!("admissions/{}", req.policy), &req.subject_hash)
@@ -38,7 +39,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }));
     };
 
-    let cas = state.cas_store()?;
+    let cas = cas_read.cas();
     let (status, attestation) = match cas.get_object(&head.target_hash)? {
         Some(value) => {
             match Some(value).and_then(|value| {

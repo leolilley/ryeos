@@ -114,10 +114,8 @@ pub struct ServiceExecutionResult {
 /// 2. Resolve through the engine.
 /// 3. Verify trust chain (signature + content hash).
 ///
-/// Error wording is keyed off `ref_kind_label`: `None` produces neutral
-/// "ref '<...>' ..." messages; `Some("service")` produces the original
-/// service-flavored "service '<...>' ..." wording so existing pin tests
-/// and callers see no diff.
+/// `ref_kind_label` affects diagnostic wording only; resolution and routing
+/// always come from the parsed canonical ref and verified registries.
 pub fn resolve_and_verify(
     engine: &Arc<ryeos_engine::engine::Engine>,
     plan_ctx: &ryeos_engine::contracts::PlanContext,

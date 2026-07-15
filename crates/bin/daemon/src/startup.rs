@@ -395,19 +395,10 @@ impl StartupCoordinator {
         let http = DynamicHttpState::bootstrap(lifecycle)?;
         let publication = Arc::new(Mutex::new(()));
         let shutting_down = Arc::new(AtomicBool::new(false));
-        let shutdown_http = http.clone();
-        let shutdown_publication = publication.clone();
-        let shutdown_flag = shutting_down.clone();
-        let uds = crate::uds::server::DynamicServerState::bootstrap_with_shutdown(
-            LifecycleResponse::starting(identity.clone(), startup.clone()),
-            Arc::new(move || {
-                let _publication = shutdown_publication.lock();
-                shutdown_flag.store(true, Ordering::Release);
-                shutdown_http.close_external_admission();
-                shutdown_http.unpublish_application();
-                ryeosd::request_shutdown();
-            }),
-        )?;
+        let uds = crate::uds::server::DynamicServerState::bootstrap(LifecycleResponse::starting(
+            identity.clone(),
+            startup.clone(),
+        ))?;
         Ok(Self {
             identity,
             process_started,
@@ -656,7 +647,14 @@ impl StartupCoordinator {
         Ok(())
     }
 
-    pub fn ready(&self, thread_projection: serde_json::Value) -> Result<()> {
+    pub fn ready<F>(
+        &self,
+        thread_projection: serde_json::Value,
+        release_internal_gates: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(),
+    {
         let _publication = self
             .publication
             .lock()
@@ -690,6 +688,11 @@ impl StartupCoordinator {
         state.snapshot = response.startup.clone();
         drop(state);
 
+        // Release internal recovery/scheduler exclusion while publication is
+        // linearized and external admission still observes Starting. The
+        // caller starts the ordinary scheduler timer only after this method
+        // release-publishes Ready.
+        release_internal_gates();
         // Admission additionally checks lifecycle.ready, so opening this gate
         // first cannot admit a request before the Ready publication lands.
         self.http.open_external_admission();

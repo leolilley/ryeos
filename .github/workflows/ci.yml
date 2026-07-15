@@ -73,6 +73,12 @@ jobs:
       - name: Check deterministic AUR metadata preparation
         run: ./scripts/release/test-prepare-aur.sh
 
+      - name: Check deterministic official bundle packaging
+        run: ./scripts/release/test-package-bundle-artifact.sh
+
+      - name: Check explicit publisher trust boundaries
+        run: ./scripts/ci/test-publisher-trust-policy.sh
+
       - name: Check canonical naming
         run: ./scripts/lint-naming.sh
 
@@ -97,7 +103,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends bubblewrap meson ninja-build libcap-dev pkg-config libssl-dev ca-certificates openssl
+          ./scripts/ci/install-bubblewrap.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -147,7 +154,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends bubblewrap meson ninja-build libcap-dev pkg-config libssl-dev ca-certificates openssl
+          ./scripts/ci/install-bubblewrap.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -184,7 +192,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends bubblewrap meson ninja-build libcap-dev pkg-config libssl-dev ca-certificates openssl
+          ./scripts/ci/install-bubblewrap.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -217,7 +226,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libssl-dev ca-certificates openssl python3
+          sudo apt-get install -y --no-install-recommends bubblewrap meson ninja-build libcap-dev pkg-config libssl-dev ca-certificates openssl python3
+          ./scripts/ci/install-bubblewrap.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -233,4 +243,9 @@ jobs:
             --populate --all --bundle-set standard --no-init --no-daemon-restart
 
       - name: Exercise installed restart and resume
+        env:
+          # The manual smoke job populates bundles with the repository's dev
+          # publisher. Trust that exact document explicitly; release artifacts
+          # use the hardcoded official publisher and need no override.
+          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
         run: ./scripts/smoke-installed-resume.sh

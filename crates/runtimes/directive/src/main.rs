@@ -136,7 +136,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
         envelope.roots.bundle_roots.clone(),
-        &envelope.roots.operator_trusted_keys_dir,
+        &envelope.roots.node_trusted_keys_dir,
     );
 
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")

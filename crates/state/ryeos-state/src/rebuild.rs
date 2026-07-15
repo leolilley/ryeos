@@ -1094,15 +1094,6 @@ pub(crate) fn repair_one_chain_verified_with_cas_and_observer(
     Ok(report)
 }
 
-pub(crate) fn verify_repair_closure(
-    cas_root: &Path,
-    chain_root_id: &str,
-    head_hash: &str,
-    verify_all_hashes: bool,
-) -> Result<()> {
-    verify_repair_closure_with_observer(cas_root, chain_root_id, head_hash, verify_all_hashes, None)
-}
-
 fn verify_repair_closure_with_observer(
     cas_root: &Path,
     chain_root_id: &str,
@@ -1178,25 +1169,18 @@ pub(crate) fn verify_repair_closure_anchored_with_cas(
     .map(|_| ())
 }
 
-/// Verify one exact chain head and return the complete closure that was
-/// checked. Import staging uses the returned hashes as durable temporary GC
-/// roots, including descendants omitted from an incremental payload because
-/// they were already present locally.
-pub(crate) fn verified_repair_closure(
-    cas_root: &Path,
+/// Verify one exact chain head from pinned CAS authority and return the
+/// complete closure that was checked. Import staging uses the returned hashes
+/// as durable temporary GC roots, including descendants omitted from an
+/// incremental payload because they were already present locally. The caller
+/// must retain the authority's mutation guard for the complete verification.
+pub(crate) fn verified_repair_closure_with_cas(
+    cas: &lillux::CasStore,
     chain_root_id: &str,
     head_hash: &str,
     verify_all_hashes: bool,
 ) -> Result<crate::object_closure::ObjectClosureReport> {
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    verified_repair_closure_inner(
-        &cas,
-        chain_root_id,
-        head_hash,
-        verify_all_hashes,
-        None,
-        None,
-    )
+    verified_repair_closure_inner(cas, chain_root_id, head_hash, verify_all_hashes, None, None)
 }
 
 fn verified_repair_closure_inner(

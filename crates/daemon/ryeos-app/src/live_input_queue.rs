@@ -39,6 +39,19 @@ use ryeos_state::objects::LiveInput;
 /// unboundedly.
 pub const DEFAULT_MAX_PENDING_PER_THREAD: usize = 32;
 
+/// Maximum JSON-serialized size of one operator input. This stays comfortably
+/// below the canonical 512 KiB thread-event cap after `cognition_in` wrapping.
+pub const MAX_LIVE_INPUT_SERIALIZED_BYTES: usize = 256 * 1024;
+
+/// Upper bound checked before a poll batch is persisted. Count × per-input cap
+/// plus a generous envelope margin remains below the 10 MiB UDS frame limit.
+pub const MAX_LIVE_INPUT_POLL_RESPONSE_BYTES: usize =
+    DEFAULT_MAX_PENDING_PER_THREAD * MAX_LIVE_INPUT_SERIALIZED_BYTES + 64 * 1024;
+
+pub fn serialized_live_input_bytes(input: &LiveInput) -> usize {
+    serde_json::to_vec(input).map_or(usize::MAX, |bytes| bytes.len())
+}
+
 #[derive(Debug, Default)]
 struct ThreadEntry {
     queue: VecDeque<LiveInput>,
@@ -68,6 +81,8 @@ pub enum EnqueueOutcome {
     /// The per-thread bound is reached; the caller should refuse without
     /// enqueueing. `pending` is the (unchanged) queue depth.
     Full { pending: usize },
+    /// The serialized input exceeds the durable-event/poll-response budget.
+    TooLarge { bytes: usize, max: usize },
 }
 
 /// Per-thread staging queue for operator live input.
@@ -91,7 +106,7 @@ impl LiveInputQueue {
     pub fn with_bound(max_pending_per_thread: usize) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
-            max_pending_per_thread: max_pending_per_thread.max(1),
+            max_pending_per_thread: max_pending_per_thread.clamp(1, DEFAULT_MAX_PENDING_PER_THREAD),
         }
     }
 
@@ -102,6 +117,13 @@ impl LiveInputQueue {
     /// running, follow-up-eligible directive; the `closed` check here is the
     /// race backstop for a finalize that landed after that gate.
     pub fn enqueue(&self, thread_id: &str, input: LiveInput) -> EnqueueOutcome {
+        let serialized_bytes = serialized_live_input_bytes(&input);
+        if serialized_bytes > MAX_LIVE_INPUT_SERIALIZED_BYTES {
+            return EnqueueOutcome::TooLarge {
+                bytes: serialized_bytes,
+                max: MAX_LIVE_INPUT_SERIALIZED_BYTES,
+            };
+        }
         let mut entries = self.entries.lock().unwrap();
         let entry = entries.entry(thread_id.to_string()).or_default();
         if entry.closed {
@@ -265,6 +287,20 @@ mod tests {
             EnqueueOutcome::Full { pending: 2 }
         );
         assert_eq!(q.pending_len("T"), 2);
+    }
+
+    #[test]
+    fn oversized_input_is_refused_before_enqueue() {
+        let q = LiveInputQueue::new();
+        let input = steer(&"x".repeat(MAX_LIVE_INPUT_SERIALIZED_BYTES));
+        assert!(matches!(
+            q.enqueue("T", input),
+            EnqueueOutcome::TooLarge {
+                max: MAX_LIVE_INPUT_SERIALIZED_BYTES,
+                ..
+            }
+        ));
+        assert_eq!(q.pending_len("T"), 0);
     }
 
     #[test]

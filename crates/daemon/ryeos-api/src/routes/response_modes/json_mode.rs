@@ -194,6 +194,7 @@ impl CompiledResponseMode for CompiledJsonMode {
             body_raw: ctx.body_raw,
             input,
             principal: Some(ctx.principal),
+            workspace_lifeline: None,
             state: ctx.state,
             webhook_dedupe: ctx.webhook_dedupe,
         };

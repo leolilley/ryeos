@@ -99,6 +99,18 @@ fn build_route_table(
     })
 }
 
+fn prospective_node_config_validator(
+    ui: Arc<ryeos_ui::UiState>,
+) -> Arc<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator> {
+    Arc::new(
+        ryeos_app::prospective_admission::ProspectiveNodeConfigValidator::new(move |snapshot| {
+            build_route_table(snapshot, ui.clone())
+                .map(|_| ())
+                .context("prospective route-table compilation failed")
+        }),
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Capture process start before any configuration, verification, or state
@@ -286,8 +298,19 @@ async fn main() -> Result<()> {
                 );
             }
 
+            // Resolve the node sandbox exactly once. Engine-owned handlers and
+            // ordinary execution share this immutable policy snapshot.
+            let sandbox = Arc::new(
+                ryeos_engine::sandbox::SandboxRuntime::load_for_daemon(
+                    &config.app_root,
+                    &config.uds_path,
+                )
+                .context("load node sandbox policy")?,
+            );
+
             // ── Two-phase node-config bootstrap ──
-            let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(&config)?;
+            let (engine, node_config_snapshot) =
+                bootstrap::load_node_config_two_phase(&config, Arc::clone(&sandbox))?;
             let node_history_policy = {
                 let roots = engine.resolution_roots(Some(config.app_root.clone()));
                 let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;
@@ -295,7 +318,7 @@ async fn main() -> Result<()> {
                     roots: &roots,
                     parsers: &parsers,
                     kinds: &engine.kinds,
-                    trust_store: &engine.trust_store,
+                    trust_store: &engine.node_trust_store,
                 };
                 Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
             };
@@ -429,6 +452,8 @@ async fn main() -> Result<()> {
             // Build UI state (browser sessions + session bus).
             let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
             let ui_state_for_hints = ui_state.clone();
+            let prospective_node_config_validator =
+                prospective_node_config_validator(ui_state.clone());
 
             // Build the route table from the node-config snapshot.
             let route_table = {
@@ -601,6 +626,7 @@ async fn main() -> Result<()> {
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
+                sandbox,
                 state_store,
                 engine: engine.clone(),
                 engine_cache: ryeos_app::engine_cache::EngineCache::new(
@@ -618,6 +644,7 @@ async fn main() -> Result<()> {
                     let mut ext = ryeos_app::extension_state::ExtensionState::new();
                     ext.insert(ui_state);
                     ext.insert(route_diagnostics);
+                    ext.insert(prospective_node_config_validator);
                     Arc::new(ext)
                 },
                 write_barrier: Arc::new(write_barrier),
@@ -652,6 +679,16 @@ async fn main() -> Result<()> {
                     }
                 },
             };
+            let admission_store = app_state.state_store.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                if let Err(error) = admission_store.close_process_attachment_admission() {
+                    tracing::error!(
+                        error = %error,
+                        "failed to close process attachment admission from shutdown signal"
+                    );
+                }
+            });
             *shutdown_drain_state
                 .lock()
                 .expect("shutdown drain state mutex poisoned") = Some(app_state.clone());
@@ -933,22 +970,20 @@ async fn main() -> Result<()> {
             let projection = serde_json::to_value(projection_snapshot)
                 .context("serialize final projection readiness snapshot")?;
 
-            // Start the timer while the scheduler write guard still excludes its
-            // first dispatch. If Ready publication fails, abort this one task
-            // explicitly; after publication it joins the common supervisor.
+            let recovery_release_for_ready = recovery_execution_release.clone();
+            startup.ready(projection, move || {
+                recovery_release_for_ready.open();
+                drop(scheduler_reconcile_guard);
+            })?;
+
+            // The ordinary timer does not exist until Ready is published, so
+            // no timer fire can race the final internal-gate release boundary.
             let scheduler_task = tokio::spawn(scheduler::timer::run(
                 scheduler_ctx,
                 scheduler_reload_rx,
                 shutdown_signal(),
             ));
-            tracing::info!("scheduler: timer loop started under startup guard");
-            if let Err(error) = startup.ready(projection) {
-                scheduler_task.abort();
-                let _ = scheduler_task.await;
-                return Err(error);
-            }
-            recovery_execution_release.open();
-            drop(scheduler_reconcile_guard);
+            tracing::info!("scheduler: timer loop started after readiness publication");
 
             supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await
         };
@@ -1043,7 +1078,11 @@ async fn main() -> Result<()> {
             .expect("shutdown drain state mutex poisoned")
             .take()
         {
-            drain_running_threads(&state);
+            if !drain_running_threads(&state).await && result.is_ok() {
+                result = Err(anyhow::anyhow!(
+                    "shutdown could not prove every attached process terminated"
+                ));
+            }
         }
 
         (result, startup_cancelled, startup_failed)
@@ -1134,7 +1173,7 @@ fn load_node_max_live_fanout(
         roots: &roots,
         parsers: &parsers,
         kinds: &engine.kinds,
-        trust_store: &engine.trust_store,
+        trust_store: &engine.node_trust_store,
     };
     let mut limit: Option<u32> = None;
     for root in &roots.ordered {
@@ -1331,12 +1370,16 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
                     thread.status
                 )
             })?;
-        let live_owned_process = match (thread.runtime.pid, thread.runtime.pgid) {
-            (Some(pid), Some(pgid)) if ryeos_app::process::pgid_live_for_retention(pgid)? => {
-                ryeos_app::process::thread_process_identity_matches(pid, pgid, thread_id)?
-            }
-            _ => false,
-        };
+        let live_owned_process = thread
+            .runtime
+            .process_identity
+            .as_ref()
+            .is_some_and(|identity| {
+                ryeos_app::process::execution_liveness(identity)
+                    == ryeos_app::process::IdentityLiveness::Alive
+                    && ryeos_app::process::execution_group_liveness(identity)
+                        == ryeos_app::process::IdentityLiveness::Alive
+            });
         let durable_follow_owner = state
             .state_store
             .get_follow_waiter_by_child_chain(&thread.chain_root_id)?
@@ -1617,84 +1660,128 @@ async fn supervise_background_tasks(
     }
 }
 
-fn drain_running_threads(state: &AppState) {
-    // Include `created`: a runtime registers its pgid (attach_process) BEFORE
-    // it marks running, so there is a brief `created` + live-pgid window. The
-    // kill loop below only acts on rows with `Some(pgid)`, so unlaunched
-    // `created` rows (no pgid) are untouched.
-    let threads = match state
-        .state_store
-        .list_threads_by_status(&["created", "running"])
-    {
-        Ok(threads) => threads,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to list running threads during shutdown");
-            return;
-        }
-    };
-
-    if threads.is_empty() {
-        return;
+async fn drain_running_threads(state: &AppState) -> bool {
+    // Serialize shutdown against every future UDS/internal attachment. An
+    // attach that committed first appears below; one that arrives later is
+    // rejected and its spawn owner aborts the exact process.
+    if let Err(error) = state.state_store.close_process_attachment_admission() {
+        tracing::error!(error = %error, "failed to close process attachment admission");
+        return false;
     }
 
-    tracing::info!(count = threads.len(), "draining running threads");
+    let drain_deadline = Instant::now()
+        .checked_add(Duration::from_secs(
+            process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+        ))
+        .unwrap_or_else(Instant::now);
+    let attached_ids = match state.state_store.list_attached_thread_ids() {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list attached threads during shutdown");
+            return false;
+        }
+    };
+    if attached_ids.is_empty() {
+        return true;
+    }
+    tracing::info!(
+        count = attached_ids.len(),
+        "draining attached threads concurrently"
+    );
 
-    for thread in &threads {
-        if let (Some(pid), Some(pgid)) = (thread.runtime.pid, thread.runtime.pgid) {
-            match process::thread_process_identity_matches(pid, pgid, &thread.thread_id) {
-                Ok(true) => {}
-                Ok(false) => {
-                    tracing::warn!(
-                        thread_id = %thread.thread_id,
-                        pid,
-                        pgid,
-                        "shutdown skipped a reused or stale persisted process identity"
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        thread_id = %thread.thread_id,
-                        pid,
-                        pgid,
-                        %error,
-                        "shutdown could not prove persisted process identity; refusing to signal it"
-                    );
-                    continue;
-                }
+    const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
+    let mut pending = Vec::with_capacity(attached_ids.len());
+    for thread_id in attached_ids {
+        let thread = match state.state_store.get_thread(&thread_id) {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                tracing::warn!(thread_id, "attached runtime row has no thread");
+                continue;
             }
-            let action = process::resolve_shutdown_action(
-                thread
-                    .runtime
-                    .launch_metadata
-                    .as_ref()
-                    .and_then(|lm| lm.cancellation_mode),
-            );
-            tracing::info!(
-                pgid,
-                thread_id = %thread.thread_id,
-                action = ?action,
-                "killing process group"
-            );
-            let result = process::kill_by_action(pgid, action);
-            if !result.success {
-                tracing::warn!(
-                    pgid,
-                    method = %result.method,
-                    "failed to kill process group"
-                );
+            Err(error) => {
+                tracing::warn!(thread_id, error = %error, "failed to load attached thread");
+                continue;
             }
-            // This death is the shutdown's doing, not the thread's — re-arm
-            // its auto-resume budget so the next boot's reconcile resumes it
-            // instead of exhausting `max_auto_resume_attempts` across
-            // deploys. Crashes skip the drain, so crash loops still exhaust.
-            if let Err(err) = state.state_store.reset_resume_attempts(&thread.thread_id) {
+        };
+        let Some(identity) = thread.runtime.process_identity.clone() else {
+            tracing::warn!(thread_id, "attached row lost its durable process identity");
+            continue;
+        };
+        let action = process::resolve_shutdown_action(
+            thread
+                .runtime
+                .launch_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.cancellation_mode),
+        );
+        let kill_identity = identity.clone();
+        let kill_task = tokio::task::spawn_blocking(move || {
+            let bounded_action = match action {
+                process::ShutdownAction::Hard => process::ShutdownAction::Hard,
+                process::ShutdownAction::Graceful(grace) => process::ShutdownAction::Graceful(
+                    grace.min(
+                        drain_deadline
+                            .saturating_duration_since(Instant::now())
+                            .saturating_sub(HARD_KILL_PROOF_RESERVE),
+                    ),
+                ),
+            };
+            process::kill_by_action(&kill_identity, bounded_action)
+        });
+        pending.push((thread_id, thread.status, identity, kill_task));
+    }
+
+    for (thread_id, status, identity, kill_task) in pending {
+        let result = match kill_task.await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(thread_id, error = %error, "shutdown process-kill worker failed");
+                continue;
+            }
+        };
+        if !result.success {
+            tracing::warn!(
+                thread_id,
+                method = result.method,
+                "failed to prove attached process termination during shutdown"
+            );
+            continue;
+        }
+        match state
+            .state_store
+            .clear_thread_process_if_matches(&thread_id, &identity)
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(thread_id, "shutdown identity changed before clear"),
+            Err(error) => tracing::warn!(
+                thread_id,
+                error = %error,
+                "failed to clear shutdown process identity"
+            ),
+        }
+        if !ryeos_app::state_store::is_terminal_status(&status) {
+            if let Err(error) = state.state_store.reset_resume_attempts(&thread_id) {
                 tracing::warn!(
-                    thread_id = %thread.thread_id,
-                    error = %err,
+                    thread_id,
+                    error = %error,
                     "failed to re-arm resume budget during drain"
                 );
             }
+        }
+    }
+
+    match state.state_store.list_attached_thread_ids() {
+        Ok(remaining) if !remaining.is_empty() => {
+            tracing::error!(
+                remaining = ?remaining,
+                "shutdown drain exhausted with attached identities still present"
+            );
+            false
+        }
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(error = %error, "failed final shutdown drain audit");
+            false
         }
     }
 }
@@ -1791,8 +1878,14 @@ async fn run_service_standalone(
     )
     .context("reconcile interrupted bundle transactions")?;
 
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
+            .context("load node sandbox policy")?,
+    );
+
     // Two-phase node-config bootstrap (same as daemon-start path)
-    let (engine, node_config_snapshot) = bootstrap::load_node_config_two_phase(config)?;
+    let (engine, node_config_snapshot) =
+        bootstrap::load_node_config_two_phase(config, Arc::clone(&sandbox))?;
     let node_history_policy = {
         let roots = engine.resolution_roots(Some(config.app_root.clone()));
         let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;
@@ -1800,7 +1893,7 @@ async fn run_service_standalone(
             roots: &roots,
             parsers: &parsers,
             kinds: &engine.kinds,
-            trust_store: &engine.trust_store,
+            trust_store: &engine.node_trust_store,
         };
         Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
     };
@@ -1909,6 +2002,9 @@ async fn run_service_standalone(
     );
 
     let standalone_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
+    let standalone_ui_state = Arc::new(ryeos_ui::UiState::new());
+    let standalone_node_config_validator =
+        prospective_node_config_validator(standalone_ui_state.clone());
     let standalone_scheduler_db = match standalone_state_access {
         ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
             let scheduler_path = config
@@ -1933,6 +2029,7 @@ async fn run_service_standalone(
 
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
+        sandbox,
         state_store,
         engine: engine.clone(),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(
@@ -1946,7 +2043,12 @@ async fn run_service_standalone(
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
-        extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
+        extensions: {
+            let mut extensions = ryeos_app::extension_state::ExtensionState::new();
+            extensions.insert(standalone_ui_state);
+            extensions.insert(standalone_node_config_validator);
+            Arc::new(extensions)
+        },
         write_barrier: Arc::new(write_barrier),
         started_at: Instant::now(),
         started_at_iso: lillux::time::iso8601_now(),

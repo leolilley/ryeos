@@ -87,6 +87,46 @@ fn store_blob_is_idempotent() {
 }
 
 #[test]
+fn store_blob_rehashes_and_rejects_a_corrupt_existing_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let data = b"expected blob bytes";
+    let hash = sha256_hex(data);
+    let path = shard_path(store.root(), "blobs", &hash, "");
+    fs::create_dir_all(path.parent().unwrap()).expect("create shard");
+    fs::write(&path, b"substituted bytes").expect("seed corrupt entry");
+
+    let error = store
+        .store_blob(data)
+        .expect_err("path existence must not satisfy a CAS write");
+
+    assert!(error.to_string().contains("integrity failure"), "{error:#}");
+    assert_eq!(
+        fs::read(&path).expect("read corrupt entry"),
+        b"substituted bytes",
+        "failed verification must not silently repair or conceal corruption"
+    );
+}
+
+#[test]
+fn store_object_rehashes_and_rejects_a_corrupt_existing_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let value = serde_json::json!({"kind": "test", "value": 7});
+    let canonical = lillux::cas::canonical_json(&value);
+    let hash = sha256_hex(canonical.as_bytes());
+    let path = shard_path(store.root(), "objects", &hash, ".json");
+    fs::create_dir_all(path.parent().unwrap()).expect("create shard");
+    fs::write(&path, br#"{"kind":"substituted"}"#).expect("seed corrupt entry");
+
+    let error = store
+        .store_object(&value)
+        .expect_err("path existence must not satisfy a CAS object write");
+
+    assert!(error.to_string().contains("integrity failure"), "{error:#}");
+}
+
+#[test]
 fn get_and_has_reject_malformed_hash() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());

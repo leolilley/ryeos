@@ -28,6 +28,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -45,7 +46,7 @@ fn sandbox_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
     let node = root.join(".ai/node");
     fs::create_dir_all(&node).unwrap();
-    fs::write(node.join("sandbox.yaml"), "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\nwritable_paths: [\"{project}\"]\nallowed_env: [\"*\"]\nmax_open_files: 128\nmax_processes: 32\n").unwrap();
+    fs::write(node.join("sandbox.yaml"), "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: [\"{verified_code}\"]\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n").unwrap();
     root
 }
 
@@ -138,7 +139,8 @@ fn build_engine_against_bundle() -> Engine {
         .expect("composer registry derives from live bundle kinds");
 
     Engine::new(kinds, parser_dispatcher, vec![bundle_root])
-        .with_trust_store(trust_store)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
         .with_composers(composers)
 }
 
@@ -226,9 +228,24 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         )
         .expect("build_plan must succeed under fixed route-handler authority");
 
+    let app_root = sandbox_app_root();
+    let sandbox = Arc::new(
+        ryeos_engine::sandbox::SandboxRuntime::load(&app_root)
+            .expect("load disabled sandbox fixture"),
+    );
     let engine_ctx = EngineContext {
-        app_root: sandbox_app_root(),
-        sandbox_enabled: false,
+        app_root,
+        sandbox,
+        sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
+        sandbox_state_root: None,
+        sandbox_checkpoint_dir: None,
+        sandbox_daemon_socket_path: None,
+        sandbox_bundle_roots: Vec::new(),
+        sandbox_node_trusted_keys_dir: None,
+        sandbox_verified_code: vec![ryeos_engine::sandbox::SandboxVerifiedCode {
+            source_path: verified.resolved.source_path.clone(),
+            content_hash: verified.resolved.content_hash.clone(),
+        }],
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

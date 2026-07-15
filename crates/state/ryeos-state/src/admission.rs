@@ -55,7 +55,9 @@ pub fn admit_root(
     request: &AdmissionRequest,
     signer: &dyn Signer,
     issuer_key: &lillux::crypto::VerifyingKey,
+    cas_mutation_guard: &crate::CasMutationGuard,
 ) -> Result<AdmissionResult> {
+    db.ensure_cas_mutation_guard(cas_mutation_guard)?;
     let cas = db.pinned_cas()?;
     if !lillux::valid_hash(&request.subject_hash)
         || request.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
@@ -217,6 +219,7 @@ pub fn admit_root(
         &attestation_hash,
         None,
         signer,
+        cas_mutation_guard,
     )?;
     db.record_admission_attestation(&NewAdmissionAttestationRecord {
         attestation_hash: attestation_hash.clone(),
@@ -310,6 +313,11 @@ mod tests {
     fn admit_root_writes_attestation_and_head() {
         let tmp = tempfile::tempdir().unwrap();
         let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
         let signer = TestSigner::default();
         let subject_hash = write_object(
             &db,
@@ -330,6 +338,7 @@ mod tests {
             &AdmissionRequest::accepted(subject_hash.clone(), "test.policy.v1"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap();
         assert!(!result.reused_existing);
@@ -371,6 +380,7 @@ mod tests {
             &AdmissionRequest::accepted(subject_hash, "test.policy.v1"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap();
         assert!(second.reused_existing);
@@ -381,6 +391,11 @@ mod tests {
     fn admit_root_rejects_missing_subject() {
         let tmp = tempfile::tempdir().unwrap();
         let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
         let signer = TestSigner::default();
 
         let err = admit_root(
@@ -388,6 +403,7 @@ mod tests {
             &AdmissionRequest::accepted("aa".repeat(32), "test.policy.v1"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap_err();
         assert!(err.to_string().contains("admission closure incomplete"));
@@ -397,6 +413,11 @@ mod tests {
     fn admit_root_rejects_unsafe_policy_before_writing_head() {
         let tmp = tempfile::tempdir().unwrap();
         let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
         let signer = TestSigner::default();
         let subject_hash = write_object(
             &db,
@@ -417,6 +438,7 @@ mod tests {
             &AdmissionRequest::accepted(subject_hash.clone(), "bad/../policy"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid admission policy"));

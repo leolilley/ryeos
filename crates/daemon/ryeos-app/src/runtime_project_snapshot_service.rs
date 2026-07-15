@@ -60,6 +60,7 @@ struct SnapshotContext<'a> {
     project_path: PathBuf,
     project_hash: String,
     principal_key: String,
+    authority: ryeos_state::PinnedStateAuthority,
     cas: CasStore,
 }
 
@@ -106,12 +107,17 @@ impl RuntimeProjectSnapshotService {
         let canonical = project_path
             .to_str()
             .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
+        let authority = state
+            .state_store
+            .with_state_db(|db| db.pinned_authority())?;
+        let cas = authority.cas_store()?;
         let ctx = SnapshotContext {
             state,
             project_hash: ryeos_state::refs::deployed_project_key(canonical),
             principal_key: ryeos_state::refs::principal_storage_key(&thread_auth.acting_principal)?
                 .to_owned(),
-            cas: state.cas_store()?,
+            authority,
+            cas,
             project_path,
         };
         match request.operation.as_str() {
@@ -261,9 +267,7 @@ fn log(ctx: &SnapshotContext<'_>, limit: usize) -> Result<Value> {
 }
 
 fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool) -> Result<Value> {
-    let guard =
-        ryeos_state::CasMutationGuard::acquire_shared(&ctx.state.config.runtime_state_dir())?;
-    guard.ensure_protects_cas_root(ctx.cas.root())?;
+    let guard = ctx.authority.acquire_shared_guard()?;
     let _permit = ctx
         .state
         .write_barrier
@@ -321,12 +325,14 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
                 &snapshot_hash,
                 current,
                 &signer,
+                &guard,
             ),
             None => db.write_project_head_ref(
                 &ctx.principal_key,
                 &ctx.project_hash,
                 &snapshot_hash,
                 &signer,
+                &guard,
             ),
         }
     })?;
@@ -571,10 +577,7 @@ fn canonical_project_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn acquire_cas_read_guard(ctx: &SnapshotContext<'_>) -> Result<ryeos_state::CasMutationGuard> {
-    let guard =
-        ryeos_state::CasMutationGuard::acquire_shared(&ctx.state.config.runtime_state_dir())?;
-    guard.ensure_protects_cas_root(ctx.cas.root())?;
-    Ok(guard)
+    ctx.authority.acquire_shared_guard()
 }
 
 /// Capture one exact regular-file observation. The descriptor is opened with

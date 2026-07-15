@@ -24,7 +24,8 @@ pub struct Request {
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     validate_hashes("object", &req.object_hashes)?;
     validate_hashes("blob", &req.blob_hashes)?;
-    let cas = state.cas_store()?;
+    let cas_read = state.acquire_cas_read()?;
+    let cas = cas_read.cas();
 
     let mut found_object_hashes = Vec::new();
     let mut missing_object_hashes = Vec::new();

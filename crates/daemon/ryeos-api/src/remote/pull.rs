@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use lillux::cas::CasStore;
 use ryeos_state::objects::{ItemSource, SourceManifest};
+use ryeos_state::{PinnedStateAuthority, StagedCasRootLease};
 
 use crate::remote::client::RemoteClient;
 
@@ -52,7 +53,8 @@ pub enum PullResultsError {
 ///
 /// # Arguments
 /// * `client` — RemoteClient connected to the remote node
-/// * `app_root` — Local app root (contains `.ai/state/objects` CAS)
+/// * `authority` — One descriptor-pinned local state authority captured by the
+///   caller for the complete push/execute/pull operation.
 /// * `pushed_snapshot_hash` — The snapshot we pushed (lineage anchor). The
 ///   result snapshot must equal this OR list it in `parent_hashes` (direct
 ///   parent only, per resolved design decision).
@@ -66,26 +68,51 @@ pub enum PullResultsError {
 ///   single-app-root implementation.
 pub async fn pull_results(
     client: &RemoteClient,
-    app_root: &Path,
+    authority: &PinnedStateAuthority,
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
     local_project_root: Option<&Path>,
     base_manifest: &SourceManifest,
     _base_user_manifest: Option<&SourceManifest>,
 ) -> Result<PullResult, PullResultsError> {
-    let local_cas_root = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("objects");
-    let local_cas = CasStore::new(local_cas_root.clone());
-    let recovery = ryeos_state::RecoveryStore::from_runtime_state_dir(
-        &app_root.join(ryeos_engine::AI_DIR).join("state"),
-    )
-    .map_err(PullResultsError::Other)?;
-    let mut staged_roots = recovery
-        .begin_staged_cas_roots("remote-pull-results")
+    let local_cas = authority.cas_store().map_err(PullResultsError::Other)?;
+    let recovery = authority
+        .require_recovery()
         .map_err(PullResultsError::Other)?;
+    let mut staged_roots = {
+        let guard = authority
+            .acquire_shared_guard()
+            .map_err(PullResultsError::Other)?;
+        recovery
+            .begin_staged_cas_roots_admitted(&guard, "remote-pull-results")
+            .map_err(PullResultsError::Other)?
+    };
 
+    let operation = pull_results_staged(
+        client,
+        authority,
+        &local_cas,
+        &mut staged_roots,
+        pushed_snapshot_hash,
+        remote_snapshot_hash,
+        local_project_root,
+        base_manifest,
+    )
+    .await;
+
+    finish_pull_staged_roots(authority, &mut staged_roots, operation)
+}
+
+async fn pull_results_staged(
+    client: &RemoteClient,
+    authority: &PinnedStateAuthority,
+    local_cas: &CasStore,
+    staged_roots: &mut StagedCasRootLease,
+    pushed_snapshot_hash: &str,
+    remote_snapshot_hash: &str,
+    local_project_root: Option<&Path>,
+    base_manifest: &SourceManifest,
+) -> Result<PullResult, PullResultsError> {
     // 1. Fetch remote snapshot object
     let snapshot_objs = client
         .objects_get(&[remote_snapshot_hash.to_string()])
@@ -100,6 +127,13 @@ pub async fn pull_results(
                 remote_snapshot_hash
             ))
         })?;
+    store_remote_object(
+        authority,
+        staged_roots,
+        local_cas,
+        remote_snapshot_hash,
+        &snapshot_val,
+    )?;
 
     // 1a. Lineage check. Runs in every mode — including --no-project —
     //     so a misconfigured / hostile remote can't slip an unrelated
@@ -110,7 +144,7 @@ pub async fn pull_results(
     // 2 – 5: project-side diff + apply. Skipped entirely in
     // --no-project mode (no local workspace to write into). The
     // user-space pull-back below still runs.
-    let mut fetched_count = 0usize;
+    let mut fetched_count = 1usize;
     let (files_updated, files_deleted) = if let Some(local_project_root) = local_project_root {
         let manifest_hash = snapshot_val
             .get("project_manifest_hash")
@@ -134,6 +168,14 @@ pub async fn pull_results(
                 manifest_hash
             ))
         })?;
+        store_remote_object(
+            authority,
+            staged_roots,
+            local_cas,
+            &manifest_hash,
+            &manifest_val,
+        )?;
+        fetched_count += 1;
 
         let remote_manifest: SourceManifest = parse_manifest(&manifest_val)?;
 
@@ -163,15 +205,7 @@ pub async fn pull_results(
             for entry in &fetched.entries {
                 if entry.kind == "object" {
                     if let Some(ref val) = entry.value {
-                        let stored = staged_roots
-                            .store_object(&local_cas, val)
-                            .map_err(PullResultsError::Other)?;
-                        if stored != entry.hash {
-                            return Err(PullResultsError::InvalidRemoteSnapshot(format!(
-                                "object hash mismatch: expected {}, got {stored}",
-                                entry.hash
-                            )));
-                        }
+                        store_remote_object(authority, staged_roots, local_cas, &entry.hash, val)?;
                         fetched_count += 1;
                         if let Some(blob_hash) =
                             val.get("content_blob_hash").and_then(|v| v.as_str())
@@ -181,14 +215,13 @@ pub async fn pull_results(
                                 .await
                                 .map_err(PullResultsError::Other)?;
                             if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
-                                let stored = staged_roots
-                                    .store_blob(&local_cas, &blob_data)
-                                    .map_err(PullResultsError::Other)?;
-                                if stored != blob_hash {
-                                    return Err(PullResultsError::InvalidRemoteSnapshot(format!(
-                                        "blob hash mismatch: expected {blob_hash}, got {stored}"
-                                    )));
-                                }
+                                store_remote_blob(
+                                    authority,
+                                    staged_roots,
+                                    local_cas,
+                                    blob_hash,
+                                    &blob_data,
+                                )?;
                                 fetched_count += 1;
                             }
                         }
@@ -201,15 +234,7 @@ pub async fn pull_results(
                             .map_err(|e| {
                                 PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}"))
                             })?;
-                        let stored = staged_roots
-                            .store_blob(&local_cas, &bytes)
-                            .map_err(PullResultsError::Other)?;
-                        if stored != entry.hash {
-                            return Err(PullResultsError::InvalidRemoteSnapshot(format!(
-                                "blob hash mismatch: expected {}, got {stored}",
-                                entry.hash
-                            )));
-                        }
+                        store_remote_blob(authority, staged_roots, local_cas, &entry.hash, &bytes)?;
                         fetched_count += 1;
                     }
                 }
@@ -218,7 +243,7 @@ pub async fn pull_results(
 
         // 5. Apply project changes with clean-base policy.
         apply_manifest_diff(
-            &local_cas,
+            local_cas,
             local_project_root,
             base_manifest,
             &remote_manifest,
@@ -230,8 +255,6 @@ pub async fn pull_results(
     // 6. No global user-space pull-back exists in the single-app-root model.
     let user_fetched = 0usize;
     let (user_files_updated, user_files_deleted) = (0usize, 0usize);
-    staged_roots.finish().map_err(PullResultsError::Other)?;
-
     Ok(PullResult {
         snapshot_hash: remote_snapshot_hash.to_string(),
         cas_objects_fetched: fetched_count + user_fetched,
@@ -240,6 +263,66 @@ pub async fn pull_results(
         user_files_updated,
         user_files_deleted,
     })
+}
+
+fn store_remote_object(
+    authority: &PinnedStateAuthority,
+    staged_roots: &mut StagedCasRootLease,
+    local_cas: &CasStore,
+    expected_hash: &str,
+    value: &Value,
+) -> Result<(), PullResultsError> {
+    let guard = authority
+        .acquire_shared_guard()
+        .map_err(PullResultsError::Other)?;
+    let stored = staged_roots
+        .store_object_admitted(&guard, local_cas, value)
+        .map_err(PullResultsError::Other)?;
+    if stored != expected_hash {
+        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+            "object hash mismatch: expected {expected_hash}, got {stored}"
+        )));
+    }
+    Ok(())
+}
+
+fn store_remote_blob(
+    authority: &PinnedStateAuthority,
+    staged_roots: &mut StagedCasRootLease,
+    local_cas: &CasStore,
+    expected_hash: &str,
+    bytes: &[u8],
+) -> Result<(), PullResultsError> {
+    let guard = authority
+        .acquire_shared_guard()
+        .map_err(PullResultsError::Other)?;
+    let stored = staged_roots
+        .store_blob_admitted(&guard, local_cas, bytes)
+        .map_err(PullResultsError::Other)?;
+    if stored != expected_hash {
+        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+            "blob hash mismatch: expected {expected_hash}, got {stored}"
+        )));
+    }
+    Ok(())
+}
+
+fn finish_pull_staged_roots<T>(
+    authority: &PinnedStateAuthority,
+    staged_roots: &mut StagedCasRootLease,
+    operation: Result<T, PullResultsError>,
+) -> Result<T, PullResultsError> {
+    let guard = authority
+        .acquire_shared_guard()
+        .map_err(PullResultsError::Other)?;
+    let finish = staged_roots
+        .finish_admitted(&guard)
+        .map_err(PullResultsError::Other);
+    match (operation, finish) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 /// A planned change to apply.

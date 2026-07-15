@@ -28,6 +28,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?
         .to_owned();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
+    let cas_read = state.acquire_cas_read()?;
 
     let deployed = state
         .state_store
@@ -42,7 +43,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }));
     };
 
-    let cas = state.cas_store()?;
+    let cas = cas_read.cas();
     let snapshot_obj = cas.get_object(&deployed.target_hash)?.ok_or_else(|| {
         anyhow!(
             "deployed snapshot {} not found in CAS",

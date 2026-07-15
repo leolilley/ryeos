@@ -1,5 +1,5 @@
 # rye:unsigned
-"""Central web-app auth primitives for RyeOS projects."""
+"""Shared central-auth implementation for the sibling RyeOS tool descriptors."""
 
 from __future__ import annotations
 

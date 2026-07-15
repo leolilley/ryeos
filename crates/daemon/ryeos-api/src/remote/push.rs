@@ -14,6 +14,7 @@ use lillux::cas::{sha256_hex, CasStore};
 use ryeos_state::ignore::IgnoreMatcher;
 use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
 use ryeos_state::project_sync::{ProjectSyncScope, PROJECT_AI_SURFACES};
+use ryeos_state::{CasMutationGuard, PinnedStateAuthority, StagedCasRootLease};
 
 use crate::remote::client::{BlobUpload, ObjectsPutResponse, RemoteClient};
 use ryeos_app::state::AppState;
@@ -52,6 +53,7 @@ pub struct PushResult {
 pub async fn push_project_ai_only(
     client: &RemoteClient,
     state: &Arc<AppState>,
+    authority: &PinnedStateAuthority,
     local_project_path: &Path,
     remote_project_path_for_ref: &str,
     remote_ignore: Option<&IgnoreMatcher>,
@@ -59,94 +61,109 @@ pub async fn push_project_ai_only(
     let app_root = &state.config.app_root;
     refuse_walking_root(local_project_path, app_root)?;
 
-    let local_cas_root = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("objects");
-    let local_cas = CasStore::new(local_cas_root);
-    let recovery =
-        ryeos_state::RecoveryStore::from_runtime_state_dir(&state.config.runtime_state_dir())?;
-    let mut staged_roots = recovery.begin_staged_cas_roots("remote-push-ai")?;
-
-    let mut items: HashMap<String, String> = HashMap::new();
-    ingest_project_ai_for_push(
-        &local_cas,
-        local_project_path,
-        &mut items,
-        remote_ignore,
-        Some(&mut staged_roots),
-    )?;
-
-    let manifest = SourceManifest {
-        item_source_hashes: items,
+    let local_cas = authority.cas_store()?;
+    let recovery = authority.require_recovery()?;
+    let mut staged_roots = {
+        let guard = authority.acquire_shared_guard()?;
+        recovery.begin_staged_cas_roots_admitted(&guard, "remote-push-ai")?
     };
-    ryeos_state::project_sync::validate_project_manifest_paths(
-        &manifest,
-        ProjectSyncScope::AiOnly,
-        remote_ignore,
-    )?;
-    let manifest_value = manifest.to_value();
-    let manifest_hash = staged_roots.store_object(&local_cas, &manifest_value)?;
 
-    let upload_session = client
-        .objects_put(None, remote_project_path_for_ref, &[], &[])
-        .await?;
+    let operation = async {
+        let mut items: HashMap<String, String> = HashMap::new();
+        let manifest_hash;
+        let manifest;
+        {
+            let guard = authority.acquire_shared_guard()?;
+            let mut staging = StagedCasWriter::new(&mut staged_roots, &guard);
+            ingest_project_ai_for_push(
+                &local_cas,
+                local_project_path,
+                &mut items,
+                remote_ignore,
+                Some(&mut staging),
+            )?;
 
-    let snapshot = ryeos_state::objects::ProjectSnapshot {
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
-        message: None,
-        project_sync_scope: ProjectSyncScope::AiOnly,
-        parent_hashes: upload_session
-            .expected_previous_hash
-            .iter()
-            .cloned()
-            .collect(),
-        created_at: lillux::time::iso8601_now(),
-        source: "remote_ai_sync".to_string(),
-    };
-    let snapshot_value = snapshot.to_value();
-    let snapshot_hash = staged_roots.store_object(&local_cas, &snapshot_value)?;
+            manifest = SourceManifest {
+                item_source_hashes: items,
+            };
+            ryeos_state::project_sync::validate_project_manifest_paths(
+                &manifest,
+                ProjectSyncScope::AiOnly,
+                remote_ignore,
+            )?;
+            manifest_hash = staging.store_object(&local_cas, &manifest.to_value())?;
+        }
 
-    let upload_closure = collect_snapshot_hashes(
-        &local_cas,
-        &manifest,
-        None,
-        None,
-        &manifest_hash,
-        &snapshot_hash,
-    )?;
-    let upload = upload_missing(
-        client,
-        &local_cas,
-        &upload_closure,
-        &snapshot_hash,
-        remote_project_path_for_ref,
-        upload_session,
-    )
-    .await?;
+        let upload_session = client
+            .objects_put(None, remote_project_path_for_ref, &[], &[])
+            .await?;
 
-    client
-        .push_head(
-            remote_project_path_for_ref,
+        let snapshot = ryeos_state::objects::ProjectSnapshot {
+            project_manifest_hash: manifest_hash.clone(),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ProjectSyncScope::AiOnly,
+            parent_hashes: upload_session
+                .expected_previous_hash
+                .iter()
+                .cloned()
+                .collect(),
+            created_at: lillux::time::iso8601_now(),
+            source: "remote_ai_sync".to_string(),
+        };
+        let (snapshot_hash, upload_closure) = {
+            let guard = authority.acquire_shared_guard()?;
+            let snapshot_hash =
+                staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
+            let upload_closure = collect_snapshot_hashes(
+                &local_cas,
+                &manifest,
+                None,
+                None,
+                &manifest_hash,
+                &snapshot_hash,
+            )?;
+            staged_roots.protect_cas_closure_admitted(
+                &guard,
+                upload_closure.object_hashes.iter().map(String::as_str),
+                upload_closure.blob_hashes.iter().map(String::as_str),
+            )?;
+            (snapshot_hash, upload_closure)
+        };
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
             &snapshot_hash,
-            &upload.staging_id,
-            upload.expected_previous_hash.as_deref(),
+            remote_project_path_for_ref,
+            upload_session,
         )
         .await?;
-    staged_roots.finish()?;
 
-    let manifest_entries = manifest.item_source_hashes.len();
-    Ok(PushResult {
-        snapshot_hash,
-        manifest_hash,
-        manifest,
-        manifest_entries,
-        blobs_uploaded: upload.uploaded,
-        blobs_skipped: upload.skipped,
-        user_manifest_hash: None,
-        user_manifest: None,
-    })
+        client
+            .push_head(
+                remote_project_path_for_ref,
+                &snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+
+        let manifest_entries = manifest.item_source_hashes.len();
+        Ok(PushResult {
+            snapshot_hash,
+            manifest_hash,
+            manifest,
+            manifest_entries,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+            user_manifest_hash: None,
+            user_manifest: None,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
 }
 
 /// Push a project directory to a remote node.
@@ -165,6 +182,7 @@ pub async fn push_project_ai_only(
 pub async fn push_project(
     client: &RemoteClient,
     state: &Arc<AppState>,
+    authority: &PinnedStateAuthority,
     project_path: &Path,
     project_path_for_ref: &str,
     remote_ignore: &IgnoreMatcher,
@@ -181,95 +199,139 @@ pub async fn push_project(
     refuse_walking_root(project_path, app_root)?;
 
     // 1. Ingest project directory into local CAS using remote's ignore rules.
-    let local_cas_root = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("objects");
-    let local_cas = CasStore::new(local_cas_root);
-    let recovery =
-        ryeos_state::RecoveryStore::from_runtime_state_dir(&state.config.runtime_state_dir())?;
-    let mut staged_roots = recovery.begin_staged_cas_roots("remote-push-project")?;
-
-    let mut items: HashMap<String, String> = HashMap::new();
-    ingest_for_push(
-        &local_cas,
-        project_path,
-        project_path,
-        &mut items,
-        remote_ignore,
-        Some(&mut staged_roots),
-    )?;
-
-    // 2. Build project manifest
-    let manifest = SourceManifest {
-        item_source_hashes: items,
+    let local_cas = authority.cas_store()?;
+    let recovery = authority.require_recovery()?;
+    let mut staged_roots = {
+        let guard = authority.acquire_shared_guard()?;
+        recovery.begin_staged_cas_roots_admitted(&guard, "remote-push-project")?
     };
-    let manifest_value = manifest.to_value();
-    let manifest_hash = staged_roots.store_object(&local_cas, &manifest_value)?;
 
-    let upload_session = client
-        .objects_put(None, project_path_for_ref, &[], &[])
-        .await?;
+    let operation = async {
+        let mut items: HashMap<String, String> = HashMap::new();
+        let manifest_hash;
+        let manifest;
+        {
+            let guard = authority.acquire_shared_guard()?;
+            let mut staging = StagedCasWriter::new(&mut staged_roots, &guard);
+            ingest_for_push(
+                &local_cas,
+                project_path,
+                project_path,
+                &mut items,
+                remote_ignore,
+                Some(&mut staging),
+            )?;
 
-    // 3. Build snapshot
-    let snapshot = ryeos_state::objects::ProjectSnapshot {
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
-        message: None,
-        project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
-        parent_hashes: upload_session
-            .expected_previous_hash
-            .iter()
-            .cloned()
-            .collect(),
-        created_at: lillux::time::iso8601_now(),
-        source: "push".to_string(),
-    };
-    let snapshot_value = snapshot.to_value();
-    let snapshot_hash = staged_roots.store_object(&local_cas, &snapshot_value)?;
+            manifest = SourceManifest {
+                item_source_hashes: items,
+            };
+            manifest_hash = staging.store_object(&local_cas, &manifest.to_value())?;
+        }
 
-    // 4. Collect the exact object and blob namespaces the remote must have.
-    let upload_closure = collect_snapshot_hashes(
-        &local_cas,
-        &manifest,
-        None,
-        None,
-        &manifest_hash,
-        &snapshot_hash,
-    )?;
+        let upload_session = client
+            .objects_put(None, project_path_for_ref, &[], &[])
+            .await?;
 
-    let upload = upload_missing(
-        client,
-        &local_cas,
-        &upload_closure,
-        &snapshot_hash,
-        project_path_for_ref,
-        upload_session,
-    )
-    .await?;
+        let snapshot = ryeos_state::objects::ProjectSnapshot {
+            project_manifest_hash: manifest_hash.clone(),
+            user_manifest_hash: None,
+            message: None,
+            project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
+            parent_hashes: upload_session
+                .expected_previous_hash
+                .iter()
+                .cloned()
+                .collect(),
+            created_at: lillux::time::iso8601_now(),
+            source: "push".to_string(),
+        };
+        let (snapshot_hash, upload_closure) = {
+            let guard = authority.acquire_shared_guard()?;
+            let snapshot_hash =
+                staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
+            let upload_closure = collect_snapshot_hashes(
+                &local_cas,
+                &manifest,
+                None,
+                None,
+                &manifest_hash,
+                &snapshot_hash,
+            )?;
+            staged_roots.protect_cas_closure_admitted(
+                &guard,
+                upload_closure.object_hashes.iter().map(String::as_str),
+                upload_closure.blob_hashes.iter().map(String::as_str),
+            )?;
+            (snapshot_hash, upload_closure)
+        };
 
-    // 7. Call push-head
-    client
-        .push_head(
-            project_path_for_ref,
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
             &snapshot_hash,
-            &upload.staging_id,
-            upload.expected_previous_hash.as_deref(),
+            project_path_for_ref,
+            upload_session,
         )
         .await?;
-    staged_roots.finish()?;
 
-    let manifest_entries = manifest.item_source_hashes.len();
-    Ok(PushResult {
-        snapshot_hash,
-        manifest_hash,
-        manifest,
-        manifest_entries,
-        blobs_uploaded: upload.uploaded,
-        blobs_skipped: upload.skipped,
-        user_manifest_hash: None,
-        user_manifest: None,
-    })
+        client
+            .push_head(
+                project_path_for_ref,
+                &snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+
+        let manifest_entries = manifest.item_source_hashes.len();
+        Ok(PushResult {
+            snapshot_hash,
+            manifest_hash,
+            manifest,
+            manifest_entries,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+            user_manifest_hash: None,
+            user_manifest: None,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
+}
+
+struct StagedCasWriter<'a> {
+    roots: &'a mut StagedCasRootLease,
+    guard: &'a CasMutationGuard,
+}
+
+impl<'a> StagedCasWriter<'a> {
+    fn new(roots: &'a mut StagedCasRootLease, guard: &'a CasMutationGuard) -> Self {
+        Self { roots, guard }
+    }
+
+    fn store_object(&mut self, cas: &CasStore, value: &serde_json::Value) -> Result<String> {
+        self.roots.store_object_admitted(self.guard, cas, value)
+    }
+
+    fn store_blob(&mut self, cas: &CasStore, bytes: &[u8]) -> Result<String> {
+        self.roots.store_blob_admitted(self.guard, cas, bytes)
+    }
+}
+
+pub(crate) fn finish_staged_roots<T>(
+    authority: &PinnedStateAuthority,
+    staged_roots: &mut StagedCasRootLease,
+    operation: Result<T>,
+) -> Result<T> {
+    let guard = authority.acquire_shared_guard()?;
+    let finish = staged_roots.finish_admitted(&guard);
+    match (operation, finish) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 #[derive(Debug)]
@@ -618,7 +680,7 @@ fn ingest_project_ai_for_push(
     project_root: &Path,
     items: &mut HashMap<String, String>,
     remote_ignore: Option<&IgnoreMatcher>,
-    mut staged_roots: Option<&mut ryeos_state::StagedCasRootLease>,
+    mut staging: Option<&mut StagedCasWriter<'_>>,
 ) -> Result<()> {
     for surface in PROJECT_AI_SURFACES
         .iter()
@@ -636,7 +698,7 @@ fn ingest_project_ai_for_push(
                 &abs,
                 items,
                 remote_ignore,
-                staged_roots.as_deref_mut(),
+                staging.as_deref_mut(),
             )?,
             _ => continue,
         }
@@ -669,7 +731,7 @@ fn ingest_project_ai_dir_for_push(
     dir: &Path,
     items: &mut HashMap<String, String>,
     remote_ignore: Option<&IgnoreMatcher>,
-    mut staged_roots: Option<&mut ryeos_state::StagedCasRootLease>,
+    mut staging: Option<&mut StagedCasWriter<'_>>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -696,7 +758,7 @@ fn ingest_project_ai_dir_for_push(
                 &path,
                 items,
                 remote_ignore,
-                staged_roots.as_deref_mut(),
+                staging.as_deref_mut(),
             )?;
         } else if ft.is_file() {
             let rel = exact_relative_project_path(project_root, &path)?;
@@ -706,8 +768,8 @@ fn ingest_project_ai_dir_for_push(
                 }
             }
             let bytes = std::fs::read(&path)?;
-            let blob_hash = match staged_roots.as_deref_mut() {
-                Some(roots) => roots.store_blob(cas, &bytes)?,
+            let blob_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_blob(cas, &bytes)?,
                 None => cas.store_blob(&bytes)?,
             };
             let integrity = sha256_hex(&bytes);
@@ -719,8 +781,8 @@ fn ingest_project_ai_dir_for_push(
                 mode: executable_mode(&path),
             };
             let item_value = item_source.to_value();
-            let obj_hash = match staged_roots.as_deref_mut() {
-                Some(roots) => roots.store_object(cas, &item_value)?,
+            let obj_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_object(cas, &item_value)?,
                 None => cas.store_object(&item_value)?,
             };
             items.insert(rel, obj_hash);
@@ -752,7 +814,7 @@ fn ingest_for_push(
     dir: &Path,
     items: &mut HashMap<String, String>,
     ignore: &IgnoreMatcher,
-    mut staged_roots: Option<&mut ryeos_state::StagedCasRootLease>,
+    mut staging: Option<&mut StagedCasWriter<'_>>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -775,11 +837,11 @@ fn ingest_for_push(
         }
 
         if path.is_dir() {
-            ingest_for_push(cas, root, &path, items, ignore, staged_roots.as_deref_mut())?;
+            ingest_for_push(cas, root, &path, items, ignore, staging.as_deref_mut())?;
         } else if path.is_file() {
             let bytes = std::fs::read(&path)?;
-            let blob_hash = match staged_roots.as_deref_mut() {
-                Some(roots) => roots.store_blob(cas, &bytes)?,
+            let blob_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_blob(cas, &bytes)?,
                 None => cas.store_blob(&bytes)?,
             };
             let integrity = sha256_hex(&bytes);
@@ -792,8 +854,8 @@ fn ingest_for_push(
                 mode: None,
             };
             let item_value = item_source.to_value();
-            let obj_hash = match staged_roots.as_deref_mut() {
-                Some(roots) => roots.store_object(cas, &item_value)?,
+            let obj_hash = match staging.as_deref_mut() {
+                Some(staging) => staging.store_object(cas, &item_value)?,
                 None => cas.store_object(&item_value)?,
             };
             items.insert(rel, obj_hash);

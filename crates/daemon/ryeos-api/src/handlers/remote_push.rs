@@ -83,9 +83,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 Some(cfg) => Some(IgnoreMatcher::from_config(&cfg.ingest_ignore)?),
                 None => None,
             };
+            let authority = state
+                .state_store
+                .with_state_db(|db| db.pinned_authority())?;
             let result = push_project_ai_only(
                 &client,
                 &state,
+                &authority,
                 &abs_project_path,
                 &project_path_for_ref,
                 remote_ignore.as_ref(),
@@ -127,9 +131,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     IgnoreMatcher::from_config(&fetched)?
                 }
             };
+            let authority = state
+                .state_store
+                .with_state_db(|db| db.pinned_authority())?;
             let result = push_project(
                 &client,
                 &state,
+                &authority,
                 &abs_project_path,
                 &project_path_for_ref,
                 &remote_ignore,

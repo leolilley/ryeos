@@ -46,9 +46,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut stored_hashes: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
-    let cas = state.cas_store()?;
-    let _cas_guard =
-        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
+    // The network fetch has completed. Capture one live state authority, then
+    // derive both the guard and CAS from it so a runtime-path rename cannot
+    // splice this write into another state tree.
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let _cas_guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
     let _permit = state
         .write_barrier
         .try_acquire()
@@ -66,6 +71,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     .ok_or_else(|| anyhow::anyhow!("blob {} missing data field", entry.hash))?;
 
                 let stored = cas.store_blob(&bytes)?;
+                if stored != entry.hash {
+                    bail!(
+                        "remote.pull: blob hash mismatch: expected {}, got {stored}",
+                        entry.hash
+                    );
+                }
                 stored_hashes.push(stored.clone());
                 fetched += 1;
 
@@ -81,6 +92,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("object {} missing value field", entry.hash))?;
                 let stored = cas.store_object(value)?;
+                if stored != entry.hash {
+                    bail!(
+                        "remote.pull: object hash mismatch: expected {}, got {stored}",
+                        entry.hash
+                    );
+                }
                 stored_hashes.push(stored.clone());
                 fetched += 1;
 

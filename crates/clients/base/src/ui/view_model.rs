@@ -1173,7 +1173,7 @@ fn bound_view_vm_keyed(
                             expanded: false,
                             detail: Vec::new(),
                             changed_at_ms: None,
-                    changed_tone: None,
+                            changed_tone: None,
                         });
                     }
                 }
@@ -1226,24 +1226,22 @@ fn bound_view_vm_keyed(
                 message: "No conversation yet — type below to start one.".to_string(),
             }
         }
-        (_, None) if core.data.source_errors.contains_key(source_key) => {
-            RyeOsViewVm::Placeholder {
-                title,
-                message: format!(
-                    "could not load {}: {}",
-                    binding
-                        .source
-                        .as_ref()
-                        .map(|s| s.item_ref.as_str())
-                        .unwrap_or("source"),
-                    core.data
-                        .source_errors
-                        .get(source_key)
-                        .map(String::as_str)
-                        .unwrap_or("source request failed")
-                ),
-            }
-        }
+        (_, None) if core.data.source_errors.contains_key(source_key) => RyeOsViewVm::Placeholder {
+            title,
+            message: format!(
+                "could not load {}: {}",
+                binding
+                    .source
+                    .as_ref()
+                    .map(|s| s.item_ref.as_str())
+                    .unwrap_or("source"),
+                core.data
+                    .source_errors
+                    .get(source_key)
+                    .map(String::as_str)
+                    .unwrap_or("source request failed")
+            ),
+        },
         (_, None) => RyeOsViewVm::Placeholder {
             title,
             message: format!(
@@ -1378,9 +1376,9 @@ fn bound_view_vm_keyed(
                 .sources
                 .iter()
                 .map(|source| {
-                    source
-                        .as_ref()
-                        .and_then(|source| arrival_by_key.get(source.key.as_str()).copied().flatten())
+                    source.as_ref().and_then(|source| {
+                        arrival_by_key.get(source.key.as_str()).copied().flatten()
+                    })
                 })
                 .collect();
             // The foldable section under the point — what a fold key toggles.
@@ -1599,7 +1597,7 @@ fn status_notice_rows(
             expanded: false,
             detail: Vec::new(),
             changed_at_ms: None,
-                    changed_tone: None,
+            changed_tone: None,
         })
         .collect()
 }

@@ -449,18 +449,26 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         }
     }
 
-    // Report the node-config activation switch first. Backend policy health is
-    // relevant only when the operator explicitly enables sandboxing.
+    // Use the same policy loader as daemon and offline execution. Disabled is
+    // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
     if initialized {
-        match inspect_sandbox_policy(&config.app_root, config.sandbox_enabled) {
-            Ok(detail) => checks.push(check("sandbox", OK, detail)),
+        let policy_path = config
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("node/sandbox.yaml");
+        match inspect_sandbox_policy(&config.app_root) {
+            Ok(inspection) => checks.push(check(
+                "sandbox",
+                inspection.status,
+                inspection.detail,
+            )),
             Err(error) => checks.push(check(
                 "sandbox",
                 FAIL,
                 serde_json::json!({
-                    "app_root": config.app_root,
+                    "policy": policy_path,
                     "error": format!("{error:#}"),
-                    "fix": "set `sandbox_enabled: false` in node config or repair the Bubblewrap policy; then run `ryeos node doctor` again",
+                    "fix": "repair `.ai/node/sandbox.yaml` (or set its mode to `disabled`); then run `ryeos node doctor` again",
                 }),
             )),
         }
@@ -604,12 +612,18 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 if !args.no_bundles {
                     let operator_config_root =
                         ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
+                    let sandbox = ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
+                        .map(std::sync::Arc::new)
+                        .map_err(|error| error.to_string());
                     for record in &snapshot.bundles {
-                        // Static checks only (no offline engine): the doctor
-                        // must stay fast and dependency-free; import dry-runs
-                        // belong to the bundle-level `ryeos doctor <source>`.
+                        // Skip import dry-runs, but parser-backed verification
+                        // still uses the node's immutable sandbox snapshot.
                         let report = ryeos_core_tools::actions::doctor::run_doctor(
                             Err("node doctor runs static checks only"),
+                            sandbox
+                                .as_ref()
+                                .map(std::sync::Arc::clone)
+                                .map_err(String::as_str),
                             &record.path,
                             &roots,
                             &operator_config_root,
@@ -671,7 +685,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 _ => "·",
             };
             println!("  {glyph} {:<24} {}", c.name, c.status);
-            if c.status != OK {
+            if c.status != OK || c.name == "sandbox" {
                 println!("      {}", c.detail);
             }
         }
@@ -697,62 +711,67 @@ fn check(
     }
 }
 
-fn inspect_sandbox_policy(
-    app_root: &std::path::Path,
-    sandbox_enabled: bool,
-) -> Result<serde_json::Value> {
-    use std::os::unix::fs::PermissionsExt;
+#[derive(Debug)]
+struct SandboxPolicyInspection {
+    detail: serde_json::Value,
+    status: &'static str,
+}
 
-    let config_path = app_root.join(ryeos_engine::AI_DIR).join("node/config.yaml");
-    if !sandbox_enabled {
-        return Ok(serde_json::json!({
-            "config": config_path,
-            "enabled": false,
-            "backend_status": "disabled",
-        }));
-    }
+fn inspect_sandbox_policy(app_root: &std::path::Path) -> Result<SandboxPolicyInspection> {
+    use ryeos_core_tools::actions::doctor::{NA, OK};
+    use ryeos_engine::sandbox::{SandboxMode, SandboxRuntime};
 
-    let path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node/sandbox.yaml");
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read sandbox policy {}", path.display()))?;
-    let policy: ryeos_engine::subprocess_spec::NodeSandboxPolicy = serde_yaml::from_str(&raw)
-        .with_context(|| format!("strictly parse sandbox policy {}", path.display()))?;
-    anyhow::ensure!(
-        policy.version == 1,
-        "unsupported sandbox policy version {} (expected 1)",
-        policy.version
-    );
-    anyhow::ensure!(
-        policy.backend_path.is_absolute(),
-        "sandbox backend path must be absolute: {}",
-        policy.backend_path.display()
-    );
-    let metadata = std::fs::metadata(&policy.backend_path).with_context(|| {
-        format!(
-            "sandbox backend {} is unavailable; install Bubblewrap (for example `sudo pacman -S bubblewrap` or `sudo apt install bubblewrap`)",
-            policy.backend_path.display()
-        )
-    })?;
-    anyhow::ensure!(
-        metadata.is_file(),
-        "sandbox backend is not a regular file: {}",
-        policy.backend_path.display()
-    );
-    anyhow::ensure!(
-        metadata.permissions().mode() & 0o111 != 0,
-        "sandbox backend is not executable: {}",
-        policy.backend_path.display()
-    );
-    Ok(serde_json::json!({
-        "config": config_path,
-        "enabled": true,
-        "policy": path,
-        "version": policy.version,
-        "backend": policy.backend_path,
-        "backend_status": "regular executable",
-    }))
+    let runtime = SandboxRuntime::load(app_root).map_err(|error| anyhow::anyhow!(error))?;
+    let inspection = runtime.inspection();
+    let enforced = runtime.mode() == SandboxMode::Enforce;
+    let open_files_status = match (enforced, inspection.limits.open_files) {
+        (false, _) => "inactive",
+        (true, None) => "not_configured",
+        (true, Some(_)) => "enforced_on_spawn",
+    };
+    Ok(SandboxPolicyInspection {
+        detail: serde_json::json!({
+            "policy": runtime.source(),
+            "version": runtime.version(),
+            "mode": runtime.mode(),
+            "policy_digest": runtime.digest(),
+            "backend": inspection.backend,
+            "backend_status": if enforced { "captured_exact_executable_compatible" } else { "not_checked" },
+            "filesystem": inspection.filesystem,
+            "network": inspection.network,
+            "environment": inspection.environment,
+            "limits": inspection.limits,
+            "limit_enforcement": {
+                "open_files": {
+                    "configured": inspection.limits.open_files,
+                    "status": open_files_status,
+                    "runtime_mechanism": if enforced && inspection.limits.open_files.is_some() {
+                        Some("RLIMIT_NOFILE (installed before exec; spawn fails closed on error)")
+                    } else {
+                        None
+                    }
+                },
+                "captured_output": {
+                    "stdout_bytes": inspection.limits.stdout_bytes,
+                    "stderr_bytes": inspection.limits.stderr_bytes,
+                    "status": "enforced_while_draining",
+                    "runtime_mechanism": "bounded stdout/stderr retention with continued draining and workload termination on overflow",
+                },
+                "verified_artifacts": {
+                    "file_bytes": inspection.limits.verified_artifact_file_bytes,
+                    "total_bytes": inspection.limits.verified_artifact_total_bytes,
+                    "files": inspection.limits.verified_artifact_files,
+                    "status": if enforced { "enforced_on_materialization" } else { "inactive" },
+                    "runtime_mechanism": if enforced {
+                        Some("metadata/read caps plus synchronized per-runtime file and byte accounting")
+                    } else {
+                        None
+                    }
+                }
+            },
+        }),
+        status: if enforced { OK } else { NA },
+    })
 }
 
 #[derive(Parser, Debug)]
@@ -1012,19 +1031,29 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_core_tools::actions::doctor::{NA, OK};
 
-    fn sandbox_root() -> tempfile::TempDir {
-        let temp = tempfile::tempdir().unwrap();
-        let node = temp.path().join(".ai/node");
-        std::fs::create_dir_all(&node).unwrap();
-        temp
+    fn sandbox_policy(backend: &std::path::Path, mode: &str, open_files: Option<u64>) -> String {
+        let open_files = open_files
+            .map(|limit| format!("  open_files: {limit}\n"))
+            .unwrap_or_else(|| "  open_files: null\n".to_string());
+        format!(
+            "version: 1\nmode: {mode}\nbackend:\n  kind: bubblewrap\n  executable: {}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            backend.display(),
+        )
     }
 
-    fn sandbox_policy(backend: &std::path::Path, version: u32) -> String {
-        format!(
-            "version: {version}\nbackend_path: {}\nallow_network: false\nwritable_paths: []\nallowed_env: []\nmax_open_files: 128\nmax_processes: 32\n",
-            backend.display()
-        )
+    fn supported_open_file_limit() -> u64 {
+        [128, 64, 32, 16, 8, 4, 2, 1, 0]
+            .into_iter()
+            .find(|max_open_files| {
+                lillux::validate_subprocess_limits(Some(&lillux::SubprocessLimits {
+                    max_open_files: Some(*max_open_files),
+                    ..lillux::SubprocessLimits::default()
+                }))
+                .is_ok()
+            })
+            .expect("the current process should accept at least RLIMIT_NOFILE=0")
     }
 
     #[test]
@@ -1042,43 +1071,91 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_doctor_accepts_absolute_regular_executable() {
+    fn sandbox_doctor_accepts_compatible_captured_backend() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = sandbox_root();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".ai/node/identity")).unwrap();
+        std::fs::write(
+            temp.path().join(".ai/node/identity/public-identity.json"),
+            "{}",
+        )
+        .unwrap();
         let backend = temp.path().join("bwrap");
-        std::fs::write(&backend, b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            &backend,
+            b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 'bubblewrap 0.11.2' ;;\n  --help) echo '--bind-fd --ro-bind-fd --argv0' ;;\n  *) exit 2 ;;\nesac\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
         let policy = temp.path().join(".ai/node/sandbox.yaml");
-        std::fs::write(&policy, sandbox_policy(&backend, 1)).unwrap();
+        let max_open_files = supported_open_file_limit();
+        std::fs::write(
+            &policy,
+            sandbox_policy(&backend, "enforce", Some(max_open_files)),
+        )
+        .unwrap();
 
-        assert!(inspect_sandbox_policy(temp.path(), true).is_ok());
+        let inspection = inspect_sandbox_policy(temp.path()).unwrap();
+        assert_eq!(inspection.status, OK);
+        assert_eq!(inspection.detail["mode"], "enforce");
+        assert_eq!(inspection.detail["network"]["mode"], "isolated");
+        assert_eq!(inspection.detail["environment"]["allow"][0], "PATH");
+        assert_eq!(inspection.detail["filesystem"]["writable"][0], "{project}");
+        assert_eq!(
+            inspection.detail["limit_enforcement"]["open_files"]["status"],
+            "enforced_on_spawn"
+        );
+    }
+
+    #[test]
+    fn sandbox_doctor_reports_disabled_without_inspecting_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
+        let policy = temp.path().join(".ai/node/sandbox.yaml");
+        std::fs::write(
+            &policy,
+            sandbox_policy(
+                std::path::Path::new("/definitely/missing-bwrap"),
+                "disabled",
+                Some(1024),
+            ),
+        )
+        .unwrap();
+
+        let inspection = inspect_sandbox_policy(temp.path()).unwrap();
+        assert_eq!(inspection.status, NA);
+        assert_eq!(inspection.detail["mode"], "disabled");
+        assert_eq!(inspection.detail["backend_status"], "not_checked");
+        assert_eq!(
+            inspection.detail["limit_enforcement"]["open_files"]["status"],
+            "inactive"
+        );
     }
 
     #[test]
     fn sandbox_doctor_rejects_unknown_fields_and_bad_backend() {
-        let temp = sandbox_root();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join(".ai/node")).unwrap();
         let policy = temp.path().join(".ai/node/sandbox.yaml");
         std::fs::write(
             &policy,
             format!(
                 "{}unexpected: true\n",
-                sandbox_policy(std::path::Path::new("relative/bwrap"), 2)
+                sandbox_policy(std::path::Path::new("/missing/bwrap"), "disabled", None)
             ),
         )
         .unwrap();
 
-        let error = inspect_sandbox_policy(temp.path(), true)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("strictly parse"));
+        let error = inspect_sandbox_policy(temp.path()).unwrap_err().to_string();
+        assert!(error.contains("unknown field"));
 
         std::fs::write(
             &policy,
-            sandbox_policy(std::path::Path::new("relative/bwrap"), 1),
+            sandbox_policy(std::path::Path::new("relative/bwrap"), "enforce", None),
         )
         .unwrap();
-        assert!(inspect_sandbox_policy(temp.path(), true)
+        assert!(inspect_sandbox_policy(temp.path())
             .unwrap_err()
             .to_string()
             .contains("absolute"));

@@ -59,18 +59,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&project_hash);
     let _project_guard = project_lock.lock_owned().await;
-    let cas_guard =
-        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
-    authority.ensure_guard(&cas_guard)?;
+    let cas_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
-    let mut stage = authority.recovery().open_durable_cas_upload_admitted(
-        &cas_guard,
-        &req.staging_id,
-        &ctx.fingerprint,
-    )?;
+    let mut stage = authority
+        .require_recovery()?
+        .open_durable_cas_upload_admitted(&cas_guard, &req.staging_id, &ctx.fingerprint)?;
     stage.ensure_publication_contract(&publication_key, expected_previous_hash)?;
     let _permit = state
         .write_barrier
@@ -188,10 +184,15 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 &req.snapshot_hash,
                 expected,
                 &signer,
+                &cas_guard,
             ),
-            None => {
-                db.write_project_head_ref(principal_key, &project_hash, &req.snapshot_hash, &signer)
-            }
+            None => db.write_project_head_ref(
+                principal_key,
+                &project_hash,
+                &req.snapshot_hash,
+                &signer,
+                &cas_guard,
+            ),
         }
     })?;
     if let Err(error) = stage.finish_admitted(&cas_guard, &req.snapshot_hash) {

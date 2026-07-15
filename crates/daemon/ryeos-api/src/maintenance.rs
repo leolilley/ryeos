@@ -191,7 +191,6 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     // drain, without ever carrying that guard across an await.
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let params_clone = params.clone();
-    let runtime_state_dir_for_guard = runtime_state_dir.clone();
     let state_store = state.state_store.clone();
     let scheduler_db = state.scheduler_db.clone();
     let state_authority = state
@@ -202,11 +201,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel(1);
     let gc_worker = tokio::task::spawn_blocking(move || -> Result<Option<GcResult>> {
-        let cas_guard = match if params_clone.dry_run {
-            ryeos_state::CasMutationGuard::acquire_existing_exclusive(&runtime_state_dir_for_guard)
-        } else {
-            ryeos_state::CasMutationGuard::acquire_exclusive(&runtime_state_dir_for_guard)
-        } {
+        let cas_guard = match state_authority.acquire_exclusive_guard(!params_clone.dry_run) {
             Ok(guard) => guard,
             Err(error) => {
                 let _ = guard_ready_tx.send(Err(error.to_string()));
@@ -319,14 +314,38 @@ fn run_gc_and_log(
     deleted_thread_runtime_files: usize,
     pending_retirements_recovered: usize,
 ) -> Result<GcResult> {
-    let runtime_state_dir = state_authority.runtime_directory().descriptor_path()?;
+    let runtime_directory = state_authority.runtime_directory();
     // The worker already owns the exclusive cross-process guard and the daemon
     // write barrier is quiesced. Every unresolved Set/Remove closure remains a
     // temporary root until its compare-acknowledged journal record is removed.
-    let pending_transition_roots = state_store
+    let mut operational_object_roots = state_store
         .with_state_db(|db| db.pending_transition_object_roots())
-        .context("read pending chain-head transition roots before CAS sweep")?;
-
+        .context("read pending chain-head transition roots before CAS sweep")?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    operational_object_roots.extend(
+        state_store
+            .active_resume_snapshot_roots()
+            .context("failed to collect active runtime snapshot roots")?,
+    );
+    let mirrored_entries = state_store
+        .with_state_db(|db| db.list_cas_entries_by_state(ryeos_state::CasEntryState::Mirrored))
+        .context("read durable mirrored CAS roots before sweep")?;
+    let mut operational_blob_roots = std::collections::BTreeSet::new();
+    for entry in mirrored_entries {
+        match entry.entry_kind {
+            ryeos_state::CasEntryKind::Object => {
+                operational_object_roots.insert(entry.hash);
+            }
+            ryeos_state::CasEntryKind::Blob => {
+                operational_blob_roots.insert(entry.hash);
+            }
+        }
+    }
+    let operational_roots = gc::AdditionalCasRoots {
+        object_hashes: operational_object_roots.into_iter().collect(),
+        blob_hashes: operational_blob_roots.into_iter().collect(),
+    };
     let mut runtime_cleanup = GcResult::default();
     let retention_started = fire_retention.is_some() && !params.dry_run;
     if fire_retention.is_some() {
@@ -341,7 +360,7 @@ fn run_gc_and_log(
             }
         } else {
             scheduler_db
-                .drain_fire_outbox(&runtime_state_dir)
+                .drain_fire_outbox_in_directory(runtime_directory)
                 .context("drain scheduler fire outbox before retention")?;
         }
     }
@@ -351,8 +370,8 @@ fn run_gc_and_log(
             .context("invalidate scheduler fire projection before journal retention")?;
     }
     let retention_result = (|| -> Result<(Vec<gc::retention::FireRetentionTarget>, usize)> {
-        let targets = gc::purge_runtime_state(
-            &runtime_state_dir,
+        let targets = gc::purge_runtime_state_in_directory(
+            runtime_directory,
             params,
             fire_retention,
             &mut runtime_cleanup,
@@ -378,9 +397,11 @@ fn run_gc_and_log(
             // Do not release the scheduler gate with an invalid projection. The
             // marker makes the crash path safe; this in-process repair gives a
             // failed maintenance call the same convergence before returning.
-            let fires_dir = runtime_state_dir.join("schedules");
             let repair = (|| -> Result<()> {
-                ryeos_scheduler::projection::rebuild_fires_from_dir(&fires_dir, scheduler_db)?;
+                ryeos_scheduler::projection::rebuild_fires_from_runtime_directory(
+                    runtime_directory,
+                    scheduler_db,
+                )?;
                 let specs = scheduler_db.list_specs(false, None)?;
                 scheduler_db.rebuild_cursors_for_specs(&specs, lillux::time::timestamp_millis())?;
                 Ok(())
@@ -402,7 +423,7 @@ fn run_gc_and_log(
         cas_guard,
         Some(signer),
         params,
-        &pending_transition_roots,
+        &operational_roots,
     )
     .context("GC pipeline failed")?;
     result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
@@ -442,8 +463,8 @@ fn run_gc_and_log(
     // Dry-run is mutation-free across authoritative and operational stores;
     // even the ordinary best-effort audit append is therefore suppressed.
     if !params.dry_run {
-        if let Err(err) = gc::event_log::append_event(
-            &runtime_state_dir,
+        if let Err(err) = gc::event_log::append_event_in_directory(
+            runtime_directory,
             &gc::event_log::GcEvent {
                 timestamp: lillux::time::iso8601_now(),
                 dry_run: params.dry_run,

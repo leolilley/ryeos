@@ -1,20 +1,49 @@
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
 use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::DynamicServerState;
 use crate::uds::protocol::RpcRequest;
 
+const FRAME_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(super) async fn handle_connection(
     mut stream: UnixStream,
     state: DynamicServerState,
+    frame_bytes: Arc<Semaphore>,
 ) -> Result<()> {
     loop {
-        let Some(frame) = read_frame(&mut stream).await? else {
+        // A persistent callback client keeps this stream open between requests.
+        // Once shutdown is visible, stop before admitting another frame. If a
+        // frame wins this biased race first, it is the connection's one
+        // already-admitted request and is allowed to drain below.
+        if crate::shutdown_requested() {
+            return Ok(());
+        }
+        let frame = read_frame(&mut stream, &frame_bytes).await?;
+        let Some((frame, frame_permit)) = frame else {
             return Ok(());
         };
 
         let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
+
+        // Acquire the peer pidfd only for the one method that persists a
+        // signalable process identity. Health/lifecycle traffic remains usable
+        // on a host that cannot satisfy the runtime-attachment kernel contract.
+        #[cfg(target_os = "linux")]
+        let peer = if request.method == "runtime.attach_process" {
+            Some(authenticated_peer(&stream)?)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let peer: Option<super::AuthenticatedUnixPeer> = None;
 
         // INFO so the ndjson sink records span NEW/CLOSE per request — a
         // request that arrives and never closes is then attributable by
@@ -31,31 +60,88 @@ pub(super) async fn handle_connection(
             span.record("thread_id", tid);
         }
 
-        let response = tracing::Instrument::instrument(
-            super::routing::dispatch_dynamic(request, &state),
+        // The decoded request, its memory charge, and any kernel-authenticated
+        // peer identity belong to an execution task rather than to the socket
+        // waiter. A forced connection-task abort drops this JoinHandle, which
+        // detaches (rather than aborts) the owner; shutdown's process-admission
+        // fence and exact-identity drain can then settle any subprocess it owns.
+        let request_state = state.clone();
+        let request_owner = tokio::spawn(tracing::Instrument::instrument(
+            async move {
+                let _frame_permit = frame_permit;
+                super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await
+            },
             span,
-        )
-        .await;
+        ));
+        let response = request_owner
+            .await
+            .context("UDS request owner task failed")?;
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;
     }
 }
 
-async fn read_frame(stream: &mut UnixStream) -> Result<Option<Vec<u8>>> {
+#[cfg(target_os = "linux")]
+fn authenticated_peer(stream: &UnixStream) -> Result<super::AuthenticatedUnixPeer> {
+    let pid = stream
+        .peer_cred()
+        .context("read Unix peer credentials")?
+        .pid()
+        .map(i64::from)
+        .ok_or_else(|| anyhow!("Unix peer credentials did not include a PID"))?;
+
+    let mut raw_pidfd: libc::c_int = -1;
+    let mut value_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&mut raw_pidfd as *mut libc::c_int).cast(),
+            &mut value_len,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("capture Unix peer pidfd with SO_PEERPIDFD");
+    }
+    if value_len as usize != std::mem::size_of::<libc::c_int>() || raw_pidfd < 0 {
+        anyhow::bail!("SO_PEERPIDFD returned an invalid descriptor");
+    }
+    // SAFETY: successful SO_PEERPIDFD installs a new descriptor in this
+    // process, and ownership transfers to the connection identity.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
+    Ok(super::AuthenticatedUnixPeer { pid, pidfd })
+}
+
+async fn read_frame(
+    stream: &mut UnixStream,
+    frame_bytes: &Arc<Semaphore>,
+) -> Result<Option<(Vec<u8>, OwnedSemaphorePermit)>> {
     let mut len_buf = [0u8; 4];
-    match stream.read_exact(&mut len_buf).await {
+    let length_read = tokio::time::timeout(FRAME_IO_TIMEOUT, stream.read_exact(&mut len_buf))
+        .await
+        .map_err(|_| anyhow!("timed out reading rpc frame length"))?;
+    match length_read {
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err).context("failed to read rpc frame length"),
     }
 
     let frame_len = validate_frame_len(u32::from_be_bytes(len_buf))?;
+    let permit = tokio::time::timeout(
+        FRAME_IO_TIMEOUT,
+        Arc::clone(frame_bytes).acquire_many_owned(frame_len),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out waiting for rpc frame memory budget"))?
+    .context("rpc frame memory budget closed")?;
     let mut frame = vec![0u8; frame_len as usize];
-    stream
-        .read_exact(&mut frame)
+    tokio::time::timeout(FRAME_IO_TIMEOUT, stream.read_exact(&mut frame))
         .await
+        .map_err(|_| anyhow!("timed out reading rpc frame body"))?
         .context("failed to read rpc frame body")?;
-    Ok(Some(frame))
+    Ok(Some((frame, permit)))
 }
 
 fn validate_frame_len(frame_len: u32) -> Result<u32> {
@@ -70,18 +156,16 @@ fn validate_frame_len(frame_len: u32) -> Result<u32> {
 }
 
 async fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
-    let len: u32 = bytes
-        .len()
-        .try_into()
-        .map_err(|_| anyhow!("frame too large"))?;
-    let len = validate_frame_len(len)?.to_be_bytes();
-    stream
-        .write_all(&len)
+    let frame_len = u32::try_from(bytes.len()).context("rpc response exceeds u32 framing")?;
+    validate_frame_len(frame_len).context("rpc response exceeds frame limit")?;
+    let len = frame_len.to_be_bytes();
+    tokio::time::timeout(FRAME_IO_TIMEOUT, stream.write_all(&len))
         .await
+        .map_err(|_| anyhow!("timed out writing rpc frame length"))?
         .context("failed to write rpc frame length")?;
-    stream
-        .write_all(bytes)
+    tokio::time::timeout(FRAME_IO_TIMEOUT, stream.write_all(bytes))
         .await
+        .map_err(|_| anyhow!("timed out writing rpc frame body"))?
         .context("failed to write rpc frame body")?;
     Ok(())
 }

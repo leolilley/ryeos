@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use super::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
 use super::{validate_object_kind, SCHEMA_VERSION};
 
+/// Maximum canonical JSON size of one thread event stored or emitted by the
+/// daemon. This limit is enforced on the complete event object, not only its
+/// payload, so every writer shares the same resource ceiling.
+pub const MAX_THREAD_EVENT_SERIALIZED_BYTES: usize = 512 * 1024;
+
 /// Event durability classes.
 ///
 /// | Class      | CAS stored | Projection indexed | Survives crash | Use case                    |
@@ -109,6 +114,14 @@ impl ThreadEvent {
         }
         if let Some(hash) = &self.prev_thread_event_hash {
             validate_canonical_hash("prev_thread_event_hash", hash)?;
+        }
+        let serialized_bytes = lillux::canonical_json(&self.to_value()).len();
+        if serialized_bytes > MAX_THREAD_EVENT_SERIALIZED_BYTES {
+            anyhow::bail!(
+                "thread event is {} serialized bytes (max {})",
+                serialized_bytes,
+                MAX_THREAD_EVENT_SERIALIZED_BYTES
+            );
         }
         Ok(())
     }

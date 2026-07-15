@@ -1,8 +1,8 @@
 //! Bridge between `SubprocessSpec` and `lillux::SubprocessRequest`.
 //!
 //! The single point where the unified subprocess boundary struct
-//! becomes a lillux subprocess call. Sandbox-wrap (future) lives
-//! between `SubprocessSpec` construction and this translation.
+//! becomes a lillux subprocess call. The node-owned sandbox stage runs
+//! after this translation and attaches its resource limits there.
 
 use ryeos_engine::subprocess_spec::SubprocessSpec;
 
@@ -31,5 +31,8 @@ pub fn to_lillux_request(spec: &SubprocessSpec) -> anyhow::Result<lillux::Subpro
                 .map_err(|_| anyhow::anyhow!("subprocess stdin protocol is not valid UTF-8"))?,
         ),
         timeout: spec.timeout.as_secs_f64(),
+        limits: None,
+        inherited_fds: Vec::new(),
+        supervised_status: None,
     })
 }

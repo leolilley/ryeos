@@ -120,6 +120,10 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             item_ref_kind = item_ref.kind(),
         );
 
+        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            launch_options.project_path().to_path_buf(),
+            ctx.state.engine.clone(),
+        );
         let handle = crate::routes::launch::spawn_dispatch_launch(
             &ctx.state,
             item_ref,
@@ -127,6 +131,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             principal_id.clone(),
             principal_scopes,
             thread_id.clone(),
+            launch_provenance,
             launch_options,
         );
 

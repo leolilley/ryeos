@@ -17,6 +17,7 @@ pub mod manifest_audit;
 pub mod manifest_sign;
 pub mod node_logs;
 pub mod publish;
+mod publisher_transaction;
 pub mod remote_descriptor;
 pub mod runtime_owned;
 pub mod sign;

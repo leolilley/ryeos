@@ -1255,7 +1255,6 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
@@ -1320,6 +1319,7 @@ mod tests {
         let test_auth = std::sync::Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let state = ryeos_app::state::AppState {
             config: std::sync::Arc::new(config),
+            sandbox: std::sync::Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
             state_store,
             engine,
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
@@ -1398,6 +1398,7 @@ mod tests {
             body_raw: body_raw.to_vec(),
             input: serde_json::Value::Null,
             principal: None,
+            workspace_lifeline: None,
             state,
             webhook_dedupe,
         }

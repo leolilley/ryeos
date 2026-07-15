@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType};
+use crate::model::{EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType, MAX_GRAPH_STEPS};
 
 /// The lifecycle events the walker fires authored hooks at. A hook targeting
 /// any other `event` never runs (validation warns). Node-level observation
@@ -21,6 +21,13 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
         warnings: Vec::new(),
     };
     let cfg = &def.config;
+
+    if cfg.max_steps > MAX_GRAPH_STEPS {
+        result.errors.push(format!(
+            "config.max_steps is {}; maximum is {MAX_GRAPH_STEPS}",
+            cfg.max_steps
+        ));
+    }
 
     // C3: config.start must exist and be non-empty
     if cfg.start.is_empty() {
@@ -646,6 +653,33 @@ config:
             .errors
             .iter()
             .any(|e| e.contains("config.nodes is empty")));
+    }
+
+    #[test]
+    fn validate_graph_rejects_max_steps_above_receipt_capacity() {
+        let yaml = format!(
+            r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  max_steps: {}
+  nodes:
+    done:
+      node_type: return
+"#,
+            MAX_GRAPH_STEPS + 1
+        );
+        let result = validate_graph(&make_graph(&yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("config.max_steps")
+                    && error.contains(&MAX_GRAPH_STEPS.to_string())),
+            "expected max_steps ceiling error, got: {:?}",
+            result.errors
+        );
     }
 
     #[test]

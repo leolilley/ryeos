@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-08T12:27:16Z:249841fdd4362e7f02ab3dc42de2f2cc6d48427e0d627cb431253e8365e6a5be:Qb2/bMXEtItHZl/pveBqpPriTGKzV+ZJZIdgApoXjJubOFyya+mbialqK5LB3db9/kAZIvFPIFRbODWSpJhcCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:4ecd1f9a5540e79a2d76ec8e1cea9029492818a3a63ec008ccdbe295ea5de7a8:loZT/+yITNt0f9xyieSRaua3VTxkjW8F1FYM8teiyWPSz8RHuzg736xTFhD2XmDA/m4gl+khbJrdDk7mmxvsBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "list-principals"
@@ -9,7 +9,7 @@ description: "Read-only roster of the realm's accounts: id, display_name, roles,
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "list-principals"
   input_data: "{params_json}"
   timeout_secs: 15

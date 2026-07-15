@@ -14,7 +14,11 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let cas = state.cas_store()?;
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let _cas_guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
     let report = collect_limited_closure_with_cas(&req, &cas)?;
     if !req.allow_incomplete && !report.is_complete() {
         bail!("object closure is incomplete");

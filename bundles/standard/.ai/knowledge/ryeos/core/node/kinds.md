@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:0f4118c187fcb6d75a557c79ecd585162f0857da1f65eece8cd81e8308130ad4:pSKHCHj6gHbe5zGgLBPO9Xzd+/fNq7zsQIZdC5x17lSGJamM0bLm13CSxe8PV2CFFgoeJjiF/26JvRcs7S1LCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T10:12:30Z:0b369eedb5161ee65e01b13e9f7195ebf06a88bc325637ad581eebac8e82f9e6:6l5V/gjVblFM1UrRj8V9/4sna8+5M87a0/6Sso2yLE9/doEW/Agm85HuW7/tUCct53aMJlmT0kKngx/BVRvZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, kinds, schema, types]
@@ -31,13 +31,14 @@ Directives support `extends` chains for inheritance, with field-level
 merge strategies for body, permissions, and context.
 
 ### `tool` — Executable Scripts
-The primary executable unit. Tools run as subprocesses that receive
-JSON params on stdin and return opaque bytes on stdout.
+The primary executable unit. Tools run as subprocesses with plan-owned opaque
+stdin and return opaque bytes on stdout. Default wrappers serialize params as
+JSON; explicit executor `input_data` may be arbitrary bytes.
 
 - **Directory:** `tools/`
 - **Formats:** `.py`, `.yaml`, `.js`, `.ts`, `.json`
 - **Composer:** `handler:ryeos/core/identity` (no composition)
-- **Execution:** Subprocess via `protocol:ryeos/core/opaque`
+- **Execution:** Subprocess via `protocol:ryeos/core/tool_callback_v1`
 
 Tools declare `executor_id: "@subprocess"` which resolves to
 `tool:ryeos/core/subprocess/execute`.
@@ -55,10 +56,13 @@ markdown (with YAML fenced blocks) or YAML.
 - **Directory:** `knowledge/`
 - **Formats:** `.md`, `.yaml`
 - **Composer:** `handler:ryeos/core/identity`
-- **Execution:** Compose operations (`compose`, `compose_positions`)
+- **Generic methods:** `compose`, `query`, `graph`, and `validate`
+- **Private launch augmentation operation:** `compose_positions`
+- **Execution:** method runtime selected by the kind schema and runtime registry
 
-Knowledge is not directly executable — it's assembled into prompt
-context blocks by the compose operation.
+Knowledge methods are directly executable through `call.method`; the
+augmentation-private `compose_positions` operation is available only to the
+daemon-owned `compose_context_positions` launch step.
 
 ### `graph` — State Machines / DAGs
 Declarative YAML state machines with nodes, edges, and conditional
@@ -108,6 +112,11 @@ and graphs. Each runtime specifies which kind it serves.
 - **Directory:** `runtimes/`
 - **Formats:** `.yaml`
 - **Execution:** Subprocess via `protocol:ryeos/core/runtime_v1`
+
+The runtime item selects a signed implementation binary. When that binary
+serves a method-bearing kind, invocation uses the served kind schema's
+`execution.method_dispatch.protocol` instead; a method-only runtime is not
+directly launchable through the runtime item's ordinary envelope.
 
 ### `service` — In-Process Services
 Daemon-internal service endpoints registered in the service registry.

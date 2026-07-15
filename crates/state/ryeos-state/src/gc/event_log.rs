@@ -3,7 +3,8 @@
 //! One JSON line per GC run at `runtime_state_dir/logs/gc.jsonl`.
 //! Provides operational observability: when did GC run, how much did it free.
 
-use std::fs::{self, OpenOptions};
+#[cfg(test)]
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
@@ -101,20 +102,30 @@ impl GcEvent {
 ///
 /// Creates the log directory and file if they don't exist.
 pub fn append_event(runtime_state_dir: &Path, event: &GcEvent) -> Result<()> {
-    let log_dir = runtime_state_dir.join("logs");
-    let log_path = log_dir.join("gc.jsonl");
+    let runtime_directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
+        .context("failed to open runtime-state directory for GC event log")?;
+    append_event_in_directory(&runtime_directory, event)
+}
 
-    fs::create_dir_all(&log_dir).context("failed to create GC log directory")?;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+/// Append a GC event beneath one already-pinned runtime root.
+pub fn append_event_in_directory(
+    runtime_directory: &lillux::PinnedDirectory,
+    event: &GcEvent,
+) -> Result<()> {
+    let log_directory = runtime_directory
+        .open_or_create_child(std::ffi::OsStr::new("logs"), 0o700)
+        .context("failed to create GC log directory")?;
+    let name = std::ffi::OsStr::new("gc.jsonl");
+    let lock = lillux::ExclusiveFileLock::acquire_in(&log_directory, name)?;
+    let mut file = lock
+        .open_target_append_create()
         .context("failed to open GC event log")?;
 
     let line = serde_json::to_string(event).context("failed to serialize GC event")?;
 
     writeln!(file, "{}", line).context("failed to write GC event")?;
+    file.sync_data().context("failed to sync GC event log")?;
+    lock.sync_parent()?;
 
     Ok(())
 }

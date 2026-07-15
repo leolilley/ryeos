@@ -55,6 +55,10 @@ fn storage_class_for_payload(event_type: &str, payload: &Value) -> &'static str 
 /// event log.
 pub const TOOL_RESULT_INLINE_MAX_BYTES: usize = 256 * 1024;
 
+/// Maximum event count in one runtime replay page. The daemon enforces this
+/// same wire limit; clients paginate until `next_cursor` is absent.
+pub const MAX_RUNTIME_REPLAY_PAGE_LIMIT: usize = 32;
+
 pub struct CallbackClient {
     inner: Option<Arc<dyn RuntimeCallbackAPI>>,
     thread_id: String,
@@ -565,7 +569,6 @@ impl CallbackClient {
     /// (`chain_root_id` or `thread_id`) until exhausted, so long histories don't
     /// silently lose events. Hard-fails on disconnect.
     async fn replay_paged(&self, scope_key: &str, scope_value: &str) -> Result<ReplayResponse> {
-        const REPLAY_PAGE_LIMIT: usize = 200;
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback replay_paged called without an inner UDS client \
@@ -581,7 +584,10 @@ impl CallbackClient {
                 scope_key.to_string(),
                 Value::String(scope_value.to_string()),
             );
-            params.insert("limit".to_string(), serde_json::json!(REPLAY_PAGE_LIMIT));
+            params.insert(
+                "limit".to_string(),
+                serde_json::json!(MAX_RUNTIME_REPLAY_PAGE_LIMIT),
+            );
             if let Some(cursor) = after_chain_seq {
                 params.insert("after_chain_seq".to_string(), serde_json::json!(cursor));
             }

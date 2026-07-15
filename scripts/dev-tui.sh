@@ -17,7 +17,7 @@
 #
 # Packaged acceptance afterwards:
 #   scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev --all
-#   scripts/pkg/install-local-direct.sh
+#   scripts/pkg/install-local-direct.sh --trust-source-publishers
 #   ryeos tui
 
 set -euo pipefail

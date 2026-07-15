@@ -32,6 +32,10 @@ Options:
   --no-init             Install files but do not run ryeos init
   --no-daemon-restart   Do not stop/restart an already-running daemon
   --keep-shadows        Do not move /usr/local/bin or ~/.local/bin RyeOS shadows
+  --trust-source-publishers
+                        Explicitly trust the publisher documents copied from
+                        this checkout. Required to initialize dev/custom-signed
+                        bundles; never enabled automatically.
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
@@ -52,8 +56,9 @@ Options:
 
 Default behavior is incremental: install already-built binaries and bundle
 sources, stop any already-running daemon, move stale PATH shadows aside, run
-ryeos init with the installed PUBLISHER_TRUST.toml files, then restart the
-daemon if it was running before the install. Pass --populate only when bundle
+ryeos init using only the compiled official-publisher trust root, then restart
+the daemon if it was running before the install. Development/custom publisher
+documents require --trust-source-publishers. Pass --populate only when bundle
 artifacts actually need to be regenerated.
 EOF
 }
@@ -139,6 +144,93 @@ bundle_payload_bins() {
 publisher_fingerprint_from_trust_doc() {
     local trust_file="$1"
     sed -n 's/^fingerprint *= *"\([^"]*\)".*/\1/p' "$trust_file" | head -n1
+}
+
+# Refuse a non-official key in a source publisher document before stopping the
+# daemon or changing the installed layout unless the operator acknowledged it.
+# The document is only a publisher pointer; it is never authority by location.
+validate_source_publisher_trust() {
+    local trust_file="$1"
+    local allow_source_publishers="$2"
+    local official_fingerprint="$3"
+    local decoded_len
+    local computed_fingerprint
+    local -a declared_fingerprints=()
+    local -a encoded_public_keys=()
+
+    if [[ ! -f "$trust_file" ]]; then
+        echo "source publisher trust document not found: $trust_file" >&2
+        return 1
+    fi
+
+    mapfile -t declared_fingerprints < <(
+        sed -n 's/^[[:space:]]*fingerprint[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$trust_file"
+    )
+    mapfile -t encoded_public_keys < <(
+        sed -n 's/^[[:space:]]*public_key[[:space:]]*=[[:space:]]*"ed25519:\([^"]*\)"[[:space:]]*$/\1/p' "$trust_file"
+    )
+    if [[ ${#declared_fingerprints[@]} -ne 1 ]]; then
+        echo "source publisher trust document must contain exactly one fingerprint: $trust_file" >&2
+        return 1
+    fi
+    if [[ ! "${declared_fingerprints[0]}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "source publisher trust document has an invalid fingerprint: $trust_file" >&2
+        return 1
+    fi
+    if [[ ${#encoded_public_keys[@]} -ne 1 ]]; then
+        echo "source publisher trust document must contain exactly one ed25519 public_key: $trust_file" >&2
+        return 1
+    fi
+    if ! decoded_len="$(printf '%s' "${encoded_public_keys[0]}" | base64 --decode 2>/dev/null | wc -c)"; then
+        echo "source publisher trust document has invalid base64 public_key: $trust_file" >&2
+        return 1
+    fi
+    if [[ "$decoded_len" -ne 32 ]]; then
+        echo "source publisher trust document public_key is not 32-byte Ed25519 material: $trust_file" >&2
+        return 1
+    fi
+    if ! computed_fingerprint="$(printf '%s' "${encoded_public_keys[0]}" | base64 --decode 2>/dev/null | sha256sum | cut -d' ' -f1)"; then
+        echo "could not fingerprint source publisher public_key: $trust_file" >&2
+        return 1
+    fi
+    if [[ "$computed_fingerprint" != "${declared_fingerprints[0]}" ]]; then
+        echo "source publisher trust document fingerprint does not match its public_key: $trust_file" >&2
+        return 1
+    fi
+    if [[ "$computed_fingerprint" == "$official_fingerprint" ]]; then
+        return 0
+    fi
+    if [[ "$allow_source_publishers" == "1" ]]; then
+        echo "[install-local-direct] explicitly trusting source publisher $computed_fingerprint"
+        return 0
+    fi
+
+    echo "source bundles are signed by non-official publisher $computed_fingerprint" >&2
+    echo "refusing to pin trust from $trust_file automatically" >&2
+    echo "rerun with --trust-source-publishers to make this development/custom trust decision explicit, or use --no-init to install files only" >&2
+    return 1
+}
+
+# Build init trust arguments from the exact source boundary the installer
+# selected and validated. The result intentionally excludes every other
+# document that might already exist below the packaged share directory.
+collect_selected_source_trust_args() {
+    local installed_share_dir="$1"
+    shift
+    local name trust_file
+    local root_trust_file="$installed_share_dir/.ai/PUBLISHER_TRUST.toml"
+
+    if [[ ! -f "$root_trust_file" ]]; then
+        echo "installed source-root trust document not found: $root_trust_file" >&2
+        return 1
+    fi
+
+    SELECTED_SOURCE_TRUST_ARGS=(--trust-file "$root_trust_file")
+    for name in "$@"; do
+        trust_file="$installed_share_dir/$name/PUBLISHER_TRUST.toml"
+        [[ -f "$trust_file" ]] && \
+            SELECTED_SOURCE_TRUST_ARGS+=(--trust-file "$trust_file")
+    done
 }
 
 operator_fingerprint() {
@@ -257,6 +349,11 @@ stop_daemon_for_install() {
     return 0
 }
 
+# Keep the policy helpers sourceable by their lightweight regression script.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 
@@ -268,6 +365,7 @@ run_populate=0
 run_init=1
 restart_daemon=1
 cleanup_shadows=1
+trust_source_publishers=0
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
 bundle_set="full"
@@ -291,6 +389,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keep-shadows)
             cleanup_shadows=0
+            shift
+            ;;
+        --trust-source-publishers)
+            trust_source_publishers=1
             shift
             ;;
         --key)
@@ -332,11 +434,69 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Source installs do not have a package manager to pull runtime dependencies.
-# Fail before builds, daemon stops, or filesystem installation if the mandatory
-# sandbox backend is absent.
-if ! command -v bwrap >/dev/null 2>&1; then
-    die "Bubblewrap is required for RyeOS subprocess sandboxing but 'bwrap' was not found in PATH. Install it first (Arch: sudo pacman -S bubblewrap; Debian/Ubuntu: sudo apt install bubblewrap; Fedora: sudo dnf install bubblewrap), then rerun this installer"
+# Source installs do not have a package manager to pull optional runtime tools.
+# Check the exact executable the node policy names; a different `bwrap` found
+# through PATH does not prove that the daemon's captured backend is compatible.
+bwrap_compatible() {
+    local executable="$1"
+    local output major minor help option
+
+    [[ -x "$executable" ]] || return 1
+    output="$("$executable" --version 2>/dev/null)" || return 1
+    [[ "$output" =~ ^bubblewrap[[:space:]]([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if (( 10#$major == 0 && 10#$minor < 11 )); then
+        return 1
+    fi
+    help="$("$executable" --help 2>&1)" || return 1
+    for option in --bind-fd --ro-bind-fd --argv0; do
+        grep -Eq "(^|[[:space:]])${option}([[:space:]]|$)" <<<"$help" || return 1
+    done
+}
+
+sandbox_app_root="${RYEOS_APP_ROOT:-$invoking_user_home/.local/share/ryeos}"
+sandbox_policy="$sandbox_app_root/.ai/node/sandbox.yaml"
+sandbox_backend="/usr/bin/bwrap"
+sandbox_mode="disabled"
+if [[ -f "$sandbox_policy" ]]; then
+    configured_backend="$(
+        sed -n 's/^[[:space:]]*executable:[[:space:]]*//p' "$sandbox_policy" | head -n1
+    )"
+    configured_backend="${configured_backend%%#*}"
+    configured_backend="${configured_backend#"${configured_backend%%[![:space:]]*}"}"
+    configured_backend="${configured_backend%"${configured_backend##*[![:space:]]}"}"
+    configured_backend="${configured_backend#\"}"
+    configured_backend="${configured_backend%\"}"
+    configured_backend="${configured_backend#\'}"
+    configured_backend="${configured_backend%\'}"
+    configured_backend="${configured_backend%"${configured_backend##*[![:space:]]}"}"
+    [[ -z "$configured_backend" ]] || sandbox_backend="$configured_backend"
+    configured_mode="$(
+        sed -n 's/^mode:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$sandbox_policy" | head -n1
+    )"
+    configured_mode="${configured_mode#\"}"
+    configured_mode="${configured_mode%\"}"
+    configured_mode="${configured_mode#\'}"
+    configured_mode="${configured_mode%\'}"
+    [[ -z "$configured_mode" ]] || sandbox_mode="$configured_mode"
+fi
+
+if ! bwrap_compatible "$sandbox_backend"; then
+    echo "[install-local-direct] warning: node sandbox backend '$sandbox_backend' is missing or incompatible" >&2
+    echo "[install-local-direct] RyeOS enforcement requires Bubblewrap 0.11.0+ with exact help tokens: --bind-fd --ro-bind-fd --argv0" >&2
+    if [[ "$sandbox_backend" == "/usr/bin/bwrap" ]]; then
+        echo "[install-local-direct] install a current bubblewrap package that provides /usr/bin/bwrap (Arch: sudo pacman -S bubblewrap), or keep mode: disabled" >&2
+    else
+        echo "[install-local-direct] install a compatible binary at the configured path, change '$sandbox_policy' to executable: /usr/bin/bwrap after installing it there, or keep mode: disabled" >&2
+    fi
+    if [[ "$sandbox_mode" == "enforce" ]]; then
+        die "sandbox policy is enforced, so installation cannot continue with an incompatible configured backend"
+    fi
+    if [[ "$sandbox_mode" != "disabled" ]]; then
+        die "sandbox policy mode '$sandbox_mode' is not a valid disabled opt-out; repair '$sandbox_policy' before continuing"
+    fi
+    echo "[install-local-direct] continuing because the node sandbox policy is disabled" >&2
 fi
 
 cd "$repo_root"
@@ -406,6 +566,22 @@ if [[ $run_populate -eq 1 ]]; then
     else
         "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}"
     fi
+fi
+
+source_root_trust_doc="$repo_root/bundles/.ai/PUBLISHER_TRUST.toml"
+if [[ $run_init -eq 1 ]]; then
+    official_publisher_fp="$(bash "$repo_root/scripts/release/official-publisher-fingerprint.sh")" \
+        || die "could not resolve the official publisher fingerprint"
+    source_trust_docs=("$source_root_trust_doc")
+    for name in "${bundle_names[@]}"; do
+        source_trust_doc="$repo_root/bundles/$name/PUBLISHER_TRUST.toml"
+        [[ -f "$source_trust_doc" ]] && source_trust_docs+=("$source_trust_doc")
+    done
+    for source_trust_doc in "${source_trust_docs[@]}"; do
+        validate_source_publisher_trust \
+            "$source_trust_doc" "$trust_source_publishers" "$official_publisher_fp" \
+            || die "source publisher trust policy rejected initialization"
+    done
 fi
 
 daemon_was_running=0
@@ -573,10 +749,14 @@ if [[ $run_init -eq 1 ]]; then
         fi
     done
     trust_args=()
-    for trust_file in "$share_dir/.ai/PUBLISHER_TRUST.toml" "$share_dir"/*/PUBLISHER_TRUST.toml; do
-        [[ -f "$trust_file" ]] || continue
-        trust_args+=(--trust-file "$trust_file")
-    done
+    if [[ $trust_source_publishers -eq 1 ]]; then
+        # Pin only the source-root and selected bundle documents validated
+        # above. A broad share-dir glob could import an unrelated residual
+        # document that was never part of this install's trust decision.
+        collect_selected_source_trust_args "$share_dir" "${bundle_names[@]}" || \
+            die "could not collect selected source publisher documents"
+        trust_args=("${SELECTED_SOURCE_TRUST_ARGS[@]}")
+    fi
     init_args=(init --source "$share_dir")
     if [[ -n "$init_app_root" ]]; then
         init_args+=(--app-root "$init_app_root")

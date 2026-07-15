@@ -387,21 +387,6 @@ impl PinnedDirectory {
         }
     }
 
-    /// Linux descriptor-rooted pathname for this exact directory inode.
-    /// This is a narrow bridge for legacy APIs that accept only a root path;
-    /// replacing the directory's ordinary pathname cannot redirect them.
-    pub fn descriptor_path(&self) -> Result<PathBuf> {
-        #[cfg(not(target_os = "linux"))]
-        anyhow::bail!("descriptor-rooted paths are unavailable on this platform");
-        #[cfg(target_os = "linux")]
-        {
-            Ok(PathBuf::from(format!(
-                "/proc/self/fd/{}",
-                self.directory.as_raw_fd()
-            )))
-        }
-    }
-
     /// Duplicate this exact open directory descriptor without resolving its
     /// pathname again.
     pub fn try_clone(&self) -> Result<Self> {
@@ -413,10 +398,26 @@ impl PinnedDirectory {
 
     /// Duplicate the open descriptor for APIs that need to bind an operation
     /// to this exact directory inode without resolving its pathname again.
-    pub(crate) fn try_clone_descriptor(&self) -> Result<File> {
+    pub fn try_clone_descriptor(&self) -> Result<File> {
         self.directory
             .try_clone()
             .with_context(|| format!("duplicate pinned directory {}", self.path.display()))
+    }
+
+    /// Set permissions on this exact open directory inode.
+    pub fn set_mode(&self, mode: u32) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = mode;
+            anyhow::bail!("pinned directory permissions are unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            self.directory
+                .set_permissions(std::fs::Permissions::from_mode(mode))
+                .with_context(|| format!("protect pinned directory {}", self.path.display()))
+        }
     }
 
     /// Serialize cooperating mutations of this exact directory namespace.
@@ -474,6 +475,31 @@ impl PinnedDirectory {
                         format!("create secure child directory {}", path.display())
                     });
                 }
+            }
+            self.directory.sync_all()?;
+            let directory =
+                open_child_directory(&self.directory, &name_c, &path)?.ok_or_else(|| {
+                    anyhow::anyhow!("secure child directory disappeared: {}", path.display())
+                })?;
+            Ok(Self { path, directory })
+        }
+    }
+
+    /// Create one new child directory relative to this exact parent inode.
+    pub fn create_child(&self, name: &OsStr, mode: u32) -> Result<Self> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, mode);
+            anyhow::bail!("secure child-directory creation is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(name)?;
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let path = self.path.join(name);
+            if unsafe { libc::mkdirat(self.directory.as_raw_fd(), name_c.as_ptr(), mode) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("create secure child directory {}", path.display()));
             }
             self.directory.sync_all()?;
             let directory =
@@ -557,6 +583,136 @@ impl PinnedDirectory {
                 0,
                 0,
             )
+        }
+    }
+
+    /// Pin one direct child as an `O_PATH` mount source. Regular files,
+    /// directories, and Unix sockets are accepted; links and special devices
+    /// are rejected. The returned descriptor remains bound to the exact entry
+    /// inode even if its ordinary pathname is later replaced.
+    pub fn open_mount_entry(&self, name: &OsStr) -> Result<Option<File>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = name;
+            anyhow::bail!("descriptor-pinned mount entries are available only on Linux");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::FileTypeExt as _;
+
+            validate_child_name(name)?;
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(error).with_context(|| {
+                    format!("pin secure mount entry {}", self.path.join(name).display())
+                });
+            }
+            let file = unsafe { File::from_raw_fd(descriptor) };
+            let file_type = file.metadata()?.file_type();
+            if !(file_type.is_file() || file_type.is_dir() || file_type.is_socket()) {
+                anyhow::bail!(
+                    "secure mount entry is not a regular file, directory, or Unix socket: {}",
+                    self.path.join(name).display()
+                );
+            }
+            Ok(Some(file))
+        }
+    }
+
+    /// Create and publish one regular file without replacing an existing
+    /// entry. A successful create returns the still-open exact inode; `None`
+    /// means another entry already owns the target name.
+    pub fn atomic_create_regular(
+        &self,
+        name: &OsStr,
+        bytes: &[u8],
+        mode: u32,
+    ) -> Result<Option<File>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, bytes, mode);
+            anyhow::bail!("secure atomic creation is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            validate_child_name(name)?;
+            if self.open_regular(name, false)?.is_some() {
+                return Ok(None);
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let sequence = crate::atomic_fs::next_temp_sequence();
+            let temp_name =
+                std::ffi::CString::new(format!(".secure.tmp.{}.{}", std::process::id(), sequence))?;
+            let descriptor = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    temp_name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    mode,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("create secure temp in {}", self.path.display()));
+            }
+            let mut temp = unsafe { File::from_raw_fd(descriptor) };
+            let result = (|| -> Result<bool> {
+                temp.write_all(bytes)?;
+                temp.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                temp.sync_all()?;
+                match publish_temp_without_replacement(
+                    &self.directory,
+                    &temp_name,
+                    &name_c,
+                    &self.path.join(name),
+                ) {
+                    Ok(()) => {
+                        self.directory.sync_all()?;
+                        Ok(true)
+                    }
+                    Err(error)
+                        if self.open_regular(name, false)?.is_some()
+                            && error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                                error.kind() == std::io::ErrorKind::AlreadyExists
+                            }) =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            })();
+            match result {
+                Ok(true) => Ok(Some(temp)),
+                Ok(false) => {
+                    unsafe {
+                        libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
+                    }
+                    Ok(None)
+                }
+                Err(error) => {
+                    unsafe {
+                        libc::unlinkat(self.directory.as_raw_fd(), temp_name.as_ptr(), 0);
+                    }
+                    Err(error)
+                }
+            }
         }
     }
 

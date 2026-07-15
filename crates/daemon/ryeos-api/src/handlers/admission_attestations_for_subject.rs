@@ -28,10 +28,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             anyhow::bail!("admission policy must not be empty");
         }
     }
+    let cas_read = state.acquire_cas_read()?;
     let attestations = state.state_store.with_state_db(|db| {
         db.list_admission_attestations_for_subject(&req.subject_hash, req.policy.as_deref())
     })?;
-    let cas = state.cas_store()?;
+    let cas = cas_read.cas();
     let local_issuer = format!("fp:{}", state.identity.fingerprint());
 
     Ok(serde_json::json!({
@@ -42,7 +43,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             .map(|record| {
                 admission_attestation_to_json(
                     record,
-                    &cas,
+                    cas,
                     &local_issuer,
                     state.identity.verifying_key(),
                 )

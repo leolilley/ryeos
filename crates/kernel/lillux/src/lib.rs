@@ -9,7 +9,11 @@ pub mod signature;
 pub mod time;
 pub mod vault;
 
-pub use exec::{RunningProcess, SpawnResult, SubprocessRequest, SubprocessResult};
+pub use exec::{
+    bubblewrap_status_pipe, configure_inherited_fds, configure_subprocess_limits,
+    validate_subprocess_limits, BubblewrapStatusPipe, OutputLimitExceeded, RunningProcess,
+    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult, SupervisedProcessStatus,
+};
 
 pub use atomic_fs::{
     atomic_exchange_paths, atomic_write, atomic_write_private, atomic_write_with_mode,

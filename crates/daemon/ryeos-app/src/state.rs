@@ -5,6 +5,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, RwLock};
 
 use ryeos_engine::engine::Engine;
+use ryeos_engine::sandbox::{SandboxMode, SandboxRuntime};
 use ryeos_runtime::authorizer::Authorizer;
 use ryeos_runtime::CommandRegistry;
 use ryeos_scheduler::db::SchedulerDb;
@@ -38,6 +39,10 @@ pub struct CatalogHealth {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
+    /// Node-owned sandbox runtime resolved once at daemon composition.
+    /// Execution paths share this immutable state instead of re-reading
+    /// activation or backend policy from the general daemon config.
+    pub sandbox: Arc<SandboxRuntime>,
     pub state_store: Arc<StateStore>,
     pub engine: Arc<Engine>,
     /// Per-snapshot engine cache used for `pushed_head` requests.
@@ -119,6 +124,14 @@ pub struct AppState {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SandboxStatus {
+    pub mode: SandboxMode,
+    pub version: u32,
+    pub source: Option<String>,
+    pub policy_digest: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub version: String,
     /// Git revision the binary was built from. Injected at build time
@@ -134,17 +147,22 @@ pub struct StatusResponse {
     pub bind: String,
     pub uds_path: String,
     pub db_path: String,
+    /// Immutable sandbox snapshot currently shared by every execution path.
+    pub sandbox: SandboxStatus,
     pub active_threads: i64,
     pub thread_projection: ThreadProjectionHealthSnapshot,
     pub pending_head_transitions: crate::state_store::PendingHeadTransitionStatus,
 }
 
 impl AppState {
-    /// CAS store rooted at this node's state. Shared shorthand for the
-    /// descriptor-bound CAS authority retained by StateDb.
-    pub fn cas_store(&self) -> anyhow::Result<lillux::cas::CasStore> {
-        self.state_store
-            .with_state_db(|db| db.pinned_authority()?.cas_store())
+    /// Acquire one descriptor-bound CAS read capability. The shared guard is
+    /// retained for the lifetime of the store so a concurrent sweep cannot
+    /// remove objects between traversal and payload reads.
+    pub fn acquire_cas_read(&self) -> anyhow::Result<PinnedCasRead> {
+        let authority = self.state_store.with_state_db(|db| db.pinned_authority())?;
+        let guard = authority.acquire_shared_guard()?;
+        let cas = authority.cas_store()?;
+        Ok(PinnedCasRead { _guard: guard, cas })
     }
 
     pub fn status(&self) -> anyhow::Result<StatusResponse> {
@@ -159,9 +177,26 @@ impl AppState {
             bind: self.config.bind.to_string(),
             uds_path: self.config.uds_path.display().to_string(),
             db_path: self.config.db_path.display().to_string(),
+            sandbox: SandboxStatus {
+                mode: self.sandbox.mode(),
+                version: self.sandbox.version(),
+                source: self.sandbox.source().map(|path| path.display().to_string()),
+                policy_digest: self.sandbox.digest().map(str::to_owned),
+            },
             active_threads: self.state_store.active_thread_count().unwrap_or(0),
             thread_projection: self.state_store.projection_health_snapshot(),
             pending_head_transitions,
         })
+    }
+}
+
+pub struct PinnedCasRead {
+    _guard: ryeos_state::CasMutationGuard,
+    cas: lillux::CasStore,
+}
+
+impl PinnedCasRead {
+    pub fn cas(&self) -> &lillux::CasStore {
+        &self.cas
     }
 }

@@ -63,12 +63,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
     let apply_lock = project_apply_lock(&project_hash);
     let _apply_guard = apply_lock.lock_owned().await;
-    let cas_read_guard =
-        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
-    authority.ensure_guard(&cas_read_guard)?;
+    let cas_read_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
 
     let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
@@ -191,8 +189,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         // behind large applies (per-project serialization is handled
         // by `project_apply_lock` above).
         let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
-        let _cas_publish_guard =
-            ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
+        let _cas_publish_guard = authority.acquire_shared_guard()?;
         let _permit = state
             .write_barrier
             .try_acquire()
@@ -229,8 +226,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                     &req.snapshot_hash,
                     expected,
                     &signer,
+                    &_cas_publish_guard,
                 ),
-                None => db.write_deployed_project_ref(&project_hash, &req.snapshot_hash, &signer),
+                None => db.write_deployed_project_ref(
+                    &project_hash,
+                    &req.snapshot_hash,
+                    &signer,
+                    &_cas_publish_guard,
+                ),
             }
         });
         if let Err(err) = ref_result {

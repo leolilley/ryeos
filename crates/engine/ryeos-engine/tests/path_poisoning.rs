@@ -27,12 +27,13 @@ fn malicious_path_binary_not_resolved() {
     // Resolution should succeed because the manifest entry exists.
 
     let item_source = json!({
+        "kind": "item_source",
         "item_ref": "bin/x86_64-unknown-linux-gnu/demo",
         "content_blob_hash": "aa".repeat(32),
         "mode": 0o755,
-        "integrity": "sha256:deadbeef",
+        "integrity": format!("sha256:{}", "aa".repeat(32)),
     });
-    let is_hash = "cc".repeat(32);
+    let is_hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&item_source).as_bytes());
 
     // Fake CAS: item_source is available, blob is NOT
     let mut manifest_hashes = HashMap::new();
@@ -55,10 +56,7 @@ fn malicious_path_binary_not_resolved() {
     // Verify the resolution came from the manifest, not from anywhere else
     assert_eq!(resolved.blob_hash, "aa".repeat(32));
     assert_eq!(resolved.mode, 0o755);
-    assert_eq!(
-        resolved.item_source["item_ref"],
-        "bin/x86_64-unknown-linux-gnu/demo"
-    );
+    assert_eq!(resolved.item_ref, "bin/x86_64-unknown-linux-gnu/demo");
 }
 
 #[test]
@@ -66,12 +64,13 @@ fn wrong_triple_not_found() {
     // Even if a binary exists for a different host triple, it should
     // not be resolved. This prevents cross-arch confusion attacks.
     let item_source = json!({
+        "kind": "item_source",
         "item_ref": "bin/aarch64-unknown-linux-gnu/demo",
         "content_blob_hash": "aa".repeat(32),
         "mode": 0o755,
-        "integrity": "sha256:deadbeef",
+        "integrity": format!("sha256:{}", "aa".repeat(32)),
     });
-    let is_hash = "cc".repeat(32);
+    let is_hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&item_source).as_bytes());
 
     let mut manifest_hashes = HashMap::new();
     manifest_hashes.insert(

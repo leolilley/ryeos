@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
-use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::process::{
-    pgid_live_for_retention, resolve_shutdown_action, signal_process_group,
-    thread_process_identity_matches, verify_thread_process_identity, ShutdownAction, SignalResult,
+    execution_group_liveness, execution_identity_is_current_boot, execution_liveness,
+    kill_by_action, resolve_shutdown_action, IdentityLiveness,
 };
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
@@ -96,7 +95,8 @@ fn is_operator_successor(successor: &ThreadDetail, upstream: &ThreadDetail) -> b
         && upstream.successor_thread_id.as_deref() == Some(successor.thread_id.as_str())
 }
 
-/// Decision the reconciler makes for a single dead thread.
+/// Decision the reconciler makes for a single interrupted thread after any
+/// attached prior-daemon execution has been terminated or safely cleared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeDecision {
     /// No `native_resume` policy on the persisted spec — finalize.
@@ -173,9 +173,9 @@ pub struct ResumeIntent {
     pub chain_root_id: String,
     pub resume_context: ResumeContext,
     /// Status of the thread row at reconcile time. The dispatcher uses
-    /// this to decide whether to call `mark_running` after attaching
-    /// the new spawn — `created` rows have never been transitioned,
-    /// and `drain_running_threads` only sees `running` rows.
+    /// this to decide whether to call `mark_running` after attaching the new
+    /// spawn: `created` rows have never made that transition, while resumed
+    /// `running` rows already have.
     pub prior_status: String,
     /// Which launch path to take post-listener.
     pub kind: ResumeKind,
@@ -198,85 +198,6 @@ enum ActiveReconcileMode {
     /// Processes launched by this daemon remain owned. Only rows with no live
     /// process and no active launch claim are re-driven.
     Live,
-}
-
-const RESTART_KILL_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
-const RESTART_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-fn signal_restart_process_group(pgid: i64, signal: i32, label: &str) -> Result<bool> {
-    match signal_process_group(pgid, signal) {
-        SignalResult::Delivered => Ok(false),
-        SignalResult::AlreadyDead => Ok(true),
-        other => anyhow::bail!(
-            "failed to deliver {label} to persisted runtime process group {pgid}: {}",
-            other.as_str()
-        ),
-    }
-}
-
-async fn wait_for_process_group_exit(pgid: i64, deadline: tokio::time::Instant) -> Result<bool> {
-    loop {
-        if !pgid_live_for_retention(pgid)? {
-            return Ok(true);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
-        }
-        tokio::time::sleep(RESTART_PROCESS_POLL_INTERVAL).await;
-    }
-}
-
-/// Stop a provably-owned runtime left by the previous daemon. Callback and
-/// thread-auth tokens are deliberately process-local, so adopting that process
-/// would leave a seemingly-live thread unable to authenticate any callback.
-async fn stop_previous_daemon_runtime(thread: &ThreadDetail, pid: i64, pgid: i64) -> Result<()> {
-    verify_thread_process_identity(pid, pgid, &thread.thread_id).with_context(|| {
-        format!(
-            "refusing to signal an unverified persisted runtime for thread {}",
-            thread.thread_id
-        )
-    })?;
-
-    let action = resolve_shutdown_action(
-        thread
-            .runtime
-            .launch_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.cancellation_mode),
-    );
-    match action {
-        ShutdownAction::Hard => {
-            if signal_restart_process_group(pgid, libc::SIGKILL, "SIGKILL")? {
-                return Ok(());
-            }
-        }
-        ShutdownAction::Graceful(grace) => {
-            if signal_restart_process_group(pgid, libc::SIGTERM, "SIGTERM")? {
-                return Ok(());
-            }
-            let deadline = tokio::time::Instant::now()
-                .checked_add(grace)
-                .context("persisted runtime cancellation grace exceeds timer domain")?;
-            if wait_for_process_group_exit(pgid, deadline).await? {
-                return Ok(());
-            }
-            if signal_restart_process_group(pgid, libc::SIGKILL, "SIGKILL")? {
-                return Ok(());
-            }
-        }
-    }
-
-    let confirmation_deadline = tokio::time::Instant::now()
-        .checked_add(RESTART_KILL_CONFIRMATION_TIMEOUT)
-        .expect("fixed restart kill timeout is representable");
-    if wait_for_process_group_exit(pgid, confirmation_deadline).await? {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "persisted runtime process group {pgid} for thread {} survived restart termination",
-            thread.thread_id
-        )
-    }
 }
 
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
@@ -316,6 +237,62 @@ fn finalize_dead(
     Ok(())
 }
 
+fn finalize_recovered_stop(
+    state: &AppState,
+    thread_id: &str,
+    prior_status: &str,
+    stop_intent: ryeos_app::state_store::StopIntent,
+    reconciled: &mut usize,
+) {
+    let terminal_status = match stop_intent {
+        ryeos_app::state_store::StopIntent::Cancel => "cancelled",
+        ryeos_app::state_store::StopIntent::Kill => "killed",
+    };
+    if let Err(error) = state.threads.finalize_thread(&ThreadFinalizeParams {
+        thread_id: thread_id.to_string(),
+        status: terminal_status.to_string(),
+        outcome_code: Some(terminal_status.to_string()),
+        result: None,
+        error: Some(json!({
+            "reason": "recovered_durable_stop_request",
+            "stop_intent": stop_intent.as_str(),
+            "reconciled_from_status": prior_status,
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    }) {
+        tracing::warn!(thread_id, error = %error, "failed to finalize recovered stop request");
+    } else {
+        *reconciled += 1;
+    }
+}
+
+fn dead_identity_safe_to_clear(
+    identity: &ryeos_app::process::ExecutionProcessIdentity,
+    thread_id: &str,
+) -> bool {
+    match execution_identity_is_current_boot(identity) {
+        Ok(false) => true,
+        Ok(true) => {
+            tracing::warn!(
+                thread_id,
+                "dead same-boot group leader cannot prove descendant group emptiness; quarantining until reboot or outer-worker cleanup"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                thread_id,
+                error = %error,
+                "cannot compare process-identity boot; quarantining"
+            );
+            false
+        }
+    }
+}
+
 /// Reconcile daemon state after restart.
 ///
 /// Two phases, against an already-current projection:
@@ -344,13 +321,24 @@ async fn reconcile_active_threads_inner(
     mode: ActiveReconcileMode,
 ) -> Result<ActiveThreadReconcileReport> {
     // Orphan thread cleanup.
-    let running_threads = state
+    let mut running_threads = state
         .state_store
         .list_threads_by_status(&["created", "running"])?;
     let active_thread_ids = running_threads
         .iter()
         .map(|thread| thread.thread_id.clone())
         .collect::<BTreeSet<_>>();
+    for thread_id in state.state_store.list_attached_thread_ids()? {
+        if running_threads
+            .iter()
+            .any(|thread| thread.thread_id == thread_id)
+        {
+            continue;
+        }
+        if let Some(thread) = state.state_store.get_thread(&thread_id)? {
+            running_threads.push(thread);
+        }
+    }
 
     if running_threads.is_empty() {
         tracing::debug!("no orphaned threads");
@@ -370,6 +358,13 @@ async fn reconcile_active_threads_inner(
 
     for thread in &running_threads {
         let pgid = thread.runtime.pgid;
+        let identity = thread.runtime.process_identity.as_ref();
+        let target_liveness = identity
+            .map(execution_liveness)
+            .unwrap_or(IdentityLiveness::DeadOrStale);
+        let group_liveness = identity
+            .map(execution_group_liveness)
+            .unwrap_or(IdentityLiveness::DeadOrStale);
 
         // A live-mode launch claim is durable ownership of the attach window.
         // Do not mistake a current daemon's claimed `created` row for a crashed
@@ -383,44 +378,180 @@ async fn reconcile_active_threads_inner(
             continue;
         }
 
-        // A thread is "dead" when:
-        //  - it has a pgid and that pgid is no longer alive, OR
-        //  - it has NO pid/pgid: spawn was interrupted before attach
-        //    (created/running but never made it to attach_process).
-        // Both cases route through the same decide_resume path.
-        if let Some(pgid) = pgid {
-            if pgid_live_for_retention(pgid)? {
-                let pid = thread.runtime.pid.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "thread {} has a live persisted pgid {pgid} but no pid for identity verification",
-                        thread.thread_id
-                    )
-                })?;
-                match thread_process_identity_matches(pid, pgid, &thread.thread_id) {
-                    Ok(true) if mode == ActiveReconcileMode::Live => continue,
-                    Ok(true) => stop_previous_daemon_runtime(thread, pid, pgid).await?,
-                    Ok(false) if mode == ActiveReconcileMode::Live => {
+        // Explicit cancellation/kill intent survives a daemon crash. Recover it
+        // before any normal resume decision so a stop-requested row can never
+        // launch a replacement. Exact pidfd group signalling fails closed.
+        if thread.runtime.stop_requested_at_ms.is_some() {
+            let stop_intent = thread
+                .runtime
+                .stop_intent
+                .expect("runtime decode enforces complete stop tombstones");
+            if let Some(identity) = identity {
+                if group_liveness == IdentityLiveness::Alive {
+                    let action = match stop_intent {
+                        ryeos_app::state_store::StopIntent::Kill => {
+                            ryeos_app::process::ShutdownAction::Hard
+                        }
+                        ryeos_app::state_store::StopIntent::Cancel => resolve_shutdown_action(
+                            thread
+                                .runtime
+                                .launch_metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.cancellation_mode),
+                        ),
+                    };
+                    let result = kill_by_action(identity, action);
+                    if !result.success {
                         tracing::warn!(
                             thread_id = %thread.thread_id,
-                            pid,
-                            pgid,
-                            "persisted numeric process identity was reused; treating the recorded runtime as dead"
+                            method = result.method,
+                            "durable stop recovery could not prove process-group termination"
                         );
+                        continue;
                     }
+                } else if group_liveness == IdentityLiveness::Unavailable
+                    || target_liveness != IdentityLiveness::DeadOrStale
+                {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        target_liveness = ?target_liveness,
+                        group_liveness = ?group_liveness,
+                        "durable stop process liveness is unavailable; failing closed"
+                    );
+                    continue;
+                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                    continue;
+                }
+                match state
+                    .state_store
+                    .clear_thread_process_if_matches(&thread.thread_id, identity)
+                {
+                    Ok(true) => {}
                     Ok(false) => {
-                        anyhow::bail!(
-                            "cannot safely stop prior runtime for thread {}: persisted pid {pid}/pgid {pgid} does not match its RyeOS thread identity",
-                            thread.thread_id
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            "durable stop identity changed before compare-and-clear"
                         );
+                        continue;
                     }
                     Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!(
-                                "cannot safely stop prior runtime for thread {}",
-                                thread.thread_id
-                            )
-                        });
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            error = %error,
+                            "failed to clear durable stop identity"
+                        );
+                        continue;
                     }
+                }
+            }
+            if !ryeos_app::state_store::is_terminal_status(&thread.status) {
+                finalize_recovered_stop(
+                    state,
+                    &thread.thread_id,
+                    &thread.status,
+                    stop_intent,
+                    &mut reconciled,
+                );
+            }
+            continue;
+        }
+
+        if ryeos_app::state_store::is_terminal_status(&thread.status) {
+            if let Some(identity) = identity {
+                if group_liveness == IdentityLiveness::Alive {
+                    let result = kill_by_action(identity, ryeos_app::process::ShutdownAction::Hard);
+                    if !result.success {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            method = result.method,
+                            "failed to drain terminal attached process during reconcile"
+                        );
+                        continue;
+                    }
+                } else if group_liveness == IdentityLiveness::Unavailable
+                    || target_liveness != IdentityLiveness::DeadOrStale
+                {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        target_liveness = ?target_liveness,
+                        group_liveness = ?group_liveness,
+                        "terminal process liveness is unavailable; failing closed"
+                    );
+                    continue;
+                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                    continue;
+                }
+                if !state
+                    .state_store
+                    .clear_thread_process_if_matches(&thread.thread_id, identity)?
+                {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        "terminal identity changed before reconcile compare-and-clear"
+                    );
+                }
+            }
+            continue;
+        }
+
+        // The single-daemon state lock proves an exact still-live attached group
+        // belongs to the interrupted prior daemon instance. Tear that group down
+        // through its verified pidfd before relaunching; never adopt an orphan
+        // whose stdout/wait ownership was lost in the crash. If the same-boot
+        // leader is already gone, descendants cannot be proven absent and the
+        // conservative quarantine below remains mandatory.
+        if let Some(identity) = identity {
+            if mode == ActiveReconcileMode::Live && group_liveness == IdentityLiveness::Alive {
+                continue;
+            }
+            match group_liveness {
+                IdentityLiveness::Alive => {
+                    let result = kill_by_action(identity, ryeos_app::process::ShutdownAction::Hard);
+                    if !result.success {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            method = result.method,
+                            "startup could not terminate exact orphan process group"
+                        );
+                        continue;
+                    }
+                }
+                IdentityLiveness::DeadOrStale => {
+                    if target_liveness != IdentityLiveness::DeadOrStale
+                        || !dead_identity_safe_to_clear(identity, &thread.thread_id)
+                    {
+                        continue;
+                    }
+                }
+                IdentityLiveness::Unavailable => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        target_liveness = ?target_liveness,
+                        group_liveness = ?group_liveness,
+                        "process liveness is unavailable; refusing reconcile resume"
+                    );
+                    continue;
+                }
+            }
+            match state
+                .state_store
+                .clear_thread_process_if_matches(&thread.thread_id, identity)
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        "attached identity changed before reconcile compare-and-clear"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        error = %error,
+                        "failed to clear terminated process identity before reconcile"
+                    );
+                    continue;
                 }
             }
         }
@@ -1040,6 +1171,9 @@ mod tests {
             runtime: ryeos_app::state_store::RuntimeInfo {
                 pid: None,
                 pgid: None,
+                process_identity: None,
+                stop_requested_at_ms: None,
+                stop_intent: None,
                 launch_metadata: lm,
             },
         }

@@ -1138,10 +1138,23 @@ impl SchedulerDb {
     /// scheduler operations cannot append an older snapshot after a newer one;
     /// JSONL replay is therefore deterministic last-wins even with duplicates.
     pub fn drain_fire_outbox(&self, runtime_state_dir: &Path) -> Result<usize> {
+        let runtime_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
+            .ok_or_else(|| anyhow!("runtime-state directory is absent"))?;
+        self.drain_fire_outbox_in_directory(&runtime_directory)
+    }
+
+    /// Sync every committed outbox snapshot beneath one exact runtime root.
+    pub fn drain_fire_outbox_in_directory(
+        &self,
+        runtime_directory: &lillux::PinnedDirectory,
+    ) -> Result<usize> {
         let _drain = self
             .outbox_drain
             .lock()
             .map_err(|error| anyhow!("scheduler outbox drain lock poisoned: {error}"))?;
+        let schedules_directory =
+            runtime_directory.open_or_create_child(std::ffi::OsStr::new("schedules"), 0o700)?;
+        let mut schedule_directories = std::collections::BTreeMap::new();
         let mut drained = 0usize;
 
         loop {
@@ -1175,12 +1188,20 @@ impl SchedulerDb {
                     snapshot.schedule_id,
                 );
             }
-            let path = runtime_state_dir
-                .join("schedules")
-                .join(&schedule_id)
-                .join("fires.jsonl");
-            super::projection::append_jsonl_entry(&path, &snapshot)
-                .with_context(|| format!("sync scheduler fire outbox sequence {sequence}"))?;
+            if !schedule_directories.contains_key(&schedule_id) {
+                let directory = schedules_directory
+                    .open_or_create_child(std::ffi::OsStr::new(&schedule_id), 0o700)?;
+                schedule_directories.insert(schedule_id.clone(), directory);
+            }
+            let schedule_directory = schedule_directories
+                .get(&schedule_id)
+                .expect("schedule directory inserted above");
+            super::projection::append_fire_jsonl_entry_in_directory(
+                schedule_directory,
+                &schedule_id,
+                &snapshot,
+            )
+            .with_context(|| format!("sync scheduler fire outbox sequence {sequence}"))?;
 
             let changed = self.lock()?.execute(
                 "DELETE FROM schedule_fire_outbox

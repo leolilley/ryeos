@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+
 use anyhow::{anyhow, Context, Result};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use serde_json::json;
 use tokio::net::UnixListener;
+use tokio::sync::Semaphore;
 
 #[cfg(test)]
 use crate::uds::protocol::{RpcRequest, RpcResponse};
@@ -14,6 +18,7 @@ use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, Comm
 use ryeos_app::event_store_service::{
     EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
+use ryeos_app::live_input_queue::MAX_LIVE_INPUT_POLL_RESPONSE_BYTES;
 use ryeos_app::runtime_item_author_service::{RuntimeAuthorItemParams, RuntimeItemAuthorService};
 use ryeos_app::runtime_project_snapshot_service::{
     RuntimeProjectSnapshotRequest, RuntimeProjectSnapshotService,
@@ -26,16 +31,17 @@ use ryeos_app::thread_lifecycle::{
     ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams, ThreadGetParams,
     ThreadMarkRunningParams,
 };
+use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
 mod routing;
 mod transport;
 
+#[cfg(test)]
 pub(crate) use routing::dispatch;
 
 struct DynamicServerInner {
     lifecycle: ArcSwap<ryeos_node::LifecycleResponse>,
     application: ArcSwapOption<AppState>,
-    shutdown: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Request-level UDS publication state. The listener can begin serving with
@@ -49,16 +55,6 @@ pub struct DynamicServerState {
 
 impl DynamicServerState {
     pub fn bootstrap(lifecycle: ryeos_node::LifecycleResponse) -> Result<Self> {
-        Self::bootstrap_with_shutdown(lifecycle, Arc::new(crate::request_shutdown))
-    }
-
-    /// Build the bootstrap UDS state with a shutdown transition supplied by
-    /// the startup coordinator. The callback linearizes shutdown against Ready
-    /// publication before the UDS application pointer is removed.
-    pub fn bootstrap_with_shutdown(
-        lifecycle: ryeos_node::LifecycleResponse,
-        shutdown: Arc<dyn Fn() + Send + Sync>,
-    ) -> Result<Self> {
         lifecycle
             .validate()
             .map_err(|message| anyhow!("invalid initial lifecycle response: {message}"))?;
@@ -66,7 +62,6 @@ impl DynamicServerState {
             inner: Arc::new(DynamicServerInner {
                 lifecycle: ArcSwap::from_pointee(lifecycle),
                 application: ArcSwapOption::empty(),
-                shutdown,
             }),
         })
     }
@@ -111,13 +106,6 @@ impl DynamicServerState {
     fn application(&self) -> Option<Arc<AppState>> {
         self.inner.application.load_full()
     }
-
-    fn request_shutdown(&self) {
-        (self.inner.shutdown)();
-        // The coordinator callback has already closed and linearized
-        // publication, so Ready cannot republish this pointer afterwards.
-        self.unpublish_application();
-    }
 }
 
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
@@ -128,6 +116,8 @@ pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
 
 pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) -> Result<()> {
     let mut connections = tokio::task::JoinSet::new();
+    let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
+    let frame_bytes = Arc::new(Semaphore::new(MAX_UDS_IN_FLIGHT_FRAME_BYTES));
     let mut shutdown_rx = crate::subscribe_shutdown();
     let shutdown = async move {
         // Subscribe before checking the flag so a request racing listener startup
@@ -148,14 +138,22 @@ pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) ->
         tokio::select! {
             biased;
             _ = &mut shutdown => break Ok(()),
-            accepted = listener.accept() => {
+            permit = Arc::clone(&connection_slots).acquire_owned() => {
+                let connection_permit = permit.context("UDS connection semaphore closed")?;
+                let accepted = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break Ok(()),
+                    accepted = listener.accept() => accepted,
+                };
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => break Err(error).context("uds accept failed"),
                 };
                 let state = state.clone();
+                let frame_bytes = Arc::clone(&frame_bytes);
                 connections.spawn(async move {
-                    transport::handle_connection(stream, state).await
+                    let _connection_permit = connection_permit;
+                    transport::handle_connection(stream, state, frame_bytes).await
                 });
             }
             joined = connections.join_next(), if !connections.is_empty() => {
@@ -207,6 +205,29 @@ fn ready_lifecycle_response(state: &AppState) -> ryeos_node::LifecycleResponse {
     response
 }
 
+/// Kernel-authenticated identity of the process that opened this Unix stream.
+/// The pidfd, not the reusable numeric PID, remains authoritative for the
+/// connection lifetime.
+pub(crate) struct AuthenticatedUnixPeer {
+    pid: i64,
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl AuthenticatedUnixPeer {
+    fn pid(&self) -> i64 {
+        self.pid
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
+    }
+}
+
+const MAX_UDS_CONNECTIONS: usize = 32;
+const MAX_UDS_IN_FLIGHT_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
 const TRANSPORT_FIELDS: &[&str] = &["callback_token", "thread_auth_token"];
 
 fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
@@ -223,10 +244,11 @@ fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-pub async fn dispatch_runtime_method(
+pub(crate) async fn dispatch_runtime_method(
     method: &str,
     params: &serde_json::Value,
     state: &AppState,
+    peer: Option<&AuthenticatedUnixPeer>,
 ) -> Result<serde_json::Value> {
     // Validate the callback token on ALL runtime.* methods, by access class:
     //
@@ -312,6 +334,8 @@ pub async fn dispatch_runtime_method(
         )
     };
 
+    enforce_runtime_callback_admission(method, params, state)?;
+
     // Strip transport-level fields before typed deserialization so
     // deny_unknown_fields on the RPC param structs doesn't reject
     // callback_token.
@@ -385,14 +409,83 @@ pub async fn dispatch_runtime_method(
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
-        "runtime.submit_command" => handle_submit_command(&clean_params, state),
+        "runtime.submit_command" => handle_submit_command(&clean_params, state).await,
         "runtime.claim_commands" => handle_claim_commands(&clean_params, state),
         "runtime.complete_command" => handle_complete_command(&clean_params, state),
         "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
-        "runtime.attach_process" => handle_attach_process(&clean_params, state),
+        "runtime.attach_process" => handle_attach_process(&clean_params, state, peer).await,
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
+}
+
+/// Fence callback mutations once a durable stop (or daemon shutdown) has
+/// closed authoring. Cooperative cancellation retains only the narrow surface
+/// needed to settle already-issued commands and finalize.
+fn enforce_runtime_callback_admission(
+    method: &str,
+    params: &serde_json::Value,
+    state: &AppState,
+) -> Result<()> {
+    if is_unrestricted_runtime_read_method(method) || method == "runtime.attach_process" {
+        return Ok(());
+    }
+    let thread_id = params
+        .get("thread_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
+
+    if is_running_runtime_mutation(method) || is_sensitive_runtime_read_method(method) {
+        state
+            .state_store
+            .ensure_running_runtime_mutation_allowed(thread_id)?;
+        return Ok(());
+    }
+    state
+        .state_store
+        .ensure_runtime_callback_mutation_allowed(thread_id, is_stop_completion_method(method))
+}
+
+fn is_running_runtime_mutation(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.append_event"
+            | "runtime.append_events"
+            | "runtime.dispatch_action"
+            | "runtime.spawn_follow_child"
+            | "runtime.request_continuation"
+            | "runtime.author_item"
+            | "runtime.vault_put"
+            | "runtime.vault_delete"
+            | "runtime.bundle_events_append"
+            | "runtime.publish_artifact"
+            | "runtime.submit_command"
+            | "runtime.poll_input"
+    )
+}
+
+fn is_stop_completion_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.finalize_thread" | "runtime.claim_commands" | "runtime.complete_command"
+    )
+}
+
+fn is_unrestricted_runtime_read_method(method: &str) -> bool {
+    is_chain_read_method(method) || method == "runtime.get_facets"
+}
+
+/// Reads that expose bundle state or vault material are live authority, not
+/// post-run inspection. Stop/shutdown/terminal therefore revoke them at the
+/// same running-thread boundary as authoring.
+fn is_sensitive_runtime_read_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.bundle_events_read_chain"
+            | "runtime.bundle_events_scan"
+            | "runtime.vault_get"
+            | "runtime.vault_list"
+    )
 }
 
 /// Runtime methods that carry a per-request `thread_auth_token`. The prelude
@@ -459,36 +552,86 @@ fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<s
         .context("failed to encode runtime.mark_running result")
 }
 
-fn handle_attach_process(
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeAttachProcessParams {
+    thread_id: String,
+    pid: i64,
+}
+
+async fn handle_attach_process(
     params: &serde_json::Value,
     state: &AppState,
+    peer: Option<&AuthenticatedUnixPeer>,
 ) -> Result<serde_json::Value> {
-    let mut params: ThreadAttachProcessParams =
+    let wire: RuntimeAttachProcessParams =
         serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
-    // The runtime self-reports its pid only; ALWAYS derive the process group
-    // daemon-side — never trust a runtime-supplied pgid. This gives reconcile's
-    // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
-    // probe instead of treating the thread as dead.
-    params.pgid = ryeos_app::process::pgid_of(params.pid);
+    let peer = verify_attaching_peer_pid(wire.pid, peer)?;
+    // The runtime reports its own PID, which must match the accepted stream's
+    // kernel credential above. Derive and pin both the target and group leader
+    // daemon-side; never trust a runtime-supplied PGID or identity. The durable
+    // boot/start-time tuple is required for every later signal.
+    let process_identity = {
+        #[cfg(target_os = "linux")]
+        {
+            ryeos_app::process::capture_execution_process_identity_from_pidfd(
+                wire.pid,
+                None,
+                peer.pidfd(),
+            )
+            .context("capture runtime process identity from Unix peer pidfd")?
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("runtime.attach_process requires Linux SO_PEERPIDFD support");
+        }
+    };
+    let params = ThreadAttachProcessParams {
+        thread_id: wire.thread_id,
+        pid: wire.pid,
+        pgid: process_identity.pgid(),
+        process_identity: Some(process_identity),
+        metadata: None,
+        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+    };
     let attached = match state.threads.attach_process(&params) {
         Ok(thread) => thread,
         Err(error) => {
-            if params.pgid > 0 {
-                let _ = ryeos_app::process::hard_kill_process_group(params.pgid);
+            if let Some(identity) = params.process_identity.clone() {
+                if let Err(join_error) = tokio::task::spawn_blocking(move || {
+                    ryeos_app::process::kill_by_action(
+                        &identity,
+                        ryeos_app::process::ShutdownAction::Hard,
+                    )
+                })
+                .await
+                {
+                    tracing::warn!(
+                        thread_id = %params.thread_id,
+                        error = %join_error,
+                        "runtime.attach_process cleanup worker failed"
+                    );
+                }
             }
             return Err(error)
-                .context("runtime.attach_process refused; spawned process group killed");
+                .context("runtime.attach_process refused; spawned process-group kill attempted");
         }
     };
     if state
         .state_store
         .launch_window_is_cancelled(&attached.chain_root_id)?
     {
-        let report = ryeos_app::cascade::signal_thread(
-            &state.state_store,
-            &attached.thread_id,
-            ryeos_app::cascade::CascadeMode::Graceful,
-        );
+        let stop_state = state.clone();
+        let stop_thread_id = attached.thread_id.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            ryeos_app::cascade::signal_thread(
+                &stop_state.state_store,
+                &stop_thread_id,
+                ryeos_app::cascade::CascadeMode::Graceful,
+            )
+        })
+        .await
+        .context("late attachment cancellation worker failed")?;
         tracing::info!(
             thread_id = %attached.thread_id,
             report = %report,
@@ -496,6 +639,22 @@ fn handle_attach_process(
         );
     }
     serde_json::to_value(attached).context("failed to encode runtime.attach_process result")
+}
+
+fn verify_attaching_peer_pid(
+    reported_pid: i64,
+    peer: Option<&AuthenticatedUnixPeer>,
+) -> Result<&AuthenticatedUnixPeer> {
+    let peer = peer.ok_or_else(|| {
+        anyhow!("runtime.attach_process requires a kernel-authenticated Unix peer pidfd")
+    })?;
+    let peer_pid = peer.pid();
+    if reported_pid != peer_pid {
+        anyhow::bail!(
+            "runtime.attach_process PID mismatch: reported {reported_pid}, Unix peer {peer_pid}"
+        );
+    }
+    Ok(peer)
 }
 
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
@@ -587,32 +746,34 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
         continuation_request: None,
         metadata: None,
     };
-    serde_json::to_value(state.threads.finalize_from_completion(
+    let finalized = state.threads.finalize_from_runtime_completion(
         &params.thread_id,
         &completion,
         Some(managed_envelope),
-    )?)
-    .context("failed to encode runtime.finalize_thread result")
+    )?;
+    // Terminal state is authoritative even while the wrapper remains alive.
+    // Revoke both in-memory credential classes immediately; an already-admitted
+    // concurrent request is still bounded by the StateStore lifecycle check.
+    state
+        .callback_tokens
+        .invalidate_for_thread(&params.thread_id);
+    state.thread_auth.invalidate_for_thread(&params.thread_id);
+    serde_json::to_value(finalized).context("failed to encode runtime.finalize_thread result")
 }
 
 fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadGetParams =
         serde_json::from_value(params.clone()).context("invalid runtime.get_thread params")?;
     match state.threads.get_thread(&params.thread_id)? {
-        Some(thread) => {
-            let facets = state.state_store.get_facets(&params.thread_id)?;
-            let facets_map: std::collections::HashMap<&str, &str> = facets
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            serde_json::to_value(json!({
-                "thread": thread,
-                "result": state.threads.get_thread_result(&params.thread_id)?,
-                "artifacts": state.threads.list_thread_artifacts(&params.thread_id)?,
-                "facets": facets_map,
-            }))
-            .context("failed to encode runtime.get_thread result")
-        }
+        // This chain-rehydration surface is intentionally slim. Artifacts and
+        // facets have their own bounded APIs; embedding their complete
+        // collections here made a tiny predecessor lookup allocate an
+        // arbitrarily large response.
+        Some(thread) => serde_json::to_value(json!({
+            "thread": thread,
+            "result": state.threads.get_thread_result(&params.thread_id)?,
+        }))
+        .context("failed to encode runtime.get_thread result"),
         None => Ok(serde_json::Value::Null),
     }
 }
@@ -700,6 +861,12 @@ fn handle_append_event_batch(
 fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: EventReplayParams =
         serde_json::from_value(params.clone()).context("invalid events.replay params")?;
+    if params.limit == 0 || params.limit > MAX_RUNTIME_REPLAY_PAGE_LIMIT {
+        anyhow::bail!(
+            "runtime events.replay limit must be between 1 and {}",
+            MAX_RUNTIME_REPLAY_PAGE_LIMIT
+        );
+    }
     serde_json::to_value(state.events.replay(&params)?)
         .context("failed to encode events.replay result")
 }
@@ -743,6 +910,20 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
             return Err(anyhow::Error::new(e).context("failed to encode poll_input inputs"));
         }
     };
+    let response = json!({ "inputs": inputs_value });
+    let response_bytes = match serde_json::to_vec(&response) {
+        Ok(bytes) => bytes.len(),
+        Err(error) => {
+            state.live_input.restore_front(thread_id, pending);
+            return Err(anyhow::Error::new(error).context("failed to size poll_input response"));
+        }
+    };
+    if response_bytes > MAX_LIVE_INPUT_POLL_RESPONSE_BYTES {
+        state.live_input.restore_front(thread_id, pending);
+        anyhow::bail!(
+            "runtime.poll_input response is {response_bytes} bytes; maximum is {MAX_LIVE_INPUT_POLL_RESPONSE_BYTES}"
+        );
+    }
 
     // A `cognition_in` carries only `content` — the intent is a delivery concern,
     // not part of the braid. Indexed (durable) so resume folds it in order.
@@ -763,7 +944,7 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
         // back for the loop to fold.
         Ok(Some(_persisted)) => {
             state.live_input.ack_drained(thread_id, n);
-            Ok(json!({ "inputs": inputs_value }))
+            Ok(response)
         }
         // Not running (terminal) — discard and release the reservation. The
         // queue close at finalize already cleared queued items; this drops
@@ -932,7 +1113,7 @@ fn handle_runtime_project_snapshot(
     RuntimeProjectSnapshotService::execute(state, cap, thread_auth, params)
 }
 
-fn handle_submit_command(
+async fn handle_submit_command(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
@@ -952,19 +1133,31 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode) {
-            Ok((report, cancelled_roots)) => {
+        let stop_state = state.clone();
+        let stop_thread_id = thread_id.clone();
+        let stop_result = tokio::task::spawn_blocking(move || {
+            ryeos_app::cascade::stop_thread_and_descendants(&stop_state, &stop_thread_id, mode)
+        })
+        .await;
+        match stop_result {
+            Ok(Ok((report, cancelled_roots))) => {
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
                 }
                 tracing::info!(thread_id = %thread_id, command_type = %command_type,
                     report = %report, "cancel/kill signalled target and descendants");
             }
-            Err(e) => tracing::warn!(
+            Ok(Err(e)) => tracing::warn!(
                 thread_id = %thread_id,
                 command_type = %command_type,
                 error = %e,
                 "cancel/kill stop failed on runtime submit_command"
+            ),
+            Err(e) => tracing::warn!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                error = %e,
+                "cancel/kill stop worker failed on runtime submit_command"
             ),
         }
     }
@@ -1076,6 +1269,33 @@ mod tests {
     use std::time::Instant;
     use tempfile::TempDir;
 
+    #[test]
+    fn runtime_attach_requires_matching_unix_peer_pid() {
+        fn peer(pid: i64) -> AuthenticatedUnixPeer {
+            AuthenticatedUnixPeer {
+                pid,
+                #[cfg(target_os = "linux")]
+                pidfd: std::fs::File::open("/dev/null").unwrap().into(),
+            }
+        }
+
+        let matching = peer(42);
+        verify_attaching_peer_pid(42, Some(&matching)).unwrap();
+
+        let missing = verify_attaching_peer_pid(42, None)
+            .err()
+            .expect("missing authenticated Unix peer should be rejected");
+        assert!(format!("{missing:#}").contains("kernel-authenticated Unix peer pidfd"));
+
+        let other = peer(43);
+        let mismatched = verify_attaching_peer_pid(42, Some(&other))
+            .err()
+            .expect("mismatched authenticated Unix peer should be rejected");
+        let message = format!("{mismatched:#}");
+        assert!(message.contains("reported 42"), "got: {message}");
+        assert!(message.contains("Unix peer 43"), "got: {message}");
+    }
+
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
 
     fn test_provenance(state: &AppState, path: &str) -> TestProvenance {
@@ -1101,7 +1321,6 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
 
@@ -1163,6 +1382,7 @@ mod tests {
 
         let state = AppState {
             config: Arc::new(config),
+            sandbox: Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
             state_store,
             engine,
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
@@ -1306,15 +1526,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let state = DynamicServerState::bootstrap(bootstrap_lifecycle(&tmp)).unwrap();
 
-        let status = routing::dispatch_dynamic(rpc("lifecycle.status", json!({})), &state).await;
+        let status =
+            routing::dispatch_dynamic(rpc("lifecycle.status", json!({})), &state, None).await;
         assert_eq!(rpc_ok(&status)["status"], "starting");
         assert_eq!(rpc_ok(&status)["ready"], false);
         assert_eq!(rpc_ok(&status)["startup"]["sequence"], 0);
 
-        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state).await;
+        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
         assert_eq!(rpc_err(&health).code, "node_starting");
 
-        let runtime = routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state).await;
+        let runtime =
+            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
         let error = rpc_err(&runtime);
         assert_eq!(error.code, "node_starting");
         assert!(error.retryable);
@@ -1327,10 +1549,10 @@ mod tests {
         // therefore fails at callback authentication, not at startup gating.
         let (_app_tmp, app) = setup_app_state();
         state.publish_application(Arc::new(app));
-        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state).await;
+        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
         assert_eq!(rpc_err(&health).code, "node_starting");
         let callback =
-            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state).await;
+            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
         let callback_error = rpc_err(&callback);
         assert_eq!(callback_error.code, "request_failed");
         assert!(callback_error.message.contains("missing callback_token"));
@@ -1800,6 +2022,14 @@ mod tests {
                 thread_id: "Catt".to_string(),
                 pid: 424242,
                 pgid: 424242,
+                process_identity: Some(ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 424242,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 424242,
+                    group_leader_start_time_ticks: 10,
+                }),
                 metadata: None,
                 launch_metadata: Default::default(),
             })
@@ -1858,7 +2088,8 @@ mod tests {
             "Cnr",
             "Cnr",
             json!({ "error": "resume rebuild failed" }),
-        );
+        )
+        .unwrap();
 
         // The finalize half readied the waiter (synchronous; the kick is a detached
         // spawn that hasn't run yet). A hung waiter here == the bug Oracle flagged.

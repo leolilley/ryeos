@@ -4,7 +4,15 @@ import unittest
 from pathlib import Path
 
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / ".ai" / "bin" / "central_auth.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / ".ai"
+    / "tools"
+    / "ryeos"
+    / "central-auth"
+    / "lib"
+    / "central_auth.py"
+)
 
 
 def load_module():

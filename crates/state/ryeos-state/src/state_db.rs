@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 
 use crate::bundle_events::{
-    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord,
+    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage,
+    BundleEventRecord, BundleEventScanCursor, BundleEventScanPage,
 };
 use crate::bundle_projection::BundleProjectionDb;
 use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
@@ -1370,43 +1371,45 @@ pub struct PinnedStateAuthority {
     runtime_directory: lillux::PinnedDirectory,
     cas_directory: lillux::PinnedDirectory,
     refs_directory: lillux::PinnedDirectory,
-    recovery: RecoveryStore,
+    recovery: Option<RecoveryStore>,
     trust_store: Arc<TrustStore>,
 }
 
 impl PinnedStateAuthority {
-    pub(crate) fn open_existing(
-        runtime_state_dir: &Path,
+    pub(crate) fn from_pinned_runtime(
+        runtime_directory: lillux::PinnedDirectory,
         trust_store: Arc<TrustStore>,
         create_recovery: bool,
     ) -> anyhow::Result<Self> {
-        let runtime_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
-            .ok_or_else(|| anyhow::anyhow!("runtime-state directory is absent"))?;
         let cas_directory = runtime_directory
             .open_child_directory(std::ffi::OsStr::new("objects"))?
             .ok_or_else(|| anyhow::anyhow!("CAS root is absent"))?;
         let refs_directory = runtime_directory
             .open_child_directory(std::ffi::OsStr::new("refs"))?
             .ok_or_else(|| anyhow::anyhow!("refs root is absent"))?;
-        let recovery_parent = if create_recovery {
-            runtime_directory.open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)?
+        let recovery = if create_recovery {
+            let recovery_parent =
+                runtime_directory.open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)?;
+            let recovery_directory = recovery_parent
+                .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)?;
+            Some(RecoveryStore::from_pinned_directories(
+                runtime_directory.try_clone()?,
+                recovery_directory,
+            )?)
         } else {
-            runtime_directory
-                .open_child_directory(std::ffi::OsStr::new("recovery"))?
-                .ok_or_else(|| anyhow::anyhow!("recovery directory is absent"))?
+            match runtime_directory.open_child_directory(std::ffi::OsStr::new("recovery"))? {
+                Some(recovery_parent) => match recovery_parent
+                    .open_child_directory(std::ffi::OsStr::new("thread-projection"))?
+                {
+                    Some(recovery_directory) => Some(RecoveryStore::from_pinned_directories(
+                        runtime_directory.try_clone()?,
+                        recovery_directory,
+                    )?),
+                    None => None,
+                },
+                None => None,
+            }
         };
-        let recovery_directory = if create_recovery {
-            recovery_parent
-                .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)?
-        } else {
-            recovery_parent
-                .open_child_directory(std::ffi::OsStr::new("thread-projection"))?
-                .ok_or_else(|| anyhow::anyhow!("thread-projection recovery directory is absent"))?
-        };
-        let recovery = RecoveryStore::from_pinned_directories(
-            runtime_directory.try_clone()?,
-            recovery_directory,
-        )?;
         Ok(Self {
             runtime_directory,
             cas_directory,
@@ -1434,8 +1437,14 @@ impl PinnedStateAuthority {
         &self.refs_directory
     }
 
-    pub fn recovery(&self) -> &RecoveryStore {
-        &self.recovery
+    pub fn recovery(&self) -> Option<&RecoveryStore> {
+        self.recovery.as_ref()
+    }
+
+    pub fn require_recovery(&self) -> anyhow::Result<&RecoveryStore> {
+        self.recovery
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("thread-projection recovery authority is absent"))
     }
 
     pub fn trust_store(&self) -> &TrustStore {
@@ -1444,6 +1453,33 @@ impl PinnedStateAuthority {
 
     pub fn ensure_guard(&self, guard: &crate::recovery::CasMutationGuard) -> anyhow::Result<()> {
         guard.ensure_protects_pinned_runtime(&self.runtime_directory)
+    }
+
+    /// Acquire the already-established shared CAS mutation guard relative to
+    /// this exact pinned runtime authority. Ordinary publishers use this path
+    /// so a renamed path cannot rebind their CAS/refs/recovery relationship.
+    pub fn acquire_shared_guard(&self) -> anyhow::Result<crate::recovery::CasMutationGuard> {
+        crate::recovery::CasMutationGuard::acquire_existing_shared_in_pinned_runtime(
+            &self.runtime_directory,
+        )
+    }
+
+    /// Acquire the exclusive CAS mutation guard relative to this exact runtime
+    /// authority. Mutable maintenance may establish the lock anchor; strict
+    /// read-only maintenance requires the anchor to already exist.
+    pub fn acquire_exclusive_guard(
+        &self,
+        create_anchor: bool,
+    ) -> anyhow::Result<crate::recovery::CasMutationGuard> {
+        if create_anchor {
+            crate::recovery::CasMutationGuard::acquire_exclusive_in_pinned_runtime(
+                &self.runtime_directory,
+            )
+        } else {
+            crate::recovery::CasMutationGuard::acquire_existing_exclusive_in_pinned_runtime(
+                &self.runtime_directory,
+            )
+        }
     }
 }
 
@@ -2142,21 +2178,6 @@ impl StateDb {
     /// Build and publish a fresh projection generation, then swap
     /// this live StateDb handle to the selected instance. Callers must keep the
     /// application offline/not-ready for the entire operation.
-    pub fn rebuild_projection_generation(
-        &mut self,
-        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-    ) -> anyhow::Result<crate::rebuild::RebuildReport> {
-        self.rebuild_projection_generation_inner(None, runtime_liveness, None)
-    }
-
-    pub fn rebuild_projection_generation_with_observer(
-        &mut self,
-        observer: Option<&dyn ProjectionRecoveryObserver>,
-        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-    ) -> anyhow::Result<crate::rebuild::RebuildReport> {
-        self.rebuild_projection_generation_inner(observer, runtime_liveness, None)
-    }
-
     /// Rebuild while consuming an exclusive CAS mutation guard already held by
     /// the application. This preserves the global guard-before-store-lock
     /// hierarchy for the offline rebuild service.
@@ -2164,15 +2185,6 @@ impl StateDb {
         &mut self,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
-    ) -> anyhow::Result<crate::rebuild::RebuildReport> {
-        self.rebuild_projection_generation_inner(None, runtime_liveness, Some(cas_mutation_guard))
-    }
-
-    fn rebuild_projection_generation_inner(
-        &mut self,
-        observer: Option<&dyn ProjectionRecoveryObserver>,
-        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-        cas_mutation_guard: Option<&crate::recovery::CasMutationGuard>,
     ) -> anyhow::Result<crate::rebuild::RebuildReport> {
         let runtime_state_dir = self
             .cas_root
@@ -2186,8 +2198,8 @@ impl StateDb {
             &self.recovery,
             self.trust_store.as_ref(),
             runtime_liveness,
-            observer,
-            cas_mutation_guard,
+            None,
+            Some(cas_mutation_guard),
         )?;
         let old_projection = std::mem::replace(&mut self.projection, new_projection);
         drop(old_projection);
@@ -2449,6 +2461,13 @@ impl StateDb {
         ))
     }
 
+    pub(crate) fn ensure_cas_mutation_guard(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)
+    }
+
     /// Refs root (`runtime_state_dir/refs`).
     pub fn refs_root(&self) -> &Path {
         &self.refs_root
@@ -2461,7 +2480,7 @@ impl StateDb {
             runtime_directory: self._runtime_state_directory.try_clone()?,
             cas_directory: self._cas_directory.try_clone()?,
             refs_directory: self._refs_directory.try_clone()?,
-            recovery: self.recovery.clone(),
+            recovery: Some(self.recovery.clone()),
             trust_store: Arc::clone(&self.trust_store),
         })
     }
@@ -2490,29 +2509,15 @@ impl StateDb {
     /// into SQLite. If head publication succeeds but projection fails, the
     /// returned committed write is pending and its durable transition remains
     /// available to the live repair worker and deterministic startup replay.
+    #[cfg(test)]
     pub fn create_chain(
         &self,
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<CreateResult>> {
-        self.create_chain_inner(chain_root_id, snapshot, signer, None, None)
-    }
-
-    pub fn create_chain_with_runtime_liveness(
-        &self,
-        chain_root_id: &str,
-        snapshot: ThreadSnapshot,
-        signer: &dyn Signer,
-        runtime_liveness: &dyn RuntimeLivenessInspector,
-    ) -> anyhow::Result<CommittedWrite<CreateResult>> {
-        self.create_chain_inner(
-            chain_root_id,
-            snapshot,
-            signer,
-            Some(runtime_liveness),
-            None,
-        )
+        let guard = self.pinned_authority()?.acquire_shared_guard()?;
+        self.create_chain_inner(chain_root_id, snapshot, signer, None, &guard)
     }
 
     pub fn create_chain_admitted(
@@ -2528,7 +2533,7 @@ impl StateDb {
             snapshot,
             signer,
             Some(runtime_liveness),
-            Some(cas_mutation_guard),
+            cas_mutation_guard,
         )
     }
 
@@ -2538,17 +2543,9 @@ impl StateDb {
         snapshot: ThreadSnapshot,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-        cas_mutation_guard: Option<&crate::recovery::CasMutationGuard>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<CreateResult>> {
-        let _owned_cas_mutation_guard = match cas_mutation_guard {
-            Some(guard) => {
-                guard.ensure_protects_cas_root(&self.cas_root)?;
-                None
-            }
-            None => Some(crate::recovery::CasMutationGuard::shared_from_cas_root(
-                &self.cas_root,
-            )?),
-        };
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
             &self._refs_directory,
             &self._cas_directory,
@@ -2615,29 +2612,15 @@ impl StateDb {
     ///
     /// Delegates to [`chain::add_thread_to_chain`] then projects the snapshot.
     /// Same CAS-first contract as [`Self::create_chain`].
+    #[cfg(test)]
     pub fn add_thread(
         &self,
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<CreateResult>> {
-        self.add_thread_inner(chain_root_id, snapshot, signer, None, None)
-    }
-
-    pub fn add_thread_with_runtime_liveness(
-        &self,
-        chain_root_id: &str,
-        snapshot: ThreadSnapshot,
-        signer: &dyn Signer,
-        runtime_liveness: &dyn RuntimeLivenessInspector,
-    ) -> anyhow::Result<CommittedWrite<CreateResult>> {
-        self.add_thread_inner(
-            chain_root_id,
-            snapshot,
-            signer,
-            Some(runtime_liveness),
-            None,
-        )
+        let guard = self.pinned_authority()?.acquire_shared_guard()?;
+        self.add_thread_inner(chain_root_id, snapshot, signer, None, &guard)
     }
 
     pub fn add_thread_admitted(
@@ -2653,7 +2636,7 @@ impl StateDb {
             snapshot,
             signer,
             Some(runtime_liveness),
-            Some(cas_mutation_guard),
+            cas_mutation_guard,
         )
     }
 
@@ -2663,17 +2646,9 @@ impl StateDb {
         snapshot: ThreadSnapshot,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-        cas_mutation_guard: Option<&crate::recovery::CasMutationGuard>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<CreateResult>> {
-        let _owned_cas_mutation_guard = match cas_mutation_guard {
-            Some(guard) => {
-                guard.ensure_protects_cas_root(&self.cas_root)?;
-                None
-            }
-            None => Some(crate::recovery::CasMutationGuard::shared_from_cas_root(
-                &self.cas_root,
-            )?),
-        };
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
             &self._refs_directory,
             &self._cas_directory,
@@ -2751,6 +2726,7 @@ impl StateDb {
     ///
     /// Delegates to [`chain::append_events`], then projects each event and
     /// each snapshot update into SQLite. Same CAS-first contract.
+    #[cfg(test)]
     pub fn append_events(
         &self,
         chain_root_id: &str,
@@ -2759,6 +2735,7 @@ impl StateDb {
         snapshot_updates: Vec<SnapshotUpdate>,
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AppendResult>> {
+        let guard = self.pinned_authority()?.acquire_shared_guard()?;
         self.append_events_inner(
             chain_root_id,
             thread_id,
@@ -2766,27 +2743,7 @@ impl StateDb {
             snapshot_updates,
             signer,
             None,
-            None,
-        )
-    }
-
-    pub fn append_events_with_runtime_liveness(
-        &self,
-        chain_root_id: &str,
-        thread_id: &str,
-        events: Vec<ThreadEvent>,
-        snapshot_updates: Vec<SnapshotUpdate>,
-        signer: &dyn Signer,
-        runtime_liveness: &dyn RuntimeLivenessInspector,
-    ) -> anyhow::Result<CommittedWrite<AppendResult>> {
-        self.append_events_inner(
-            chain_root_id,
-            thread_id,
-            events,
-            snapshot_updates,
-            signer,
-            Some(runtime_liveness),
-            None,
+            &guard,
         )
     }
 
@@ -2807,7 +2764,7 @@ impl StateDb {
             snapshot_updates,
             signer,
             Some(runtime_liveness),
-            Some(cas_mutation_guard),
+            cas_mutation_guard,
         )
     }
 
@@ -2819,21 +2776,13 @@ impl StateDb {
         snapshot_updates: Vec<SnapshotUpdate>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-        cas_mutation_guard: Option<&crate::recovery::CasMutationGuard>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<AppendResult>> {
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::append_events cannot persist ephemeral events");
         }
 
-        let _owned_cas_mutation_guard = match cas_mutation_guard {
-            Some(guard) => {
-                guard.ensure_protects_cas_root(&self.cas_root)?;
-                None
-            }
-            None => Some(crate::recovery::CasMutationGuard::shared_from_cas_root(
-                &self.cas_root,
-            )?),
-        };
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
             &self._refs_directory,
             &self._cas_directory,
@@ -2934,6 +2883,7 @@ impl StateDb {
     ///
     /// This is used for relation-bearing child creation where a thread must not
     /// become durable without the events that define what kind of child it is.
+    #[cfg(test)]
     pub fn add_thread_with_events(
         &self,
         chain_root_id: &str,
@@ -2941,25 +2891,8 @@ impl StateDb {
         events: Vec<ThreadEvent>,
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
-        self.add_thread_with_events_inner(chain_root_id, snapshot, events, signer, None, None)
-    }
-
-    pub fn add_thread_with_events_and_runtime_liveness(
-        &self,
-        chain_root_id: &str,
-        snapshot: ThreadSnapshot,
-        events: Vec<ThreadEvent>,
-        signer: &dyn Signer,
-        runtime_liveness: &dyn RuntimeLivenessInspector,
-    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
-        self.add_thread_with_events_inner(
-            chain_root_id,
-            snapshot,
-            events,
-            signer,
-            Some(runtime_liveness),
-            None,
-        )
+        let guard = self.pinned_authority()?.acquire_shared_guard()?;
+        self.add_thread_with_events_inner(chain_root_id, snapshot, events, signer, None, &guard)
     }
 
     pub fn add_thread_with_events_admitted(
@@ -2977,7 +2910,7 @@ impl StateDb {
             events,
             signer,
             Some(runtime_liveness),
-            Some(cas_mutation_guard),
+            cas_mutation_guard,
         )
     }
 
@@ -2988,21 +2921,13 @@ impl StateDb {
         events: Vec<ThreadEvent>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-        cas_mutation_guard: Option<&crate::recovery::CasMutationGuard>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::add_thread_with_events cannot persist ephemeral events");
         }
 
-        let _owned_cas_mutation_guard = match cas_mutation_guard {
-            Some(guard) => {
-                guard.ensure_protects_cas_root(&self.cas_root)?;
-                None
-            }
-            None => Some(crate::recovery::CasMutationGuard::shared_from_cas_root(
-                &self.cas_root,
-            )?),
-        };
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
             &self._refs_directory,
             &self._cas_directory,
@@ -3105,7 +3030,9 @@ impl StateDb {
         project_hash: &str,
         project_snapshot_hash: &str,
         signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
@@ -3131,7 +3058,9 @@ impl StateDb {
         new_snapshot_hash: &str,
         expected_current_hash: &str,
         signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
@@ -3168,7 +3097,9 @@ impl StateDb {
         project_hash: &str,
         project_snapshot_hash: &str,
         signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         let _project_lock = crate::refs::DeployedProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
@@ -3192,7 +3123,9 @@ impl StateDb {
         new_snapshot_hash: &str,
         expected_current_hash: &str,
         signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         let _project_lock = crate::refs::DeployedProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
@@ -3216,7 +3149,9 @@ impl StateDb {
         name: &str,
         target_hash: &str,
         signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         if namespace == "chains" {
             anyhow::bail!("chain-head publication requires an admitted CAS mutation guard");
         }
@@ -3718,7 +3653,9 @@ impl StateDb {
         new_target_hash: &str,
         expected_current_hash: Option<&str>,
         signer: &dyn Signer,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
         if namespace == "chains" {
             anyhow::bail!("chain-head publication requires an admitted CAS mutation guard");
         }
@@ -3914,7 +3851,7 @@ impl StateDb {
         crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
         cas_guard.ensure_protects_pinned_runtime(&self._runtime_state_directory)?;
         let cas = self.pinned_cas()?;
-        bundle_events::append_bundle_event_admitted_pinned(
+        bundle_events::append_bundle_event_pinned(
             &cas,
             &self._refs_directory,
             request,
@@ -3952,6 +3889,46 @@ impl StateDb {
             bundle_id,
             event_kind,
             self.trust_store.as_ref(),
+        )
+    }
+
+    pub fn read_bundle_event_chain_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        chain_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> anyhow::Result<BundleEventChainPage> {
+        bundle_events::read_bundle_event_chain_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            chain_id,
+            cursor,
+            limit,
+            max_serialized_bytes,
+        )
+    }
+
+    pub fn scan_bundle_events_page(
+        &self,
+        bundle_id: &str,
+        event_kind: &str,
+        cursor: Option<&BundleEventScanCursor>,
+        limit: usize,
+        max_serialized_bytes: usize,
+    ) -> anyhow::Result<BundleEventScanPage> {
+        bundle_events::scan_bundle_events_page(
+            &self.cas_root,
+            &self.refs_root,
+            bundle_id,
+            event_kind,
+            cursor,
+            limit,
+            max_serialized_bytes,
         )
     }
 
@@ -5371,13 +5348,13 @@ mod tests {
             .unwrap();
 
         let first = crate::sync::export_chain(
-            source.cas_root(),
-            source.refs_root(),
+            source.cas_root().parent().unwrap(),
             "T-root",
             source.head_trust_store(),
         )
         .unwrap();
-        let staged = crate::sync::stage_chain_import(target.cas_root(), &first).unwrap();
+        let staged =
+            crate::sync::stage_chain_import(target.cas_root().parent().unwrap(), &first).unwrap();
         let guard = crate::CasMutationGuard::shared_from_cas_root(target.cas_root()).unwrap();
         crate::sync::finalize_import(&target, staged, &signer, &guard).unwrap();
 
@@ -5390,13 +5367,13 @@ mod tests {
             .value
             .chain_state_hash;
         let second = crate::sync::export_chain(
-            source.cas_root(),
-            source.refs_root(),
+            source.cas_root().parent().unwrap(),
             "T-root",
             source.head_trust_store(),
         )
         .unwrap();
-        let staged = crate::sync::stage_chain_import(target.cas_root(), &second).unwrap();
+        let staged =
+            crate::sync::stage_chain_import(target.cas_root().parent().unwrap(), &second).unwrap();
         crate::sync::finalize_import(&target, staged, &signer, &guard).unwrap();
 
         let imported = target

@@ -78,7 +78,10 @@ pub struct GcParams {
     /// project/deployed heads.
     #[serde(default)]
     pub deep: bool,
-    /// Purge executor/materialization caches under `.ai/state/cache`.
+    /// Purge rebuildable caches under `.ai/state/cache`. Request-owned
+    /// `cache/executions` workspaces and lock-owned `cache/verified-code`
+    /// generations are excluded because their in-memory lifelines are outside
+    /// CAS reachability and own cleanup.
     #[serde(default)]
     pub purge_cache: bool,
     /// Truncate `.ai/state/trace-events.ndjson`.
@@ -243,6 +246,15 @@ pub struct GcResult {
     pub duration_ms: u64,
 }
 
+/// Durable operational CAS roots that are not yet represented by signed refs.
+/// Object and blob identities remain distinct so a blob is never interpreted
+/// as a JSON closure root.
+#[derive(Debug, Clone, Default)]
+pub struct AdditionalCasRoots {
+    pub object_hashes: Vec<String>,
+    pub blob_hashes: Vec<String>,
+}
+
 /// Purge opt-in runtime-only state before CAS sweep.
 ///
 /// The caller should hold the daemon write barrier. This helper deliberately
@@ -255,6 +267,19 @@ pub fn purge_runtime_state(
     fire_retention: Option<retention::FireRetentionPolicy>,
     result: &mut GcResult,
 ) -> Result<Vec<retention::FireRetentionTarget>> {
+    let runtime_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
+        .ok_or_else(|| anyhow::anyhow!("runtime-state directory is absent"))?;
+    purge_runtime_state_in_directory(&runtime_directory, params, fire_retention, result)
+}
+
+/// Purge runtime-only state beneath the exact runtime directory selected by
+/// the owning state authority.
+pub fn purge_runtime_state_in_directory(
+    runtime_directory: &lillux::PinnedDirectory,
+    params: &GcParams,
+    fire_retention: Option<retention::FireRetentionPolicy>,
+    result: &mut GcResult,
+) -> Result<Vec<retention::FireRetentionTarget>> {
     // Chain heads and per-thread runtime/checkpoint state are deliberately not
     // touched here. The daemon owns the cross-store liveness view required to
     // retire one captured-policy-eligible terminal chain safely. Blind removal
@@ -262,18 +287,25 @@ pub fn purge_runtime_state(
     // resumable work.
 
     if params.deep || params.purge_cache {
-        let cache_dir = runtime_state_dir.join("cache");
-        remove_path_contents(&cache_dir, params.dry_run, result)?;
-        if !params.dry_run {
-            lillux::PinnedDirectory::open_or_create(&cache_dir)
+        let cache_name = std::ffi::OsStr::new("cache");
+        if let Some(cache_directory) = runtime_directory.open_child_directory(cache_name)? {
+            remove_rebuildable_cache_directory(&cache_directory, params.dry_run, result)?;
+        } else if !params.dry_run {
+            runtime_directory
+                .open_or_create_child(cache_name, 0o700)
                 .context("failed to establish runtime cache directory")?;
         }
     }
 
     if params.deep || params.truncate_trace {
-        let trace_path = runtime_state_dir.join("trace-events.ndjson");
+        let trace_path = runtime_directory.path().join("trace-events.ndjson");
         let before = result.freed_bytes;
-        truncate_file(&trace_path, params.dry_run, result)?;
+        truncate_file_in_directory(
+            runtime_directory,
+            std::ffi::OsStr::new("trace-events.ndjson"),
+            params.dry_run,
+            result,
+        )?;
         if result.freed_bytes > before {
             tracing::warn!(
                 path = %trace_path.display(),
@@ -287,8 +319,12 @@ pub fn purge_runtime_state(
     // Retention sweep: age/count-bound the append-only schedule fire history.
     // Each bound is independently content-authored; with both omitted this
     // pass is disabled, even for deep GC.
-    let fire_retention_targets =
-        retention::sweep_fire_jsonl(runtime_state_dir, fire_retention, params.dry_run, result)?;
+    let fire_retention_targets = retention::sweep_fire_jsonl_in_directory(
+        runtime_directory,
+        fire_retention,
+        params.dry_run,
+        result,
+    )?;
 
     Ok(fire_retention_targets)
 }
@@ -301,13 +337,18 @@ pub fn purge_runtime_state(
 /// `signer` is required only when `compact=true` (to update project head refs).
 /// Sweep-only GC doesn't need signing authority.
 pub fn run_gc(
-    cas_root: &Path,
-    refs_root: &Path,
+    runtime_state_dir: &Path,
     trust_store: &crate::refs::TrustStore,
     signer: Option<&dyn crate::Signer>,
     params: &GcParams,
 ) -> Result<GcResult> {
-    run_gc_with_additional_roots(cas_root, refs_root, trust_store, signer, params, &[])
+    run_gc_with_additional_roots(
+        runtime_state_dir,
+        trust_store,
+        signer,
+        params,
+        &AdditionalCasRoots::default(),
+    )
 }
 
 /// Run GC while preserving complete operational closures which are not yet
@@ -317,27 +358,24 @@ pub fn run_gc(
 /// already hold the same guard while it quiesces writers and snapshots the
 /// additional roots; same-thread exclusive acquisition is reentrant.
 pub fn run_gc_with_additional_roots(
-    cas_root: &Path,
-    refs_root: &Path,
+    runtime_state_dir: &Path,
     trust_store: &crate::refs::TrustStore,
     signer: Option<&dyn crate::Signer>,
     params: &GcParams,
-    additional_roots: &[String],
+    additional_roots: &AdditionalCasRoots,
 ) -> Result<GcResult> {
     params.validate()?;
-    let runtime_state_dir = cas_root
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("CAS root has no runtime-state parent"))?;
-    if refs_root.parent() != Some(runtime_state_dir) {
-        anyhow::bail!("CAS and refs roots do not share one runtime-state parent");
-    }
+    let runtime_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
+        .ok_or_else(|| anyhow::anyhow!("runtime-state directory is absent"))?;
     let cas_mutation_guard = if params.dry_run {
-        crate::recovery::CasMutationGuard::acquire_existing_exclusive(runtime_state_dir)?
+        crate::recovery::CasMutationGuard::acquire_existing_exclusive_in_pinned_runtime(
+            &runtime_directory,
+        )?
     } else {
-        crate::recovery::CasMutationGuard::exclusive_from_cas_root(cas_root)?
+        crate::recovery::CasMutationGuard::acquire_exclusive_in_pinned_runtime(&runtime_directory)?
     };
-    let authority = crate::PinnedStateAuthority::open_existing(
-        runtime_state_dir,
+    let authority = crate::PinnedStateAuthority::from_pinned_runtime(
+        runtime_directory,
         std::sync::Arc::new(trust_store.clone()),
         !params.dry_run,
     )?;
@@ -362,14 +400,13 @@ pub fn run_gc_with_pinned_authority(
     cas_mutation_guard: &crate::recovery::CasMutationGuard,
     signer: Option<&dyn crate::Signer>,
     params: &GcParams,
-    additional_roots: &[String],
+    additional_roots: &AdditionalCasRoots,
 ) -> Result<GcResult> {
     params.validate()?;
     if !cas_mutation_guard.is_exclusive() {
         anyhow::bail!("GC requires an exclusive CAS mutation guard");
     }
     authority.ensure_guard(cas_mutation_guard)?;
-
     let started = Instant::now();
     let mut result = GcResult::default();
     let recovery = authority.recovery();
@@ -378,25 +415,30 @@ pub fn run_gc_with_pinned_authority(
     if !params.dry_run {
         if let Some(max_age_seconds) = params.durable_cas_upload_max_age_seconds {
             let cutoff = iso8601_seconds_ago(max_age_seconds);
-            result.retired_durable_cas_uploads = recovery
+            result.retired_durable_cas_uploads = authority
+                .require_recovery()?
                 .retire_durable_cas_uploads_created_before(&cutoff, cas_mutation_guard)
                 .context("retire abandoned durable CAS upload stages")?;
         }
     }
-    let staged_roots = if params.dry_run {
-        recovery.inspect_staged_cas_root_hashes_read_only()?
-    } else {
-        recovery.active_staged_cas_root_hashes()?
+    let staged_roots = match (recovery, params.dry_run) {
+        (Some(recovery), true) => recovery.inspect_staged_cas_root_hashes_read_only()?,
+        (Some(recovery), false) => recovery.active_staged_cas_root_hashes()?,
+        (None, true) => crate::recovery::StagedCasRootHashes::default(),
+        (None, false) => anyhow::bail!("mutable GC requires recovery authority"),
     };
     let mut operational_roots = additional_roots
+        .object_hashes
         .iter()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    operational_roots.extend(
-        recovery
-            .pending_transition_object_roots()
-            .context("read pending chain-head transition roots before CAS sweep")?,
-    );
+    if let Some(recovery) = recovery {
+        operational_roots.extend(
+            recovery
+                .pending_transition_object_roots()
+                .context("read pending chain-head transition roots before CAS sweep")?,
+        );
+    }
     operational_roots.extend(staged_roots.object_hashes.iter().cloned());
 
     if params.compact {
@@ -442,10 +484,19 @@ pub fn run_gc_with_pinned_authority(
     reachable
         .blob_hashes
         .extend(staged_roots.blob_hashes.iter().cloned());
+    for hash in &additional_roots.blob_hashes {
+        if !lillux::valid_hash(hash) || hash.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            anyhow::bail!("invalid additional GC blob root: {hash}");
+        }
+        cas.get_blob(hash)?
+            .ok_or_else(|| anyhow::anyhow!("additional GC blob root is absent: {hash}"))?;
+        reachable.blob_hashes.insert(hash.clone());
+    }
 
     result.roots_walked = reachable.authoritative_root_count
         + operational_roots.len()
-        + staged_roots.blob_hashes.len();
+        + staged_roots.blob_hashes.len()
+        + additional_roots.blob_hashes.len();
     result.reachable_objects = reachable.object_hashes.len();
     result.reachable_blobs = reachable.blob_hashes.len();
 
@@ -648,14 +699,6 @@ fn validate_cas_shard_component(component: &str, parent: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_path_contents(path: &Path, dry_run: bool, result: &mut GcResult) -> Result<()> {
-    let Some(directory) = lillux::PinnedDirectory::open(path)? else {
-        return Ok(());
-    };
-    remove_directory_contents(&directory, dry_run, result)?;
-    Ok(())
-}
-
 fn remove_directory_contents(
     directory: &lillux::PinnedDirectory,
     dry_run: bool,
@@ -692,14 +735,58 @@ fn remove_directory_contents(
     Ok(())
 }
 
-fn truncate_file(path: &Path, dry_run: bool, result: &mut GcResult) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let Some(directory) = lillux::PinnedDirectory::open(parent)? else {
-        return Ok(());
-    };
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("runtime trace path has no filename"))?;
+/// Remove rebuildable cache entries without touching live execution roots.
+///
+/// `cache/executions` contains pushed-snapshot checkouts and isolated
+/// no-project workspaces whose `TempDirGuard`s own cleanup. The sandbox's
+/// `cache/verified-code` generations are likewise protected by process-held
+/// lifetime locks and remove themselves when their runtime generation drops.
+/// A deep maintenance pass cannot infer either in-memory liveness state here,
+/// so it must never recursively unlink those directories.
+fn remove_rebuildable_cache_directory(
+    cache_directory: &lillux::PinnedDirectory,
+    dry_run: bool,
+    result: &mut GcResult,
+) -> Result<()> {
+    for name in cache_directory.entry_names()? {
+        if matches!(name.to_str(), Some("executions" | "verified-code")) {
+            continue;
+        }
+        if let Some(child) = cache_directory.open_child_directory(&name)? {
+            remove_directory_contents(&child, dry_run, result)?;
+            if !dry_run {
+                if !cache_directory.remove_empty_child_if_same(&name, &child)? {
+                    anyhow::bail!(
+                        "runtime cache directory changed while being purged: {}",
+                        child.path().display()
+                    );
+                }
+            }
+            continue;
+        }
+        let file = cache_directory.open_regular(&name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "runtime cache entry disappeared: {}",
+                cache_directory.path().join(&name).display()
+            )
+        })?;
+        let file_size = file.metadata()?.len();
+        if !dry_run {
+            cache_directory.remove_if_same(&name, &file)?;
+        }
+        result.deleted_runtime_files += 1;
+        result.freed_bytes += file_size;
+    }
+    Ok(())
+}
+
+fn truncate_file_in_directory(
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    dry_run: bool,
+    result: &mut GcResult,
+) -> Result<()> {
+    let path = directory.path().join(name);
     let Some(file) = directory.open_regular(name, !dry_run)? else {
         return Ok(());
     };
@@ -856,7 +943,7 @@ mod tests {
             ..GcParams::default()
         };
 
-        let result = run_gc(&cas_root, &refs_root, &trust_store, Some(&signer), &params).unwrap();
+        let result = run_gc(tmp.path(), &trust_store, Some(&signer), &params).unwrap();
 
         assert!(result.compaction.is_some());
         let compaction = result.compaction.unwrap();
@@ -897,7 +984,7 @@ mod tests {
             ..GcParams::default()
         };
 
-        let result = run_gc(&cas_root, &refs_root, &trust_store, Some(&signer), &params).unwrap();
+        let result = run_gc(tmp.path(), &trust_store, Some(&signer), &params).unwrap();
         assert_eq!(result.deleted_objects, 0);
         assert_eq!(result.deleted_blobs, 0);
         assert!(result.compaction.is_none());
@@ -942,8 +1029,7 @@ mod tests {
         drop(cas_guard);
 
         let result = run_gc(
-            &cas_root,
-            &refs_root,
+            &runtime_state_dir,
             &crate::refs::TrustStore::new(),
             None,
             &GcParams::default(),
@@ -1094,6 +1180,8 @@ mod tests {
         let bundle_event_ref =
             runtime_state_dir.join("refs/generic/bundle_events/email/event/head");
         let cache_file = runtime_state_dir.join("cache/executors/hash/runtime/bin");
+        let execution_file = runtime_state_dir.join("cache/executions/live/project.yaml");
+        let verified_code_file = runtime_state_dir.join("cache/verified-code/generation/digest");
         let trace_file = runtime_state_dir.join("trace-events.ndjson");
         let thread_meta = runtime_state_dir.join("threads/T-1/meta.json");
         let thread_checkpoint = runtime_state_dir.join("threads/T-1/checkpoints/ck.bin");
@@ -1102,11 +1190,15 @@ mod tests {
         fs::create_dir_all(project_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(bundle_event_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(execution_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(verified_code_file.parent().unwrap()).unwrap();
         fs::create_dir_all(thread_checkpoint.parent().unwrap()).unwrap();
         fs::write(&chain_ref, b"chain").unwrap();
         fs::write(&project_ref, b"project").unwrap();
         fs::write(&bundle_event_ref, b"bundle-event").unwrap();
         fs::write(&cache_file, b"cache").unwrap();
+        fs::write(&execution_file, b"active workspace").unwrap();
+        fs::write(&verified_code_file, b"verified bytes").unwrap();
         fs::write(&trace_file, b"trace line\n").unwrap();
         fs::write(&thread_meta, b"meta").unwrap();
         fs::write(&thread_checkpoint, b"ckpt").unwrap();
@@ -1129,6 +1221,14 @@ mod tests {
         assert!(
             !cache_file.exists(),
             "deep purge should drop executor cache files"
+        );
+        assert!(
+            execution_file.exists(),
+            "deep purge must not unlink request-owned execution workspaces"
+        );
+        assert!(
+            verified_code_file.exists(),
+            "deep purge must not unlink active verified-code generations"
         );
         assert_eq!(
             fs::metadata(&trace_file).unwrap().len(),

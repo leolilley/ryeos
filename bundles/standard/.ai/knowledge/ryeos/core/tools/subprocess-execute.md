@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-05T00:57:59Z:7c2c9cc7b1aab4fc5516ad7f67a04f34dced88bd7c9b09057c6dc2c497683d71:KYeS/gcxmlkITZ65coHjR4ECtr25+ZjddnAgbakMXwfQ7UVzB/4tMGMYmz/abxrNK4cZCfiWBpQqeRICMZZsBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T01:54:46Z:35fb0a062cc197bf83d07375656a0e55731adfd186cbe9b0f53297e8f55117ba:cBH287LggilPnKLwM3zBAIJODie3ck1n5VBjFO9ZL8E1MVEmE6PZM7p8E08dbEgH2++MQVSbfEXDZ1FmDhqUDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/tools
 tags: [tool, subprocess, executor]
-version: "1.0.0"
+version: "1.1.0"
 description: Subprocess execute tool reference.
 ---
 
@@ -24,3 +24,7 @@ config:
 The `config_schema` on this terminal describes the wrapper `config:` block consumed by `@subprocess`; it is not a public caller-parameter schema for direct execution.
 
 It owns command construction, working directory, environment, timeout, process group, and native async/resume metadata for generic subprocess execution.
+
+After this terminal constructs the request, the engine applies the node's
+immutable sandbox snapshot before Lillux spawn. Tools cannot override policy or
+activation. See [Execution Sandbox](../node/execution-sandbox.md).

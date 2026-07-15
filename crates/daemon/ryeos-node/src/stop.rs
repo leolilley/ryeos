@@ -1,9 +1,7 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::status::LifecycleStatus;
 use crate::LocalLifecycleEnv;
@@ -31,7 +29,7 @@ pub struct StopReport {
 
 pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopReport> {
     let initial = crate::status::status(env).await?;
-    let initial_live_uds: Option<PathBuf> = match initial {
+    match initial {
         LifecycleStatus::NotInitialized { .. } => {
             bail!("RyeOS is not initialized. Run: ryeos init")
         }
@@ -44,41 +42,35 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
         LifecycleStatus::Stale { diagnostics, .. } => {
             bail!("stale daemon metadata: {}", diagnostics.message)
         }
-        LifecycleStatus::Running { ref metadata, .. } => metadata.uds_path.clone(),
+        LifecycleStatus::Running { .. } => {}
         // Busy-but-alive: proceed with the normal stop flow — the graceful
         // shutdown call may itself time out, after which the deadline/force
         // path below applies.
-        LifecycleStatus::Unresponsive { ref metadata, .. } => metadata.uds_path.clone(),
+        LifecycleStatus::Unresponsive { .. } => {}
         LifecycleStatus::Starting {
-            ref metadata,
             control_available: true,
             ..
         }
-        | LifecycleStatus::Failed { ref metadata, .. } => metadata.uds_path.clone(),
+        | LifecycleStatus::Failed { .. } => {}
         LifecycleStatus::Starting { ref metadata, .. } => {
+            // No authenticated daemon socket exists yet, so the signal path
+            // cannot pin and verify the live peer. Booting clears on its own.
             bail!(
                 "a daemon (pid {}) is starting but its control socket is not available yet; \
                  wait briefly, then retry stop",
                 metadata.pid.unwrap_or_default(),
             )
         }
-    };
+    }
 
-    // Send shutdown to the UDS that just proved the daemon is alive,
-    // falling back to the configured path only if status did not record
-    // one. Never blind-fire at a stale `daemon.json`-derived path.
-    let shutdown_uds = initial_live_uds
-        .clone()
-        .unwrap_or_else(|| env.config().uds_path.clone());
-    let _ = crate::control::call(
-        &shutdown_uds,
-        "lifecycle.shutdown",
-        json!({}),
-        env.rpc_timeout(),
-    )
-    .await;
+    // Runtime sandboxes receive the callback UDS, so privileged lifecycle
+    // control must never be routed over that socket. Signal the positively
+    // identified local daemon instead; SIGTERM enters the same graceful
+    // shutdown coordinator as Ctrl-C.
+    signal_live_daemon(env, libc::SIGTERM).await?;
 
-    let deadline = Instant::now() + opts.timeout;
+    let mut deadline = Instant::now() + opts.timeout;
+    let mut forced = false;
     loop {
         let status = crate::status::status(env).await?;
         match status {
@@ -101,15 +93,16 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
         }
 
         if Instant::now() >= deadline {
-            if opts.force {
-                // Re-confirm the LIVE pid + uds path right before
-                // signalling. The pid captured at the start of stop()
-                // may already be stale if the daemon restarted during
-                // the graceful-stop window. Fail closed if reconfirm
-                // fails or if the live daemon does not report a pid.
-                let (pid, _) = reconfirm_live_pid(env).await?;
-                force_kill(pid)?;
+            if opts.force && !forced {
+                // Reconnect to the live socket and pin its kernel-authenticated
+                // peer before escalation. Never signal a daemon.json PID.
+                signal_live_daemon(env, libc::SIGKILL).await?;
+                forced = true;
+                deadline = Instant::now() + Duration::from_secs(2);
                 continue;
+            }
+            if forced {
+                bail!("daemon remained live after pidfd SIGKILL escalation");
             }
             bail!("timed out waiting for graceful shutdown; try: ryeos stop --force");
         }
@@ -117,48 +110,78 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
     }
 }
 
-/// Re-probe `lifecycle.status` against the currently live UDS and
-/// return its `(pid, uds_path)`. Fails when no live daemon responds,
-/// when the live daemon does not report a pid, or when both candidate
-/// UDS paths refuse the RPC.
-async fn reconfirm_live_pid(env: &LocalLifecycleEnv) -> Result<(u32, PathBuf)> {
+/// Connect to the configured live control/callback socket, take the kernel's
+/// peer PID (rather than trusting daemon.json or an RPC field), pin that exact
+/// incarnation with a pidfd, verify it is ryeosd, and signal through the pidfd.
+async fn signal_live_daemon(env: &LocalLifecycleEnv, signal: libc::c_int) -> Result<()> {
     let timeout = env.rpc_timeout();
     for candidate in env.uds_candidates() {
-        let value =
-            match crate::control::call(&candidate, "lifecycle.status", json!({}), timeout).await {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-
-        let response: crate::LifecycleResponse = match serde_json::from_value(value) {
-            Ok(response) => response,
-            Err(_) => continue,
-        };
-        if response.validate().is_err()
-            || response.identity.app_root != env.config().app_root
-            || response.identity.uds_path != candidate
+        let stream = match tokio::time::timeout(
+            timeout,
+            tokio::net::UnixStream::connect(&candidate),
+        )
+        .await
         {
+            Ok(Ok(stream)) => stream,
+            _ => continue,
+        };
+        let Some(pid) = stream
+            .peer_cred()
+            .context("read daemon socket peer credentials")?
+            .pid()
+        else {
             continue;
+        };
+        if signal_verified_ryeosd_peer(&stream, pid as u32, signal).is_ok() {
+            return Ok(());
         }
-        return Ok((response.identity.pid, candidate));
     }
     Err(anyhow::anyhow!(
-        "cannot force stop: no daemon responded to live status reconfirmation"
+        "cannot stop: no configured socket had a verifiable live ryeosd peer"
     ))
 }
 
-fn force_kill(pid: u32) -> Result<()> {
-    #[cfg(unix)]
+fn signal_verified_ryeosd_peer(
+    stream: &tokio::net::UnixStream,
+    pid: u32,
+    signal: libc::c_int,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
     {
-        // Fail-closed PID verification: if we cannot positively confirm
-        // the target pid is a `ryeosd`, do not signal it.
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let mut raw_pidfd: libc::c_int = -1;
+        let mut value_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERPIDFD,
+                (&mut raw_pidfd as *mut libc::c_int).cast(),
+                &mut value_len,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("capture daemon socket peer with SO_PEERPIDFD");
+        }
+        if value_len as usize != std::mem::size_of::<libc::c_int>() || raw_pidfd < 0 {
+            bail!("SO_PEERPIDFD returned an invalid daemon descriptor");
+        }
+        // SAFETY: successful SO_PEERPIDFD installed a new owned descriptor.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
         verify_expected_ryeosd_pid(pid)?;
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0u32,
+            )
+        };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
-            // ESRCH: pid is gone — benign. The daemon may have just
-            // exited gracefully between reconfirm and signal; let the
-            // caller loop re-probe status.
             if err.raw_os_error() == Some(libc::ESRCH) {
                 return Ok(());
             }
@@ -167,10 +190,10 @@ fn force_kill(pid: u32) -> Result<()> {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
-        let _ = pid;
-        bail!("force stop is not supported on this platform")
+        let _ = (stream, pid, signal);
+        bail!("pidfd lifecycle stop is not supported on this platform")
     }
 }
 

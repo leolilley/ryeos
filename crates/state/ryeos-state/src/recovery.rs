@@ -426,15 +426,6 @@ impl Drop for DurableCasUploadStage {
 }
 
 impl StagedCasRootLease {
-    pub fn store_object(
-        &mut self,
-        cas: &lillux::cas::CasStore,
-        value: &serde_json::Value,
-    ) -> Result<String> {
-        let guard = CasMutationGuard::acquire_shared(self.runtime_state_dir()?)?;
-        self.store_object_admitted(&guard, cas, value)
-    }
-
     pub fn store_object_admitted(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -449,11 +440,6 @@ impl StagedCasRootLease {
             anyhow::bail!("staged CAS object hash mismatch: expected {expected}, got {stored}");
         }
         Ok(stored)
-    }
-
-    pub fn store_blob(&mut self, cas: &lillux::cas::CasStore, bytes: &[u8]) -> Result<String> {
-        let guard = CasMutationGuard::acquire_shared(self.runtime_state_dir()?)?;
-        self.store_blob_admitted(&guard, cas, bytes)
     }
 
     pub fn store_blob_admitted(
@@ -472,11 +458,6 @@ impl StagedCasRootLease {
         Ok(stored)
     }
 
-    pub fn protect_object_hash(&mut self, hash: &str) -> Result<()> {
-        let guard = CasMutationGuard::acquire_shared(self.runtime_state_dir()?)?;
-        self.protect_object_hash_admitted(&guard, hash)
-    }
-
     pub fn protect_object_hash_admitted(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -489,11 +470,6 @@ impl StagedCasRootLease {
                 .write_staged_roots(&self.directory, &self.record)?;
         }
         Ok(())
-    }
-
-    pub fn protect_blob_hash(&mut self, hash: &str) -> Result<()> {
-        let guard = CasMutationGuard::acquire_shared(self.runtime_state_dir()?)?;
-        self.protect_blob_hash_admitted(&guard, hash)
     }
 
     pub fn protect_blob_hash_admitted(
@@ -514,15 +490,6 @@ impl StagedCasRootLease {
     /// publication. Callers that verified a head closure while holding the CAS
     /// mutation guard use this before releasing that guard, so omitted but
     /// already-local descendants cannot be swept between staging and publish.
-    pub fn protect_cas_closure<'a, O, B>(&mut self, object_hashes: O, blob_hashes: B) -> Result<()>
-    where
-        O: IntoIterator<Item = &'a str>,
-        B: IntoIterator<Item = &'a str>,
-    {
-        let guard = CasMutationGuard::acquire_shared(self.runtime_state_dir()?)?;
-        self.protect_cas_closure_admitted(&guard, object_hashes, blob_hashes)
-    }
-
     pub fn protect_cas_closure_admitted<'a, O, B>(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -557,17 +524,11 @@ impl StagedCasRootLease {
         Ok(())
     }
 
-    pub fn finish(&mut self) -> Result<()> {
-        self.release_inner()
-    }
-
     /// Release this lease using an already-held CAS mutation guard. This is
     /// the admitted path for callers that also hold a later lock in the global
     /// mutation hierarchy (for example the daemon StateStore mutex).
     pub fn finish_admitted(&mut self, cas_mutation_guard: &CasMutationGuard) -> Result<()> {
-        if let Err(error) =
-            self.recovery.ensure_guard(cas_mutation_guard)
-        {
+        if let Err(error) = self.recovery.ensure_guard(cas_mutation_guard) {
             // Never let Drop reacquire the first lock while a caller may hold
             // later hierarchy locks. The durable record becomes an abandoned
             // lease and the next exclusive GC pass reclaims it safely.
@@ -581,15 +542,6 @@ impl StagedCasRootLease {
             drop(self.lock_file.take());
         }
         result
-    }
-
-    fn release_inner(&mut self) -> Result<()> {
-        if self.lock_file.is_none() {
-            return Ok(());
-        }
-        let runtime_state_dir = self.runtime_state_dir()?;
-        let _cas_guard = CasMutationGuard::acquire_shared(runtime_state_dir)?;
-        self.release_inner_admitted()
     }
 
     fn release_inner_admitted(&mut self) -> Result<()> {
@@ -613,21 +565,14 @@ impl StagedCasRootLease {
         drop(lock_file);
         Ok(())
     }
-
-    fn runtime_state_dir(&self) -> Result<&Path> {
-        self.recovery
-            .root
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| anyhow::anyhow!("recovery root has no runtime-state parent"))
-    }
 }
 
 impl Drop for StagedCasRootLease {
     fn drop(&mut self) {
-        if let Err(error) = self.release_inner() {
-            tracing::warn!(error = %error, lease_id = %self.record.lease_id, "failed to release staged CAS roots");
-        }
+        // Dropping a lease never reopens a path and never removes its durable
+        // roots. Without an explicitly admitted finish, leave the record for
+        // the exclusive GC recovery pass and only release the live lease lock.
+        drop(self.lock_file.take());
     }
 }
 
@@ -698,22 +643,101 @@ pub struct CasMutationGuard {
 }
 
 impl CasMutationGuard {
+    pub(crate) fn acquire_existing_shared_in_pinned_runtime(
+        runtime: &lillux::PinnedDirectory,
+    ) -> Result<Self> {
+        let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
+        if exclusive_depth != 0 {
+            let file = current_guard_file_for_pinned_runtime(runtime)?;
+            EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
+            return Ok(Self {
+                _file: file,
+                exclusive: false,
+                depth: GuardDepth::Exclusive,
+                _not_send: std::marker::PhantomData,
+            });
+        }
+        let shared_depth = SHARED_CAS_GUARD_DEPTH.with(Cell::get);
+        if shared_depth != 0 {
+            let file = current_guard_file_for_pinned_runtime(runtime)?;
+            SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
+            return Ok(Self {
+                _file: file,
+                exclusive: false,
+                depth: GuardDepth::Shared,
+                _not_send: std::marker::PhantomData,
+            });
+        }
+
+        let recovery = runtime
+            .open_child_directory(std::ffi::OsStr::new("recovery"))?
+            .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
+        let file = recovery
+            .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), true)?
+            .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("acquire pinned CAS mutation/sweep lock");
+            }
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("CAS mutation/sweep locking is unavailable on this platform");
+        let file = Rc::new(file);
+        CAS_GUARD_FILE.with(|current| {
+            let previous = current.borrow_mut().replace(Rc::clone(&file));
+            debug_assert!(previous.is_none());
+        });
+        SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
+        Ok(Self {
+            _file: file,
+            exclusive: false,
+            depth: GuardDepth::Shared,
+            _not_send: std::marker::PhantomData,
+        })
+    }
+
     pub(crate) fn acquire_exclusive_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
+    ) -> Result<Self> {
+        Self::acquire_exclusive_in_pinned_runtime_mode(runtime, true)
+    }
+
+    pub(crate) fn acquire_existing_exclusive_in_pinned_runtime(
+        runtime: &lillux::PinnedDirectory,
+    ) -> Result<Self> {
+        Self::acquire_exclusive_in_pinned_runtime_mode(runtime, false)
+    }
+
+    fn acquire_exclusive_in_pinned_runtime_mode(
+        runtime: &lillux::PinnedDirectory,
+        create: bool,
     ) -> Result<Self> {
         if EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
             || SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0
         {
             anyhow::bail!("pinned CAS mutation guard cannot be acquired reentrantly");
         }
-        let recovery = runtime.open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)?;
-        let file = recovery.open_regular_create(
-            std::ffi::OsStr::new("cas-mutation.lock"),
-            true,
-            false,
-            0o600,
-        )?;
-        recovery.sync()?;
+        let recovery_name = std::ffi::OsStr::new("recovery");
+        let recovery = if create {
+            runtime.open_or_create_child(recovery_name, 0o700)?
+        } else {
+            runtime
+                .open_child_directory(recovery_name)?
+                .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?
+        };
+        let lock_name = std::ffi::OsStr::new("cas-mutation.lock");
+        let file = if create {
+            let file = recovery.open_regular_create(lock_name, true, false, 0o600)?;
+            recovery.sync()?;
+            file
+        } else {
+            recovery
+                .open_regular(lock_name, false)?
+                .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?
+        };
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -1002,6 +1026,38 @@ fn current_guard_file_for(runtime_state_dir: &Path) -> Result<Rc<File>> {
     Ok(held)
 }
 
+fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> Result<Rc<File>> {
+    let held = CAS_GUARD_FILE.with(|file| {
+        file.borrow()
+            .as_ref()
+            .cloned()
+            .expect("reentrant CAS guard depth without lock file")
+    });
+    let recovery = runtime
+        .open_child_directory(std::ffi::OsStr::new("recovery"))?
+        .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
+    let expected = recovery
+        .open_regular(std::ffi::OsStr::new("cas-mutation.lock"), false)?
+        .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
+    let expected = expected
+        .metadata()
+        .context("inspect pinned CAS mutation lock")?;
+    let held_metadata = held.metadata().context("inspect held CAS mutation lock")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if expected.dev() != held_metadata.dev() || expected.ino() != held_metadata.ino() {
+            anyhow::bail!(
+                "held CAS mutation guard does not protect pinned runtime {}",
+                runtime.path().display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("CAS mutation/sweep locking is unavailable on this platform");
+    Ok(held)
+}
+
 impl RecoveryStore {
     pub fn from_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
         let runtime = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
@@ -1085,11 +1141,6 @@ impl RecoveryStore {
     fn open_or_create_child_directory(&self, name: &str) -> Result<lillux::PinnedDirectory> {
         self.directory
             .open_or_create_child(std::ffi::OsStr::new(name), 0o700)
-    }
-
-    pub fn begin_staged_cas_roots(&self, purpose: &str) -> Result<StagedCasRootLease> {
-        let guard = CasMutationGuard::acquire_shared(self.runtime_state_dir()?)?;
-        self.begin_staged_cas_roots_admitted(&guard, purpose)
     }
 
     pub fn begin_staged_cas_roots_admitted(
@@ -2397,15 +2448,25 @@ mod tests {
     fn staged_cas_roots_are_active_until_finished() {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
-        let mut lease = store.begin_staged_cas_roots("test-import").unwrap();
-        lease.protect_object_hash(&hash("a")).unwrap();
-        lease.protect_blob_hash(&hash("b")).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let mut lease = store
+            .begin_staged_cas_roots_admitted(&guard, "test-import")
+            .unwrap();
+        lease
+            .protect_object_hash_admitted(&guard, &hash("a"))
+            .unwrap();
+        lease
+            .protect_blob_hash_admitted(&guard, &hash("b"))
+            .unwrap();
 
         let active = store.active_staged_cas_root_hashes().unwrap();
         assert_eq!(active.object_hashes, vec![hash("a")]);
         assert_eq!(active.blob_hashes, vec![hash("b")]);
 
-        lease.finish().unwrap();
+        lease.finish_admitted(&guard).unwrap();
         let active = store.active_staged_cas_root_hashes().unwrap();
         assert!(active.object_hashes.is_empty());
         assert!(active.blob_hashes.is_empty());
@@ -2415,9 +2476,19 @@ mod tests {
     fn staged_cas_root_read_only_inspection_preserves_namespace() {
         let temp = tempfile::tempdir().unwrap();
         let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
-        let mut lease = store.begin_staged_cas_roots("test-dry-run").unwrap();
-        lease.protect_object_hash(&hash("a")).unwrap();
-        lease.protect_blob_hash(&hash("b")).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_shared_in_pinned_runtime(store.runtime_directory())
+                .unwrap();
+        let mut lease = store
+            .begin_staged_cas_roots_admitted(&guard, "test-dry-run")
+            .unwrap();
+        lease
+            .protect_object_hash_admitted(&guard, &hash("a"))
+            .unwrap();
+        lease
+            .protect_blob_hash_admitted(&guard, &hash("b"))
+            .unwrap();
         let staged_dir = temp.path().join("recovery/staged-cas-roots");
         let before = fs::read_dir(&staged_dir).unwrap().count();
 
@@ -2426,7 +2497,7 @@ mod tests {
         assert_eq!(roots.object_hashes, vec![hash("a")]);
         assert_eq!(roots.blob_hashes, vec![hash("b")]);
         assert_eq!(fs::read_dir(&staged_dir).unwrap().count(), before);
-        lease.finish().unwrap();
+        lease.finish_admitted(&guard).unwrap();
     }
 
     #[test]

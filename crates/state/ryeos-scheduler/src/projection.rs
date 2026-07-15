@@ -132,6 +132,37 @@ pub fn append_jsonl_entry<T: serde::Serialize>(path: &Path, entry: &T) -> Result
         .context("fire journal append requires the current FireRecord shape")?;
     ensure_fire_journal_parent(path)?;
     let lock = lillux::ExclusiveFileLock::acquire(path)?;
+    append_fire_jsonl_entry_with_lock(&lock, path, &entry)
+}
+
+/// Append beneath an already-pinned schedule directory.
+pub fn append_fire_jsonl_entry_in_directory<T: serde::Serialize>(
+    schedule_directory: &lillux::PinnedDirectory,
+    expected_schedule_id: &str,
+    entry: &T,
+) -> Result<()> {
+    super::crontab::validate_schedule_id(expected_schedule_id)?;
+    let entry: FireRecord = serde_json::from_value(serde_json::to_value(entry)?)
+        .context("fire journal append requires the current FireRecord shape")?;
+    if entry.schedule_id != expected_schedule_id {
+        bail!(
+            "scheduler fire {} belongs to {}, not {}",
+            entry.fire_id,
+            entry.schedule_id,
+            expected_schedule_id
+        );
+    }
+    let name = std::ffi::OsStr::new("fires.jsonl");
+    let lock = lillux::ExclusiveFileLock::acquire_in(schedule_directory, name)?;
+    let path = schedule_directory.path().join(name);
+    append_fire_jsonl_entry_with_lock(&lock, &path, &entry)
+}
+
+fn append_fire_jsonl_entry_with_lock(
+    lock: &lillux::ExclusiveFileLock,
+    path: &Path,
+    entry: &FireRecord,
+) -> Result<()> {
     let mut file = lock
         .open_target_append_create()
         .with_context(|| format!("open fires journal {}", path.display()))?;
@@ -349,6 +380,79 @@ pub fn rebuild_fires_from_dir(fires_dir: &Path, db: &SchedulerDb) -> Result<()> 
     Ok(())
 }
 
+/// Rebuild `schedule_fires` from an already-pinned runtime root.
+pub fn rebuild_fires_from_runtime_directory(
+    runtime_directory: &lillux::PinnedDirectory,
+    db: &SchedulerDb,
+) -> Result<()> {
+    db.begin_fire_projection_rebuild()?;
+    let Some(schedules_directory) =
+        runtime_directory.open_child_directory(std::ffi::OsStr::new("schedules"))?
+    else {
+        db.finish_fire_projection_rebuild()?;
+        return Ok(());
+    };
+
+    for schedule_name in schedules_directory.entry_names()? {
+        let schedule_id = schedule_name
+            .to_str()
+            .context("scheduler fire directory name must be UTF-8")?;
+        super::crontab::validate_schedule_id(schedule_id)?;
+        let schedule_directory = schedules_directory
+            .open_child_directory(&schedule_name)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "scheduler fires root contains unsupported entry {}",
+                    schedules_directory.path().join(&schedule_name).display()
+                )
+            })?;
+
+        let mut has_journal = false;
+        for entry_name in schedule_directory.entry_names()? {
+            match entry_name.to_str() {
+                Some(".fires.jsonl.lock") => {
+                    schedule_directory
+                        .open_regular(&entry_name, false)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "scheduler fire lock is not a regular file: {}",
+                                schedule_directory.path().join(&entry_name).display()
+                            )
+                        })?;
+                }
+                Some("fires.jsonl") => {
+                    schedule_directory
+                        .open_regular(&entry_name, false)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "scheduler fire journal is not a regular file: {}",
+                                schedule_directory.path().join(&entry_name).display()
+                            )
+                        })?;
+                    has_journal = true;
+                }
+                _ => bail!(
+                    "scheduler fire directory contains unsupported entry {}",
+                    schedule_directory.path().join(&entry_name).display()
+                ),
+            }
+        }
+        if has_journal {
+            let name = std::ffi::OsStr::new("fires.jsonl");
+            let lock = lillux::ExclusiveFileLock::acquire_existing_in(&schedule_directory, name)?;
+            rebuild_fire_projection_with_lock(
+                &lock,
+                &schedule_directory.path().join(name),
+                schedule_id,
+                db,
+            )?;
+        }
+    }
+
+    db.finish_fire_projection_rebuild()?;
+    Ok(())
+}
+
 /// Parse a canonical JSONL journal and upsert its latest legal snapshots.
 fn rebuild_fire_projection(
     jsonl_path: &Path,
@@ -356,6 +460,15 @@ fn rebuild_fire_projection(
     db: &SchedulerDb,
 ) -> Result<()> {
     let lock = lillux::ExclusiveFileLock::acquire(jsonl_path)?;
+    rebuild_fire_projection_with_lock(&lock, jsonl_path, expected_schedule, db)
+}
+
+fn rebuild_fire_projection_with_lock(
+    lock: &lillux::ExclusiveFileLock,
+    jsonl_path: &Path,
+    expected_schedule: &str,
+    db: &SchedulerDb,
+) -> Result<()> {
     let file = lock
         .open_target_read()
         .with_context(|| format!("read {}", jsonl_path.display()))?;

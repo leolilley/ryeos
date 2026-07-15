@@ -119,7 +119,8 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
         (core_root, TrustClass::TrustedBundle),
         (std_root, TrustClass::TrustedBundle),
     ];
-    let registry = HandlerRegistry::load_base(&tagged_roots, &trust_store).unwrap_or_else(|err| {
+    let registry = HandlerRegistry::load_base_for_authoring(&tagged_roots, &trust_store)
+        .unwrap_or_else(|err| {
         let detail = format!("{err:?}");
         if detail.contains("not in trust store") {
             panic!(
@@ -133,7 +134,7 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
             );
         }
         panic!("live HandlerRegistry must load from bundles/{{core,standard}}/: {detail}");
-    });
+        });
     Arc::new(registry)
 }
 

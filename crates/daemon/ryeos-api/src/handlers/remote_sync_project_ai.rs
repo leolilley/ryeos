@@ -67,9 +67,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // remote would later reject (e.g. `__pycache__/`, `*.pyc`) are
     // dropped before we POST the manifest.
     let remote_ignore = ryeos_app::ignore::IgnoreMatcher::from_config(&remote_cfg.ingest_ignore)?;
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
     let push = push_project_ai_only(
         &client,
         &state,
+        &authority,
         &binding.local_project_path,
         &binding.remote_project_path,
         Some(&remote_ignore),

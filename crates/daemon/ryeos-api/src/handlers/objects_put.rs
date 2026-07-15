@@ -56,18 +56,16 @@ pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified()
         .map_err(|error| anyhow::anyhow!(error))?;
-    let cas_guard =
-        ryeos_state::CasMutationGuard::acquire_shared(&state.config.runtime_state_dir())?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;
-    authority.ensure_guard(&cas_guard)?;
+    let cas_guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
     let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
-    let recovery = authority.recovery();
+    let recovery = authority.require_recovery()?;
     let canonical_project_path =
         ryeos_executor::execution::project_source::canonical_project_ref(&req.project_path)
             .map_err(|error| anyhow::anyhow!("objects.put: {error}"))?;

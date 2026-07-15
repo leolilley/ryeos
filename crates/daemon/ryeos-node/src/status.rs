@@ -296,7 +296,6 @@ mod tests {
             app_root: root.join("state"),
             bind: "127.0.0.1:7400".parse::<SocketAddr>().unwrap(),
             uds_path: root.join("runtime/ryeosd.sock"),
-            sandbox_enabled: false,
         }
     }
 

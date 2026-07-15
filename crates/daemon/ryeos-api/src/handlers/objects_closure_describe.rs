@@ -92,7 +92,11 @@ pub(crate) fn collect_limited_closure(
     req: &Request,
     state: Arc<AppState>,
 ) -> Result<ryeos_state::object_closure::ObjectClosureReport> {
-    let cas = state.cas_store()?;
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let _cas_guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
     collect_limited_closure_with_cas(req, &cas)
 }
 

@@ -60,10 +60,11 @@ pub struct ImportResult {
 
 /// A verified chain payload whose imported objects remain durable GC roots
 /// until [`finalize_import`] publishes and projects the authoritative head.
-/// Dropping an unfinished value abandons the import and releases its roots;
-/// callers cannot accidentally finalize a hash unrelated to the staged
-/// payload because the identity is carried privately by this token.
-#[must_use = "a staged chain import must be finalized or explicitly abandoned"]
+/// Dropping an unfinished value abandons the import but deliberately leaves
+/// its durable record for the exclusive GC recovery pass; callers cannot
+/// accidentally finalize a hash unrelated to the staged payload because the
+/// identity is carried privately by this token.
+#[must_use = "a staged chain import must be finalized"]
 pub struct StagedChainImport {
     pub result: ImportResult,
     chain_root_id: String,
@@ -83,21 +84,14 @@ pub struct ImportAttribution {
     pub job_id: Option<String>,
 }
 
-/// Standalone pathname adapter for exporting a chain + linked projects.
-///
-/// This pins the runtime, refs, and CAS directories once at entry and retains
-/// a shared CAS-mutation guard for the complete export. Callers operating from
-/// an already-open [`StateDb`] authority should retain their admitted guard
-/// and call [`export_chain_pinned`] instead of converting descriptors back to
-/// paths.
+/// Standalone export rooted in one runtime-state authority.
 pub fn export_chain(
-    cas_root: &Path,
-    refs_root: &Path,
+    runtime_state_dir: &Path,
     chain_root_id: &str,
     trust_store: &crate::refs::TrustStore,
 ) -> Result<ExportPayload> {
     let (_cas_mutation_guard, cas, refs_directory) =
-        pin_standalone_export_authority(cas_root, refs_root)?;
+        pin_standalone_export_authority(runtime_state_dir)?;
     export_chain_pinned(&cas, &refs_directory, chain_root_id, trust_store)
 }
 
@@ -163,20 +157,15 @@ pub fn export_chain_pinned(
     })
 }
 
-/// Standalone pathname adapter for a reconciled export.
-///
-/// The runtime authority is pinned once and a shared CAS-mutation guard is
-/// retained for the complete operation. Already-open StateDb callers should
-/// use [`reconcile_export_pinned`] with their descriptor-bound authority.
+/// Standalone reconciled export rooted in one runtime-state authority.
 pub fn reconcile_export(
-    cas_root: &Path,
-    refs_root: &Path,
+    runtime_state_dir: &Path,
     chain_root_id: &str,
     remote_has: &HashSet<String>,
     trust_store: &crate::refs::TrustStore,
 ) -> Result<ExportPayload> {
     let (_cas_mutation_guard, cas, refs_directory) =
-        pin_standalone_export_authority(cas_root, refs_root)?;
+        pin_standalone_export_authority(runtime_state_dir)?;
     reconcile_export_pinned(
         &cas,
         &refs_directory,
@@ -265,14 +254,55 @@ pub fn reconcile_export_pinned(
 ///
 /// The returned token must be consumed by [`finalize_import`] before its roots
 /// can be released safely.
-pub fn stage_chain_import(cas_root: &Path, payload: &ExportPayload) -> Result<StagedChainImport> {
-    let cas_mutation_guard = crate::recovery::CasMutationGuard::shared_from_cas_root(cas_root)?;
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    let runtime_state_dir = cas_root
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("CAS root has no runtime-state parent"))?;
-    let mut roots = crate::recovery::RecoveryStore::from_runtime_state_dir(runtime_state_dir)?
-        .begin_staged_cas_roots_admitted(&cas_mutation_guard, "chain-import")?;
+pub fn stage_chain_import(
+    runtime_state_dir: &Path,
+    payload: &ExportPayload,
+) -> Result<StagedChainImport> {
+    let runtime_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
+        .ok_or_else(|| anyhow::anyhow!("runtime-state directory is absent"))?;
+    let cas_mutation_guard =
+        crate::recovery::CasMutationGuard::acquire_existing_shared_in_pinned_runtime(
+            &runtime_directory,
+        )?;
+    let cas_directory = runtime_directory
+        .open_child_directory(std::ffi::OsStr::new("objects"))?
+        .ok_or_else(|| anyhow::anyhow!("CAS root is absent"))?;
+    let recovery_parent =
+        runtime_directory.open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)?;
+    let recovery_directory =
+        recovery_parent.open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)?;
+    let recovery = crate::RecoveryStore::from_pinned_directories(
+        runtime_directory.try_clone()?,
+        recovery_directory,
+    )?;
+    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    stage_chain_import_with_pinned_authority(&cas, &recovery, payload, &cas_mutation_guard)
+}
+
+/// Stage a remote chain payload using one captured runtime authority.
+///
+/// CAS writes, durable temporary roots, and closure verification are all
+/// descriptor-relative to `authority`. The caller must retain `guard` until
+/// this function returns; the returned durable lease then protects the exact
+/// verified closure until [`finalize_import`] consumes it.
+pub fn stage_chain_import_pinned(
+    authority: &crate::PinnedStateAuthority,
+    payload: &ExportPayload,
+    guard: &crate::CasMutationGuard,
+) -> Result<StagedChainImport> {
+    authority.ensure_guard(guard)?;
+    let cas = authority.cas_store()?;
+    stage_chain_import_with_pinned_authority(&cas, authority.require_recovery()?, payload, guard)
+}
+
+fn stage_chain_import_with_pinned_authority(
+    cas: &lillux::CasStore,
+    recovery: &crate::RecoveryStore,
+    payload: &ExportPayload,
+    guard: &crate::CasMutationGuard,
+) -> Result<StagedChainImport> {
+    recovery.ensure_guard(guard)?;
+    let mut roots = recovery.begin_staged_cas_roots_admitted(guard, "chain-import")?;
     let mut result = ImportResult::default();
 
     for entry in &payload.entries {
@@ -286,12 +316,12 @@ pub fn stage_chain_import(cas_root: &Path, payload: &ExportPayload) -> Result<St
         // Protect the expected hash durably before the first CAS write. The
         // lease spans the gap between this function and final head publication.
         if entry.is_blob {
-            roots.protect_blob_hash_admitted(&cas_mutation_guard, &entry.hash)?;
+            roots.protect_blob_hash_admitted(guard, &entry.hash)?;
         } else {
-            roots.protect_object_hash_admitted(&cas_mutation_guard, &entry.hash)?;
+            roots.protect_object_hash_admitted(guard, &entry.hash)?;
         }
 
-        let outcome = put_sync_entry(&cas, entry)?;
+        let outcome = put_sync_entry(cas, entry)?;
         if outcome.hash != entry.hash {
             anyhow::bail!(
                 "sync entry canonical hash mismatch: declared {}, canonical {}",
@@ -311,14 +341,14 @@ pub fn stage_chain_import(cas_root: &Path, payload: &ExportPayload) -> Result<St
     // CAS mutation guard still excludes sweep. Incremental payloads may omit
     // descendants already present locally, so lease the verified closure—not
     // merely the entries transported in this payload—before releasing it.
-    let closure = crate::rebuild::verified_repair_closure(
-        cas_root,
+    let closure = crate::rebuild::verified_repair_closure_with_cas(
+        cas,
         &payload.chain_root_id,
         &payload.chain_head_hash,
         true,
     )?;
     roots.protect_cas_closure_admitted(
-        &cas_mutation_guard,
+        guard,
         closure.object_hashes.iter().map(String::as_str),
         closure.blob_hashes.iter().map(String::as_str),
     )?;
@@ -406,7 +436,7 @@ fn put_sync_entry(cas: &lillux::CasStore, entry: &SyncEntry) -> Result<lillux::C
 }
 
 fn load_exact_staged_chain_head(
-    cas_root: &Path,
+    cas: &lillux::CasStore,
     chain_root_id: &str,
     chain_head_hash: &str,
 ) -> Result<crate::ChainState> {
@@ -417,7 +447,6 @@ fn load_exact_staged_chain_head(
     {
         anyhow::bail!("invalid staged chain head hash: {chain_head_hash}");
     }
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
     let value = cas
         .get_object(chain_head_hash)
         .with_context(|| format!("read exact staged chain head {chain_head_hash}"))?
@@ -454,8 +483,9 @@ pub fn finalize_import(
     cas_mutation_guard: &crate::CasMutationGuard,
 ) -> Result<ImportResult> {
     let operation = (|| -> Result<()> {
-        cas_mutation_guard.ensure_protects_cas_root(state_db.cas_root())?;
-        let cas_root = state_db.cas_root();
+        let authority = state_db.pinned_authority()?;
+        authority.ensure_guard(cas_mutation_guard)?;
+        let cas = authority.cas_store()?;
         if staged.result.hash_mismatches != 0 {
             anyhow::bail!(
                 "cannot finalize chain import with {} hash mismatch(es)",
@@ -468,14 +498,14 @@ pub fn finalize_import(
         // publication type contract, and a nested ChainState cannot stand in
         // for this exact hash.
         let _chain_state =
-            load_exact_staged_chain_head(cas_root, &staged.chain_root_id, &staged.chain_head_hash)?;
+            load_exact_staged_chain_head(&cas, &staged.chain_root_id, &staged.chain_head_hash)?;
 
         // Verify the complete imported closure and every genesis-to-target
         // ChainState transition again at the publication boundary, including
         // hashes of already-local descendants. StateDb repeats this under the
         // chain lock and anchors it to any current signed head before publication.
-        crate::rebuild::verify_repair_closure(
-            cas_root,
+        crate::rebuild::verify_repair_closure_with_cas(
+            &cas,
             &staged.chain_root_id,
             &staged.chain_head_hash,
             true,
@@ -572,32 +602,18 @@ fn verified_chain_reachability_pinned(
 }
 
 fn pin_standalone_export_authority(
-    cas_root: &Path,
-    refs_root: &Path,
+    runtime_state_dir: &Path,
 ) -> Result<(
     crate::CasMutationGuard,
     lillux::CasStore,
     lillux::PinnedDirectory,
 )> {
-    let runtime_state_dir = cas_root
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("CAS root has no runtime-state parent"))?;
-    if cas_root.file_name() != Some(std::ffi::OsStr::new("objects"))
-        || refs_root.parent() != Some(runtime_state_dir)
-        || refs_root.file_name() != Some(std::ffi::OsStr::new("refs"))
-    {
-        anyhow::bail!(
-            "standalone sync export requires sibling runtime-state objects and refs roots"
-        );
-    }
-
-    // Acquire the guard before pinning authority to preserve the global lock
-    // order. The inode comparison then rejects replacement between those two
-    // steps instead of allowing the adapter to combine generations.
-    let cas_mutation_guard = crate::CasMutationGuard::shared_from_cas_root(cas_root)?;
     let runtime_directory = lillux::PinnedDirectory::open(runtime_state_dir)?
         .ok_or_else(|| anyhow::anyhow!("runtime-state directory is absent"))?;
-    cas_mutation_guard.ensure_protects_pinned_runtime(&runtime_directory)?;
+    let cas_mutation_guard =
+        crate::recovery::CasMutationGuard::acquire_existing_shared_in_pinned_runtime(
+            &runtime_directory,
+        )?;
     let cas_directory = runtime_directory
         .open_child_directory(std::ffi::OsStr::new("objects"))?
         .ok_or_else(|| anyhow::anyhow!("CAS objects directory is absent"))?;
@@ -797,7 +813,7 @@ mod tests {
         write_signed_head(&refs_root, "T-root", &cs_hash);
 
         let trust_store = test_trust_store();
-        let payload = export_chain(&cas_root, &refs_root, "T-root", trust_store.as_ref()).unwrap();
+        let payload = export_chain(tmp.path(), "T-root", trust_store.as_ref()).unwrap();
         assert_eq!(payload.chain_root_id, "T-root");
         assert_eq!(payload.chain_head_hash, cs_hash);
         assert_eq!(payload.entries.len(), 2);
@@ -830,7 +846,7 @@ mod tests {
         let payload = minimal_chain_payload("T-test");
         let head_hash = payload.chain_head_hash.clone();
 
-        let staged = stage_chain_import(&cas_root, &payload).unwrap();
+        let staged = stage_chain_import(tmp.path(), &payload).unwrap();
         assert_eq!(staged.result.imported, 2);
         assert_eq!(staged.result.already_present, 0);
         assert_eq!(staged.result.hash_mismatches, 0);
@@ -841,7 +857,7 @@ mod tests {
         assert!(path.exists());
 
         // Re-import should be a no-op (already present)
-        let staged2 = stage_chain_import(&cas_root, &payload).unwrap();
+        let staged2 = stage_chain_import(tmp.path(), &payload).unwrap();
         assert_eq!(staged2.result.imported, 0);
         assert_eq!(staged2.result.already_present, 2);
     }
@@ -909,7 +925,7 @@ mod tests {
             total_bytes: 12,
         };
 
-        let error = stage_chain_import(&cas_root, &payload)
+        let error = stage_chain_import(tmp.path(), &payload)
             .err()
             .expect("corrupt staged head must fail closure verification");
         assert!(error.to_string().contains("incomplete CAS closure"));
@@ -931,7 +947,7 @@ mod tests {
         });
         payload.total_bytes += data.len();
 
-        let staged = stage_chain_import(&cas_root, &payload).unwrap();
+        let staged = stage_chain_import(tmp.path(), &payload).unwrap();
         assert_eq!(staged.result.imported, 3);
 
         let path = lillux::shard_path(&cas_root, "blobs", &hash, "");
@@ -952,7 +968,7 @@ mod tests {
         lillux::atomic_write(&snapshot_path, &snapshot.data).unwrap();
         payload.total_bytes -= snapshot.data.len();
 
-        let staged = stage_chain_import(&cas_root, &payload).unwrap();
+        let staged = stage_chain_import(tmp.path(), &payload).unwrap();
         let active = crate::RecoveryStore::from_runtime_state_dir(tmp.path())
             .unwrap()
             .active_staged_cas_root_hashes()
@@ -1041,14 +1057,8 @@ mod tests {
         remote_has.insert(cs_hash.clone());
 
         let trust_store = test_trust_store();
-        let payload = reconcile_export(
-            &cas_root,
-            &refs_root,
-            "T-root",
-            &remote_has,
-            trust_store.as_ref(),
-        )
-        .unwrap();
+        let payload =
+            reconcile_export(tmp.path(), "T-root", &remote_has, trust_store.as_ref()).unwrap();
         assert_eq!(payload.entries.len(), 1);
         assert_eq!(payload.entries[0].hash, snap_hash);
 
@@ -1164,7 +1174,7 @@ mod tests {
             ],
         };
 
-        let staged = stage_chain_import(cas_root, &payload).unwrap();
+        let staged = stage_chain_import(cas_root.parent().unwrap(), &payload).unwrap();
         let cas_guard = crate::CasMutationGuard::shared_from_cas_root(db.cas_root()).unwrap();
         finalize_import(&db, staged, &signer, &cas_guard).unwrap();
 

@@ -33,7 +33,6 @@ pub struct NodeConfig {
     pub app_root: PathBuf,
     pub bind: SocketAddr,
     pub uds_path: PathBuf,
-    pub sandbox_enabled: bool,
 }
 
 impl NodeConfig {
@@ -50,7 +49,6 @@ impl NodeConfig {
             app_root,
             bind,
             uds_path: runtime_root.join("ryeosd.sock"),
-            sandbox_enabled: false,
         })
     }
 
@@ -79,7 +77,6 @@ impl NodeConfig {
             app_root: config.app_root.clone(),
             bind: config.bind,
             uds_path: config.uds_path.clone(),
-            sandbox_enabled: config.sandbox_enabled,
         }
     }
 }

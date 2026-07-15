@@ -54,7 +54,8 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         .expect("derive composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, vec![core_root, std_root])
-        .with_trust_store(trust_store)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
         .with_composers(composers)
 }
 

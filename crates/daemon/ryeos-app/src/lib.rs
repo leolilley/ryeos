@@ -34,6 +34,7 @@ pub mod principal;
 pub mod process;
 pub mod projection_health;
 pub mod projection_repair;
+pub mod prospective_admission;
 pub mod recovery_execution_gate;
 pub mod route_diagnostics;
 pub mod route_raw;
