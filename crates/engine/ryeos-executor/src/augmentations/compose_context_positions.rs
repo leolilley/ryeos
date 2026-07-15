@@ -187,12 +187,18 @@ pub async fn run(
             requested_by: Some(principal_fingerprint.to_string()),
             project_root: match &plan_ctx.project_context {
                 ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                    Some(path.canonicalize().unwrap_or_else(|_| path.clone()))
+                    Some(path.canonicalize().map_err(|error| {
+                        LaunchAugmentationError::Threads(format!(
+                            "canonicalize augmentation project {}: {error}",
+                            path.display()
+                        ))
+                    })?)
                 }
                 _ => None,
             },
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy: None,
         })
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
@@ -358,11 +364,26 @@ pub async fn run(
         .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
 
         let executor_path = executor.path.clone();
-        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let executor_path_str = executor_path
+            .to_str()
+            .ok_or_else(|| {
+                LaunchAugmentationError::RuntimeRegistry(
+                    "resolved executor path is not valid UTF-8".to_string(),
+                )
+            })?
+            .to_owned();
         let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
             source_path: executor.path,
             content_hash: executor.content_hash,
         }];
+        let project_path_str = project_path
+            .to_str()
+            .ok_or_else(|| {
+                LaunchAugmentationError::RuntimeRegistry(
+                    "augmentation project path is not valid UTF-8".to_string(),
+                )
+            })?
+            .to_owned();
         let stdin_data = ryeos_engine::protocols::build_method_call_stdin(
             &runtime_protocol.descriptor,
             &envelope,
@@ -378,7 +399,8 @@ pub async fn run(
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
-        );
+        )
+        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
         let callback_socket_requested = runtime_protocol
             .descriptor
             .env_injections
@@ -404,8 +426,22 @@ pub async fn run(
                 .cas_root()
                 .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
             callback_token: Some(cap.token.clone()),
-            callback_socket_path: callback_socket_requested
-                .then(|| state.config.uds_path.to_string_lossy().into_owned()),
+            callback_socket_path: if callback_socket_requested {
+                Some(
+                    state
+                        .config
+                        .uds_path
+                        .to_str()
+                        .ok_or_else(|| {
+                            LaunchAugmentationError::RuntimeRegistry(
+                                "callback socket path is not valid UTF-8".to_string(),
+                            )
+                        })?
+                        .to_owned(),
+                )
+            } else {
+                None
+            },
             callback_project_path: Some(callback_project_path.clone()),
             thread_auth_token: thread_auth.as_ref().map(|auth| auth.token.clone()),
             params: envelope.payload.clone(),
@@ -453,7 +489,7 @@ pub async fn run(
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
-            cwd: Some(project_path.to_string_lossy().into_owned()),
+            cwd: Some(project_path_str),
             envs,
             stdin_data: Some(stdin_data),
             timeout: AUGMENTATION_RUNTIME_TIMEOUT_SECS as f64,

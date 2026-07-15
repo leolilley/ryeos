@@ -28,10 +28,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             anyhow::bail!("admission policy must not be empty");
         }
     }
+    let cas_read = state.acquire_cas_read()?;
     let attestations = state.state_store.with_state_db(|db| {
         db.list_admission_attestations_for_subject(&req.subject_hash, req.policy.as_deref())
     })?;
-    let cas_root = state.state_store.cas_root()?;
+    let cas = cas_read.cas();
     let local_issuer = format!("fp:{}", state.identity.fingerprint());
 
     Ok(serde_json::json!({
@@ -42,7 +43,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             .map(|record| {
                 admission_attestation_to_json(
                     record,
-                    &cas_root,
+                    cas,
                     &local_issuer,
                     state.identity.verifying_key(),
                 )
@@ -53,31 +54,24 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
 fn admission_attestation_to_json(
     record: ryeos_state::AdmissionAttestationRecord,
-    cas_root: &std::path::Path,
+    cas: &lillux::CasStore,
     local_issuer: &str,
     local_key: &lillux::crypto::VerifyingKey,
 ) -> Result<Value> {
-    let path = lillux::shard_path(cas_root, "objects", &record.attestation_hash, ".json");
-    let bytes = std::fs::read(&path).with_context(|| {
-        format!(
-            "failed to read indexed admission attestation {}",
-            record.attestation_hash
-        )
-    })?;
-    let actual = lillux::sha256_hex(&bytes);
-    if actual != record.attestation_hash {
-        anyhow::bail!(
-            "indexed admission attestation hash mismatch: expected {}, got {}",
-            record.attestation_hash,
-            actual
-        );
-    }
-    let attestation_value: Value = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "failed to parse indexed admission attestation {}",
-            record.attestation_hash
-        )
-    })?;
+    let attestation_value: Value = cas
+        .get_object(&record.attestation_hash)
+        .with_context(|| {
+            format!(
+                "failed to read indexed admission attestation {}",
+                record.attestation_hash
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "indexed admission attestation {} is missing",
+                record.attestation_hash
+            )
+        })?;
     let attestation = ryeos_state::Attestation::from_value(&attestation_value)?;
     if attestation.subject_hash != record.subject_hash
         || attestation.policy != record.policy

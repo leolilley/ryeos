@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use anyhow::{anyhow, Context, Result};
+use arc_swap::{ArcSwap, ArcSwapOption};
 use serde_json::json;
 use tokio::net::UnixListener;
-use tokio::sync::{watch, Semaphore};
-use tokio::task::JoinSet;
+use tokio::sync::Semaphore;
 
 #[cfg(test)]
 use crate::uds::protocol::{RpcRequest, RpcResponse};
@@ -20,6 +20,9 @@ use ryeos_app::event_store_service::{
 };
 use ryeos_app::live_input_queue::MAX_LIVE_INPUT_POLL_RESPONSE_BYTES;
 use ryeos_app::runtime_item_author_service::{RuntimeAuthorItemParams, RuntimeItemAuthorService};
+use ryeos_app::runtime_project_snapshot_service::{
+    RuntimeProjectSnapshotRequest, RuntimeProjectSnapshotService,
+};
 use ryeos_app::runtime_vault_service::{
     RuntimeVaultListParams, RuntimeVaultPutParams, RuntimeVaultRefParams, RuntimeVaultService,
 };
@@ -35,6 +38,172 @@ mod transport;
 
 #[cfg(test)]
 pub(crate) use routing::dispatch;
+
+struct DynamicServerInner {
+    lifecycle: ArcSwap<ryeos_node::LifecycleResponse>,
+    application: ArcSwapOption<AppState>,
+}
+
+/// Request-level UDS publication state. The listener can begin serving with
+/// only lifecycle identity/progress, then publish AppState once callbacks are
+/// safe. Each frame reloads this state, so a connection accepted during boot
+/// observes later application and Ready publication.
+#[derive(Clone)]
+pub struct DynamicServerState {
+    inner: Arc<DynamicServerInner>,
+}
+
+impl DynamicServerState {
+    pub fn bootstrap(lifecycle: ryeos_node::LifecycleResponse) -> Result<Self> {
+        lifecycle
+            .validate()
+            .map_err(|message| anyhow!("invalid initial lifecycle response: {message}"))?;
+        Ok(Self {
+            inner: Arc::new(DynamicServerInner {
+                lifecycle: ArcSwap::from_pointee(lifecycle),
+                application: ArcSwapOption::empty(),
+            }),
+        })
+    }
+
+    pub fn publish_application(&self, state: Arc<AppState>) {
+        self.inner.application.store(Some(state));
+    }
+
+    pub fn unpublish_application(&self) {
+        self.inner.application.store(None);
+    }
+
+    pub fn publish_lifecycle(&self, lifecycle: ryeos_node::LifecycleResponse) -> Result<()> {
+        lifecycle
+            .validate()
+            .map_err(|message| anyhow!("invalid lifecycle response: {message}"))?;
+        let current = self.lifecycle();
+        if lifecycle.identity != current.identity {
+            anyhow::bail!("lifecycle identity cannot change after listener publication");
+        }
+        if current.status != ryeos_node::LifecycleWireState::Starting {
+            anyhow::bail!("terminal lifecycle state cannot be republished");
+        }
+        if lifecycle.startup.sequence <= current.startup.sequence {
+            anyhow::bail!("lifecycle publication sequence must increase");
+        }
+        if lifecycle.ready && self.inner.application.load().is_none() {
+            anyhow::bail!("cannot publish Ready before application state");
+        }
+        self.inner.lifecycle.store(Arc::new(lifecycle));
+        Ok(())
+    }
+
+    pub fn lifecycle(&self) -> Arc<ryeos_node::LifecycleResponse> {
+        self.inner.lifecycle.load_full()
+    }
+
+    pub fn application_is_published(&self) -> bool {
+        self.inner.application.load().is_some()
+    }
+
+    fn application(&self) -> Option<Arc<AppState>> {
+        self.inner.application.load_full()
+    }
+}
+
+pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
+    let dynamic = DynamicServerState::bootstrap(ready_lifecycle_response(&state))?;
+    dynamic.publish_application(state);
+    serve_dynamic(listener, dynamic).await
+}
+
+pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) -> Result<()> {
+    let mut connections = tokio::task::JoinSet::new();
+    let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
+    let frame_bytes = Arc::new(Semaphore::new(MAX_UDS_IN_FLIGHT_FRAME_BYTES));
+    let mut shutdown_rx = crate::subscribe_shutdown();
+    let shutdown = async move {
+        // Subscribe before checking the flag so a request racing listener startup
+        // is observed either through the durable process-local flag or the channel.
+        if crate::shutdown_requested() {
+            return;
+        }
+        match shutdown_rx.as_mut() {
+            Some(receiver) => {
+                let _ = receiver.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(shutdown);
+
+    let listener_result = loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break Ok(()),
+            permit = Arc::clone(&connection_slots).acquire_owned() => {
+                let connection_permit = permit.context("UDS connection semaphore closed")?;
+                let accepted = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break Ok(()),
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error).context("uds accept failed"),
+                };
+                let state = state.clone();
+                let frame_bytes = Arc::clone(&frame_bytes);
+                connections.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    transport::handle_connection(stream, state, frame_bytes).await
+                });
+            }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(joined) = joined {
+                    report_connection_exit(joined);
+                }
+            }
+        }
+    };
+
+    // No connection may outlive the supervised UDS listener. In particular,
+    // shutdown must cancel frames already blocked in reads or runtime dispatch.
+    connections.abort_all();
+    while let Some(joined) = connections.join_next().await {
+        report_connection_exit(joined);
+    }
+
+    listener_result
+}
+
+fn report_connection_exit(joined: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "uds connection error"),
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => tracing::error!(%error, "uds connection task failed"),
+    }
+}
+
+fn ready_lifecycle_response(state: &AppState) -> ryeos_node::LifecycleResponse {
+    let ready_at = lillux::time::iso8601_now();
+    let build = ryeos_app::build_info::get();
+    let identity = ryeos_node::LifecycleIdentity {
+        pid: std::process::id(),
+        bind: state.config.bind.to_string(),
+        uds_path: state.config.uds_path.clone(),
+        app_root: state.config.app_root.clone(),
+        started_at: state.started_at_iso.clone(),
+        version: build.version.to_string(),
+        revision: Some(build.revision.to_string()),
+        build_date: Some(build.build_date.to_string()),
+    };
+    let mut startup = ryeos_node::StartupSnapshot::bootstrapping(&state.started_at_iso);
+    startup.phase_started_at = ready_at.clone();
+    startup.elapsed_ms = state.started_at.elapsed().as_millis() as u64;
+    let mut response = ryeos_node::LifecycleResponse::running(identity, ready_at, startup);
+    response.thread_projection =
+        serde_json::to_value(state.state_store.projection_health_snapshot()).ok();
+    response
+}
 
 /// Kernel-authenticated identity of the process that opened this Unix stream.
 /// The pidfd, not the reusable numeric PID, remains authoritative for the
@@ -58,73 +227,6 @@ impl AuthenticatedUnixPeer {
 
 const MAX_UDS_CONNECTIONS: usize = 32;
 const MAX_UDS_IN_FLIGHT_FRAME_BYTES: usize = 32 * 1024 * 1024;
-
-pub async fn serve(
-    listener: UnixListener,
-    state: Arc<AppState>,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
-    let frame_bytes = Arc::new(Semaphore::new(MAX_UDS_IN_FLIGHT_FRAME_BYTES));
-    let mut connections = JoinSet::new();
-
-    loop {
-        let connection_permit = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-                continue;
-            }
-            joined = connections.join_next(), if !connections.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    tracing::warn!(error = %error, "UDS connection task failed");
-                }
-                continue;
-            }
-            permit = Arc::clone(&connection_slots).acquire_owned() => {
-                permit.context("UDS connection semaphore closed")?
-            }
-        };
-        let (stream, _) = tokio::select! {
-            biased;
-            changed = shutdown.changed() => {
-                drop(connection_permit);
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-                continue;
-            }
-            accepted = listener.accept() => accepted.context("uds accept failed")?,
-        };
-        let state = state.clone();
-        let frame_bytes = Arc::clone(&frame_bytes);
-        let connection_shutdown = shutdown.clone();
-        connections.spawn(async move {
-            let _connection_permit = connection_permit;
-            if let Err(err) =
-                transport::handle_connection(stream, state, frame_bytes, connection_shutdown).await
-            {
-                tracing::warn!(error = %err, "uds connection error");
-            }
-        });
-    }
-
-    // Stop the kernel accept surface immediately, then let each admitted
-    // connection finish its current decoded request. Idle persistent callback
-    // streams observe `shutdown` in the transport and leave without consuming
-    // the grace period. The daemon coordinator owns the one absolute shutdown
-    // deadline; aborting this server task at that deadline drops the JoinSet and
-    // aborts any connection tasks still waiting on an unbounded inline request.
-    drop(listener);
-    while let Some(joined) = connections.join_next().await {
-        if let Err(error) = joined {
-            tracing::warn!(error = %error, "UDS connection task failed while draining");
-        }
-    }
-    Ok(())
-}
 
 const TRANSPORT_FIELDS: &[&str] = &["callback_token", "thread_auth_token"];
 
@@ -176,7 +278,10 @@ pub(crate) async fn dispatch_runtime_method(
             .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
-    } else if matches!(method, "runtime.poll_input" | "runtime.author_item") {
+    } else if matches!(
+        method,
+        "runtime.poll_input" | "runtime.author_item" | "runtime.project_snapshot"
+    ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
         // runtime holds: the per-request thread_auth_token (like dispatch_action)
@@ -193,7 +298,7 @@ pub(crate) async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         let thread_auth = state.thread_auth.validate(tat, thread_id)?;
-        if method == "runtime.author_item" {
+        if matches!(method, "runtime.author_item" | "runtime.project_snapshot") {
             validated_thread_auth = Some(thread_auth);
         }
         let token = params
@@ -268,6 +373,12 @@ pub(crate) async fn dispatch_runtime_method(
             handle_runtime_vault_list(&clean_params, state, callback_cap.as_ref())
         }
         "runtime.author_item" => handle_runtime_author_item(
+            &clean_params,
+            state,
+            callback_cap.as_ref(),
+            validated_thread_auth.as_ref(),
+        ),
+        "runtime.project_snapshot" => handle_runtime_project_snapshot(
             &clean_params,
             state,
             callback_cap.as_ref(),
@@ -989,6 +1100,19 @@ fn handle_runtime_author_item(
     .context("failed to encode runtime.author_item result")
 }
 
+fn handle_runtime_project_snapshot(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    thread_auth: Option<&ryeos_app::callback_token::ThreadAuthState>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let thread_auth = thread_auth.ok_or_else(|| anyhow::anyhow!("missing thread auth state"))?;
+    let params: RuntimeProjectSnapshotRequest = serde_json::from_value(params.clone())
+        .context("invalid runtime.project_snapshot params")?;
+    RuntimeProjectSnapshotService::execute(state, cap, thread_auth, params)
+}
+
 async fn handle_submit_command(
     params: &serde_json::Value,
     state: &AppState,
@@ -1136,7 +1260,7 @@ mod tests {
     use ryeos_app::identity::NodeIdentity;
     use ryeos_app::kind_profiles::KindProfileRegistry;
     use ryeos_app::state::AppState;
-    use ryeos_app::state_store::StateStore;
+    use ryeos_app::state_store::{NewThreadRecord, StateStore};
     use ryeos_app::thread_lifecycle::{
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
@@ -1208,16 +1332,38 @@ mod tests {
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            identity.verifying_key().clone(),
+        );
         let write_barrier = WriteBarrier::new();
         let state_store = Arc::new(
-            StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier).unwrap(),
+            StateStore::new_with_head_trust(
+                tmpdir.path().to_path_buf(),
+                runtime_state_dir,
+                runtime_db_path,
+                signer,
+                write_barrier,
+                Arc::new(head_trust),
+            )
+            .unwrap(),
         );
+        let engine = Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ));
         let kind_profiles = Arc::new(KindProfileRegistry::build(None));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
             ThreadLifecycleService::new(
                 state_store.clone(),
+                engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
@@ -1230,14 +1376,6 @@ mod tests {
             events.clone(),
         ));
 
-        let engine = ryeos_engine::engine::Engine::new(
-            ryeos_engine::kind_registry::KindRegistry::empty(),
-            ryeos_engine::parsers::ParserDispatcher::new(
-                ryeos_engine::parsers::ParserRegistry::empty(),
-                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-            ),
-            Vec::new(),
-        );
         let test_command_registry = Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         );
@@ -1247,7 +1385,7 @@ mod tests {
             config: Arc::new(config),
             sandbox: Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
             state_store,
-            engine: Arc::new(engine),
+            engine,
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -1276,6 +1414,9 @@ mod tests {
                 hosted_node_policies: vec![],
                 command_registration_policy: Default::default(),
             }),
+            node_history_policy: Arc::new(
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            ),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),
                 lillux::vault::VaultSecretKey::generate(),
@@ -1293,6 +1434,21 @@ mod tests {
     }
 
     fn make_create_params(thread_id: &str, chain_root_id: &str) -> ThreadCreateParams {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "test/directive".to_string(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                },
+            }
+        });
         ThreadCreateParams {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
@@ -1307,6 +1463,7 @@ mod tests {
             project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy,
         }
     }
 
@@ -1326,6 +1483,23 @@ mod tests {
         resp.error.as_ref().expect("expected error")
     }
 
+    fn bootstrap_lifecycle(tmp: &TempDir) -> ryeos_node::LifecycleResponse {
+        let started_at = "2026-07-14T00:00:00Z";
+        ryeos_node::LifecycleResponse::starting(
+            ryeos_node::LifecycleIdentity {
+                pid: 42,
+                bind: "127.0.0.1:7400".into(),
+                uds_path: tmp.path().join("ryeosd.sock"),
+                app_root: tmp.path().to_path_buf(),
+                started_at: started_at.into(),
+                version: "test".into(),
+                revision: None,
+                build_date: None,
+            },
+            ryeos_node::StartupSnapshot::bootstrapping(started_at),
+        )
+    }
+
     // ── system methods ──────────────────────────────────────────────
 
     #[tokio::test]
@@ -1342,6 +1516,61 @@ mod tests {
         let resp = dispatch(rpc("lifecycle.status", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "running");
+        assert_eq!(rpc_ok(&resp)["schema"], 1);
+        assert_eq!(rpc_ok(&resp)["ready"], true);
+        assert_eq!(rpc_ok(&resp)["startup"]["phase"], "ready");
+        assert!(rpc_ok(&resp)["ready_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn dynamic_bootstrap_serves_status_and_classified_not_ready() {
+        let tmp = TempDir::new().unwrap();
+        let state = DynamicServerState::bootstrap(bootstrap_lifecycle(&tmp)).unwrap();
+
+        let status =
+            routing::dispatch_dynamic(rpc("lifecycle.status", json!({})), &state, None).await;
+        assert_eq!(rpc_ok(&status)["status"], "starting");
+        assert_eq!(rpc_ok(&status)["ready"], false);
+        assert_eq!(rpc_ok(&status)["startup"]["sequence"], 0);
+
+        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
+        assert_eq!(rpc_err(&health).code, "node_starting");
+
+        let runtime =
+            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
+        let error = rpc_err(&runtime);
+        assert_eq!(error.code, "node_starting");
+        assert!(error.retryable);
+        assert_eq!(error.details["phase"], "bootstrapping");
+        assert_eq!(error.details["sequence"], 0);
+
+        // Application publication is a separate boundary from Ready. Once it
+        // lands, token-gated recovery callbacks enter the runtime dispatcher
+        // while ordinary external admission is still closed. A missing token
+        // therefore fails at callback authentication, not at startup gating.
+        let (_app_tmp, app) = setup_app_state();
+        state.publish_application(Arc::new(app));
+        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
+        assert_eq!(rpc_err(&health).code, "node_starting");
+        let callback =
+            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
+        let callback_error = rpc_err(&callback);
+        assert_eq!(callback_error.code, "request_failed");
+        assert!(callback_error.message.contains("missing callback_token"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_state_refuses_ready_before_application_publication() {
+        let tmp = TempDir::new().unwrap();
+        let starting = bootstrap_lifecycle(&tmp);
+        let state = DynamicServerState::bootstrap(starting.clone()).unwrap();
+        let ready = ryeos_node::LifecycleResponse::running(
+            starting.identity,
+            "2026-07-14T00:00:01Z",
+            starting.startup,
+        );
+        let error = state.publish_lifecycle(ready).unwrap_err();
+        assert!(error.to_string().contains("before application state"));
     }
 
     #[tokio::test]
@@ -1428,7 +1657,7 @@ mod tests {
         let params = make_create_params("T-1", "T-1");
 
         // threads.create is internal — call service directly
-        state.threads.create_thread(&params).unwrap();
+        state.threads.create_thread_for_test(&params).unwrap();
 
         let cbt = state.callback_tokens.generate(
             "T-1",
@@ -1479,7 +1708,7 @@ mod tests {
     fn setup_follow_parent(state: &AppState, caps: Vec<String>) -> (String, String) {
         state
             .threads
-            .create_thread(&make_create_params("P", "P"))
+            .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
         state
             .state_store
@@ -1549,6 +1778,21 @@ mod tests {
         chain_root_id: &str,
         upstream: Option<&str>,
     ) -> ryeos_app::state_store::NewThreadRecord {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "test/graph".to_string(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                },
+            }
+        });
         ryeos_app::state_store::NewThreadRecord {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
@@ -1563,6 +1807,7 @@ mod tests {
             project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy,
         }
     }
 
@@ -1576,7 +1821,7 @@ mod tests {
         };
         state
             .threads
-            .create_thread(&make_create_params("P", "P"))
+            .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
         state.threads.mark_running("P").unwrap();
         state
@@ -1646,11 +1891,13 @@ mod tests {
     }
 
     fn set_test_follow_child(state: &AppState, follow_key: &str, child: &str) {
-        let item_ref = "graph:test";
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
         let hash = ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &json!(null), None);
         state
             .state_store
-            .set_follow_child(follow_key, 0, item_ref, &hash, child, child)
+            .set_follow_child(follow_key, 0, item_ref, &hash, child, child, &sealed)
             .unwrap();
     }
 
@@ -1735,7 +1982,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cpre", "Cpre"))
+            .create_thread_for_test(&make_create_params("Cpre", "Cpre"))
             .unwrap();
         arm_waiting_follow(&state, "wk-pre", "Cpre");
         assert_eq!(
@@ -1768,7 +2015,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Catt", "Catt"))
+            .create_thread_for_test(&make_create_params("Catt", "Catt"))
             .unwrap();
         state
             .threads
@@ -1807,7 +2054,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Crun", "Crun"))
+            .create_thread_for_test(&make_create_params("Crun", "Crun"))
             .unwrap();
         state.threads.mark_running("Crun").unwrap();
         arm_waiting_follow(&state, "wk-run", "Crun");
@@ -1832,7 +2079,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cnr", "Cnr"))
+            .create_thread_for_test(&make_create_params("Cnr", "Cnr"))
             .unwrap();
         state.threads.mark_running("Cnr").unwrap();
         arm_waiting_follow(&state, "wk-nr", "Cnr");
@@ -1869,7 +2116,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Ssucc", "Ssucc"))
+            .create_thread_for_test(&make_create_params("Ssucc", "Ssucc"))
             .unwrap();
         // Exhaust the per-successor auto-launch budget.
         for _ in 0..ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS {
@@ -1911,7 +2158,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cterm", "Cterm"))
+            .create_thread_for_test(&make_create_params("Cterm", "Cterm"))
             .unwrap();
         state.threads.mark_running("Cterm").unwrap();
         // RAW state-store finalize bypasses record_follow_child_terminal, leaving the
@@ -1995,7 +2242,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Ccancel", "Ccancel"))
+            .create_thread_for_test(&make_create_params("Ccancel", "Ccancel"))
             .unwrap();
         state.threads.mark_running("Ccancel").unwrap();
         arm_waiting_follow(&state, "wk-cancel", "Ccancel");
@@ -2040,7 +2287,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cfollow", "Cfollow"))
+            .create_thread_for_test(&make_create_params("Cfollow", "Cfollow"))
             .unwrap();
         state.threads.mark_running("Cfollow").unwrap();
         arm_waiting_follow(&state, "wk-aux", "Cfollow");
@@ -2048,7 +2295,7 @@ mod tests {
         // Auxiliary run riding the child's chain: own thread id, child's chain root.
         state
             .threads
-            .create_thread(&make_create_params("Kaux", "Cfollow"))
+            .create_thread_for_test(&make_create_params("Kaux", "Cfollow"))
             .unwrap();
         state.threads.mark_running("Kaux").unwrap();
         finalize_child(&state, "Kaux", "completed", Some(json!({ "positions": 1 })));
@@ -2103,7 +2350,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cres", "Cres"))
+            .create_thread_for_test(&make_create_params("Cres", "Cres"))
             .unwrap();
         state
             .state_store
@@ -2211,7 +2458,7 @@ mod tests {
         assert!(matches!(
             state
                 .state_store
-                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .claim_thread_launch("S", "other-claim", "other:test")
                 .unwrap(),
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
         ));
@@ -2243,7 +2490,7 @@ mod tests {
         // A raw running "S" with no follow-resume marker (upstream None ≠ parent "P").
         state
             .threads
-            .create_thread(&make_create_params("S", "S"))
+            .create_thread_for_test(&make_create_params("S", "S"))
             .unwrap();
         state.threads.mark_running("S").unwrap();
         arm_waiting_follow(&state, "wk-unmarked", "C");
@@ -2258,7 +2505,7 @@ mod tests {
         assert!(matches!(
             state
                 .state_store
-                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .claim_thread_launch("S", "other-claim", "other:test")
                 .unwrap(),
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
         ));
@@ -2290,7 +2537,25 @@ mod tests {
         // "S" links upstream to the parent "P" but carries NO follow-resume edge.
         let mut params = make_create_params("S", "S");
         params.upstream_thread_id = Some("P".to_string());
-        state.threads.create_thread(&params).unwrap();
+        state
+            .state_store
+            .create_thread_for_test(&NewThreadRecord {
+                thread_id: params.thread_id,
+                chain_root_id: params.chain_root_id,
+                kind: params.kind,
+                item_ref: params.item_ref,
+                executor_ref: params.executor_ref,
+                launch_mode: params.launch_mode,
+                current_site_id: params.current_site_id,
+                origin_site_id: params.origin_site_id,
+                upstream_thread_id: params.upstream_thread_id,
+                requested_by: params.requested_by,
+                project_root: params.project_root,
+                usage_subject: params.usage_subject,
+                usage_subject_asserted_by: params.usage_subject_asserted_by,
+                captured_history_policy: params.captured_history_policy,
+            })
+            .unwrap();
         arm_waiting_follow(&state, "wk-nomarker", "C");
         state
             .state_store
@@ -2327,7 +2592,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-degraded", "C");
@@ -2361,7 +2626,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-mgd", "C");
@@ -2414,7 +2679,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-cont", "C");
@@ -2437,7 +2702,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-out", "C");
@@ -2574,7 +2839,7 @@ mod tests {
         // seeded) → refused: follow needs a checkpoint-resumable parent.
         state
             .threads
-            .create_thread(&make_create_params("P", "P"))
+            .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "P",
@@ -2625,7 +2890,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-pub", "T-pub"))
+            .create_thread_for_test(&make_create_params("T-pub", "T-pub"))
             .unwrap();
 
         // A subscriber attached before finalization must receive the
@@ -2664,7 +2929,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-cancel", "T-cancel"))
+            .create_thread_for_test(&make_create_params("T-cancel", "T-cancel"))
             .unwrap();
         state.threads.mark_running("T-cancel").unwrap();
 
@@ -2700,7 +2965,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-seat", "T-seat"))
+            .create_thread_for_test(&make_create_params("T-seat", "T-seat"))
             .unwrap();
         state.threads.mark_running("T-seat").unwrap();
 
@@ -2733,7 +2998,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-Bad", "T-Bad"))
+            .create_thread_for_test(&make_create_params("T-Bad", "T-Bad"))
             .unwrap();
 
         let resp = dispatch(
@@ -2766,7 +3031,7 @@ mod tests {
 
         state
             .threads
-            .create_thread(&make_create_params("T-events-1", "T-events-1"))
+            .create_thread_for_test(&make_create_params("T-events-1", "T-events-1"))
             .unwrap();
 
         let finalize_resp = dispatch(
@@ -2836,7 +3101,7 @@ mod tests {
         );
         state
             .threads
-            .create_thread(&make_create_params("T-stream-1", "T-stream-1"))
+            .create_thread_for_test(&make_create_params("T-stream-1", "T-stream-1"))
             .unwrap();
 
         // Subscribe BEFORE the callback fires so the event lands in
@@ -2886,7 +3151,7 @@ mod tests {
         );
         state
             .threads
-            .create_thread(&make_create_params("T-ephemeral-1", "T-ephemeral-1"))
+            .create_thread_for_test(&make_create_params("T-ephemeral-1", "T-ephemeral-1"))
             .unwrap();
         let mut rx = state.event_streams.subscribe("T-ephemeral-1");
 
@@ -2948,7 +3213,7 @@ mod tests {
         );
         state
             .threads
-            .create_thread(&make_create_params("T-ephemeral-bad", "T-ephemeral-bad"))
+            .create_thread_for_test(&make_create_params("T-ephemeral-bad", "T-ephemeral-bad"))
             .unwrap();
 
         let resp = dispatch(
@@ -2991,7 +3256,7 @@ mod tests {
         );
         state
             .threads
-            .create_thread(&make_create_params("T-stream-2", "T-stream-2"))
+            .create_thread_for_test(&make_create_params("T-stream-2", "T-stream-2"))
             .unwrap();
         let mut rx = state.event_streams.subscribe("T-stream-2");
 
@@ -3373,7 +3638,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-cmd-1", "T-cmd-1"))
+            .create_thread_for_test(&make_create_params("T-cmd-1", "T-cmd-1"))
             .unwrap();
 
         let cbt = state.callback_tokens.generate(
@@ -3455,7 +3720,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-tat-missing", "T-tat-missing"))
+            .create_thread_for_test(&make_create_params("T-tat-missing", "T-tat-missing"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-missing",
@@ -3495,7 +3760,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-tat-wrong", "T-tat-wrong"))
+            .create_thread_for_test(&make_create_params("T-tat-wrong", "T-tat-wrong"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-wrong",
@@ -3533,7 +3798,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-tat-ok", "T-tat-ok"))
+            .create_thread_for_test(&make_create_params("T-tat-ok", "T-tat-ok"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-ok",
@@ -3621,7 +3886,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-caps-empty", "T-caps-empty"))
+            .create_thread_for_test(&make_create_params("T-caps-empty", "T-caps-empty"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-caps-empty",
@@ -3669,7 +3934,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-caps-wild", "T-caps-wild"))
+            .create_thread_for_test(&make_create_params("T-caps-wild", "T-caps-wild"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-caps-wild",
@@ -3720,7 +3985,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-facets-1", "T-facets-1"))
+            .create_thread_for_test(&make_create_params("T-facets-1", "T-facets-1"))
             .unwrap();
 
         let cbt = state.callback_tokens.generate(
@@ -3759,13 +4024,13 @@ mod tests {
     fn chain_with_successor(state: &AppState) -> ryeos_app::callback_token::CallbackCapability {
         state
             .threads
-            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-pred", "T-pred"))
             .unwrap();
         state.threads.mark_running("T-pred").unwrap();
         // Successor shares the predecessor's chain root.
         state
             .threads
-            .create_thread(&make_create_params("T-succ", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-succ", "T-pred"))
             .unwrap();
         state.callback_tokens.generate(
             "T-succ",
@@ -3847,7 +4112,7 @@ mod tests {
         // A thread in a DIFFERENT chain.
         state
             .threads
-            .create_thread(&make_create_params("T-other", "T-other"))
+            .create_thread_for_test(&make_create_params("T-other", "T-other"))
             .unwrap();
 
         let resp = dispatch(
@@ -3882,7 +4147,7 @@ mod tests {
         // Completed `system_task` predecessor owned by `user:test`.
         state
             .threads
-            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-pred", "T-pred"))
             .unwrap();
         state.threads.mark_running("T-pred").unwrap();
         state
@@ -3944,7 +4209,7 @@ mod tests {
         use ryeos_app::state_store::NewThreadRecord;
         state
             .threads
-            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-pred", "T-pred"))
             .unwrap();
         state.threads.mark_running("T-pred").unwrap();
         state
@@ -3963,7 +4228,7 @@ mod tests {
             .unwrap();
         state
             .state_store
-            .create_continuation(
+            .create_continuation_for_test(
                 &NewThreadRecord {
                     thread_id: "T-succ".to_string(),
                     chain_root_id: "T-pred".to_string(),
@@ -3978,6 +4243,7 @@ mod tests {
                     project_root: None,
                     usage_subject: None,
                     usage_subject_asserted_by: None,
+                    captured_history_policy: None,
                 },
                 "T-pred",
                 "T-pred",
@@ -3991,7 +4257,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-1", "T-1"))
+            .create_thread_for_test(&make_create_params("T-1", "T-1"))
             .unwrap();
 
         let view = state
@@ -4065,13 +4331,13 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-parent", "T-parent"))
+            .create_thread_for_test(&make_create_params("T-parent", "T-parent"))
             .unwrap();
         // A child is a thread whose `upstream_thread_id` points at the parent
         // (edges are derived from that link).
         let mut child = make_create_params("T-child", "T-parent");
         child.upstream_thread_id = Some("T-parent".to_string());
-        state.threads.create_thread(&child).unwrap();
+        state.threads.create_thread_for_test(&child).unwrap();
 
         let children = state.threads.list_children("T-parent").unwrap();
         let v = serde_json::to_value(&children).unwrap();

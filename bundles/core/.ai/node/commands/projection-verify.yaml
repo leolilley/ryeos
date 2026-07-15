@@ -1,0 +1,8 @@
+# ryeos:signed:2026-07-14T23:18:48Z:1b5f083185fe0bfeb1d03c5fb1d35a35f96c723528b2f21bc212d282cd51a168:4HIDFVegVRM8CQ7uwmYKz19VPWRceNskh0pmIhunTuyQfMMo2s8XcJlDUxcgRTPA0oc9SfgbMER7D50R20BnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- projection
+- verify
+description: Strictly verify the selected projection against trusted signed heads and CAS
+dispatch:
+  kind: execute_ref
+  execute: service:projection/verify

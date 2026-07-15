@@ -571,7 +571,7 @@ inputs: []
 // or fails at runtime execution (no LLM provider configured), but
 // either way the thread row must record the SUBJECT's identity.
 //
-// We open `projection.sqlite3` directly and assert the thread row
+// We open the generation-selected projection directly and assert the thread row
 // has the directive's kind/thread_profile/item_ref, not the runtime's.
 //
 // If the root/runtime split regresses, this test will see
@@ -623,7 +623,8 @@ inputs: []
     // this directive invocation. ProjectionDb writes happen on the
     // daemon side; give it a brief settle window so the row is
     // visible to a fresh read.
-    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     for _ in 0..20 {
         if projection_path.exists() {
             break;
@@ -632,7 +633,7 @@ inputs: []
     }
     assert!(
         projection_path.exists(),
-        "projection.sqlite3 must exist at {}",
+        "selected projection must exist at {}",
         projection_path.display()
     );
 
@@ -739,7 +740,8 @@ config:
     // row identity below — regardless of dispatch outcome.
     let _ = (status, body);
 
-    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     for _ in 0..20 {
         if projection_path.exists() {
             break;
@@ -748,7 +750,7 @@ config:
     }
     assert!(
         projection_path.exists(),
-        "projection.sqlite3 must exist at {}",
+        "selected projection must exist at {}",
         projection_path.display()
     );
 

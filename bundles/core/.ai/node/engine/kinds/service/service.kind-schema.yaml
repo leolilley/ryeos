@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T04:09:05Z:461e42f612af535926078ebe715656468a206e87aea2e4428a25d8c15c05a26d:amUTxxeHyGkMZOp/I2N2BP+L2+fcjVtBKYOqTpdadwHjAhWD+5uYaPRY7Jf2s0gTQWTmWyws0xYvbQ7TfzIhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:3a95580dbb89a544a1db599327f38f18df8fc4cee51042c8418c860fc63b279d:EAeXmEpnxFbHbLEb65J7I8a/PuWKuPpMljUfIDiEyppfz8Sv9APHJ1xjqxhBEv4Agt9lPRG1KLY6cZCINKJoCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/service"
 version: "1.0.0"
 location:
@@ -15,6 +15,10 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
+  # Generic engine contract: resolve the optional authored policy from the
+  # verified composed service value. No service/ref branch consumes it.
+  history_policy:
+    composed_path: history
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -40,6 +44,25 @@ composed_value_contract:
       elements: { type: single, prim: string }
     description: { type: single, prim: string }
     record_thread: { type: single, prim: boolean }
+    state_access:
+      type: single
+      prim: string
+      enum: [read_write, read_only_existing, projection_rebuild]
+    # Atomic authored mapping. Omission delegates to the signed node default;
+    # there is no kind- or service-specific fallback.
+    history:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          retention:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                terminal_for: { type: single, prim: string }
     ui_read_only: { type: single, prim: boolean }
     ui_dispatch:
       type: single
@@ -69,6 +92,9 @@ metadata:
     record_thread:
       from: path_value
       key: record_thread
+    state_access:
+      from: path
+      key: state_access
     ui_read_only:
       from: path_value
       key: ui_read_only

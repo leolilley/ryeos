@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-09T01:21:44Z:8d534c60719d4625b0d46e559fc140e0b28820d8a929093603122d698e532ab6:Cwg9hS7Hbu2vO7nAPvTeplQFYPGC6jY3Id9F1vb3Bwn4YQ9cJGTJ8jaIfekQ4ZWI/gfveMevp7FPH3p1mlW8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T23:18:43Z:d3fc9199b4a45c64f0566b9891c1487020e0ba02e1c344f50bd6b9a88d674c69:hy/nFk7uh80Zxzqb2fAbpSO2rEAOGEq1im7+Lv5ZxzRu9OvSy5Z5k8/lpxezIv29+TpK5+ZePNI5cduCpUgjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -40,7 +40,8 @@ file hashes through CAS.
 | `fetch` | `fetch` | `ryeos.execute.service.fetch` |
 | `verify` | `verify` | `ryeos.execute.service.verify` |
 | `node-sign` | `node-sign` | `ryeos.execute.service.node-sign` |
-| `rebuild` | `rebuild` | `ryeos.execute.service.rebuild` |
+| `projection/verify` | `projection.verify` | `ryeos.execute.service.projection/verify` |
+| `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
@@ -53,6 +54,11 @@ file hashes through CAS.
 unauthenticated discovery routes. Mutating routes such as
 `identity/authorize-key` and `system/push-head` require signed auth plus
 the listed capability.
+
+`projection/verify` and `projection/rebuild` are offline-only standalone
+operator services. Verification inspects the selected projection without
+mutation. Rebuild performs a history-sized replacement while the daemon is
+stopped; it is disaster recovery, never a scheduled maintenance job.
 
 ## Admission Services
 
@@ -165,27 +171,31 @@ handling. Schedules are represented as signed node config records under
 project-authored schedule declarations into that node-owned section.
 
 Schedule records include the target `item_ref`, schedule type,
-expression, params, project root, execution authority, and optional
-`managed_by` metadata. This lets a verified bundle or project declare
-periodic work such as send-queue processing, due campaign work, IMAP
-polling, or projection rebuilds without inventing a separate cron shim.
+expression, params, timezone, explicit misfire/overlap policy, lateness
+grace, enabled state, optional project root, execution authority, and
+optional `managed_by` metadata. This lets a verified bundle or project declare
+periodic work such as send-queue processing, due campaign work, or IMAP
+polling without inventing a separate cron shim.
 
 Node schedule spec shape:
 
 ```yaml
 spec_version: 1
-section: schedules
 schedule_id: ryeos-email.process-send-queue
 item_ref: tool:ryeos-email/system/process_send_queue
 schedule_type: interval
 expression: "30"
 params: {}
 timezone: UTC
+misfire_policy: fire_once_now
+overlap_policy: skip
+lateness_grace_secs: 60
 enabled: true
 project_root: /path/to/project-or-bundle
 execution:
   requester_fingerprint: fp:...
-  capabilities: []
+  capabilities:
+    - ryeos.execute.tool.ryeos-email/system/process_send_queue
 ```
 
 Project-managed declarations use the deploy/reconcile path rather than
@@ -203,8 +213,16 @@ schedules:
     schedule_type: interval
     expression: "30"
     params: {}
+    timezone: UTC
+    misfire_policy: fire_once_now
     overlap_policy: skip
+    lateness_grace_secs: 60
+    enabled: true
 ```
+
+Every field shown above except `project_root` is authored data. Registration,
+project deploy, node-config loading, and projection rebuild reject omissions;
+the runtime does not choose policy defaults based on schedule type.
 
 Use scheduler services for imperative operator control (`register`,
 `pause`, `resume`, `deregister`, `show_fires`). Use project deploy
@@ -219,8 +237,8 @@ before removing a bundle or revoking the execution principal.
 
 Long-running bundle duties should be modeled as small scheduled tools
 rather than HTTP callbacks: process send queues, run due campaign work,
-poll IMAP or provider deltas, retry ambiguous side effects, and
-rebuild/materialize projections. Each scheduled tool should be idempotent
+poll IMAP or provider deltas, retry ambiguous side effects, and materialize
+bundle-owned read models. Each scheduled tool should be idempotent
 against bundle events or the provider's delivery IDs so missed, retried,
 or overlapping fires do not duplicate external side effects.
 

@@ -59,28 +59,6 @@ fn default_launch_mode() -> String {
     "inline".to_string()
 }
 
-fn pre_spawn_stream_error(
-    thread_id: String,
-    keep_alive_secs: u64,
-    code: &'static str,
-    message: String,
-) -> RouteInvocationResult {
-    let stream = async_stream::stream! {
-        yield Ok(
-            RouteStreamEnvelope::new(
-                "stream_started",
-                serde_json::json!({"thread_id": thread_id}),
-            )
-        );
-        yield Ok(error_envelope(code, &message));
-    };
-
-    RouteInvocationResult::Stream(RouteEventStream {
-        events: Box::pin(stream),
-        keep_alive_secs,
-    })
-}
-
 static GATEWAY_CONTRACT: RouteInvocationContract = RouteInvocationContract {
     output: RouteInvocationOutput::Stream,
     principal: PrincipalPolicy::Optional,
@@ -106,6 +84,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // Parse launch request from input (mode prepares it from body).
         let req: LaunchRequest = serde_json::from_value(ctx.input.clone())
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
+        if req.validate_only {
+            return Err(RouteDispatchError::BadRequest(
+                "validate_only is not supported by a pre-minted event stream launch".to_string(),
+            ));
+        }
 
         let item_ref =
             crate::routes::parsed_ref::ParsedItemRef::parse(&req.item_ref).map_err(|e| {
@@ -173,131 +156,35 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
-        // ── Phase 0: preflight composition validation ───────────────
-        // Run the resolution pipeline for the root item before spawning
-        // the background dispatch task. If composition validation fails,
-        // the error is caught here and emitted as a structured
-        // `stream_error` SSE event rather than crashing the background
-        // task with an unstructured internal error.
-        {
-            let engine = &ctx.state.engine;
-            let effective_parsers = engine
-                .effective_parser_dispatcher(Some(project_path.as_path()))
-                .map_err(|e| RouteDispatchError::BadRequest(format!("parser dispatcher: {e}")))?;
-            let engine_roots = engine.resolution_roots(Some(project_path.as_path().to_path_buf()));
-
-            let root_canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(
-                req.item_ref.as_str(),
-            )
-            .map_err(|e| RouteDispatchError::BadRequest(format!("invalid item_ref: {e}")))?;
-
-            if let Err(
-                ryeos_engine::resolution::ResolutionError::ComposedValueContractViolation {
-                    item_ref,
-                    report,
-                    ..
-                },
-            ) = ryeos_engine::resolution::run_resolution_pipeline(
-                &root_canonical,
-                &engine.kinds,
-                &effective_parsers,
-                &engine_roots,
-                &engine.trust_store,
-                &engine.composers,
-            ) {
-                // Return a "pre-spawn" stream error via the
-                // error_envelope helper. This is NOT a background task
-                // failure — it's a synchronous preflight rejection.
-                // The SSE stream will emit a single stream_error event.
-                use ryeos_executor::dispatch_error::ContractViolationDetails;
-                let details = ContractViolationDetails::from_report(&report);
-                let error_count = report.errors.len();
-                let warning_count = report.warnings.len();
-                let mut payload = serde_json::to_value(
-                    ryeos_executor::structured_error::StructuredErrorPayload::contract_violation(
-                        format!(
-                            "contract violation: `{item_ref}` ({error_count} error(s), {warning_count} warning(s))"
-                        ),
-                        details,
-                    ),
-                )
-                .expect("payload serializes");
-                // Remove code/error so error_envelope_with adds them.
-                if let Some(map) = payload.as_object_mut() {
-                    map.remove("code");
-                    map.remove("error");
-                }
-
-                let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
-                let stream = async_stream::stream! {
-                    yield Ok(
-                        RouteStreamEnvelope::new(
-                            "stream_started",
-                            serde_json::json!({"thread_id": thread_id}),
-                        )
-                    );
-                    yield Ok(error_envelope_with(
-                        "contract_violation",
-                        &format!(
-                            "contract violation: `{item_ref}` ({error_count} error(s), {warning_count} warning(s))"
-                        ),
-                        Some(payload),
-                    ));
-                };
-
-                return Ok(RouteInvocationResult::Stream(RouteEventStream {
-                    events: Box::pin(stream),
-                    keep_alive_secs: self.keep_alive_secs,
-                }));
-            }
-        }
-
-        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
-
         // The dispatch-launch stream is a fire-and-tail-until-terminal
         // contract. Non-inline launches can return before the thread is
         // terminal, and validate-only dispatch can complete without a
-        // lifecycle thread at all. Reject both before spawning work so they
-        // don't degrade into misleading `thread_not_terminal` stream errors.
+        // lifecycle thread at all. Reject both before admission and id minting.
         if req.launch_mode != "inline" {
-            return Ok(pre_spawn_stream_error(
-                thread_id,
-                self.keep_alive_secs,
-                "stream_launch_mode_unsupported",
-                format!(
-                    "/execute/stream supports launch_mode='inline' only; got '{}'",
-                    req.launch_mode
-                ),
-            ));
+            return Err(RouteDispatchError::BadRequest(format!(
+                "/execute/stream supports launch_mode='inline' only; got '{}'",
+                req.launch_mode
+            )));
         }
 
         if req.validate_only {
-            return Ok(pre_spawn_stream_error(
-                thread_id,
-                self.keep_alive_secs,
-                "stream_validate_only_unsupported",
-                "validate_only is not supported on /execute/stream; use POST /execute for validation".to_string(),
+            return Err(RouteDispatchError::BadRequest(
+                "validate_only is not supported on /execute/stream; use POST /execute for validation"
+                    .to_string(),
             ));
         }
 
         // ── Target-site guard ───────────────────────────────────────
         // v1: streaming target-site forwarding is not yet implemented.
-        // Non-local target_site_id returns a clear stream_error so
-        // callers know the feature is coming but not ready.
+        // Non-local target_site_id is rejected before admission and id minting.
         if let Some(ref target_site_id) = req.target_site_id {
             let current_site_id = ctx.state.threads.site_id();
             if target_site_id != current_site_id {
-                let tsid = target_site_id.clone();
-                return Ok(pre_spawn_stream_error(
-                    thread_id,
-                    self.keep_alive_secs,
-                    "target_site_stream_unsupported",
-                    format!(
-                        "target-site streaming is not yet supported on /execute/stream \
-                         (target_site_id: '{tsid}'); unary target-site forwarding is currently \
-                         inline-only via POST /execute"
-                    ),
-                ));
+                return Err(RouteDispatchError::BadRequest(format!(
+                    "target-site streaming is not yet supported on /execute/stream \
+                         (target_site_id: '{target_site_id}'); unary target-site forwarding is \
+                         currently inline-only via POST /execute"
+                )));
             }
             // Self-target: normalize to local (fall through).
             tracing::debug!(
@@ -318,6 +205,50 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .map(|p| p.scopes.clone())
             .unwrap_or_default();
 
+        // Resolve the actual persisted root (including wrapper targets), verify
+        // it, and capture its policy before exposing an id to the stream.
+        let preflight = crate::routes::launch::preflight_dispatch_launch(
+            &ctx.state,
+            &item_ref,
+            &project_path,
+            &req.parameters,
+            &principal_id,
+            &principal_scopes,
+            req.call.clone(),
+            &req.launch_mode,
+            req.validate_only,
+            usage_subject.as_ref(),
+            usage_subject_asserted_by.as_deref(),
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("stream root launch admission failed: {error}"))
+        })?;
+        if !preflight.class.persists_pre_minted_root() {
+            return Err(RouteDispatchError::BadRequest(
+                "stream launch requires execution that persists a pre-minted thread root"
+                    .to_string(),
+            ));
+        }
+        let root_admission = preflight.root_admission.ok_or_else(|| {
+            RouteDispatchError::Internal(
+                "threaded dispatch preflight returned no root admission".to_string(),
+            )
+        })?;
+        let mut options = crate::routes::launch::DispatchLaunchOptions::admitted(root_admission)
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "validated stream contract rejected at dispatch boundary: {error:#}"
+                ))
+            })?;
+        options.launch_mode = req.launch_mode;
+        options.target_site_id = req.target_site_id;
+        options.validate_only = req.validate_only;
+        options.usage_subject = usage_subject;
+        options.usage_subject_asserted_by = usage_subject_asserted_by;
+        options.call = req.call;
+
+        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+
         let route_id: String = ctx.route_id.to_string();
 
         let span = tracing::info_span!(
@@ -332,25 +263,13 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
-        // Build launch options before moving `req` fields.
-        let options = crate::routes::launch::DispatchLaunchOptions {
-            launch_mode: req.launch_mode,
-            target_site_id: req.target_site_id,
-            validate_only: req.validate_only,
-            usage_subject,
-            usage_subject_asserted_by,
-            call: req.call,
-            previous_thread_id: None,
-        };
-
         let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_path.as_path().to_path_buf(),
+            options.project_path().to_path_buf(),
             ctx.state.engine.clone(),
         );
         let mut launch_handle = crate::routes::launch::spawn_dispatch_launch(
             &ctx.state,
             item_ref,
-            project_path,
             req.parameters,
             principal_id,
             principal_scopes,

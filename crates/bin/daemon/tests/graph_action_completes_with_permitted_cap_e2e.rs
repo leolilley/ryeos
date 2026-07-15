@@ -262,9 +262,8 @@ fn receipt_metadata_for_node<'a>(
 }
 
 fn persisted_thread_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = common::selected_projection_path(state_path)
+        .expect("resolve selected projection generation");
     let conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap_or_else(|e| panic!("open projection DB at {}: {e}", db_path.display()));

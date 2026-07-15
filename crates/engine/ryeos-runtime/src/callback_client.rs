@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::callback::{CallbackError, ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
@@ -509,6 +509,18 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    pub async fn project_snapshot(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback project_snapshot called without an inner UDS client (socket missing)"
+            )
+        })?;
+        client
+            .project_snapshot(&self.thread_id, request)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread_by_id(&self, thread_id: &str) -> Result<Value> {
         match &self.inner {
@@ -790,6 +802,7 @@ impl CallbackClient {
     /// payload. The daemon persists this so resumed threads can reseed
     /// BudgetTracker and Harness.
     pub async fn emit_thread_usage(&self, usage: &ryeos_state::ThreadUsage) -> Result<()> {
+        usage.validate().context("invalid thread usage")?;
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback emit_thread_usage called without an inner UDS client \

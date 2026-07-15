@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use serde_json::json;
 
@@ -43,12 +45,12 @@ fn continuation_shape(thread: &ThreadDetail) -> bool {
 ///
 /// A row failing any clause is left to the normal `reconcile` / native-resume /
 /// finalize paths — never skipped here and never relaunched.
-fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> bool {
+fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> Result<bool> {
     if thread.status != ThreadStatus::Created.as_str() {
-        return false;
+        return Ok(false);
     }
     if thread.runtime.pgid.is_some() {
-        return false;
+        return Ok(false);
     }
     if thread
         .runtime
@@ -57,14 +59,17 @@ fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> bool {
         .and_then(|m| m.native_resume.as_ref())
         .is_some()
     {
-        return false;
+        return Ok(false);
     }
-    matches!(
-        state
-            .state_store
-            .get_follow_waiter_by_child_chain(&thread.chain_root_id),
-        Ok(Some(w)) if w.children.iter().any(|c| c.child_thread_id == thread.thread_id)
-    )
+    Ok(state
+        .state_store
+        .get_follow_waiter_by_child_chain(&thread.chain_root_id)?
+        .is_some_and(|waiter| {
+            waiter
+                .children
+                .iter()
+                .any(|child| child.child_thread_id == thread.thread_id)
+        }))
 }
 
 /// Machine-only proof that `successor` is an autonomous MACHINE continuation of
@@ -176,6 +181,25 @@ pub struct ResumeIntent {
     pub kind: ResumeKind,
 }
 
+/// Complete result of one indexed active-thread reconciliation pass.
+/// `active_thread_ids` is the exact initial `created|running` set, including
+/// rows classified into follow/window ownership rather than a resume intent.
+#[derive(Debug, Clone)]
+pub struct ActiveThreadReconcileReport {
+    pub active_thread_ids: BTreeSet<String>,
+    pub resume_intents: Vec<ResumeIntent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveReconcileMode {
+    /// No process from the prior daemon can retain callback authority. Prove
+    /// its identity, stop it, then classify the row for resume/finalization.
+    Startup,
+    /// Processes launched by this daemon remain owned. Only rows with no live
+    /// process and no active launch claim are re-driven.
+    Live,
+}
+
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
 /// `FinalizeExhausted` / orphan branches share identical bookkeeping.
 fn finalize_dead(
@@ -185,7 +209,7 @@ fn finalize_dead(
     prior_status: &str,
     extra: Option<(&'static str, serde_json::Value)>,
     reconciled: &mut usize,
-) {
+) -> Result<()> {
     let (outcome_code, error_extra) = match extra {
         Some((code, val)) => (code, Some(val)),
         None => ("daemon_reconciled", None),
@@ -198,7 +222,7 @@ fn finalize_dead(
     if let Some(extra) = error_extra {
         error_obj["details"] = extra;
     }
-    if let Err(err) = state.threads.finalize_thread(&ThreadFinalizeParams {
+    state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
         outcome_code: Some(outcome_code.to_string()),
@@ -208,15 +232,9 @@ fn finalize_dead(
         artifacts: Vec::new(),
         final_cost: None,
         summary_json: None,
-    }) {
-        tracing::warn!(
-            thread_id,
-            error = %err,
-            "failed to finalize thread"
-        );
-    } else {
-        *reconciled += 1;
-    }
+    })?;
+    *reconciled += 1;
+    Ok(())
 }
 
 fn finalize_recovered_stop(
@@ -277,11 +295,10 @@ fn dead_identity_safe_to_clear(
 
 /// Reconcile daemon state after restart.
 ///
-/// Three phases:
-/// 1. Catch up projection from CAS (repair any projection drift)
-/// 2. Find threads left in non-terminal status whose processes are dead
+/// Two phases, against an already-current projection:
+/// 1. Find threads left in non-terminal status whose processes are dead
 ///    (or whose spawn was interrupted before pid/pgid attach)
-/// 3. For each: either finalize-as-failed, or collect a `ResumeIntent`
+/// 2. For each: either finalize-as-failed, or collect a `ResumeIntent`
 ///    that the caller dispatches AFTER the daemon's listeners are bound
 ///
 /// Returns the `ResumeIntent`s the caller must dispatch. The reconciler
@@ -289,43 +306,28 @@ fn dead_identity_safe_to_clear(
 /// daemon's listener startup, and a resumed subprocess making its first
 /// callback before the UDS / HTTP server is bound would fail.
 #[tracing::instrument(name = "state:reconcile", skip(state))]
-pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
-    // Catch up projection from CAS.
-    let cas_root = state.state_store.cas_root()?;
-    let refs_root = state.state_store.refs_root()?;
+pub async fn reconcile_active_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup).await
+}
 
-    state.state_store.with_projection(|projection| {
-        let catch_up =
-            ryeos_state::rebuild::catch_up_projection(projection, &cas_root, &refs_root)?;
+/// Mid-life counterpart used by the supervised periodic recovery task. It
+/// never clears claims or stops a verified live process owned by this daemon.
+pub async fn reconcile_live_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Live).await
+}
 
-        if catch_up.chains_updated > 0 {
-            tracing::info!(
-                chains_checked = catch_up.chains_checked,
-                chains_updated = catch_up.chains_updated,
-                threads_restored = catch_up.threads_restored,
-                events_projected = catch_up.events_projected,
-                "projection caught up from CAS"
-            );
-        }
-
-        Ok::<_, anyhow::Error>(())
-    })?;
-
-    // Clear stale launch claims BEFORE collecting intents: a restart proves every
-    // prior in-process launcher is gone, so any surviving (even unexpired) claim is
-    // stale. Without this, a `created` successor whose launcher crashed after
-    // claiming but before `mark_running` would have its reconcile relaunch blocked
-    // by `AlreadyClaimed` until the lease expired — stranding accepted work.
-    match state.state_store.clear_all_launch_claims() {
-        Ok(n) if n > 0 => tracing::info!(cleared = n, "cleared stale launch claims at startup"),
-        Ok(_) => {}
-        Err(err) => tracing::warn!(error = %err, "failed to clear stale launch claims at startup"),
-    }
-
+async fn reconcile_active_threads_inner(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+) -> Result<ActiveThreadReconcileReport> {
     // Orphan thread cleanup.
     let mut running_threads = state
         .state_store
         .list_threads_by_status(&["created", "running"])?;
+    let active_thread_ids = running_threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<BTreeSet<_>>();
     for thread_id in state.state_store.list_attached_thread_ids()? {
         if running_threads
             .iter()
@@ -340,7 +342,10 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
 
     if running_threads.is_empty() {
         tracing::debug!("no orphaned threads");
-        return Ok(Vec::new());
+        return Ok(ActiveThreadReconcileReport {
+            active_thread_ids,
+            resume_intents: Vec::new(),
+        });
     }
 
     tracing::info!(
@@ -360,6 +365,18 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         let group_liveness = identity
             .map(execution_group_liveness)
             .unwrap_or(IdentityLiveness::DeadOrStale);
+
+        // A live-mode launch claim is durable ownership of the attach window.
+        // Do not mistake a current daemon's claimed `created` row for a crashed
+        // spawn merely because it has not attached a pgid yet.
+        if mode == ActiveReconcileMode::Live
+            && state
+                .state_store
+                .get_launch_claim(&thread.thread_id)?
+                .is_some()
+        {
+            continue;
+        }
 
         // Explicit cancellation/kill intent survives a daemon crash. Recover it
         // before any normal resume decision so a stop-requested row can never
@@ -484,6 +501,9 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         // leader is already gone, descendants cannot be proven absent and the
         // conservative quarantine below remains mandatory.
         if let Some(identity) = identity {
+            if mode == ActiveReconcileMode::Live && group_liveness == IdentityLiveness::Alive {
+                continue;
+            }
             match group_liveness {
                 IdentityLiveness::Alive => {
                     let result = kill_by_action(identity, ryeos_app::process::ShutdownAction::Hard);
@@ -554,88 +574,83 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     .upstream_thread_id
                     .as_deref()
                     .expect("continuation_shape implies upstream is Some");
-                if let Ok(Some(src)) = state.threads.get_thread(upstream_id) {
-                    // A follow-resume successor has the same shape as a stranded
-                    // machine continuation (source `continued`, points back), but it
-                    // must NOT be auto-launched here — it waits for the followed
-                    // child's result and is driven by the follow-resume path. Leave
-                    // it pending. Fail closed: a marker-read error must not let a
-                    // follow-resume successor slip into machine launch.
-                    match state
+                let src = state.threads.get_thread(upstream_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "continuation successor {} references missing upstream {upstream_id}",
+                        thread.thread_id
+                    )
+                })?;
+                // A follow-resume successor has the same shape as a stranded
+                // machine continuation (source `continued`, points back), but it
+                // must NOT be auto-launched here — it waits for the followed
+                // child's result and is driven by the follow-resume path. Leave
+                // it pending. Fail closed: a marker-read error must not let a
+                // follow-resume successor slip into machine launch.
+                match state
+                    .state_store
+                    .is_follow_resume_successor(upstream_id, &thread.thread_id)
+                {
+                    Ok(true) => {
+                        tracing::info!(
+                            thread_id = %thread.thread_id,
+                            "follow-resume successor — leaving pending, not a machine continuation"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(err) => return Err(err),
+                }
+                if is_machine_successor(thread, &src) {
+                    // Autonomous continuation is always-on, bounded by the
+                    // chain-depth cap enforced at create time (an unbounded
+                    // chain can no longer form), so reconcile recovers a
+                    // stranded machine successor unconditionally. Collect the
+                    // intent only — `launch_successor` (post-listener) owns the
+                    // lease claim AND the attempt budget.
+                    let resume_context = lm
+                        .and_then(|m| m.resume_context.clone())
+                        .expect("continuation_shape implies resume_context is Some");
+                    tracing::info!(
+                        thread_id = %thread.thread_id,
+                        "machine continuation successor stranded by crash — collecting launch intent"
+                    );
+                    intents.push(ResumeIntent {
+                        thread_id: thread.thread_id.clone(),
+                        chain_root_id: thread.chain_root_id.clone(),
+                        resume_context,
+                        prior_status: thread.status.clone(),
+                        kind: ResumeKind::Continuation,
+                    });
+                    reconciled += 1;
+                    continue;
+                }
+                // OPERATOR follow-up stranded by a crash before its launch task
+                // ran. NOT gated — accepted operator work must be recovered, not
+                // lost. Confirm via the persisted request fingerprint (only
+                // operator `create_or_get` records one) so we never mistake some
+                // other completed→created lineage for a follow-up.
+                if is_operator_successor(thread, &src)
+                    && state
                         .state_store
-                        .is_follow_resume_successor(upstream_id, &thread.thread_id)
-                    {
-                        Ok(true) => {
-                            tracing::info!(
-                                thread_id = %thread.thread_id,
-                                "follow-resume successor — leaving pending, not a machine continuation"
-                            );
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(err) => {
-                            tracing::warn!(
-                                thread_id = %thread.thread_id,
-                                error = %err,
-                                "follow-resume marker read failed — leaving pending"
-                            );
-                            continue;
-                        }
-                    }
-                    if is_machine_successor(thread, &src) {
-                        // Autonomous continuation is always-on, bounded by the
-                        // chain-depth cap enforced at create time (an unbounded
-                        // chain can no longer form), so reconcile recovers a
-                        // stranded machine successor unconditionally. Collect the
-                        // intent only — `launch_successor` (post-listener) owns the
-                        // lease claim AND the attempt budget.
-                        let resume_context = lm
-                            .and_then(|m| m.resume_context.clone())
-                            .expect("continuation_shape implies resume_context is Some");
-                        tracing::info!(
-                            thread_id = %thread.thread_id,
-                            "machine continuation successor stranded by crash — collecting launch intent"
-                        );
-                        intents.push(ResumeIntent {
-                            thread_id: thread.thread_id.clone(),
-                            chain_root_id: thread.chain_root_id.clone(),
-                            resume_context,
-                            prior_status: thread.status.clone(),
-                            kind: ResumeKind::Continuation,
-                        });
-                        reconciled += 1;
-                        continue;
-                    }
-                    // OPERATOR follow-up stranded by a crash before its launch task
-                    // ran. NOT gated — accepted operator work must be recovered, not
-                    // lost. Confirm via the persisted request fingerprint (only
-                    // operator `create_or_get` records one) so we never mistake some
-                    // other completed→created lineage for a follow-up.
-                    if is_operator_successor(thread, &src)
-                        && state
-                            .state_store
-                            .get_continuation_fingerprint(upstream_id)
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    {
-                        let resume_context = lm
-                            .and_then(|m| m.resume_context.clone())
-                            .expect("continuation_shape implies resume_context is Some");
-                        tracing::info!(
-                            thread_id = %thread.thread_id,
-                            "operator follow-up successor stranded by crash — collecting launch intent"
-                        );
-                        intents.push(ResumeIntent {
-                            thread_id: thread.thread_id.clone(),
-                            chain_root_id: thread.chain_root_id.clone(),
-                            resume_context,
-                            prior_status: thread.status.clone(),
-                            kind: ResumeKind::OperatorContinuation,
-                        });
-                        reconciled += 1;
-                        continue;
-                    }
+                        .get_continuation_fingerprint(upstream_id)?
+                        .is_some()
+                {
+                    let resume_context = lm
+                        .and_then(|m| m.resume_context.clone())
+                        .expect("continuation_shape implies resume_context is Some");
+                    tracing::info!(
+                        thread_id = %thread.thread_id,
+                        "operator follow-up successor stranded by crash — collecting launch intent"
+                    );
+                    intents.push(ResumeIntent {
+                        thread_id: thread.thread_id.clone(),
+                        chain_root_id: thread.chain_root_id.clone(),
+                        resume_context,
+                        prior_status: thread.status.clone(),
+                        kind: ResumeKind::OperatorContinuation,
+                    });
+                    reconciled += 1;
+                    continue;
                 }
             }
         }
@@ -644,7 +659,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         // window) has no native_resume policy yet, so `decide_resume` below would
         // finalize it failed. Leave it to `reconcile_follow`, which relaunches it
         // fresh via `launch_follow_child`.
-        if is_pending_follow_child(state, thread) {
+        if is_pending_follow_child(state, thread)? {
             tracing::info!(
                 thread_id = %thread.thread_id,
                 "follow child stranded pre-launch — leaving for reconcile_follow relaunch"
@@ -660,8 +675,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         if thread.status == ThreadStatus::Created.as_str()
             && state
                 .state_store
-                .launch_window_is_queued(&thread.chain_root_id)
-                .unwrap_or(false)
+                .launch_window_is_queued(&thread.chain_root_id)?
         {
             tracing::info!(
                 thread_id = %thread.thread_id,
@@ -685,7 +699,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     &thread.status,
                     Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
                     &mut reconciled,
-                );
+                )?;
                 continue;
             }
         };
@@ -716,7 +730,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     &thread.status,
                     extra,
                     &mut reconciled,
-                );
+                )?;
             }
             ResumeDecision::MissingResumeContext => {
                 tracing::warn!(
@@ -737,7 +751,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         json!({"reason": "no resume_context in launch_metadata"}),
                     )),
                     &mut reconciled,
-                );
+                )?;
             }
             ResumeDecision::Exhausted { attempts, max } => {
                 tracing::warn!(
@@ -756,7 +770,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         json!({"attempts": attempts, "max": max}),
                     )),
                     &mut reconciled,
-                );
+                )?;
             }
             ResumeDecision::Resume { next_attempt, max } => {
                 // Persist the bumped counter BEFORE scheduling the
@@ -776,7 +790,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         &thread.status,
                         Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
                         &mut reconciled,
-                    );
+                    )?;
                     continue;
                 }
                 // Pull the resume_context for the dispatcher.
@@ -809,7 +823,10 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         resume_intents = intents.len(),
         "reconciled orphaned threads"
     );
-    Ok(intents)
+    Ok(ActiveThreadReconcileReport {
+        active_thread_ids,
+        resume_intents: intents,
+    })
 }
 
 /// A follow-recovery action collected at startup and driven post-listener (the
@@ -874,14 +891,10 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
             }
             follow_phase::WAITING => waiting_follow_action(state, &w)?,
             follow_phase::RESERVED => converge_reserved_follow(state, &w)?,
-            other => {
-                tracing::debug!(
-                    follow_key = %w.follow_key,
-                    phase = %other,
-                    "follow waiter in an unrecognized phase — skipped"
-                );
-                Vec::new()
-            }
+            other => anyhow::bail!(
+                "follow waiter {} has unrecognized phase {other}",
+                w.follow_key
+            ),
         };
         match waiter_actions.is_empty() {
             false => actions.extend(waiter_actions),
@@ -931,8 +944,10 @@ fn waiting_follow_action(
     w: &ryeos_app::runtime_db::FollowWaiter,
 ) -> Result<Vec<FollowReconcileAction>> {
     if w.children.is_empty() {
-        tracing::warn!(follow_key = %w.follow_key, "waiting follow waiter has no child thread recorded");
-        return Ok(Vec::new());
+        anyhow::bail!(
+            "waiting follow waiter {} has no child thread recorded",
+            w.follow_key
+        );
     }
     let mut actions = Vec::new();
     let mut resume = false;
@@ -944,11 +959,11 @@ fn waiting_follow_action(
         match state.state_store.get_thread(child_id)? {
             // Pre-launch window: the child provably never launched.
             Some(child)
-                if is_pending_follow_child(state, &child)
+                if is_pending_follow_child(state, &child)?
                     && state
                         .state_store
                         .launch_window_is_queued(&slot.child_chain_root_id)? => {}
-            Some(child) if is_pending_follow_child(state, &child) => {
+            Some(child) if is_pending_follow_child(state, &child)? => {
                 if state
                     .state_store
                     .launch_window_is_cancelled(&slot.child_chain_root_id)?
@@ -1008,9 +1023,10 @@ fn waiting_follow_action(
                     resume = true;
                 }
             }
-            None => {
-                tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id, "waiting follow waiter's child row is missing");
-            }
+            None => anyhow::bail!(
+                "waiting follow waiter {} references missing child {child_id}",
+                w.follow_key
+            ),
         }
     }
     if resume {
@@ -1041,11 +1057,18 @@ fn converge_reserved_follow(
     state: &AppState,
     w: &ryeos_app::runtime_db::FollowWaiter,
 ) -> Result<Vec<FollowReconcileAction>> {
-    let parent_continued = w.parent_successor_thread_id.is_some()
-        || matches!(
-            state.state_store.get_thread(&w.parent_thread_id),
-            Ok(Some(p)) if p.status == ThreadStatus::Continued.as_str()
-        );
+    let parent = state
+        .state_store
+        .get_thread(&w.parent_thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "reserved follow waiter {} references missing parent {}",
+                w.follow_key,
+                w.parent_thread_id
+            )
+        })?;
+    let parent_continued =
+        w.parent_successor_thread_id.is_some() || parent.status == ThreadStatus::Continued.as_str();
     if !parent_continued {
         tracing::debug!(follow_key = %w.follow_key, "reserved follow waiter, parent not yet continued — parent resume re-drives");
         return Ok(Vec::new());
@@ -1057,30 +1080,24 @@ fn converge_reserved_follow(
             .any(|(i, c)| c.item_index != i as u32)
     {
         tracing::warn!(follow_key = %w.follow_key, "reserved waiter: parent continued but no child recorded — clearing orphan");
-        let _ = state.state_store.clear_follow_waiter(&w.follow_key);
+        state.state_store.clear_follow_waiter(&w.follow_key)?;
         return Ok(Vec::new());
     }
     // Adopt the parent's follow-resume successor if step 3 created it but did not
     // record it on the waiter.
     if w.parent_successor_thread_id.is_none() {
-        if let Ok(Some(parent)) = state.state_store.get_thread(&w.parent_thread_id) {
-            if let Some(succ) = parent.successor_thread_id {
-                if state
+        if let Some(successor_id) = parent.successor_thread_id {
+            if state
+                .state_store
+                .is_follow_resume_successor(&w.parent_thread_id, &successor_id)?
+            {
+                state
                     .state_store
-                    .is_follow_resume_successor(&w.parent_thread_id, &succ)
-                    .unwrap_or(false)
-                {
-                    let _ = state
-                        .state_store
-                        .set_follow_parent_successor(&w.follow_key, &succ);
-                }
+                    .set_follow_parent_successor(&w.follow_key, &successor_id)?;
             }
         }
     }
-    if let Err(e) = state.state_store.mark_follow_waiting(&w.follow_key) {
-        tracing::warn!(follow_key = %w.follow_key, error = %e, "reserved waiter: could not converge to waiting (missing child/successor) — leaving");
-        return Ok(Vec::new());
-    }
+    state.state_store.mark_follow_waiting(&w.follow_key)?;
     tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter to waiting");
     match state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
         Some(updated) => waiting_follow_action(state, &updated),

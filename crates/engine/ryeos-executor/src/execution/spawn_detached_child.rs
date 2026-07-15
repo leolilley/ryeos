@@ -34,7 +34,7 @@ use ryeos_app::event_store_service::{EventAppendItem, EventAppendParams};
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::state::AppState;
-use ryeos_app::thread_lifecycle::{new_thread_id, ThreadCreateParams};
+use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::events::RuntimeEventType;
@@ -109,8 +109,8 @@ pub async fn spawn_detached_child(
     // Managed-runtime children only: a child kind served by a registered runtime
     // resolves here; a leaf tool/service kind does not. The same lookup yields the
     // child row's `native:<binary>` executor identity.
-    let child_runtime = state
-        .engine
+    let child_runtime = child_provenance
+        .request_engine()
         .runtimes
         .resolve_for_launch(None, &child_ref.kind)
         .map_err(|e| {
@@ -131,8 +131,8 @@ pub async fn spawn_detached_child(
     // `graph_run`), not the item kind: profile-driven continuation / resume /
     // operator behavior keys off the profile name, so a fresh child row and its
     // captured identity must carry the profile, exactly like a normal launch.
-    let child_thread_profile = state
-        .engine
+    let child_thread_profile = child_provenance
+        .request_engine()
         .kinds
         .get(&child_ref.kind)
         .and_then(|schema| schema.execution())
@@ -153,56 +153,72 @@ pub async fn spawn_detached_child(
         fingerprint: thread_auth.acting_principal.clone(),
         scopes: thread_auth.caller_scopes.clone(),
     });
-    let child_thread_id = new_thread_id();
-    state.threads.create_thread(&ThreadCreateParams {
-        thread_id: child_thread_id.clone(),
-        chain_root_id: child_thread_id.clone(),
-        kind: child_thread_profile.clone(),
-        item_ref: child_item_ref.to_string(),
-        executor_ref: child_executor_ref.clone(),
-        launch_mode: parent.launch_mode.clone(),
-        current_site_id: parent.current_site_id.clone(),
-        origin_site_id: parent.origin_site_id.clone(),
-        upstream_thread_id: None,
-        requested_by: Some(thread_auth.acting_principal.clone()),
-        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
-        usage_subject: None,
-        usage_subject_asserted_by: None,
-    })?;
-
-    // Seed a MINIMAL launch identity: the detached launcher re-resolves the item
-    // + envelope off the callback hot path. `effective_caps` carries the PARENT's
-    // caps — the bounding authority the launcher hands to
-    // `CapabilityPolicy::FollowChildHybrid`, overwritten with the child's own
-    // composed caps once policy resolution succeeds.
-    let meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-        kind: child_thread_profile.clone(),
-        item_ref: child_item_ref.to_string(),
-        launch_mode: parent.launch_mode.clone(),
-        parameters: child_parameters.clone(),
-        // Resume identity derives from validated server-side provenance, never
-        // the request body — same rule as follow.
-        project_context: ProjectContext::LocalPath {
-            path: cap.provenance.effective_path().to_path_buf(),
+    let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
+        ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+            engine: child_provenance.request_engine(),
+            node_history_policy: &state.node_history_policy,
+            site_id: &parent.current_site_id,
+            project_path: child_provenance.effective_path(),
+            item_ref: child_item_ref,
+            launch_mode: &parent.launch_mode,
+            parameters: child_parameters.clone(),
+            requested_by: thread_auth.acting_principal.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            caller_scopes: thread_auth.caller_scopes.clone(),
+            validate_only: false,
+            creates_chain_root: true,
         },
-        original_snapshot_hash: inherited_snapshot_hash,
-        // A detached child borrows the parent's workspace; it never owns snapshot
-        // lineage, so no pushed-head identity is seeded.
-        original_pushed_head_ref: None,
-        // The parent's state-root override carries to the child so its
-        // state/callback anchor stays isolated with the parent's.
-        state_root: cap
-            .provenance
-            .state_root_override()
-            .map(|p| p.to_path_buf()),
-        current_site_id: parent.current_site_id.clone(),
-        origin_site_id: parent.origin_site_id.clone(),
-        requested_by: requested_by.clone(),
-        execution_hints: ExecutionHints::default(),
-        effective_caps: cap.effective_caps.clone(),
-        executor_ref: Some(child_executor_ref.clone()),
-        runtime_ref: Some(child_runtime_ref.clone()),
-    });
+    )
+    .context("detach: verified child history-policy preflight")?;
+    let child_root_admission = child_preflight.root_admission;
+    let child_execution = child_root_admission.execution_request(
+        child_executor_ref.clone(),
+        parent.launch_mode.clone(),
+        child_parameters.clone(),
+    )?;
+    let sealed_root_request =
+        SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref.clone())?;
+    let child_thread_id = new_thread_id();
+    state
+        .threads
+        .create_root_thread_with_id(&child_thread_id, &child_execution)?;
+
+    // Persist two agreeing authorities before launch: ResumeContext carries the
+    // envelope/provenance identity and the sealed request carries the exact
+    // verified fresh-root subject. `effective_caps` is the PARENT's bounding
+    // authority for `CapabilityPolicy::FollowChildHybrid`; the child's composed
+    // caps replace it after first-launch policy resolution.
+    let meta = RuntimeLaunchMetadata::default()
+        .with_resume_context(ResumeContext {
+            kind: child_thread_profile.clone(),
+            item_ref: child_item_ref.to_string(),
+            launch_mode: parent.launch_mode.clone(),
+            parameters: child_parameters.clone(),
+            // Resume identity derives from validated server-side provenance, never
+            // the request body — same rule as follow.
+            project_context: ProjectContext::LocalPath {
+                path: cap.provenance.effective_path().to_path_buf(),
+            },
+            original_snapshot_hash: inherited_snapshot_hash,
+            // A detached child borrows the parent's workspace; it never owns snapshot
+            // lineage, so no pushed-head identity is seeded.
+            original_pushed_head_ref: None,
+            // The parent's state-root override carries to the child so its
+            // state/callback anchor stays isolated with the parent's.
+            state_root: cap
+                .provenance
+                .state_root_override()
+                .map(|p| p.to_path_buf()),
+            current_site_id: parent.current_site_id.clone(),
+            origin_site_id: parent.origin_site_id.clone(),
+            requested_by: requested_by.clone(),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: cap.effective_caps.clone(),
+            executor_ref: Some(child_executor_ref.clone()),
+            runtime_ref: Some(child_runtime_ref.clone()),
+        })
+        .with_sealed_root_request(sealed_root_request);
     state
         .state_store
         .seed_launch_metadata(&child_thread_id, &meta)?;
@@ -318,36 +334,32 @@ pub async fn spawn_detached_child(
     }
 
     // ── Launch detached ─────────────────────────────────────────────────────
-    // Fire-and-forget: `launch_follow_child` is claim-guarded, so a lost spawn is
-    // safe for the reconcile sweep to re-drive. The launch uses the parent's
+    // Fire-and-forget: preparation persists the launch claim before returning,
+    // so a daemon loss is safe for the reconcile sweep to re-drive. The launch uses the parent's
     // BORROWED-CHILD provenance (moved in) — pushed-head / effective workspace /
     // request engine preserved. Parent execution ceiling from the VALIDATED cap
     // (never `child_parameters`): the child launches clamped to the parent's hard
     // limits at parent depth + 1, recording the `dispatch` child-link edge.
     if !queued {
-        let launch_state = state.clone();
-        let launch_child_id = child_thread_id.clone();
         let launch_parent_context = crate::dispatch::ParentExecutionContext {
             parent_thread_id: cap.thread_id.clone(),
             hard_limits: cap.hard_limits.clone(),
             depth: cap.depth,
         };
-        tokio::spawn(async move {
-            if let Err(e) = crate::execution::launch::launch_follow_child(
-                launch_state,
-                &launch_child_id,
+        if let crate::execution::launch::RecoveryLaunchOutcome::Skipped(reason) =
+            crate::execution::launch::prepare_and_spawn_follow_child(
+                state.clone(),
+                &child_thread_id,
                 Some(child_provenance),
                 Some(launch_parent_context),
-            )
-            .await
-            {
-                tracing::error!(
-                    child_thread_id = %launch_child_id,
-                    error = %e,
-                    "detached child launch failed",
-                );
-            }
-        });
+            )?
+        {
+            tracing::debug!(
+                child_thread_id = %child_thread_id,
+                reason,
+                "detached child launch skipped"
+            );
+        }
     }
     // Members of the same window that this enqueue admitted alongside (slots
     // opened without a kick landing) launch on the reconcile-parity path.

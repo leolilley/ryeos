@@ -177,14 +177,23 @@ pub fn resolve_project_context(
             request_engine: Arc::clone(&state.engine),
         },
         ProjectSource::PushedHead => {
+            let authority = crate::execution::pinned_state_authority(state)?;
+            let cas_mutation_guard = authority.acquire_shared_guard()?;
+            authority.ensure_guard(&cas_mutation_guard)?;
             // HEAD lookup MUST use the same canonical ref string as
             // push_head used when writing the ref. canonical_project_ref
             // is the single source of truth — it canonicalizes via
             // std::fs::canonicalize (matching push_head) and bypasses
             // only for NO_PROJECT_SENTINEL.
-            let project_str = canonical_project_ref(&project_path.to_string_lossy())?;
+            let project_path = project_path.to_str().ok_or_else(|| {
+                ProjectSourceError::Other(
+                    "project_path is not valid UTF-8 and cannot be used as a project identity"
+                        .into(),
+                )
+            })?;
+            let project_str = canonical_project_ref(project_path)?;
             let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
-            let principal_key = ryeos_state::refs::principal_storage_key(principal_id);
+            let principal_key = ryeos_state::refs::principal_storage_key(principal_id)?;
 
             let snap_hash = state
                 .state_store
@@ -193,7 +202,14 @@ pub fn resolve_project_context(
                     project_path: project_str.to_string(),
                 })?;
 
-            resolve_pinned_snapshot_context(state, &snap_hash, original_path, checkout_id)?
+            resolve_pinned_snapshot_context_admitted(
+                state,
+                &authority,
+                &cas_mutation_guard,
+                &snap_hash,
+                original_path,
+                checkout_id,
+            )?
         }
     };
 
@@ -223,8 +239,29 @@ pub fn resolve_pinned_snapshot_context(
     original_path: PathBuf,
     checkout_id: &str,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
-    let cas_root = state.state_store.cas_root()?;
-    let cas = lillux::cas::CasStore::new(cas_root.clone());
+    let authority = crate::execution::pinned_state_authority(state)?;
+    let cas_mutation_guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&cas_mutation_guard)?;
+    resolve_pinned_snapshot_context_admitted(
+        state,
+        &authority,
+        &cas_mutation_guard,
+        snapshot_hash,
+        original_path,
+        checkout_id,
+    )
+}
+
+fn resolve_pinned_snapshot_context_admitted(
+    state: &AppState,
+    authority: &ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
+    snapshot_hash: &str,
+    original_path: PathBuf,
+    checkout_id: &str,
+) -> Result<ResolvedProjectContext, ProjectSourceError> {
+    authority.ensure_guard(cas_mutation_guard)?;
+    let cas = authority.cas_store()?;
 
     let snap_obj = cas
         .get_object(snapshot_hash)
@@ -268,7 +305,8 @@ pub fn resolve_pinned_snapshot_context(
     let materialization_cache =
         crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
     crate::execution::checkout_project(
-        &cas_root,
+        &authority,
+        &cas_mutation_guard,
         manifest_hash,
         &exec_dir,
         Some(&materialization_cache),
@@ -355,10 +393,15 @@ impl ProjectPathSpec {
     /// The string form used for `canonical_project_ref` lookups.
     /// Returns `NO_PROJECT_SENTINEL` for `NoProject`, the path's
     /// string for `Explicit`.
-    pub fn ref_string(&self) -> String {
+    pub fn ref_string(&self) -> Result<String, ProjectSourceError> {
         match self {
-            Self::NoProject => NO_PROJECT_SENTINEL.to_string(),
-            Self::Explicit { path } => path.to_string_lossy().to_string(),
+            Self::NoProject => Ok(NO_PROJECT_SENTINEL.to_string()),
+            Self::Explicit { path } => path.to_str().map(str::to_owned).ok_or_else(|| {
+                ProjectSourceError::Other(
+                    "project path is not valid UTF-8 and cannot be used as a project identity"
+                        .into(),
+                )
+            }),
         }
     }
 
@@ -410,7 +453,12 @@ pub fn canonical_project_ref(raw: &str) -> Result<String, ProjectSourceError> {
         )));
     }
     match path.canonicalize() {
-        Ok(p) => Ok(p.to_string_lossy().to_string()),
+        Ok(path) => path.into_os_string().into_string().map_err(|_| {
+            ProjectSourceError::Other(format!(
+                "project_path '{}' resolves to a non-UTF-8 path and cannot be used as a project identity",
+                raw
+            ))
+        }),
         Err(e) => Err(ProjectSourceError::Other(format!(
             "project_path '{}' is not canonicalizable: {}. Ensure the path \
              exists and is accessible.",
@@ -472,8 +520,9 @@ mod canonical_project_ref_tests {
         // exercise symlink unification portably here without an OS-specific
         // setup; the contract is: identical input → identical output AND
         // canonicalize-equivalent inputs → identical output.)
-        let r1 = canonical_project_ref(&abs.to_string_lossy()).unwrap();
-        let r2 = canonical_project_ref(&abs.to_string_lossy()).unwrap();
+        let abs = abs.to_str().unwrap();
+        let r1 = canonical_project_ref(abs).unwrap();
+        let r2 = canonical_project_ref(abs).unwrap();
         assert_eq!(r1, r2);
     }
 
@@ -507,7 +556,7 @@ mod canonical_project_ref_tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("borrowed working dir"));
-        assert!(msg.contains(&missing.display().to_string()));
+        assert!(msg.contains(missing.to_str().unwrap()));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-05T02:37:45Z:d1490455b66da28341bc82e6f55d48ebeef88d5e306e1ef8321b5933024ba43b:cLko1dkADIwFeqA7JhG0TKzC4X6JbEWJEnG77+QXyheXVgroVp4iowuuDMdmncGn2DbySVHIopKkpMsMjHreBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:5a591fd80c1e1094e5ac7c792f8bf3b0f2a45962f6a44ddfbdf84acbb5fe14a7:zJfSIwENSL57830IBxfDhUTafXja7LKqVksslJ06G3bCxYurVXF2z87VdTouR7X2+9DkWJKhJnsgwXYHmcAbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Execution config — system defaults
 # Override per-project: .ai/config/execution/execution.yaml
 category: "execution"
@@ -25,7 +25,16 @@ defaults:
 #     timeout: 600
 #     cancellation_grace_secs: 30
 
-# Node-scoped valves — read by the daemon at boot from bundle layers plus
+# Generic root-history default. The node's own signed config layer may replace
+# this complete block. No retention age exists in Rust; omitting all signed
+# history blocks resolves Durable as well. An optional `minimum_terminal_for`
+# bounds both the finite node default and trusted item-authored overrides; a
+# node default below that minimum is invalid at boot.
+history:
+  default_retention: durable
+  item_authored_retention: allow
+
+# Other node-scoped valves — read by the daemon at boot from bundle layers plus
 # the node's own tree (<app_root>/.ai/config/execution/execution.yaml),
 # which is the operator's overlay. Per-launch policy reads use the project
 # as overlay and never read this section, so a project cannot set

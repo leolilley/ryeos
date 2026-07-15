@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }

@@ -116,12 +116,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         },
     };
 
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let _cas_guard = authority.acquire_shared_guard()?;
     let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
     let result = state.state_store.with_state_db(|db| {
-        ryeos_state::admit_root(db, &request, &signer, state.identity.verifying_key())
+        ryeos_state::admit_root(
+            db,
+            &request,
+            &signer,
+            state.identity.verifying_key(),
+            &_cas_guard,
+        )
     })?;
 
     Ok(serde_json::json!({

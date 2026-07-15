@@ -6,7 +6,8 @@
 //! Lock file at `runtime_state_dir/gc.lock`.
 //! State file at `runtime_state_dir/gc.state.json` for observability.
 
-use std::fs::{self, File};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
@@ -17,33 +18,35 @@ use serde_json::json;
 ///
 /// Acquires an exclusive flock on `runtime_state_dir/gc.lock`. The lock is
 /// released when this guard is dropped (or the process exits).
-#[derive(Debug)]
 pub struct GcLock {
     _lock_file: File,
-    state_path: std::path::PathBuf,
+    directory: lillux::PinnedDirectory,
+    state_file: Option<File>,
 }
 
 impl GcLock {
+    /// Establish the persistent GC lock anchor during ordinary mutable node
+    /// initialization. A later dry-run can then serialize with GC without
+    /// creating files merely by inspecting state.
+    pub fn ensure_anchor(runtime_state_dir: &Path) -> Result<()> {
+        let directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
+            .context("open runtime state directory for GC lock initialization")?;
+        directory
+            .open_regular_create(std::ffi::OsStr::new("gc.lock"), true, false, 0o600)
+            .context("establish GC lock anchor")?;
+        directory.sync().context("sync GC lock anchor directory")
+    }
+
     /// Acquire the GC lock. Blocks until acquired or times out.
     ///
     /// Creates a JSON sidecar file at `runtime_state_dir/gc.state.json`
     /// for observability (who holds the lock, current phase, PID).
     pub fn acquire(runtime_state_dir: &Path, node_id: &str) -> Result<Self> {
         let lock_path = runtime_state_dir.join("gc.lock");
-        let state_path = runtime_state_dir.join("gc.state.json");
-
-        // Ensure runtime_state_dir exists
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).context("failed to create runtime_state_dir for GC lock")?;
-        }
-
-        // Open (create if needed) and lock
-        let lock_file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
+        let directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
+            .context("open runtime state directory for GC lock")?;
+        let lock_file = directory
+            .open_regular_create(std::ffi::OsStr::new("gc.lock"), true, false, 0o600)
             .with_context(|| format!("failed to open GC lock file: {}", lock_path.display()))?;
 
         // Non-blocking exclusive lock
@@ -64,25 +67,69 @@ impl GcLock {
             "phase": "acquired",
             "started_at": lillux::time::iso8601_now(),
         });
-        fs::write(&state_path, serde_json::to_string_pretty(&state)?)
-            .context("failed to write GC state file")?;
+        let state_name = std::ffi::OsStr::new("gc.state.json");
+        let existing_state = directory
+            .open_regular(state_name, true)
+            .context("open existing GC state file")?;
+        let state_bytes = serde_json::to_vec_pretty(&state)?;
+        directory
+            .atomic_write_if_same(state_name, existing_state.as_ref(), &state_bytes, 0o600)
+            .context("publish GC state file")?;
+        let state_file = directory
+            .open_regular(state_name, true)?
+            .ok_or_else(|| anyhow::anyhow!("published GC state file disappeared"))?;
 
         tracing::info!(pid = pid, node_id = node_id, "GC lock acquired");
 
         Ok(Self {
             _lock_file: lock_file,
-            state_path,
+            directory,
+            state_file: Some(state_file),
+        })
+    }
+
+    /// Acquire the established GC lock without creating the anchor, a state
+    /// sidecar, or any directory. This is the literal mutation-free dry-run
+    /// path; absence is a current-format initialization error.
+    pub fn acquire_existing(runtime_state_dir: &Path) -> Result<Self> {
+        let lock_path = runtime_state_dir.join("gc.lock");
+        let directory = lillux::PinnedDirectory::open(runtime_state_dir)?
+            .ok_or_else(|| anyhow::anyhow!("runtime state directory is absent"))?;
+        let lock_file = directory
+            .open_regular(std::ffi::OsStr::new("gc.lock"), true)?
+            .ok_or_else(|| anyhow::anyhow!("GC lock anchor is absent: {}", lock_path.display()))?;
+        if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = std::io::Error::last_os_error();
+            anyhow::bail!(
+                "failed to acquire GC lock at {}: {} (another GC run may be in progress)",
+                lock_path.display(),
+                err
+            );
+        }
+        Ok(Self {
+            _lock_file: lock_file,
+            directory,
+            state_file: None,
         })
     }
 
     /// Update the current phase in the state sidecar.
     pub fn update_phase(&self, phase: &str) -> Result<()> {
-        if let Ok(content) = fs::read_to_string(&self.state_path) {
-            if let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(obj) = state.as_object_mut() {
-                    obj.insert("phase".to_string(), json!(phase));
-                    let _ = fs::write(&self.state_path, serde_json::to_string_pretty(&state)?);
-                }
+        let Some(state_file) = self.state_file.as_ref() else {
+            return Ok(());
+        };
+        let mut file = state_file.try_clone().context("clone GC state file")?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        if let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(obj) = state.as_object_mut() {
+                obj.insert("phase".to_string(), json!(phase));
+                let bytes = serde_json::to_vec_pretty(&state)?;
+                file.set_len(0)?;
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
             }
         }
         Ok(())
@@ -95,7 +142,11 @@ impl Drop for GcLock {
         // If we unlock first, another process could acquire the lock and
         // write its own sidecar — then our remove_file would delete the
         // NEW holder's state file.
-        let _ = fs::remove_file(&self.state_path);
+        if let Some(state_file) = self.state_file.take() {
+            let _ = self
+                .directory
+                .remove_if_same(std::ffi::OsStr::new("gc.state.json"), &state_file);
+        }
 
         // Release flock (implicit on close, but explicit is cleaner)
         unsafe {
@@ -109,7 +160,23 @@ impl Drop for GcLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn existing_lock_path_is_mutation_free() {
+        let tmp = TempDir::new().unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        fs::create_dir_all(&runtime_state_dir).unwrap();
+        assert!(GcLock::acquire_existing(&runtime_state_dir).is_err());
+        assert!(!runtime_state_dir.join("gc.lock").exists());
+
+        GcLock::ensure_anchor(&runtime_state_dir).unwrap();
+        let before = fs::read_dir(&runtime_state_dir).unwrap().count();
+        drop(GcLock::acquire_existing(&runtime_state_dir).unwrap());
+        assert_eq!(fs::read_dir(&runtime_state_dir).unwrap().count(), before);
+        assert!(!runtime_state_dir.join("gc.state.json").exists());
+    }
 
     #[test]
     fn lock_acquire_and_release() {

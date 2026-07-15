@@ -23,6 +23,21 @@ use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_state::objects::{LiveInput, LiveInputIntent};
 
+fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
+    let hash = "a".repeat(64);
+    ryeos_state::objects::CapturedThreadHistoryPolicy {
+        retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+        canonical_item_ref: "directive:test/live".to_string(),
+        item_content_hash: hash.clone(),
+        item_signer_fingerprint: Some(hash.clone()),
+        item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+        kind_schema_content_hash: hash,
+        resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+            node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+        },
+    }
+}
+
 /// Create a `directive`-kind thread directly through the state store (bypassing
 /// the lifecycle kind-profile check the empty test registry would fail) and mark
 /// it running.
@@ -41,10 +56,11 @@ fn create_running_directive(state: &AppState, thread_id: &str, requested_by: &st
         project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
+        captured_history_policy: Some(captured_policy()),
     };
     state
         .state_store
-        .create_thread(&rec)
+        .create_thread_for_test(&rec)
         .expect("create thread");
     state
         .state_store

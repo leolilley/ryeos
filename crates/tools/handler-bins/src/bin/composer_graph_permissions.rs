@@ -8,8 +8,12 @@ fn main() {
             Err((step, reason)) => HandlerResponse::ComposeErr { step, reason },
         },
         HandlerRequest::ValidateComposerConfig(v) => {
-            match graph_permissions::validate_config(&v.composer_config) {
-                Ok(()) => HandlerResponse::ValidateOk,
+            match graph_permissions::validate_config(&v.composer_config).and_then(|()| {
+                graph_permissions::validate_field_requirements(&v.field_requirements)
+            }) {
+                Ok(()) => HandlerResponse::ValidateComposerOk {
+                    field_requirements: v.field_requirements,
+                },
                 Err(msg) => HandlerResponse::ValidateErr { message: msg },
             }
         }

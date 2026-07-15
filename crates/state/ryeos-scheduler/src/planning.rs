@@ -29,7 +29,26 @@ pub fn plan_schedule(
 ) -> SchedulePlan {
     let last_scheduled_at = last_fire.map(|f| f.scheduled_at);
     let last_fire_at = last_fire.and_then(|f| f.fired_at);
+    plan_schedule_from_boundaries(spec, last_scheduled_at, last_fire_at, now_ms)
+}
 
+/// Plan from the durable per-schedule cursor without loading a historical fire
+/// row. Startup reconciliation uses this after cursor/projection consistency
+/// has been checked against the indexed latest fire.
+pub fn plan_schedule_from_cursor(
+    spec: &ScheduleSpecRecord,
+    last_scheduled_at: Option<i64>,
+    now_ms: i64,
+) -> SchedulePlan {
+    plan_schedule_from_boundaries(spec, last_scheduled_at, None, now_ms)
+}
+
+fn plan_schedule_from_boundaries(
+    spec: &ScheduleSpecRecord,
+    last_scheduled_at: Option<i64>,
+    last_fire_at: Option<i64>,
+    now_ms: i64,
+) -> SchedulePlan {
     if !spec.enabled {
         return SchedulePlan {
             last_scheduled_at,
@@ -206,7 +225,7 @@ fn interval_ms(spec: &ScheduleSpecRecord) -> Option<i64> {
 }
 
 fn within_lateness_grace(spec: &ScheduleSpecRecord, scheduled_at: i64, now_ms: i64) -> bool {
-    let grace_ms = spec.lateness_grace_secs.max(0).saturating_mul(1000);
+    let grace_ms = spec.lateness_grace_secs.saturating_mul(1000);
     now_ms <= scheduled_at.saturating_add(grace_ms)
 }
 
@@ -227,8 +246,8 @@ mod tests {
             lateness_grace_secs: 60,
             enabled: true,
             project_root: None,
-            signer_fingerprint: "fp:test".to_string(),
-            spec_hash: "abc".to_string(),
+            signer_fingerprint: "11".repeat(32),
+            spec_hash: "22".repeat(32),
             registered_at,
             requester_fingerprint: "fp:test".to_string(),
             capabilities: vec!["ryeos.execute.*".to_string()],
@@ -236,17 +255,18 @@ mod tests {
     }
 
     fn make_fire(scheduled_at: i64) -> FireRecord {
+        let fire_id = format!("test@{scheduled_at}");
         FireRecord {
-            fire_id: format!("test@{scheduled_at}"),
+            thread_id: Some(super::super::types::thread_id_from_fire(&fire_id)),
+            fire_id,
             schedule_id: "test".to_string(),
             scheduled_at,
             fired_at: Some(scheduled_at + 1),
-            completed_at: None,
-            thread_id: None,
+            completed_at: Some(scheduled_at + 1),
             status: "completed".to_string(),
             trigger_reason: "normal".to_string(),
             outcome: Some("success".to_string()),
-            signer_fingerprint: Some("fp:test".to_string()),
+            signer_fingerprint: "11".repeat(32),
         }
     }
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:13:18Z:04a26d0cb7b7c40fa488547cbb0314e9b918a88149ea2fd2dd674f3074d44331:YPsK4JgFHy1+xVHlTHAwA+umagnNpiDJyi3Gwv/liqyECNvzag8581G2SeoxhJjcW1ni9kwYJhfThRfsqlz4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T23:18:43Z:5579875b4a42e4f24a6336e4464ecaa7a1fec3d695f8cb2064cf73a880324178:sDHhcOv+oMoBt4EJs+7Ugz7+VtB2jfH5eTr460OnOKcoN/1pazjllgF+lp949HuWRFwzmGGEv1OUgZk4SjPPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -131,7 +131,10 @@ Cancel a running thread. Authenticated.
 
 ### `POST /objects/has`
 
-Check whether CAS objects exist on this node.
+Check whether typed CAS entries exist on this node. Requests carry separate
+`object_hashes` and `blob_hashes` arrays; responses partition each namespace
+into found and missing hashes. A digest found as a blob never satisfies an
+object request, or vice versa.
 
 - **Source:** `service:objects/has`
 - **Required cap:** `ryeos.execute.service.objects/has`

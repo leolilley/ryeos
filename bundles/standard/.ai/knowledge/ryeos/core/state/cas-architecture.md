@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:1feba17290d5fbb9be705a619531f66f70a5ca360516b0d3de6fd01998ad87d6:fTZRbvlgHHaXH2mtxWpfgnwsdmIhGNNyCS4bX148/LK74wYpN95DZzn4llLX2yElBSrnPLojvmn6A+eGhGC4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T23:18:43Z:e77ceab63ac74285cb292f30a4c2117a776287607391635ef1014cea8f65a72c:TT325xfHbQoRAMpYG6wqpqaSb2TGMsh43NaczQXnIrZo86biC7agMpOzuRR274JOGyedlsO9SCI/B9hyCHwHDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -24,11 +24,20 @@ through CAS. Everything else is a derived view.
 | **Signed refs** | Yes (one per head) | No | Entry points into the CAS graph |
 | **SQLite projection** | Yes (derived) | Fully | Query performance |
 
-The critical contract is **CAS-first writes**: if CAS succeeds but the
-projection write fails, the system logs a warning and continues. The
-projection is repaired on next startup via `catch_up_projection`. You
-can literally delete `projection.sqlite3` and lose nothing — the full
-state is recovered by walking signed heads through CAS.
+The critical contract is **CAS-first, journaled writes**. Every chain-head
+change records a durable pending transition before publishing its signed ref.
+If projection work fails, the pending record remains and the repair worker
+replays that named chain. Normal startup enumerates only this journal; it does
+not sweep every historical signed head.
+
+The selected projection has a generation-scoped instance identity and path,
+named
+`projection.<instance-id>.sqlite3`, chosen by
+`state/recovery/thread-projection/generation.json`. If that selected generation
+is absent, invalid, or from another schema epoch, bootstrap builds a fresh
+instance by walking trusted signed heads, verifies it, and then atomically
+publishes the generation pointer. The bootstrap lifecycle surface remains
+responsive while that offline recovery runs.
 
 ### CAS Objects
 
@@ -54,12 +63,21 @@ Refs are written by the node's signing key, so they are tamper-evident.
 
 ### SQLite Projection
 
-The projection (`projection.sqlite3`) is a materialized view of CAS
-state, optimized for query performance. Only `Durable` events are
-indexed; journal and ephemeral events are not projected.
+The selected `projection.<instance-id>.sqlite3` is a materialized view of CAS
+state, optimized for query performance. Only `Durable` events are indexed;
+journal and ephemeral events are not projected.
 
 The projection is **not authoritative** — it is a cache that can be
 fully rebuilt from CAS at any time.
+
+### Stable Operational State
+
+`state/operational.sqlite3` owns records that cannot be reconstructed from
+signed chain heads: CAS-entry attribution, admission-attestation lookup rows,
+sync jobs, and sync-job attempts. It is a fixed source-of-truth store, is never
+selected through `generation.json`, and is never copied, replaced, or removed
+by projection rebuild or generation cleanup. `state/operational.initialized`
+fails closed if an established operational database later disappears.
 
 ## SQLite Schema Ownership
 
@@ -67,9 +85,10 @@ Every database in the system is stamped with a `PRAGMA application_id`:
 
 | Database | ID | Hex | ASCII |
 |---|---|---|---|
-| `runtime.db` | `0x52594541` | `RYEA` | Runtime |
-| `projection.sqlite3` | `0x5259504a` | `RYPJ` | Projection |
-| `scheduler.db` | `0x52595343` | `RYSC` | Scheduler |
+| `runtime.sqlite3` | `0x52594541` | `RYEA` | Runtime |
+| `operational.sqlite3` | `0x52594f50` | `RYOP` | Stable operational state |
+| `projection.<instance-id>.sqlite3` | `0x5259504a` | `RYPJ` | Projection generation |
+| `scheduler.sqlite3` | `0x52595343` | `RYSC` | Scheduler projection |
 
 On open, the system performs a four-step exhaustive check:
 
@@ -116,13 +135,20 @@ are journal-only; all lifecycle and audit events are durable.
 
 ## CAS-First Write Contract
 
-The system never writes to the projection without first writing to CAS.
-The projection is a **second-class citizen**:
+The system never writes to the projection without first writing to CAS and
+publishing through the per-chain transition journal. The projection is a
+**second-class citizen**:
 
-- CAS write succeeds, projection fails → warning logged, projection
-  repaired on next `catch_up_projection`
-- Projection is deleted → full rebuild from CAS on next daemon startup
+- CAS/head succeeds, projection fails → the pending Set stays durable and the
+  named-chain repair worker converges it
+- Selected generation is deleted → bootstrap performs a verified full rebuild
+  into a new selected instance before the application becomes Ready
 - `INSERT OR IGNORE` in the projection prevents duplicate event indexing
+
+`projection verify` is a fail-only, read-only inspection of the selected
+generation. `projection rebuild` explicitly constructs and verifies a new
+generation while the daemon is offline. Neither command runs as an automatic
+history-sized sweep on a normal current-generation boot.
 
 This is an event sourcing pattern where the events live in a
 content-addressed graph with hash-linked chains, and the projection is

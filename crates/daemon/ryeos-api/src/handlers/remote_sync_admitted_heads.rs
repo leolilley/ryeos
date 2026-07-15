@@ -1,5 +1,6 @@
 //! `remote/sync-admitted-heads` — mirror all discovered remote admission heads.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -120,18 +121,39 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let missing = state.state_store.with_state_db(|db| {
-            candidates
-                .iter()
-                .filter_map(|(head, subject_hash)| {
-                    match db.get_cas_entry(CasEntryKind::Object, &head.target_hash) {
-                        Ok(Some(entry)) if entry.state == CasEntryState::Mirrored => None,
-                        Ok(_) => Some(Ok((*head, subject_hash.clone()))),
-                        Err(err) => Some(Err(err)),
-                    }
-                })
-                .collect::<Result<Vec<_>>>()
+        let mirrored_targets = state.state_store.with_state_db(|db| {
+            let mut mirrored = BTreeSet::new();
+            for (head, _) in &candidates {
+                if db
+                    .get_cas_entry(CasEntryKind::Object, &head.target_hash)?
+                    .is_some_and(|entry| entry.state == CasEntryState::Mirrored)
+                {
+                    mirrored.insert(head.target_hash.clone());
+                }
+            }
+            Ok(mirrored)
         })?;
+        let cas_read = state.acquire_cas_read()?;
+        let mut missing = Vec::new();
+        for (head, subject_hash) in &candidates {
+            let complete_locally = if mirrored_targets.contains(&head.target_hash) {
+                let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+                    cas_read.cas(),
+                    [head.target_hash.clone()],
+                    ryeos_state::object_closure::ObjectClosureLimits::unbounded_for_local_maintenance(),
+                )?;
+                report.is_complete()
+            } else {
+                false
+            };
+            if !complete_locally {
+                missing.push((*head, subject_hash.clone()));
+            }
+        }
+        // The durable Mirrored rows are GC roots. The read capability is only
+        // needed to make each closure decision atomic with respect to a sweep;
+        // do not retain it across remote I/O or staged import work.
+        drop(cas_read);
         let already_mirrored = candidates.len().saturating_sub(missing.len());
         let missing_count = missing.len();
         let max_imports = req.max_imports.unwrap_or(DEFAULT_MAX_IMPORTS);

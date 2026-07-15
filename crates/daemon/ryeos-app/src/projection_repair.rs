@@ -31,6 +31,15 @@ pub async fn run(state_store: Arc<StateStore>, shutdown: impl Future<Output = ()
 
         if repaired.is_ok() {
             retry_delay = Duration::from_secs(1);
+            // A pending Remove can require app-owned runtime cleanup rather
+            // than another projection replay. Wait for that owner (or a new
+            // repair request) to change the journal instead of hot-spinning.
+            if !health.is_current() {
+                tokio::select! {
+                    _ = health.notified() => {}
+                    _ = &mut shutdown => return Ok(()),
+                }
+            }
             continue;
         }
         tracing::warn!(

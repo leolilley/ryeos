@@ -8,27 +8,15 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::identity::NodeIdentity;
-use crate::io::atomic;
-
-/// Write a signed `kind: node` item.
-///
-/// Serializes the provided YAML body as-is, signs it with the node's identity,
-/// and writes atomically. Section identity comes from the output path, not the
-/// body.
-///
-/// Output path: `<base_dir>/<section>/<name>.yaml`.
-///
-/// # Trust continuity
-///
-/// The daemon's identity MUST be in the trust store the daemon will use
-/// on next boot. Otherwise the daemon's own writes won't verify.
-pub fn write_signed_node_item(
-    base_dir: &Path,
+/// Render the exact signed bytes for one path-owned `kind: node` item without
+/// touching the filesystem. Callers that already hold a pinned namespace can
+/// publish these bytes with an inode-bound conditional replacement.
+pub fn render_signed_node_item(
     section: &str,
     name: &str,
     body: &serde_json::Value,
     identity: &NodeIdentity,
-) -> Result<std::path::PathBuf> {
+) -> Result<Vec<u8>> {
     // Build canonical YAML from body fields. Structural node-config metadata is
     // path-derived and must never be serialized.
     let mut yaml_map = serde_yaml::Mapping::new();
@@ -60,17 +48,49 @@ pub fn write_signed_node_item(
         serde_yaml::to_string(&yaml_map).context("failed to serialize node config body to YAML")?;
 
     // Sign with node identity
-    let signed = lillux::signature::sign_content(&yaml_str, identity.signing_key(), "#", None);
+    Ok(lillux::signature::sign_content(&yaml_str, identity.signing_key(), "#", None).into_bytes())
+}
 
-    // Compute output path
-    let section_dir = base_dir.join(section);
-    let output_path = section_dir.join(format!("{}.yaml", name));
+/// Write a signed `kind: node` item.
+///
+/// Serializes the provided YAML body as-is, signs it with the node's identity,
+/// and publishes atomically relative to a pinned, directory-locked section.
+/// Section identity comes from the output path, not the body.
+///
+/// Output path: `<base_dir>/<section>/<name>.yaml`.
+///
+/// # Trust continuity
+///
+/// The daemon's identity MUST be in the trust store the daemon will use
+/// on next boot. Otherwise the daemon's own writes won't verify.
+pub fn write_signed_node_item(
+    base_dir: &Path,
+    section: &str,
+    name: &str,
+    body: &serde_json::Value,
+    identity: &NodeIdentity,
+) -> Result<std::path::PathBuf> {
+    let bytes = render_signed_node_item(section, name, body, identity)?;
 
-    // Atomic write
-    atomic::atomic_write(&output_path, signed.as_bytes())
-        .with_context(|| format!("failed to write node config item {}", output_path.display()))?;
+    let base_directory = lillux::PinnedDirectory::open_or_create(base_dir)
+        .context("establish no-follow node config root")?;
+    let section_directory = base_directory
+        .open_or_create_child(std::ffi::OsStr::new(section), 0o777)
+        .with_context(|| format!("establish node config section {section}"))?;
+    let _directory_lock = section_directory.lock_exclusive()?;
+    let filename = format!("{name}.yaml");
+    let filename = std::ffi::OsStr::new(&filename);
+    let expected = section_directory.open_regular(filename, false)?;
+    section_directory
+        .atomic_write_if_same(filename, expected.as_ref(), &bytes, 0o600)
+        .with_context(|| {
+            format!(
+                "failed to write node config item {}",
+                section_directory.path().join(filename).display()
+            )
+        })?;
 
-    Ok(output_path)
+    Ok(section_directory.path().join(filename))
 }
 
 #[cfg(test)]
@@ -126,6 +146,26 @@ mod tests {
         assert!(
             err.to_string().contains("command structural field 'name'"),
             "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn writes_only_the_canonical_yaml_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_signed_node_item(
+            tmp.path(),
+            "schedules",
+            "demo",
+            &serde_json::json!({ "schedule_id": "demo" }),
+            &identity(),
+        )
+        .unwrap();
+
+        assert_eq!(path, tmp.path().join("schedules/demo.yaml"));
+        assert!(path.is_file());
+        assert_eq!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("yaml")
         );
     }
 }

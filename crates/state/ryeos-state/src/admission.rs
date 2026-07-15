@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::object_closure::{collect_object_closure_with_limits, ObjectClosureLimits};
+use crate::object_closure::{collect_object_closure_with_cas_and_limits, ObjectClosureLimits};
 use crate::{
     AdmissionAttestationState, Attestation, CasEntryKind, CasEntryState,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, Signer, StateDb,
@@ -55,7 +55,10 @@ pub fn admit_root(
     request: &AdmissionRequest,
     signer: &dyn Signer,
     issuer_key: &lillux::crypto::VerifyingKey,
+    cas_mutation_guard: &crate::CasMutationGuard,
 ) -> Result<AdmissionResult> {
+    db.ensure_cas_mutation_guard(cas_mutation_guard)?;
+    let cas = db.pinned_cas()?;
     if !lillux::valid_hash(&request.subject_hash)
         || request.subject_hash.bytes().any(|b| b.is_ascii_uppercase())
     {
@@ -75,7 +78,7 @@ pub fn admit_root(
         &format!("admissions/{}", request.policy),
         &request.subject_hash,
     )? {
-        let existing_attestation = read_attestation(db, &existing.target_hash)?;
+        let existing_attestation = read_attestation(&cas, &existing.target_hash)?;
         if existing_attestation.subject_hash != request.subject_hash
             || existing_attestation.policy != request.policy
             || existing_attestation.claim != request.claim
@@ -106,8 +109,8 @@ pub fn admit_root(
         });
     }
 
-    let closure = collect_object_closure_with_limits(
-        db.cas_root(),
+    let closure = collect_object_closure_with_cas_and_limits(
+        &cas,
         [request.subject_hash.clone()],
         request.limits,
     )
@@ -122,7 +125,7 @@ pub fn admit_root(
             closure.unsupported_objects.len()
         );
     }
-    verify_closure_content_hashes(db, &closure)?;
+    verify_closure_content_hashes(&cas, &closure)?;
 
     let evidence = json!({
         "closure": {
@@ -155,19 +158,25 @@ pub fn admit_root(
     let attestation_value = attestation.to_value();
     let canonical = lillux::canonical_json(&attestation_value);
     let attestation_hash = lillux::sha256_hex(canonical.as_bytes());
-    let path = lillux::shard_path(db.cas_root(), "objects", &attestation_hash, ".json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("failed to create attestation CAS parent")?;
-    }
-    lillux::atomic_write(&path, canonical.as_bytes())
+    let stored = cas
+        .put_object(&attestation_value)
         .context("failed to write attestation CAS object")?;
+    if stored.hash != attestation_hash {
+        anyhow::bail!(
+            "attestation CAS hash mismatch: expected {}, got {}",
+            attestation_hash,
+            stored.hash
+        );
+    }
 
     let source_principal = Some(format!("fp:{}", signer.fingerprint()));
     for hash in &closure.object_hashes {
-        let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
-        let bytes = std::fs::metadata(&path)
-            .with_context(|| format!("failed to stat admitted object {hash}"))?
-            .len();
+        let object = cas
+            .get_object(hash)
+            .with_context(|| format!("failed to read admitted object {hash}"))?
+            .ok_or_else(|| anyhow::anyhow!("admitted object {hash} is missing"))?;
+        let bytes = u64::try_from(lillux::canonical_json(&object).len())
+            .context("admitted object length does not fit u64")?;
         db.record_cas_entry(&NewCasEntryAttribution {
             hash: hash.clone(),
             entry_kind: CasEntryKind::Object,
@@ -179,10 +188,11 @@ pub fn admit_root(
         })?;
     }
     for hash in &closure.blob_hashes {
-        let path = lillux::shard_path(db.cas_root(), "blobs", hash, "");
-        let bytes = std::fs::metadata(&path)
-            .with_context(|| format!("failed to stat admitted blob {hash}"))?
-            .len();
+        let blob = cas
+            .get_blob(hash)
+            .with_context(|| format!("failed to read admitted blob {hash}"))?
+            .ok_or_else(|| anyhow::anyhow!("admitted blob {hash} is missing"))?;
+        let bytes = u64::try_from(blob.len()).context("admitted blob length does not fit u64")?;
         db.record_cas_entry(&NewCasEntryAttribution {
             hash: hash.clone(),
             entry_kind: CasEntryKind::Blob,
@@ -209,6 +219,7 @@ pub fn admit_root(
         &attestation_hash,
         None,
         signer,
+        cas_mutation_guard,
     )?;
     db.record_admission_attestation(&NewAdmissionAttestationRecord {
         attestation_hash: attestation_hash.clone(),
@@ -248,52 +259,27 @@ fn validate_admission_label(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_attestation(db: &StateDb, hash: &str) -> Result<Attestation> {
-    let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read admission attestation {hash}"))?;
-    let actual = lillux::sha256_hex(&bytes);
-    if actual != hash {
-        anyhow::bail!(
-            "admission attestation content hash mismatch: expected {}, got {}",
-            hash,
-            actual
-        );
-    }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse admission attestation {hash}"))?;
+fn read_attestation(cas: &lillux::CasStore, hash: &str) -> Result<Attestation> {
+    let value = cas
+        .get_object(hash)
+        .with_context(|| format!("failed to read admission attestation {hash}"))?
+        .ok_or_else(|| anyhow::anyhow!("admission attestation {hash} is missing"))?;
     Attestation::from_value(&value)
 }
 
 fn verify_closure_content_hashes(
-    db: &StateDb,
+    cas: &lillux::CasStore,
     closure: &crate::object_closure::ObjectClosureReport,
 ) -> Result<()> {
     for hash in &closure.object_hashes {
-        let path = lillux::shard_path(db.cas_root(), "objects", hash, ".json");
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("failed to read admission object {hash}"))?;
-        let actual = lillux::sha256_hex(&bytes);
-        if actual != *hash {
-            anyhow::bail!(
-                "admission object content hash mismatch: expected {}, got {}",
-                hash,
-                actual
-            );
-        }
+        cas.get_object(hash)
+            .with_context(|| format!("failed to read admission object {hash}"))?
+            .ok_or_else(|| anyhow::anyhow!("admission object {hash} is missing"))?;
     }
     for hash in &closure.blob_hashes {
-        let path = lillux::shard_path(db.cas_root(), "blobs", hash, "");
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("failed to read admission blob {hash}"))?;
-        let actual = lillux::sha256_hex(&bytes);
-        if actual != *hash {
-            anyhow::bail!(
-                "admission blob content hash mismatch: expected {}, got {}",
-                hash,
-                actual
-            );
-        }
+        cas.get_blob(hash)
+            .with_context(|| format!("failed to read admission blob {hash}"))?
+            .ok_or_else(|| anyhow::anyhow!("admission blob {hash} is missing"))?;
     }
     Ok(())
 }
@@ -302,8 +288,17 @@ fn verify_closure_content_hashes(
 mod tests {
     use super::*;
     use crate::objects::Attestation;
+    use crate::refs::TrustStore;
     use crate::signer::TestSigner;
     use serde_json::json;
+    use std::sync::Arc;
+
+    fn test_trust_store() -> Arc<TrustStore> {
+        let signer = TestSigner::default();
+        let mut trust_store = TrustStore::new();
+        trust_store.insert(signer.fingerprint().to_string(), signer.verifying_key());
+        Arc::new(trust_store)
+    }
 
     fn write_object(db: &StateDb, value: &serde_json::Value) -> String {
         let canonical = lillux::canonical_json(value);
@@ -317,7 +312,12 @@ mod tests {
     #[test]
     fn admit_root_writes_attestation_and_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
+        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
         let signer = TestSigner::default();
         let subject_hash = write_object(
             &db,
@@ -338,6 +338,7 @@ mod tests {
             &AdmissionRequest::accepted(subject_hash.clone(), "test.policy.v1"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap();
         assert!(!result.reused_existing);
@@ -379,6 +380,7 @@ mod tests {
             &AdmissionRequest::accepted(subject_hash, "test.policy.v1"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap();
         assert!(second.reused_existing);
@@ -388,7 +390,12 @@ mod tests {
     #[test]
     fn admit_root_rejects_missing_subject() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
+        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
         let signer = TestSigner::default();
 
         let err = admit_root(
@@ -396,6 +403,7 @@ mod tests {
             &AdmissionRequest::accepted("aa".repeat(32), "test.policy.v1"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap_err();
         assert!(err.to_string().contains("admission closure incomplete"));
@@ -404,7 +412,12 @@ mod tests {
     #[test]
     fn admit_root_rejects_unsafe_policy_before_writing_head() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = StateDb::open(tmp.path()).unwrap();
+        let db = StateDb::open(tmp.path(), test_trust_store()).unwrap();
+        let guard = db
+            .pinned_authority()
+            .unwrap()
+            .acquire_shared_guard()
+            .unwrap();
         let signer = TestSigner::default();
         let subject_hash = write_object(
             &db,
@@ -425,6 +438,7 @@ mod tests {
             &AdmissionRequest::accepted(subject_hash.clone(), "bad/../policy"),
             &signer,
             &signer.verifying_key(),
+            &guard,
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid admission policy"));

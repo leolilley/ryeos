@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-11T21:03:05Z:c4648303952fcb898c9e2f3c30f45cee62d2c7fff46b3e3e4849433ec32c7dc1:0LSdN/+l42bH7YfPxvk0pxaaB0YBLSaSa7UKV7dFryc6O+gUfjzDSv8yC5HTsAEi6fGddYa5dB07jK9Z0sFWAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:d1d6b4e1a98cc8de1cc1bcb1b39421b0322d729aa7ef5f5f38532742cff39f7a:/prUF5Ij8xskYGL3pn83Rgrii1T1XTWG0OKOnkbsFDBmfuxO2gY1izVbcTKNaJ4DeXqVFkAgJDZ77fBqER7wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/core
 name: graph-permissions
 kind: handler
 serves: composer
 binary_ref: bin/x86_64-unknown-linux-gnu/rye-composer-graph-permissions
-abi_version: "v1"
+abi_version: "v3"
 required_caps: []
 description: "Graph permissions composer handler"

@@ -244,20 +244,25 @@ pub async fn import_admitted_root(
         source_peer: req.source_peer.clone(),
         job_id: req.job_id.clone(),
     };
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let cas_guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
     let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
-    let import = state
-        .state_store
-        .with_state_db(|db| ryeos_state::sync::import_objects_staged(db, &payload, &attribution))?;
+    let import = state.state_store.with_state_db(|db| {
+        ryeos_state::sync::import_objects_staged(db, &payload, &attribution, &cas_guard)
+    })?;
     if import.hash_mismatches != 0 {
         anyhow::bail!(
             "remote import encountered {} hash mismatch(es)",
             import.hash_mismatches
         );
     }
-    verify_local_imported_closure(state, &req.subject_hash, &closure_options)?;
+    verify_local_imported_closure(&cas, &req.subject_hash, &closure_options)?;
 
     let object_hashes = payload
         .entries
@@ -294,7 +299,7 @@ pub async fn import_admitted_root(
 }
 
 fn verify_local_imported_closure(
-    state: &Arc<AppState>,
+    cas: &lillux::CasStore,
     subject_hash: &str,
     options: &ObjectsClosureRequestOptions,
 ) -> Result<()> {
@@ -313,9 +318,8 @@ fn verify_local_imported_closure(
             .max_links_per_object
             .unwrap_or(defaults.max_links_per_object),
     };
-    let cas_root = state.state_store.cas_root()?;
-    let report = ryeos_state::object_closure::collect_object_closure_with_limits(
-        &cas_root,
+    let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        cas,
         [subject_hash.to_string()],
         limits,
     )?;
@@ -512,6 +516,10 @@ mod tests {
 
         fn fingerprint(&self) -> &str {
             &self.fingerprint
+        }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
         }
     }
 

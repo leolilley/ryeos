@@ -149,9 +149,10 @@ config:
 /// The test owns the whole daemon, so an unfiltered read is exactly the parent +
 /// child + successor threads.
 fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

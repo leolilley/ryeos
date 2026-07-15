@@ -1,8 +1,12 @@
-# ryeos:signed:2026-06-19T05:40:59Z:7853da58122e73183c156acfa36ef545b8f563e9aaedee311d413b140b174101:3le8JvjCwsGMqWdNQcwxL7908BSq+S4QejnLS0KW/xGBfAtmPJgB48Jw8j/RI7T2XUFOn5kOT/yq0e6dXVdfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:0a2c2b27dc3384692c264a22058a207cae5c49454af1d84ae63b4380b4151535:co/HJrLTJnnFo2ce6TEUM6cC9DdkkL8Uvo+9qHTxkNdnjMdkUGrUiOf2zi39IYqH3jCekipwO1K9lGEo6/HHAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - register
-description: Create or update a schedule spec
+description: >-
+  Create or update a schedule spec. The input object must explicitly provide
+  schedule_id, item_ref, schedule_type, expression, params, timezone,
+  misfire_policy, overlap_policy, lateness_grace_secs, and enabled;
+  project_root is optional.
 arguments:
 - name: params
   kind: json

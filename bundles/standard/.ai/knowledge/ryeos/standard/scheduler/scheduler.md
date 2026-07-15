@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:1debf86b9448d22a8fe21d97a763999c5922603a8db95165200d57b814e837b5:ZZfBIWP7FszTXrYy7OsKDe5oAAIIo6GmtN7XUz5aOurDbsX3GugJ1C0HxzK+Mi1EpQx4piW+Jj29fOlP10hGDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-14T23:18:43Z:79d622c08de678f9500cc7b4d07ecdb42a557b4560d16924ba5d63931cf06742:Ke438Jv2hf1fGcGpSGUhdFn3BHaA+o8tVqcaKtbNISKJc9sM1y9EaHEW1bPW5gzjTU42vLggkq/IUeIhaUKRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -43,10 +43,37 @@ ryeos scheduler show-fires <id>     # View fire history
 ## Registration
 
 Register a schedule by providing:
+- **Schedule ID** — stable identifier for update and operations
 - **Item ref** — canonical ref of the item to execute
-- **Schedule spec** — cron expression or interval
-- **Parameters** — input values for each execution
-- **Project path** — which project context to run in
+- **Schedule type and expression** — `cron`, `interval`, or `at`
+- **Parameters** — an object passed to each execution
+- **Timezone** — an explicit IANA timezone such as `UTC`
+- **Misfire policy** — `skip`, `fire_once_now`,
+  `catch_up_bounded:N`, or `catch_up_within_secs:S`
+- **Overlap policy** — `allow`, `skip`, or `cancel_previous`
+- **Lateness grace** — a positive number of seconds
+- **Enabled state** — an explicit boolean
+- **Project root** — optional project context for execution
+
+Complete registration object:
+
+```yaml
+schedule_id: hourly-report
+item_ref: graph:reports/hourly
+schedule_type: cron
+expression: "0 0 * * * *"
+params:
+  format: summary
+timezone: UTC
+misfire_policy: fire_once_now
+overlap_policy: skip
+lateness_grace_secs: 60
+enabled: true
+project_root: /path/to/project
+```
+
+All fields in this example except `project_root` are required. Policies are
+authored behavior: the daemon does not infer them or substitute defaults.
 
 The daemon evaluates the schedule and fires executions at the
 specified times. Each fire creates a new thread.

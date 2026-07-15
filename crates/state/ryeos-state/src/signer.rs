@@ -14,6 +14,39 @@ pub trait Signer: Send + Sync {
     /// Return the fingerprint of the signing key (e.g. SHA-256 of the
     /// public key in hex).
     fn fingerprint(&self) -> &str;
+
+    /// Return the public key corresponding to the private signing authority.
+    /// Authoritative writers use this to prove both fingerprint consistency
+    /// and membership in the StateDb-owned trust store before publication.
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey;
+}
+
+/// Prove that a prospective authoritative writer owns the exact key admitted
+/// under its declared fingerprint. Checking the fingerprint alone would not
+/// prove possession of the trusted private key.
+pub fn ensure_signer_trusted(
+    signer: &dyn Signer,
+    trust_store: &crate::refs::TrustStore,
+) -> anyhow::Result<()> {
+    let verifying_key = signer.verifying_key();
+    let actual_fingerprint = lillux::crypto::fingerprint(&verifying_key);
+    if signer.fingerprint() != actual_fingerprint {
+        anyhow::bail!(
+            "signer fingerprint/key mismatch: declared {}, actual {}",
+            signer.fingerprint(),
+            actual_fingerprint,
+        );
+    }
+    let trusted = trust_store
+        .get(signer.fingerprint())
+        .ok_or_else(|| anyhow::anyhow!("signer {} is not trusted", signer.fingerprint()))?;
+    if trusted.as_bytes() != verifying_key.as_bytes() {
+        anyhow::bail!(
+            "signer key does not match trusted key for {}",
+            signer.fingerprint()
+        );
+    }
+    Ok(())
 }
 
 /// Deterministic test signer with real Ed25519 cryptography.
@@ -65,6 +98,10 @@ impl Signer for TestSigner {
 
     fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+        self.signing_key.verifying_key()
     }
 }
 

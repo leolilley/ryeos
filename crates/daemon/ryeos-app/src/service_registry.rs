@@ -155,6 +155,37 @@ pub fn extract_record_thread(metadata_extra: &HashMap<String, Value>) -> Result<
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandaloneStateAccess {
+    ReadWrite,
+    ReadOnlyExisting,
+    ProjectionRebuild,
+}
+
+/// State bootstrap contract authored by the verified service item. The
+/// read-only variant opens only already-selected state and rejects mutation;
+/// absence preserves ordinary standalone read/write service behavior.
+pub fn extract_standalone_state_access(
+    metadata_extra: &HashMap<String, Value>,
+) -> Result<StandaloneStateAccess> {
+    match metadata_extra.get("state_access") {
+        None => Ok(StandaloneStateAccess::ReadWrite),
+        Some(Value::String(value)) if value == "read_write" => {
+            Ok(StandaloneStateAccess::ReadWrite)
+        }
+        Some(Value::String(value)) if value == "read_only_existing" => {
+            Ok(StandaloneStateAccess::ReadOnlyExisting)
+        }
+        Some(Value::String(value)) if value == "projection_rebuild" => {
+            Ok(StandaloneStateAccess::ProjectionRebuild)
+        }
+        Some(Value::String(other)) => anyhow::bail!(
+            "service YAML field 'state_access' has invalid value '{other}'; expected read_write | read_only_existing | projection_rebuild"
+        ),
+        Some(_) => anyhow::bail!("service YAML field 'state_access' must be a string"),
+    }
+}
+
 /// Whether a signed service may be invoked from a browser session whose
 /// project authority is read-only. This is independent of audit policy.
 pub fn extract_ui_read_only(metadata_extra: &HashMap<String, Value>) -> Result<bool> {
@@ -175,11 +206,32 @@ pub enum UiDispatchMode {
 /// path is the generic verified executor; only session-state services opt into
 /// direct descriptor dispatch so they retain the browser-session principal.
 pub fn extract_ui_dispatch(metadata_extra: &HashMap<String, Value>) -> Result<UiDispatchMode> {
-    match metadata_extra.get("ui_dispatch").and_then(Value::as_str) {
-        None | Some("verified") => Ok(UiDispatchMode::Verified),
-        Some("session_local") => Ok(UiDispatchMode::SessionLocal),
-        Some(other) => anyhow::bail!(
+    match metadata_extra.get("ui_dispatch") {
+        None => Ok(UiDispatchMode::Verified),
+        Some(Value::String(value)) if value == "verified" => Ok(UiDispatchMode::Verified),
+        Some(Value::String(value)) if value == "session_local" => Ok(UiDispatchMode::SessionLocal),
+        Some(Value::String(other)) => anyhow::bail!(
             "service YAML field 'ui_dispatch' has invalid value '{other}'; expected verified | session_local"
         ),
+        Some(_) => anyhow::bail!("service YAML field 'ui_dispatch' must be a string"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_state_access_rejects_present_non_string() {
+        let metadata = HashMap::from([("state_access".to_string(), serde_json::json!(false))]);
+        let error = extract_standalone_state_access(&metadata).unwrap_err();
+        assert!(error.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn ui_dispatch_rejects_present_non_string() {
+        let metadata = HashMap::from([("ui_dispatch".to_string(), serde_json::json!({}))]);
+        let error = extract_ui_dispatch(&metadata).unwrap_err();
+        assert!(error.to_string().contains("must be a string"));
     }
 }

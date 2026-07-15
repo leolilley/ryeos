@@ -5,7 +5,7 @@
 //! once. Launch paths then share the resolved runtime and call [`SandboxRuntime::apply`]
 //! without reopening node configuration at the process boundary.
 
-use std::io::Read as _;
+use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -171,24 +171,44 @@ pub struct SandboxRuntime {
     state: SandboxRuntimeState,
     /// Canonical host path used for authority and overlap checks.
     app_root: Option<PathBuf>,
+    /// Exact app-root directory inode captured while the policy was loaded.
+    app_root_authority: Option<Arc<lillux::PinnedDirectory>>,
+    /// Exact daemon-owned parent of runtime workspace project directories.
+    runtime_workspaces: Option<Arc<lillux::PinnedDirectory>>,
     /// Node-configured spelling recreated inside the sandbox namespace.
     app_root_destination: Option<PathBuf>,
-    daemon_socket: Option<PathBuf>,
+    daemon_socket: Option<PinnedDaemonSocket>,
     verified_artifacts: Option<Arc<VerifiedArtifactStore>>,
     /// Exact startup-captured backend inode executed for every enforced apply.
     backend_handle: Option<Arc<std::fs::File>>,
 }
 
+#[derive(Debug, Clone)]
+struct PinnedDaemonSocket {
+    source: PathBuf,
+    destination: PathBuf,
+    parent: Arc<lillux::PinnedDirectory>,
+    name: std::ffi::OsString,
+    entry: Arc<std::fs::File>,
+}
+
 #[derive(Debug)]
 struct VerifiedArtifactStore {
-    root: PathBuf,
-    stores_root: PathBuf,
+    root: lillux::PinnedDirectory,
+    stores_root: lillux::PinnedDirectory,
+    generation: std::ffi::OsString,
     max_file_bytes: u64,
     max_total_bytes: u64,
     max_files: u64,
     usage: std::sync::Mutex<VerifiedArtifactUsage>,
     #[cfg(unix)]
     _lifetime_lock: std::fs::File,
+}
+
+#[derive(Debug)]
+struct MaterializedArtifact {
+    path: PathBuf,
+    handle: Arc<std::fs::File>,
 }
 
 #[derive(Debug, Default)]
@@ -203,28 +223,29 @@ impl Drop for VerifiedArtifactStore {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd as _;
-            use std::os::unix::fs::OpenOptionsExt as _;
 
-            let cleanup_lock_path = self.stores_root.join(".cleanup.lock");
-            if let Ok(cleanup_lock) = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&cleanup_lock_path)
+            if let Ok(Some(cleanup_lock)) = self
+                .stores_root
+                .open_regular(".cleanup.lock".as_ref(), true)
             {
                 if unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                    let _ = std::fs::remove_dir_all(&self.root);
+                    let _ = remove_flat_artifact_generation(
+                        &self.stores_root,
+                        &self.generation,
+                        &self.root,
+                    );
                 }
             }
             return;
         }
-        #[cfg(not(unix))]
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
 impl VerifiedArtifactStore {
-    fn create(app_root: &Path, limits: &SandboxLimitsPolicy) -> Result<Self, EngineError> {
+    fn create(
+        app_root: &lillux::PinnedDirectory,
+        limits: &SandboxLimitsPolicy,
+    ) -> Result<Self, EngineError> {
         #[cfg(not(unix))]
         {
             let _ = (app_root, limits);
@@ -236,47 +257,46 @@ impl VerifiedArtifactStore {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd as _;
-            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            use std::os::unix::fs::PermissionsExt as _;
             use std::sync::atomic::{AtomicU64, Ordering};
 
             static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
-            let stores_root = app_root
-                .join(crate::AI_DIR)
-                .join("state/cache/verified-code");
-            create_directory_tree_without_symlinks(
+            let stores_root = open_or_create_relative_directory(
                 app_root,
-                Path::new(".ai/state/cache/verified-code"),
+                &[crate::AI_DIR, "state", "cache", "verified-code"],
+                0o700,
+                "verified-code store root",
             )?;
-            std::fs::set_permissions(&stores_root, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| {
-                    refused(format!(
-                        "verified-code store root {} cannot be protected: {error}",
-                        stores_root.display()
-                    ))
-                })?;
+            stores_root.set_mode(0o700).map_err(|error| {
+                refused(format!(
+                    "verified-code store root {} cannot be protected: {error}",
+                    stores_root.path().display()
+                ))
+            })?;
 
             // Serialize generation creation with stale-generation cleanup so
             // another process never observes a new directory before its
             // lifetime lock is held.
-            let cleanup_lock_path = stores_root.join(".cleanup.lock");
-            let cleanup_lock = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&cleanup_lock_path)
+            let cleanup_lock = stores_root
+                .open_regular_create(".cleanup.lock".as_ref(), true, false, 0o600)
                 .map_err(|error| {
                     refused(format!(
                         "verified-code cleanup lock {} cannot be opened: {error}",
-                        cleanup_lock_path.display()
+                        stores_root.path().join(".cleanup.lock").display()
+                    ))
+                })?;
+            cleanup_lock
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| {
+                    refused(format!(
+                        "verified-code cleanup lock cannot be protected: {error}"
                     ))
                 })?;
             if unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
                 return Err(refused(format!(
                     "verified-code cleanup lock {} cannot be acquired: {}",
-                    cleanup_lock_path.display(),
+                    stores_root.path().join(".cleanup.lock").display(),
                     std::io::Error::last_os_error()
                 )));
             }
@@ -290,92 +310,97 @@ impl VerifiedArtifactStore {
                     .as_nanos(),
                 NEXT_STORE_ID.fetch_add(1, Ordering::Relaxed)
             );
-            let root = stores_root.join(generation);
-            std::fs::create_dir(&root).map_err(|error| {
+            let generation = std::ffi::OsString::from(generation);
+            let root = stores_root
+                .create_child(&generation, 0o700)
+                .map_err(|error| {
+                    refused(format!(
+                        "verified-code generation cannot be created: {error}"
+                    ))
+                })?;
+            root.set_mode(0o700).map_err(|error| {
                 refused(format!(
-                    "verified-code generation {} cannot be created: {error}",
-                    root.display()
+                    "verified-code generation {} cannot be protected: {error}",
+                    root.path().display()
                 ))
             })?;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(
-                |error| {
-                    refused(format!(
-                        "verified-code generation {} cannot be protected: {error}",
-                        root.display()
-                    ))
-                },
-            )?;
-            let lifetime_path = root.join(".lifetime.lock");
-            let lifetime_lock = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&lifetime_path)
+            let lifetime_lock = root
+                .open_regular_create(".lifetime.lock".as_ref(), true, true, 0o600)
                 .map_err(|error| {
                     refused(format!(
                         "verified-code lifetime lock {} cannot be opened: {error}",
-                        lifetime_path.display()
+                        root.path().join(".lifetime.lock").display()
+                    ))
+                })?;
+            lifetime_lock
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| {
+                    refused(format!(
+                        "verified-code lifetime lock cannot be protected: {error}"
                     ))
                 })?;
             if unsafe { libc::flock(lifetime_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0
             {
                 return Err(refused(format!(
                     "verified-code lifetime lock {} cannot be acquired: {}",
-                    lifetime_path.display(),
+                    root.path().join(".lifetime.lock").display(),
                     std::io::Error::last_os_error()
                 )));
             }
 
-            for entry in std::fs::read_dir(&stores_root).map_err(|error| {
+            for name in stores_root.entry_names().map_err(|error| {
                 refused(format!(
                     "verified-code store root {} cannot be read: {error}",
-                    stores_root.display()
+                    stores_root.path().display()
                 ))
             })? {
-                let entry = entry.map_err(|error| {
-                    refused(format!("verified-code store entry cannot be read: {error}"))
-                })?;
-                let stale_root = entry.path();
-                if stale_root == root
-                    || !entry
-                        .file_type()
-                        .map_err(|error| {
-                            refused(format!(
-                                "verified-code store entry {} cannot be inspected: {error}",
-                                stale_root.display()
-                            ))
-                        })?
-                        .is_dir()
-                {
+                if name == generation || name == ".cleanup.lock" {
                     continue;
                 }
-                let stale_lifetime = stale_root.join(".lifetime.lock");
-                let stale_lock = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&stale_lifetime);
-                let is_stale = match stale_lock {
-                    Ok(stale_lock) => unsafe {
-                        libc::flock(stale_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0
-                    },
-                    Err(_) => true,
-                };
-                if is_stale {
-                    std::fs::remove_dir_all(&stale_root).map_err(|error| {
+                let Some(stale_root) =
+                    stores_root.open_child_directory(&name).map_err(|error| {
                         refused(format!(
-                            "stale verified-code generation {} cannot be removed: {error}",
-                            stale_root.display()
+                            "verified-code store entry cannot be inspected: {error}"
                         ))
-                    })?;
+                    })?
+                else {
+                    return Err(refused(format!(
+                        "verified-code store contains unsupported entry {}",
+                        stores_root.path().join(&name).display()
+                    )));
+                };
+                let stale_guard = match stale_root.open_regular(".lifetime.lock".as_ref(), true) {
+                    Ok(Some(stale_lock))
+                        if unsafe {
+                            libc::flock(stale_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0
+                        } =>
+                    {
+                        Some(Some(stale_lock))
+                    }
+                    Ok(Some(_)) => None,
+                    Ok(None) => Some(None),
+                    Err(error) => {
+                        return Err(refused(format!(
+                            "stale verified-code lifetime lock cannot be opened: {error}"
+                        )))
+                    }
+                };
+                if let Some(_stale_guard) = stale_guard {
+                    remove_flat_artifact_generation(&stores_root, &name, &stale_root).map_err(
+                        |error| {
+                            refused(format!(
+                                "stale verified-code generation {} cannot be removed: {error}",
+                                stale_root.path().display()
+                            ))
+                        },
+                    )?;
                 }
             }
 
             Ok(Self {
                 root,
                 stores_root,
+                generation,
                 max_file_bytes: limits.verified_artifact_file_bytes,
                 max_total_bytes: limits.verified_artifact_total_bytes,
                 max_files: limits.verified_artifact_files,
@@ -398,7 +423,7 @@ impl VerifiedArtifactStore {
         name: &str,
         expected_hash: &str,
         content: &[u8],
-    ) -> Result<PathBuf, EngineError> {
+    ) -> Result<MaterializedArtifact, EngineError> {
         let mut components = Path::new(name).components();
         if !matches!(components.next(), Some(std::path::Component::Normal(_)))
             || components.next().is_some()
@@ -429,16 +454,29 @@ impl VerifiedArtifactStore {
             .usage
             .lock()
             .map_err(|_| refused("verified artifact accounting lock is poisoned".to_string()))?;
-        let artifact = self.root.join(name);
+        let artifact = self.root.path().join(name);
         if let Some((recorded_hash, recorded_len)) = usage.entries.get(name) {
             if recorded_hash != expected_hash || *recorded_len != content_len {
                 return Err(refused(format!(
                     "verified artifact name `{name}` was reused for different content"
                 )));
             }
-            let (existing, _) = read_regular_file_bytes_limited(
+            let file = self
+                .root
+                .open_regular(name.as_ref(), false)
+                .map_err(|error| refused(format!("verified artifact cannot be opened: {error}")))?
+                .ok_or_else(|| {
+                    refused(format!(
+                        "verified artifact {} disappeared",
+                        artifact.display()
+                    ))
+                })?;
+            protect_verified_artifact(&file, &artifact)?;
+            let (existing, _) = read_regular_file_handle_limited(
                 "verified artifact",
                 &artifact,
+                file.try_clone()
+                    .map_err(|error| refused(error.to_string()))?,
                 self.max_file_bytes,
             )?;
             if lillux::cas::sha256_hex(&existing) != expected_hash {
@@ -447,7 +485,10 @@ impl VerifiedArtifactStore {
                     artifact.display()
                 )));
             }
-            return Ok(artifact);
+            return Ok(MaterializedArtifact {
+                path: artifact,
+                handle: Arc::new(file),
+            });
         }
 
         let next_files = usage
@@ -471,10 +512,16 @@ impl VerifiedArtifactStore {
             )));
         }
 
-        if artifact.exists() {
-            let (existing, _) = read_regular_file_bytes_limited(
+        let file = if let Some(file) = self
+            .root
+            .open_regular(name.as_ref(), false)
+            .map_err(|error| refused(format!("verified artifact cannot be opened: {error}")))?
+        {
+            let (existing, _) = read_regular_file_handle_limited(
                 "verified artifact",
                 &artifact,
+                file.try_clone()
+                    .map_err(|error| refused(error.to_string()))?,
                 self.max_file_bytes,
             )?;
             if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
@@ -483,28 +530,56 @@ impl VerifiedArtifactStore {
                     artifact.display()
                 )));
             }
+            file
         } else {
-            lillux::atomic_write_private(&artifact, content).map_err(|error| {
-                refused(format!(
-                    "verified artifact {} cannot be written: {error}",
-                    artifact.display()
-                ))
-            })?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o500)).map_err(
-                |error| {
+            match self
+                .root
+                .atomic_create_regular(name.as_ref(), content, 0o500)
+                .map_err(|error| {
                     refused(format!(
-                        "verified artifact {} cannot be protected: {error}",
+                        "verified artifact {} cannot be written: {error}",
                         artifact.display()
                     ))
-                },
-            )?;
-        }
-        let (captured, _) =
-            read_regular_file_bytes_limited("verified artifact", &artifact, self.max_file_bytes)?;
+                })? {
+                Some(file) => file,
+                None => {
+                    let file = self
+                        .root
+                        .open_regular(name.as_ref(), false)
+                        .map_err(|error| {
+                            refused(format!("verified artifact cannot be opened: {error}"))
+                        })?
+                        .ok_or_else(|| {
+                            refused(format!(
+                                "verified artifact {} disappeared",
+                                artifact.display()
+                            ))
+                        })?;
+                    let (existing, _) = read_regular_file_handle_limited(
+                        "verified artifact",
+                        &artifact,
+                        file.try_clone()
+                            .map_err(|error| refused(error.to_string()))?,
+                        self.max_file_bytes,
+                    )?;
+                    if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
+                        return Err(refused(format!(
+                            "verified artifact {} exists with unexpected content",
+                            artifact.display()
+                        )));
+                    }
+                    file
+                }
+            }
+        };
+        protect_verified_artifact(&file, &artifact)?;
+        let (captured, _) = read_regular_file_handle_limited(
+            "verified artifact",
+            &artifact,
+            file.try_clone()
+                .map_err(|error| refused(error.to_string()))?,
+            self.max_file_bytes,
+        )?;
         if lillux::cas::sha256_hex(&captured) != expected_hash {
             return Err(refused(format!(
                 "verified artifact {} failed its content-address check",
@@ -516,8 +591,83 @@ impl VerifiedArtifactStore {
         usage
             .entries
             .insert(name.to_string(), (expected_hash.to_string(), content_len));
-        Ok(artifact)
+        Ok(MaterializedArtifact {
+            path: artifact,
+            handle: Arc::new(file),
+        })
     }
+}
+
+fn protect_verified_artifact(file: &std::fs::File, path: &Path) -> Result<(), EngineError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Err(refused(
+            "verified artifacts require Unix file permissions".to_string(),
+        ))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o500))
+            .map_err(|error| {
+                refused(format!(
+                    "verified artifact {} cannot be protected: {error}",
+                    path.display()
+                ))
+            })
+    }
+}
+
+fn open_or_create_relative_directory(
+    root: &lillux::PinnedDirectory,
+    components: &[&str],
+    mode: u32,
+    kind: &str,
+) -> Result<lillux::PinnedDirectory, EngineError> {
+    let mut current = root
+        .try_clone()
+        .map_err(|error| refused(format!("{kind} authority cannot be cloned: {error}")))?;
+    for component in components {
+        current = current
+            .open_or_create_child(component.as_ref(), mode)
+            .map_err(|error| refused(format!("{kind} cannot open `{component}`: {error}")))?;
+    }
+    Ok(current)
+}
+
+fn open_relative_directory(
+    root: &lillux::PinnedDirectory,
+    components: &[&str],
+    kind: &str,
+) -> Result<lillux::PinnedDirectory, EngineError> {
+    let mut current = root
+        .try_clone()
+        .map_err(|error| refused(format!("{kind} authority cannot be cloned: {error}")))?;
+    for component in components {
+        current = current
+            .open_child_directory(component.as_ref())
+            .map_err(|error| refused(format!("{kind} cannot open `{component}`: {error}")))?
+            .ok_or_else(|| refused(format!("{kind} component `{component}` is missing")))?;
+    }
+    Ok(current)
+}
+
+fn remove_flat_artifact_generation(
+    stores_root: &lillux::PinnedDirectory,
+    generation: &std::ffi::OsStr,
+    root: &lillux::PinnedDirectory,
+) -> anyhow::Result<()> {
+    for entry in root.regular_files()? {
+        root.remove_if_same(&entry.name, &entry.file)?;
+    }
+    if !stores_root.remove_empty_child_if_same(generation, root)? {
+        anyhow::bail!(
+            "verified-code generation is not a flat regular-file namespace: {}",
+            root.path().display()
+        );
+    }
+    Ok(())
 }
 
 /// Provenance of the writable project root presented to one launch.
@@ -615,9 +765,8 @@ impl SandboxRuntime {
         Self::load_inner(app_root, None)
     }
 
-    /// Load the daemon snapshot and pin its configured callback socket path.
-    /// The socket itself is resolved only for launches that request callback
-    /// IPC, because the listener may not exist yet at policy-load time.
+    /// Load the daemon snapshot and retain the exact configured callback
+    /// socket inode for every launch that is allowed callback IPC.
     pub fn load_for_daemon(app_root: &Path, daemon_socket: &Path) -> Result<Self, EngineError> {
         validate_namespace_destination("daemon socket", daemon_socket)?;
         let socket_parent = daemon_socket.parent().ok_or_else(|| {
@@ -633,24 +782,69 @@ impl SandboxRuntime {
                 daemon_socket.display()
             ))
         })?;
-        Self::load_inner(app_root, Some(canonical_parent.join(socket_name)))
+        let parent = lillux::PinnedDirectory::open(&canonical_parent)
+            .map_err(|error| refused(format!("daemon socket parent cannot be pinned: {error}")))?
+            .ok_or_else(|| refused("daemon socket parent disappeared".to_string()))?;
+        let entry = parent
+            .open_mount_entry(socket_name)
+            .map_err(|error| refused(format!("daemon socket cannot be pinned: {error}")))?
+            .ok_or_else(|| refused("daemon socket disappeared before sandbox load".to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt as _;
+            if !entry
+                .metadata()
+                .map_err(|error| refused(format!("daemon socket cannot be inspected: {error}")))?
+                .file_type()
+                .is_socket()
+            {
+                return Err(refused(format!(
+                    "daemon socket {} is not a Unix socket",
+                    daemon_socket.display()
+                )));
+            }
+        }
+        let socket = PinnedDaemonSocket {
+            source: canonical_parent.join(socket_name),
+            destination: daemon_socket.to_path_buf(),
+            parent: Arc::new(parent),
+            name: socket_name.to_os_string(),
+            entry: Arc::new(entry),
+        };
+        Self::load_inner(app_root, Some(socket))
     }
 
-    fn load_inner(app_root: &Path, daemon_socket: Option<PathBuf>) -> Result<Self, EngineError> {
+    fn load_inner(
+        app_root: &Path,
+        daemon_socket: Option<PinnedDaemonSocket>,
+    ) -> Result<Self, EngineError> {
         validate_namespace_destination("app root", app_root)?;
         // Bind the policy bytes and all later authority checks to one canonical
         // app-root identity. The supplied spelling remains the namespace
         // destination, but it is never used as the host-side authority root.
         let runtime_app_root = canonicalize_context_mount("app root", app_root)?;
-        validate_existing_directory_tree_without_symlinks(
-            &runtime_app_root,
-            Path::new(".ai/node"),
+        let app_root_authority = lillux::PinnedDirectory::open(&runtime_app_root)
+            .map_err(|error| refused(format!("app root cannot be pinned: {error}")))?
+            .ok_or_else(|| {
+                refused("app root disappeared while loading sandbox policy".to_string())
+            })?;
+        let policy_parent = open_relative_directory(
+            &app_root_authority,
+            &[crate::AI_DIR, "node"],
             "sandbox policy parent",
         )?;
         let source = runtime_app_root
             .join(crate::AI_DIR)
             .join(SANDBOX_POLICY_RELATIVE_PATH);
-        let mut file = open_policy_file(&source)?;
+        let mut file = policy_parent
+            .open_regular("sandbox.yaml".as_ref(), false)
+            .map_err(|error| refused(format!("node sandbox policy cannot be opened: {error}")))?
+            .ok_or_else(|| {
+                refused(format!(
+                    "node sandbox policy is required at {}",
+                    source.display()
+                ))
+            })?;
         let mut raw = String::new();
         file.read_to_string(&mut raw)
             .map_err(|error| EngineError::SandboxPolicyRefused {
@@ -664,8 +858,15 @@ impl SandboxRuntime {
                 reason: format!("invalid node sandbox policy {}: {error}", source.display()),
             })?;
         let digest = format!("sha256:{}", lillux::sha256_hex(raw.as_bytes()));
-        let observed_app_root = canonicalize_context_mount("app root", app_root)?;
-        if observed_app_root != runtime_app_root {
+        let observed_app_root = lillux::PinnedDirectory::open(app_root)
+            .map_err(|error| refused(format!("app root cannot be rechecked: {error}")))?
+            .ok_or_else(|| {
+                refused("app root disappeared while loading sandbox policy".to_string())
+            })?;
+        if !app_root_authority
+            .is_same_directory(&observed_app_root)
+            .map_err(|error| refused(format!("app-root identity cannot be compared: {error}")))?
+        {
             return Err(refused(format!(
                 "app root {} changed while its sandbox policy was being loaded",
                 app_root.display()
@@ -676,6 +877,7 @@ impl SandboxRuntime {
             Some(source),
             Some(digest),
             Some(runtime_app_root),
+            Some(Arc::new(app_root_authority)),
             Some(app_root.to_path_buf()),
             daemon_socket,
         )
@@ -813,6 +1015,55 @@ impl SandboxRuntime {
         }
         let canonical_project = canonicalize_context_mount("project", &project_destination)?;
         let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
+        let (runtime_workspace_authorized, project_source_handle) = if context.project_authority
+            == SandboxProjectAuthority::RuntimeWorkspace
+        {
+            let workspaces = self
+                .runtime_workspaces
+                .as_deref()
+                .expect("enforced sandbox runtime has pinned workspace authority");
+            if canonical_project.parent() != Some(workspaces.path()) {
+                return Err(refused(format!(
+                    "runtime workspace {} is not a direct child of {}",
+                    canonical_project.display(),
+                    workspaces.path().display()
+                )));
+            }
+            let workspace_name = canonical_project.file_name().ok_or_else(|| {
+                refused(format!(
+                    "runtime workspace {} has no child name",
+                    canonical_project.display()
+                ))
+            })?;
+            let expected = workspaces
+                .open_child_directory(workspace_name)
+                .map_err(|error| refused(format!("runtime workspace cannot be opened: {error}")))?
+                .ok_or_else(|| refused("runtime workspace disappeared".to_string()))?;
+            let requested = lillux::PinnedDirectory::open(&canonical_project)
+                .map_err(|error| {
+                    refused(format!(
+                        "requested runtime workspace cannot be pinned: {error}"
+                    ))
+                })?
+                .ok_or_else(|| refused("requested runtime workspace disappeared".to_string()))?;
+            if !expected.is_same_directory(&requested).map_err(|error| {
+                refused(format!(
+                    "runtime workspace identity cannot be compared: {error}"
+                ))
+            })? {
+                return Err(refused(
+                    "runtime workspace does not match its pinned named-child authority".to_string(),
+                ));
+            }
+            let handle = Arc::new(expected.try_clone_descriptor().map_err(|error| {
+                refused(format!(
+                    "runtime workspace authority cannot be cloned: {error}"
+                ))
+            })?);
+            (true, Some(handle))
+        } else {
+            (false, None)
+        };
 
         let mut environment_names = std::collections::HashSet::new();
         if let Some((duplicate, _)) = envs
@@ -856,6 +1107,7 @@ impl SandboxRuntime {
             .checkpoint_dir
             .map(|path| canonicalize_context_mount("checkpoint directory", path))
             .transpose()?;
+        let mut checkpoint_source_handle = None;
         if let Some(checkpoint_dir) = &canonical_checkpoint_dir {
             let expected = self
                 .app_root
@@ -864,19 +1116,29 @@ impl SandboxRuntime {
                 .join("threads")
                 .join(context.thread_id)
                 .join("checkpoints");
-            let expected = canonicalize_launch_path("expected checkpoint directory", &expected)?;
-            let configured_expected = self
-                .app_root
+            let app_root_authority = self
+                .app_root_authority
                 .as_deref()
-                .expect("enforced sandbox runtime has an app root")
-                .join("threads")
-                .join(context.thread_id)
-                .join("checkpoints");
-            if expected != configured_expected {
-                return Err(refused(format!(
-                    "daemon checkpoint path {} traverses a symlink",
-                    configured_expected.display()
-                )));
+                .expect("enforced sandbox runtime has pinned app-root authority");
+            let expected_authority = open_relative_directory(
+                app_root_authority,
+                &["threads", context.thread_id, "checkpoints"],
+                "daemon checkpoint directory",
+            )?;
+            let requested_authority = lillux::PinnedDirectory::open(checkpoint_dir)
+                .map_err(|error| {
+                    refused(format!("checkpoint directory cannot be pinned: {error}"))
+                })?
+                .ok_or_else(|| refused("checkpoint directory disappeared".to_string()))?;
+            if !expected_authority
+                .is_same_directory(&requested_authority)
+                .map_err(|error| {
+                    refused(format!("checkpoint identity cannot be compared: {error}"))
+                })?
+            {
+                return Err(refused(
+                    "checkpoint directory is not the daemon-owned directory".to_string(),
+                ));
             }
             if checkpoint_dir != &expected {
                 return Err(refused(format!(
@@ -885,6 +1147,11 @@ impl SandboxRuntime {
                     expected.display()
                 )));
             }
+            checkpoint_source_handle = Some(Arc::new(
+                expected_authority.try_clone_descriptor().map_err(|error| {
+                    refused(format!("checkpoint authority cannot be cloned: {error}"))
+                })?,
+            ));
         }
         let resolved_writable_mounts =
             if context.project_authority == SandboxProjectAuthority::ReadOnly {
@@ -903,6 +1170,8 @@ impl SandboxRuntime {
                             &canonical_cwd,
                             context.checkpoint_dir,
                             canonical_checkpoint_dir.as_deref(),
+                            checkpoint_source_handle.as_ref(),
+                            project_source_handle.as_ref(),
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -929,9 +1198,12 @@ impl SandboxRuntime {
                 &mount.source,
                 self.app_root.as_deref(),
                 backend_path,
-                self.daemon_socket.as_deref(),
+                self.daemon_socket
+                    .as_ref()
+                    .map(|socket| socket.source.as_path()),
                 &canonical_project,
                 context.project_authority,
+                runtime_workspace_authorized,
                 mount.authority,
                 canonical_checkpoint_dir.as_deref(),
             )?;
@@ -1035,21 +1307,35 @@ impl SandboxRuntime {
         }
         let canonical_requested_daemon_socket = requested_daemon_socket
             .map(|requested| {
-                let configured = self.daemon_socket.as_deref().ok_or_else(|| {
+                let configured = self.daemon_socket.as_ref().ok_or_else(|| {
                     refused(
                         "sandbox launch requested daemon IPC without a daemon-pinned socket path"
                             .to_string(),
                     )
                 })?;
-                let canonical = canonicalize_context_mount("requested daemon socket", requested)?;
-                if canonical != configured {
+                if requested != configured.destination {
                     return Err(refused(format!(
                         "sandbox launch requested daemon socket {}, expected {}",
                         requested.display(),
-                        configured.display()
+                        configured.destination.display()
                     )));
                 }
-                Ok(canonical)
+                let current = configured
+                    .parent
+                    .open_mount_entry(&configured.name)
+                    .map_err(|error| {
+                        refused(format!(
+                            "daemon socket authority cannot be checked: {error}"
+                        ))
+                    })?
+                    .ok_or_else(|| refused("daemon socket entry disappeared".to_string()))?;
+                if !same_file_identity(&current, &configured.entry)? {
+                    return Err(refused(format!(
+                        "daemon socket {} changed after sandbox load",
+                        configured.destination.display()
+                    )));
+                }
+                Ok(configured.source.clone())
             })
             .transpose()?;
         let mut readable_mounts = self
@@ -1065,8 +1351,9 @@ impl SandboxRuntime {
                     &cwd_destination,
                     &canonical_cwd,
                     self.app_root.as_deref(),
+                    self.app_root_authority.as_deref(),
                     self.app_root_destination.as_deref(),
-                    self.daemon_socket.as_deref(),
+                    self.daemon_socket.as_ref(),
                     requested_daemon_socket,
                     context.bundle_roots,
                     context.node_trusted_keys_dir,
@@ -1199,8 +1486,8 @@ impl SandboxRuntime {
         // Retaining host PIDs is required by the current cancellation
         // protocol, but exposing the host procfs would let a same-UID workload
         // escape the selected filesystem surface through another process's
-        // `root`, `cwd`, or `fd` links. Present an empty compatibility
-        // directory instead; RyeOS does not claim PID/signal isolation.
+        // `root`, `cwd`, or `fd` links. Present an empty `/proc` directory;
+        // RyeOS does not claim PID/signal isolation.
         sandbox_args.extend(["--dir".to_string(), "/proc".to_string()]);
         for path in [
             "/etc/hosts",
@@ -1355,8 +1642,9 @@ impl SandboxRuntime {
         source: Option<PathBuf>,
         digest: Option<String>,
         app_root: Option<PathBuf>,
+        app_root_authority: Option<Arc<lillux::PinnedDirectory>>,
         app_root_destination: Option<PathBuf>,
-        daemon_socket: Option<PathBuf>,
+        daemon_socket: Option<PinnedDaemonSocket>,
     ) -> Result<Self, EngineError> {
         if policy.version != SANDBOX_POLICY_VERSION {
             return Err(refused(format!(
@@ -1374,13 +1662,32 @@ impl SandboxRuntime {
             validate_enforced_limits(&policy.limits)?;
         }
         let verified_artifacts = if state == SandboxRuntimeState::Enforced {
-            let app_root = app_root.as_deref().ok_or_else(|| {
-                refused("enforced sandbox runtime requires an app root".to_string())
+            let app_root = app_root_authority.as_deref().ok_or_else(|| {
+                refused("enforced sandbox runtime requires pinned app-root authority".to_string())
             })?;
             Some(Arc::new(VerifiedArtifactStore::create(
                 app_root,
                 &policy.limits,
             )?))
+        } else {
+            None
+        };
+        let runtime_workspaces = if state == SandboxRuntimeState::Enforced {
+            let app_root = app_root_authority.as_deref().ok_or_else(|| {
+                refused("enforced sandbox runtime requires pinned app-root authority".to_string())
+            })?;
+            let workspaces = open_or_create_relative_directory(
+                app_root,
+                &[crate::AI_DIR, "state", "cache", "executions"],
+                0o700,
+                "runtime workspace root",
+            )?;
+            workspaces.set_mode(0o700).map_err(|error| {
+                refused(format!(
+                    "runtime workspace root cannot be protected: {error}"
+                ))
+            })?;
+            Some(Arc::new(workspaces))
         } else {
             None
         };
@@ -1416,6 +1723,8 @@ impl SandboxRuntime {
             },
             state,
             app_root,
+            app_root_authority,
+            runtime_workspaces,
             app_root_destination,
             daemon_socket,
             verified_artifacts,
@@ -1543,10 +1852,9 @@ impl SandboxRuntime {
             .as_deref()
             .expect("enforced sandbox runtime has a verified artifact store");
         let artifact = artifact_root.materialize(content_hash, content_hash, content)?;
-        let artifact_source = canonicalize_launch_path("verified-code artifact", &artifact)?;
         let artifact = ReadableMount {
-            source_handle: pin_mount_source("verified-code artifact", &artifact_source)?,
-            source: artifact_source,
+            source_handle: artifact.handle,
+            source: artifact.path,
             destination,
         };
         Ok(PreparedVerifiedCode {
@@ -1564,6 +1872,7 @@ impl Default for SandboxRuntime {
     fn default() -> Self {
         Self::resolve(
             SandboxPolicy::default_disabled(),
+            None,
             None,
             None,
             None,
@@ -1625,8 +1934,7 @@ fn resolve_backend(
         let content_hash = lillux::cas::sha256_hex(&content);
         let artifact =
             artifacts.materialize(&format!("backend-{content_hash}"), &content_hash, &content)?;
-        let artifact = canonicalize_launch_path("sandbox backend artifact", &artifact)?;
-        let handle = pin_mount_source("sandbox backend artifact", &artifact)?;
+        let handle = artifact.handle;
         let version = probe_bubblewrap_backend(&handle)?;
         Ok((
             executable,
@@ -2134,6 +2442,21 @@ fn read_regular_file_bytes_limited(
         ))
     })?;
 
+    read_regular_file_handle_limited(kind, path, file, max_bytes)
+}
+
+fn read_regular_file_handle_limited(
+    kind: &str,
+    path: &Path,
+    mut file: std::fs::File,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, std::fs::Metadata), EngineError> {
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+        refused(format!(
+            "{kind} {} cannot be rewound: {error}",
+            path.display()
+        ))
+    })?;
     let metadata = file.metadata().map_err(|error| {
         refused(format!(
             "{kind} {} cannot be inspected: {error}",
@@ -2174,91 +2497,6 @@ fn canonicalize_launch_path(kind: &str, path: &Path) -> Result<PathBuf, EngineEr
             path.display()
         ))
     })
-}
-
-fn create_directory_tree_without_symlinks(root: &Path, relative: &Path) -> Result<(), EngineError> {
-    if !root.is_absolute()
-        || relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(refused(format!(
-            "unsafe verified-code directory root {} and relative path {}",
-            root.display(),
-            relative.display()
-        )));
-    }
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let std::path::Component::Normal(component) = component else {
-            unreachable!("relative path components were validated")
-        };
-        current.push(component);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(refused(format!(
-                    "verified-code directory {} must be a non-symlink directory",
-                    current.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|error| {
-                    refused(format!(
-                        "verified-code directory {} cannot be created: {error}",
-                        current.display()
-                    ))
-                })?;
-            }
-            Err(error) => {
-                return Err(refused(format!(
-                    "verified-code directory {} cannot be inspected: {error}",
-                    current.display()
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_existing_directory_tree_without_symlinks(
-    root: &Path,
-    relative: &Path,
-    kind: &str,
-) -> Result<(), EngineError> {
-    if !root.is_absolute()
-        || relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(refused(format!(
-            "unsafe {kind} root {} and relative path {}",
-            root.display(),
-            relative.display()
-        )));
-    }
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let std::path::Component::Normal(component) = component else {
-            unreachable!("relative path components were validated")
-        };
-        current.push(component);
-        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
-            refused(format!(
-                "{kind} {} cannot be inspected: {error}",
-                current.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(refused(format!(
-                "{kind} {} must be a non-symlink directory",
-                current.display()
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// Open one already-canonical mount source and retain an inheritable O_PATH
@@ -2362,6 +2600,27 @@ fn mount_fd_arg(handle: &Arc<std::fs::File>) -> String {
     }
 }
 
+fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> Result<bool, EngineError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right);
+        Err(refused(
+            "sandbox file-identity comparison is unavailable on this platform".to_string(),
+        ))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let left = left
+            .metadata()
+            .map_err(|error| refused(format!("sandbox authority cannot be inspected: {error}")))?;
+        let right = right
+            .metadata()
+            .map_err(|error| refused(format!("sandbox authority cannot be inspected: {error}")))?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+}
+
 /// Serialize Bubblewrap's complete option vector into an immutable anonymous
 /// file. The host process command line then contains only `--args <fd>`;
 /// target arguments and `--setenv` values never appear in `/proc/*/cmdline`.
@@ -2451,60 +2710,6 @@ fn seal_bubblewrap_args(args: &[String]) -> Result<Arc<std::fs::File>, EngineErr
     }
 }
 
-fn open_policy_file(source: &Path) -> Result<std::fs::File, EngineError> {
-    let source_metadata =
-        std::fs::symlink_metadata(source).map_err(|error| EngineError::SandboxPolicyRefused {
-            reason: format!(
-                "node sandbox policy is required at {}: {error}",
-                source.display()
-            ),
-        })?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
-        return Err(refused(format!(
-            "node sandbox policy {} must be a regular non-symlink file",
-            source.display()
-        )));
-    }
-
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt as _;
-
-        std::fs::OpenOptions::new()
-            .read(true)
-            // NOFOLLOW closes the final-component swap between the metadata
-            // check and open. NONBLOCK keeps a malicious FIFO swap from
-            // stalling node startup before the post-open file-type check.
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(source)
-    };
-
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(source);
-
-    let file = file.map_err(|error| EngineError::SandboxPolicyRefused {
-        reason: format!(
-            "node sandbox policy is required at {}: {error}",
-            source.display()
-        ),
-    })?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| EngineError::SandboxPolicyRefused {
-            reason: format!(
-                "node sandbox policy {} cannot be inspected: {error}",
-                source.display()
-            ),
-        })?;
-    if !metadata.is_file() {
-        return Err(refused(format!(
-            "node sandbox policy {} must be a regular non-symlink file",
-            source.display()
-        )));
-    }
-    Ok(file)
-}
-
 fn resolve_writable_mount(
     configured: &str,
     project_destination: &Path,
@@ -2513,6 +2718,8 @@ fn resolve_writable_mount(
     canonical_cwd: &Path,
     checkpoint_destination: Option<&Path>,
     canonical_checkpoint_dir: Option<&Path>,
+    checkpoint_source_handle: Option<&Arc<std::fs::File>>,
+    project_source_handle: Option<&Arc<std::fs::File>>,
 ) -> Result<Option<WritableMount>, EngineError> {
     let authority = if configured == "{checkpoint_dir}" {
         WritableMountAuthority::DaemonCheckpoint
@@ -2551,7 +2758,17 @@ fn resolve_writable_mount(
             destination.display()
         )));
     }
-    let source_handle = pin_mount_source("writable mount", &source)?;
+    let source_handle = if authority == WritableMountAuthority::DaemonCheckpoint {
+        checkpoint_source_handle
+            .cloned()
+            .ok_or_else(|| refused("daemon checkpoint mount has no pinned authority".to_string()))?
+    } else if configured == "{project}" && project_source_handle.is_some() {
+        project_source_handle
+            .cloned()
+            .expect("checked project source handle")
+    } else {
+        pin_mount_source("writable mount", &source)?
+    };
     Ok(Some(WritableMount {
         source,
         destination,
@@ -2567,8 +2784,9 @@ fn resolve_readable_mounts(
     cwd_destination: &Path,
     canonical_cwd: &Path,
     app_root: Option<&Path>,
+    app_root_authority: Option<&lillux::PinnedDirectory>,
     app_root_destination: Option<&Path>,
-    daemon_socket: Option<&Path>,
+    daemon_socket: Option<&PinnedDaemonSocket>,
     requested_daemon_socket: Option<&Path>,
     bundle_roots: &[PathBuf],
     node_trusted_keys_dir: Option<&Path>,
@@ -2584,6 +2802,12 @@ fn resolve_readable_mounts(
             })?
             .join(crate::AI_DIR)
             .join("node/identity/public-identity.json");
+        let authority = app_root_authority.ok_or_else(|| {
+            refused(
+                "sandbox runtime cannot resolve {node_public_identity} without pinned app-root authority"
+                    .to_string(),
+            )
+        })?;
         let destination = app_root_destination
             .ok_or_else(|| {
                 refused(
@@ -2593,35 +2817,24 @@ fn resolve_readable_mounts(
             })?
             .join(crate::AI_DIR)
             .join("node/identity/public-identity.json");
-        let metadata = std::fs::symlink_metadata(&source_path).map_err(|error| {
-            refused(format!(
-                "node public identity {} cannot be inspected: {error}",
-                source_path.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(refused(format!(
-                "node public identity {} must be a regular non-symlink file",
-                source_path.display()
-            )));
-        }
-        let source = std::fs::canonicalize(&source_path).map_err(|error| {
-            refused(format!(
-                "node public identity {} cannot be resolved: {error}",
-                source_path.display()
-            ))
-        })?;
-        if source != source_path {
-            return Err(refused(format!(
-                "node public identity path {} traverses a symlink",
-                source_path.display()
-            )));
-        }
-        let source_handle = pin_mount_source("node public identity", &source)?;
+        let identity_parent = open_relative_directory(
+            authority,
+            &[crate::AI_DIR, "node", "identity"],
+            "node public identity parent",
+        )?;
+        let source_handle = identity_parent
+            .open_regular("public-identity.json".as_ref(), false)
+            .map_err(|error| refused(format!("node public identity cannot be opened: {error}")))?
+            .ok_or_else(|| {
+                refused(format!(
+                    "node public identity {} is missing",
+                    source_path.display()
+                ))
+            })?;
         return Ok(vec![ReadableMount {
-            source,
+            source: source_path,
             destination,
-            source_handle,
+            source_handle: Arc::new(source_handle),
         }]);
     }
 
@@ -2641,53 +2854,17 @@ fn resolve_readable_mounts(
                 requested.display()
             )));
         }
-        let requested_source = std::fs::canonicalize(requested).map_err(|error| {
-            refused(format!(
-                "requested daemon socket {} cannot be resolved: {error}",
-                requested.display()
-            ))
-        })?;
-        if requested_source != configured {
+        if requested != configured.destination {
             return Err(refused(format!(
                 "sandbox launch requested daemon socket {}, expected {}",
                 requested.display(),
-                configured.display()
+                configured.destination.display()
             )));
         }
-        let metadata = std::fs::symlink_metadata(configured).map_err(|error| {
-            refused(format!(
-                "daemon socket {} cannot be inspected: {error}",
-                configured.display()
-            ))
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileTypeExt as _;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
-                return Err(refused(format!(
-                    "daemon socket {} must be a non-symlink Unix socket",
-                    configured.display()
-                )));
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            return Err(refused(
-                "daemon socket mounts are supported only on Unix".to_string(),
-            ));
-        }
-        let source = std::fs::canonicalize(configured).map_err(|error| {
-            refused(format!(
-                "daemon socket {} cannot be resolved: {error}",
-                configured.display()
-            ))
-        })?;
-        let source_handle = pin_mount_source("daemon socket", &source)?;
         return Ok(vec![ReadableMount {
-            source,
+            source: configured.source.clone(),
             destination: requested.to_path_buf(),
-            source_handle,
+            source_handle: configured.entry.clone(),
         }]);
     }
 
@@ -2819,6 +2996,7 @@ fn validate_writable_mount(
     daemon_socket: Option<&Path>,
     canonical_project: &Path,
     project_authority: SandboxProjectAuthority,
+    runtime_workspace_authorized: bool,
     mount_authority: WritableMountAuthority,
     canonical_checkpoint_dir: Option<&Path>,
 ) -> Result<(), EngineError> {
@@ -2829,11 +3007,10 @@ fn validate_writable_mount(
     }
 
     if let Some(app_root) = app_root {
-        let configured_execution_root = app_root.join(crate::AI_DIR).join("state/cache/executions");
-        let execution_root =
-            std::fs::canonicalize(&configured_execution_root).unwrap_or(configured_execution_root);
+        let execution_root = app_root.join(crate::AI_DIR).join("state/cache/executions");
         let is_exact_runtime_workspace = project_authority
             == SandboxProjectAuthority::RuntimeWorkspace
+            && runtime_workspace_authorized
             && canonical_project.parent() == Some(execution_root.as_path())
             && path.starts_with(canonical_project);
         let is_exact_daemon_checkpoint = mount_authority

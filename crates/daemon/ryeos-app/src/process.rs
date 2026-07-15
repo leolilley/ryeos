@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
@@ -98,13 +98,172 @@ struct PinnedProcess {
 }
 
 pub fn remove_stale_socket(path: &Path) -> Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect daemon socket {}", path.display()))
+        }
+    };
+    if !metadata.file_type().is_socket() {
+        bail!(
+            "refusing to replace non-socket daemon control path {}",
+            path.display()
+        );
     }
-    Ok(())
+
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!(
+            "refusing to replace live daemon control socket {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            // Re-check the directory entry after the liveness probe. A process
+            // may have replaced the refused inode while we were connecting;
+            // unlinking that replacement would orphan its live listener.
+            let current = match std::fs::symlink_metadata(path) {
+                Ok(current) => current,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("reinspect daemon socket {}", path.display()))
+                }
+            };
+            if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+                bail!(
+                    "daemon control socket changed during stale probe at {}; refusing replacement",
+                    path.display()
+                );
+            }
+            std::fs::remove_file(path)
+                .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "daemon socket ownership is uncertain at {}; refusing replacement",
+                path.display()
+            )
+        }),
+    }
 }
 
+/// Check if a process group is alive.
+pub fn pgid_alive(pgid: i64) -> bool {
+    // kill(0, -pgid) checks if any process in the group exists
+    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
+}
+
+/// Prove that a persisted PID/PGID still identifies the RyeOS runtime for the
+/// expected thread before restart recovery sends any signal to it.
+///
+/// A bare numeric PID or process-group ID is not an identity: Linux may reuse
+/// it after the recorded process exits. Every RyeOS runtime is launched with a
+/// thread-id protocol binding, so recovery verifies that binding in the
+/// process's original environment and also verifies the process still belongs
+/// to the recorded group. An unreadable or mismatched identity fails closed;
+/// callers must never signal the numeric group in that case.
+#[cfg(target_os = "linux")]
+pub fn thread_process_identity_matches(pid: i64, pgid: i64, thread_id: &str) -> Result<bool> {
+    let pid = i32::try_from(pid).context("persisted runtime pid is out of range")?;
+    let pgid = i32::try_from(pgid).context("persisted runtime pgid is out of range")?;
+    if pid <= 0 || pgid <= 0 {
+        anyhow::bail!("persisted runtime pid and pgid must be positive");
+    }
+    if pid == std::process::id() as i32 || i64::from(pgid) == daemon_pgid() {
+        anyhow::bail!("persisted runtime identity aliases the daemon process group");
+    }
+    if thread_id.is_empty() || thread_id.as_bytes().contains(&0) {
+        anyhow::bail!("expected runtime thread id is empty or contains NUL");
+    }
+
+    let actual_pgid = unsafe { libc::getpgid(pid) };
+    if actual_pgid < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
+        }
+        return Err(error)
+            .with_context(|| format!("inspect process group for persisted runtime pid {pid}"));
+    }
+    if actual_pgid != pgid {
+        return Ok(false);
+    }
+
+    let environ_path = std::path::PathBuf::from(format!("/proc/{pid}/environ"));
+    let environ = match std::fs::read(&environ_path) {
+        Ok(environ) => environ,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read runtime identity from {}", environ_path.display()))
+        }
+    };
+    let expected_uds = format!("RYEOSD_THREAD_ID={thread_id}");
+    let expected_engine = format!("RYEOS_THREAD_ID={thread_id}");
+    let matches = environ
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == expected_uds.as_bytes() || entry == expected_engine.as_bytes());
+    Ok(matches)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn thread_process_identity_matches(_pid: i64, _pgid: i64, _thread_id: &str) -> Result<bool> {
+    anyhow::bail!("restart process identity verification is unsupported on this platform")
+}
+
+pub fn verify_thread_process_identity(pid: i64, pgid: i64, thread_id: &str) -> Result<()> {
+    if thread_process_identity_matches(pid, pgid, thread_id)? {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "persisted runtime pid {pid}/pgid {pgid} does not carry the expected RyeOS thread identity"
+    )
+}
+
+/// Fail-closed process-group liveness for retention decisions.
+///
+/// Unlike the hot-path boolean probe, only `ESRCH` proves absence. Permission
+/// denial still proves that an identity exists, while malformed identifiers,
+/// the daemon's own group, and unexpected OS failures make the inspection
+/// indeterminate and therefore abort retirement.
+pub fn pgid_live_for_retention(pgid: i64) -> Result<bool> {
+    let pgid = i32::try_from(pgid).context("persisted process-group id is out of range")?;
+    if pgid <= 0 {
+        anyhow::bail!("persisted process-group id must be positive");
+    }
+    if i64::from(pgid) == daemon_pgid() {
+        anyhow::bail!("persisted runtime process group aliases the daemon process group");
+    }
+    probe_identity(-pgid, "process group")
+}
+
+/// PID counterpart used when a runtime row has not recorded a process group.
+pub fn pid_live_for_retention(pid: i64) -> Result<bool> {
+    let pid = i32::try_from(pid).context("persisted process id is out of range")?;
+    if pid <= 0 {
+        anyhow::bail!("persisted process id must be positive");
+    }
+    if pid == std::process::id() as i32 {
+        anyhow::bail!("persisted runtime process id aliases the daemon process");
+    }
+    probe_identity(pid, "process")
+}
+
+fn probe_identity(signal_target: i32, label: &str) -> Result<bool> {
+    if unsafe { libc::kill(signal_target, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error).with_context(|| format!("inspect persisted {label} liveness")),
+    }
+}
 /// Return the daemon's own process group ID.
 pub fn daemon_pgid() -> i64 {
     unsafe { libc::getpgid(0) as i64 }
@@ -925,6 +1084,39 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use tempfile::TempDir;
+
+    #[test]
+    fn stale_socket_cleanup_never_unlinks_a_live_listener() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ryeosd.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let error = remove_stale_socket(&path).unwrap_err();
+        assert!(error.to_string().contains("live daemon control socket"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn stale_socket_cleanup_removes_a_refused_socket() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ryeosd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        remove_stale_socket(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_socket_cleanup_refuses_a_non_socket_path() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ryeosd.sock");
+        std::fs::write(&path, b"not a socket").unwrap();
+
+        let error = remove_stale_socket(&path).unwrap_err();
+        assert!(error.to_string().contains("non-socket daemon control path"));
+        assert!(path.exists());
+    }
 
     /// Spawn a shell that:
     ///   1. Installs a SIGTERM trap which writes a marker file then exits 0.

@@ -251,6 +251,7 @@ async fn dispatch_managed_subprocess(
             canonical_ref,
             hop_thread_profile,
             hop_verified,
+            root_subject,
             request,
             ctx,
             state,
@@ -306,6 +307,7 @@ async fn dispatch_managed_subprocess(
         &runtime_ref,
         ctx,
         request,
+        &state.node_history_policy,
     )?;
 
     // Runtime callback caps (bundle-events / runtime-vault) are minted inside
@@ -382,12 +384,13 @@ async fn dispatch_streaming_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
     verified: Option<&VerifiedItem>,
+    root_subject: Option<RootSubject>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
-    let item_ref_str = current_ref.to_string();
+    let terminal_ref = current_ref.to_string();
     let engine_roots = ctx
         .engine
         .resolution_roots(Some(request.project_path.to_path_buf()));
@@ -411,7 +414,7 @@ async fn dispatch_streaming_subprocess(
     let verified_item = verified.ok_or_else(|| DispatchError::SchemaMisconfigured {
         kind: current_ref.kind.clone(),
         detail: format!(
-            "callback-free streaming item '{item_ref_str}' dispatched without a verified item — \
+            "callback-free streaming item '{terminal_ref}' dispatched without a verified item — \
              the dispatch loop must resolve before reaching a streaming terminator"
         ),
     })?;
@@ -424,12 +427,55 @@ async fn dispatch_streaming_subprocess(
         .ok_or_else(|| DispatchError::SchemaMisconfigured {
             kind: current_ref.kind.clone(),
             detail: format!(
-                "callback-free streaming item '{item_ref_str}' has no direct `executor_id`; \
+                "callback-free streaming item '{terminal_ref}' has no direct `executor_id`; \
                  its kind schema must extract a signed bare binary identity so the daemon \
                  can resolve it against the installed bundle executor manifest"
             ),
         })?;
     let executor_ref = format!("native:{executor_id}");
+
+    // The terminal hop selects the executable and protocol. Durable thread
+    // identity remains the first verified subject admitted by public preflight
+    // across any alias or registry traversal.
+    let subject = root_subject.unwrap_or_else(|| RootSubject {
+        item_ref: terminal_ref.clone(),
+        thread_profile: thread_profile.to_string(),
+        verified: Some(verified_item.clone()),
+    });
+    let verified_subject = match subject.verified {
+        Some(verified) => verified,
+        None => {
+            let canonical = CanonicalRef::parse(&subject.item_ref).map_err(|error| {
+                DispatchError::InvalidRef(subject.item_ref.clone(), error.to_string())
+            })?;
+            let resolved = ctx
+                .engine
+                .resolve(&ctx.plan_ctx, &canonical)
+                .map_err(|error| DispatchError::SchemaMisconfigured {
+                    kind: canonical.kind.clone(),
+                    detail: format!(
+                        "streaming subject resolution failed for '{}': {error}",
+                        subject.item_ref
+                    ),
+                })?;
+            ctx.engine
+                .verify(&ctx.plan_ctx, resolved)
+                .map_err(|error| {
+                    DispatchError::InvalidRef(
+                        subject.item_ref.clone(),
+                        format!("streaming subject verification failed: {error}"),
+                    )
+                })?
+        }
+    };
+    let subject_item_ref = subject.item_ref;
+    let subject_thread_profile = subject.thread_profile;
+
+    if request.parent_execution_context.is_some() && request.previous_thread_id.is_some() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "streaming launch cannot be both a callback child and a chained continuation"
+        )));
+    }
 
     let cache_root = state
         .config
@@ -448,7 +494,20 @@ async fn dispatch_streaming_subprocess(
         detail: e.to_string(),
     })?;
 
-    let executor_path_str = executor.path.to_string_lossy().to_string();
+    let executor_path = executor.path.clone();
+    let executor_path_str = executor_path
+        .to_str()
+        .ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!("resolved executor path is not valid UTF-8"))
+        })?
+        .to_owned();
+    let project_path = request.project_path.to_path_buf();
+    let project_path_str = project_path
+        .to_str()
+        .ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!("streaming project path is not valid UTF-8"))
+        })?
+        .to_owned();
     let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
         source_path: executor.path,
         content_hash: executor.content_hash,
@@ -464,15 +523,18 @@ async fn dispatch_streaming_subprocess(
     let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
         &state.config.app_root,
-    );
+    )
+    .map_err(|error| DispatchError::Internal(error.into()))?;
     let env_request = ryeos_engine::subprocess_spec::SubprocessBuildRequest {
-        cmd: std::path::PathBuf::from(&executor_path_str),
+        cmd: executor_path,
         args: Vec::new(),
-        cwd: request.project_path.to_path_buf(),
+        cwd: project_path.clone(),
         timeout: std::time::Duration::from_secs(120),
-        item_ref: current_ref.clone(),
+        item_ref: CanonicalRef::parse(&subject_item_ref).map_err(|error| {
+            DispatchError::InvalidRef(subject_item_ref.clone(), error.to_string())
+        })?,
         thread_id: thread_id.clone(),
-        project_path: request.project_path.to_path_buf(),
+        project_path: project_path.clone(),
         acting_principal: request.acting_principal.to_string(),
         cas_root: state
             .state_store
@@ -547,49 +609,83 @@ async fn dispatch_streaming_subprocess(
     // leaving a process absent from the daemon's exact-identity drain. Give
     // every invocation the same durable lifecycle/process owner as the other
     // inline terminators before any process can be spawned.
-    let (chain_root_id, upstream_thread_id) =
-        if let Some(parent) = request.parent_execution_context.as_ref() {
-            let durable_parent = state
-                .threads
-                .get_thread(&parent.parent_thread_id)
-                .map_err(DispatchError::Internal)?
-                .ok_or_else(|| {
-                    DispatchError::Internal(anyhow::anyhow!(
-                        "streaming parent thread not found: {}",
-                        parent.parent_thread_id
-                    ))
-                })?;
-            (durable_parent.chain_root_id, Some(durable_parent.thread_id))
+    let created = if let Some(parent) = request.parent_execution_context.as_ref() {
+        let durable_parent = state
+            .threads
+            .get_thread(&parent.parent_thread_id)
+            .map_err(DispatchError::Internal)?
+            .ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "streaming parent thread not found: {}",
+                    parent.parent_thread_id
+                ))
+            })?;
+        state
+            .threads
+            .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
+                thread_id: thread_id.clone(),
+                chain_root_id: durable_parent.chain_root_id,
+                kind: subject_thread_profile.clone(),
+                item_ref: subject_item_ref.clone(),
+                executor_ref: executor_ref.clone(),
+                launch_mode: request.launch_mode.to_string(),
+                current_site_id: ctx.plan_ctx.current_site_id.clone(),
+                origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+                upstream_thread_id: Some(durable_parent.thread_id),
+                requested_by: Some(request.acting_principal.to_string()),
+                project_root: Some(project_path.clone()),
+                usage_subject: request.usage_subject.clone(),
+                usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+                captured_history_policy: None,
+            })
+    } else {
+        let root_admission = if request.previous_thread_id.is_some() {
+            None
         } else {
-            (thread_id.clone(), None)
+            let admission = request.root_admission.as_ref().ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "streaming root `{subject_item_ref}` has no sealed root admission"
+                ))
+            })?;
+            admission
+                .ensure_matches_subject(&ctx.engine, &verified_subject, &subject_thread_profile)
+                .map_err(DispatchError::Internal)?;
+            Some(admission.clone())
         };
-    state
-        .threads
-        .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
-            thread_id: thread_id.clone(),
-            chain_root_id,
-            kind: thread_profile.to_string(),
-            item_ref: item_ref_str.clone(),
+        let resolved_stream = ryeos_app::thread_lifecycle::ResolvedExecutionRequest {
+            kind: subject_thread_profile.clone(),
+            item_ref: subject_item_ref.clone(),
             executor_ref: executor_ref.clone(),
             launch_mode: request.launch_mode.to_string(),
             current_site_id: ctx.plan_ctx.current_site_id.clone(),
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-            upstream_thread_id,
+            target_site_id: None,
             requested_by: Some(request.acting_principal.to_string()),
-            project_root: Some(
-                request
-                    .project_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| request.project_path.to_path_buf()),
-            ),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-        })
-        .map_err(|error| {
-            DispatchError::Internal(anyhow::anyhow!(
-                "streaming thread creation failed for {thread_id}: {error}"
-            ))
-        })?;
+            parameters: request.params.clone(),
+            resolved_item: verified_subject.resolved.clone(),
+            plan_context: ctx.plan_ctx.clone(),
+            root_admission,
+        };
+        if let Some(previous_thread_id) = request.previous_thread_id.as_deref() {
+            state.threads.create_continuation_with_id(
+                &thread_id,
+                previous_thread_id,
+                &resolved_stream,
+                Some("chained_resume"),
+            )
+        } else {
+            state
+                .threads
+                .create_root_thread_with_id(&thread_id, &resolved_stream)
+        }
+    };
+    created.map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "streaming thread creation failed for {thread_id}: {error}"
+        ))
+    })?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &thread_id);
 
@@ -672,7 +768,7 @@ async fn dispatch_streaming_subprocess(
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
             args: vec![],
-            cwd: Some(request.project_path.to_string_lossy().into_owned()),
+            cwd: Some(project_path_str),
             envs,
             stdin_data: Some(stdin_data),
             timeout: 120.0,
@@ -693,7 +789,7 @@ async fn dispatch_streaming_subprocess(
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &sandbox_verified_code,
-                    item_ref: &item_ref_str,
+                    item_ref: &subject_item_ref,
                     thread_id: &thread_id,
                 },
             )
@@ -715,7 +811,7 @@ async fn dispatch_streaming_subprocess(
 
         if !result.success {
             return Err(DispatchError::SubprocessRunFailed {
-                item_ref: item_ref_str.clone(),
+                item_ref: subject_item_ref.clone(),
                 detail: format!(
                     "exit_code={}, stderr={}",
                     result.exit_code,
