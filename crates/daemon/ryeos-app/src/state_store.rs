@@ -277,6 +277,22 @@ pub enum ContinuationOutcome {
     Conflict { successor_thread_id: String },
 }
 
+/// Truthful result of the atomic portable child-lineage append. `Appended`
+/// means this call advanced the signed parent braid; `AlreadyPresent` means an
+/// earlier drive already recorded the same parent/child edge; `ParentSettled`
+/// means the parent can no longer author the event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildLineageAppendOutcome {
+    Appended,
+    AlreadyPresent,
+    ParentSettled,
+}
+
+pub struct ChildLineageAppend {
+    pub outcome: ChildLineageAppendOutcome,
+    pub persisted: Vec<PersistedEventRecord>,
+}
+
 /// Result of the atomic pre-launch cleanup transition used after child-lineage
 /// admission fails. The store only finalizes when the row is still `created`,
 /// has no attached process identity, and has no launch claim. Callers therefore
@@ -3112,15 +3128,6 @@ impl StateStore {
         Ok(children)
     }
 
-    pub fn thread_edge_exists(
-        &self,
-        parent_thread_id: &str,
-        child_thread_id: &str,
-    ) -> Result<bool> {
-        let g = self.lock()?;
-        queries::thread_edge_exists(g.state_db.projection(), parent_thread_id, child_thread_id)
-    }
-
     pub fn list_chain_threads(&self, chain_root_id: &str) -> Result<Vec<ThreadDetail>> {
         let g = self.lock()?;
         let thread_rows = queries::list_threads_by_chain(g.state_db.projection(), chain_root_id)?;
@@ -3668,6 +3675,86 @@ impl StateStore {
     pub fn clear_all_launch_claims(&self) -> Result<usize> {
         let g = self.lock()?;
         g.runtime_db.clear_all_launch_claims()
+    }
+
+    /// Append the portable parent→child spawn edge exactly once. The write
+    /// permit and store lock cover the appendability check, projected-edge
+    /// lookup, and signed-chain append, so concurrent RESERVED re-drives cannot
+    /// both observe absence. Projection must be current because it is the
+    /// idempotency index for the signed event stream.
+    pub fn append_child_thread_spawned_once(
+        &self,
+        chain_root_id: &str,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        payload: Value,
+    ) -> Result<ChildLineageAppend> {
+        if payload
+            .get("child_thread_id")
+            .and_then(Value::as_str)
+            != Some(child_thread_id)
+        {
+            bail!("child lineage payload does not name child {child_thread_id}");
+        }
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if !self.projection_health.is_current() {
+            bail!("child lineage admission requires a current thread projection");
+        }
+        let Some(parent) = g.state_db.get_thread(parent_thread_id)? else {
+            return Ok(ChildLineageAppend {
+                outcome: ChildLineageAppendOutcome::ParentSettled,
+                persisted: Vec::new(),
+            });
+        };
+        if parent.chain_root_id != chain_root_id {
+            bail!(
+                "parent thread {parent_thread_id} belongs to chain {}, not {chain_root_id}",
+                parent.chain_root_id
+            );
+        }
+        if g.state_db.get_thread(child_thread_id)?.is_none() {
+            bail!("child thread not found while recording lineage: {child_thread_id}");
+        }
+        if queries::thread_edge_exists(
+            g.state_db.projection(),
+            parent_thread_id,
+            child_thread_id,
+        )? {
+            return Ok(ChildLineageAppend {
+                outcome: ChildLineageAppendOutcome::AlreadyPresent,
+                persisted: Vec::new(),
+            });
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(parent_thread_id)?
+            .ok_or_else(|| anyhow!("parent runtime row missing: {parent_thread_id}"))?;
+        if parent.status != ThreadStatus::Running.as_str()
+            || runtime.stop_intent.is_some()
+            || !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            return Ok(ChildLineageAppend {
+                outcome: ChildLineageAppendOutcome::ParentSettled,
+                persisted: Vec::new(),
+            });
+        }
+        let persisted = append_events_locked(
+            &g,
+            chain_root_id,
+            parent_thread_id,
+            &[NewEventRecord {
+                event_type: ryeos_state::event_types::CHILD_THREAD_SPAWNED.to_string(),
+                storage_class: "indexed".to_string(),
+                payload,
+            }],
+        )?;
+        Ok(ChildLineageAppend {
+            outcome: ChildLineageAppendOutcome::Appended,
+            persisted,
+        })
     }
 
     #[tracing::instrument(

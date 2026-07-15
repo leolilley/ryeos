@@ -661,32 +661,26 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         // follow child is spawned inside this daemon callback, so the graph
         // walker never receives a dispatch result from which it could emit
         // `child_thread_spawned`. Record the durable edge here before the
-        // parent is settled `continued`. The projection existence check makes
-        // a RESERVED-phase re-drive idempotent while the event itself keeps the
-        // relationship rebuild-safe (runtime_db's child link remains the
-        // separate operational cascade copy).
-        if !state
-            .state_store
-            .thread_edge_exists(&parent_thread_id, &child_thread_id)?
-        {
-            let event_type = ryeos_runtime::events::RuntimeEventType::ChildThreadSpawned;
-            let persisted = state.threads.append_thread_events(
-                &parent.chain_root_id,
-                &parent_thread_id,
-                &[NewEventRecord {
-                    event_type: event_type.as_str().to_string(),
-                    storage_class: event_type.storage_class().as_str().to_string(),
-                    payload: json!({
-                        "child_thread_id": child_thread_id,
-                        "node": params.follow_node,
-                        "step": params.step_count,
-                        "item_id": child.item_ref,
-                        "cohort_index": item_index,
-                        "spawn_reason": "follow",
-                    }),
-                }],
-            )?;
-            if persisted.is_none() {
+        // parent is settled `continued`. The store serializes the edge absence
+        // check and signed append, making concurrent RESERVED-phase re-drives
+        // exactly-once while the event stays rebuild-safe (runtime_db's child
+        // link remains the separate operational cascade copy).
+        match state.threads.append_child_thread_spawned_once(
+            &parent.chain_root_id,
+            &parent_thread_id,
+            &child_thread_id,
+            json!({
+                "child_thread_id": child_thread_id,
+                "node": params.follow_node,
+                "step": params.step_count,
+                "item_id": child.item_ref,
+                "cohort_index": item_index,
+                "spawn_reason": "follow",
+            }),
+        )? {
+            ryeos_app::state_store::ChildLineageAppendOutcome::Appended
+            | ryeos_app::state_store::ChildLineageAppendOutcome::AlreadyPresent => {}
+            ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled => {
                 bail!(
                     "follow: parent {parent_thread_id} settled before child lineage was recorded"
                 );

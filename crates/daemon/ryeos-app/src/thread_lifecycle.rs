@@ -14,6 +14,7 @@ use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
+    ChildLineageAppendOutcome,
     FinalizeCreatedUnattachedOutcome as StoreFinalizeCreatedUnattachedOutcome,
     FinalizeIfNonterminalOutcome as StoreFinalizeIfNonterminalOutcome, FinalizeThreadRecord,
     NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
@@ -2155,6 +2156,27 @@ impl ThreadLifecycleService {
             self.publish_records(records);
         }
         Ok(persisted)
+    }
+
+    /// Record one portable cross-chain parent→child edge exactly once and
+    /// publish it only after the signed append and projection commit.
+    pub fn append_child_thread_spawned_once(
+        &self,
+        chain_root_id: &str,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        payload: Value,
+    ) -> Result<ChildLineageAppendOutcome> {
+        let result = self.state_store.append_child_thread_spawned_once(
+            chain_root_id,
+            parent_thread_id,
+            child_thread_id,
+            payload,
+        )?;
+        if result.outcome == ChildLineageAppendOutcome::Appended {
+            self.publish_records(&result.persisted);
+        }
+        Ok(result.outcome)
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {
