@@ -156,7 +156,8 @@ pub fn admit_root(
     attestation.verify_with_key(issuer_key)?;
 
     let attestation_value = attestation.to_value();
-    let canonical = lillux::canonical_json(&attestation_value);
+    let canonical = lillux::canonical_json(&attestation_value)
+        .context("failed to canonicalize admission attestation")?;
     let attestation_hash = lillux::sha256_hex(canonical.as_bytes());
     let stored = cas
         .put_object(&attestation_value)
@@ -175,7 +176,9 @@ pub fn admit_root(
             .get_object(hash)
             .with_context(|| format!("failed to read admitted object {hash}"))?
             .ok_or_else(|| anyhow::anyhow!("admitted object {hash} is missing"))?;
-        let bytes = u64::try_from(lillux::canonical_json(&object).len())
+        let canonical = lillux::canonical_json(&object)
+            .with_context(|| format!("failed to canonicalize admitted object {hash}"))?;
+        let bytes = u64::try_from(canonical.len())
             .context("admitted object length does not fit u64")?;
         db.record_cas_entry(&NewCasEntryAttribution {
             hash: hash.clone(),
@@ -301,7 +304,7 @@ mod tests {
     }
 
     fn write_object(db: &StateDb, value: &serde_json::Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(db.cas_root(), "objects", &hash, ".json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

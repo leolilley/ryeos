@@ -279,6 +279,7 @@ pub async fn execute_service_verified(
             verified.clone(),
             &state.node_history_policy,
             thread_profile.clone(),
+            std::collections::BTreeMap::new(),
             None,
             None,
         )?;

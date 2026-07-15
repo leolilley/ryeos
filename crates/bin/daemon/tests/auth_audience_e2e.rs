@@ -97,6 +97,7 @@ async fn rejects_request_signed_with_caller_audience_when_daemon_identity_differ
     // audience = caller's own fingerprint (the bug).
     let body = serde_json::json!({
         "item_ref": "directive:nonexistent/test",
+        "ref_bindings": {},
         "project_path": "/tmp",
         "parameters": {},
     });
@@ -162,6 +163,7 @@ async fn accepts_request_signed_with_daemon_audience() {
     // Sign with the CORRECT audience: daemon's principal_id.
     let body = serde_json::json!({
         "item_ref": "directive:nonexistent/test",
+        "ref_bindings": {},
         "project_path": "/tmp",
         "parameters": {},
     });

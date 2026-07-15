@@ -1,5 +1,6 @@
 //! BundleEventObject — immutable bundle fact stored in CAS.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::thread_snapshot::parse_canonical_timestamp;
@@ -90,7 +91,9 @@ impl BundleEventObject {
         if let Some(hash) = &self.request_fingerprint {
             validate_canonical_hash("request_fingerprint", hash)?;
         }
-        let serialized_bytes = lillux::canonical_json(&self.to_value()).len();
+        let serialized_bytes = lillux::canonical_json(&self.to_value())
+            .context("failed to canonicalize bundle event")?
+            .len();
         if serialized_bytes > MAX_BUNDLE_EVENT_SERIALIZED_BYTES {
             anyhow::bail!(
                 "bundle event is {} serialized bytes (max {})",
@@ -106,9 +109,11 @@ impl BundleEventObject {
     }
 }
 
-pub fn hash_bundle_event(event: &BundleEventObject) -> String {
-    let canonical = lillux::canonical_json(&event.to_value());
-    lillux::sha256_hex(canonical.as_bytes())
+pub fn hash_bundle_event(
+    event: &BundleEventObject,
+) -> Result<String, lillux::CanonicalJsonError> {
+    let canonical = lillux::canonical_json(&event.to_value())?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 pub fn validate_bundle_identifier(label: &str, value: &str) -> anyhow::Result<()> {
@@ -175,7 +180,7 @@ mod tests {
         event.validate().unwrap();
         let value = event.to_value();
         assert!(value.get("event_hash").is_none());
-        assert_eq!(hash_bundle_event(&event).len(), 64);
+        assert_eq!(hash_bundle_event(&event).unwrap().len(), 64);
     }
 
     #[test]

@@ -131,6 +131,8 @@ mod types {
         pub event_count: usize,
         /// The events that were persisted.
         pub events: Vec<ThreadEvent>,
+        /// Exact normalized/stamped updates committed for existing threads.
+        pub snapshot_updates: Vec<SnapshotUpdate>,
     }
 
     /// Result of reading a chain snapshot.
@@ -553,8 +555,9 @@ fn read_chain_head_for_mutation(
             chain_state.chain_root_id
         );
     }
-    let canonical_hash =
-        lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&chain_state.to_value())
+        .context("failed to canonicalize current chain head")?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != signed_ref.target_hash {
         anyhow::bail!(
             "chain head object is not canonically encoded: signed {}, canonical {canonical_hash}",
@@ -586,8 +589,9 @@ fn read_current_snapshot_for_mutation(
         &entry.snapshot_hash,
         &format!("current snapshot for thread {thread_id}"),
     )?;
-    let canonical_hash =
-        lillux::sha256_hex(lillux::canonical_json(&snapshot.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&snapshot.to_value())
+        .context("failed to canonicalize current thread snapshot")?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != entry.snapshot_hash {
         anyhow::bail!(
             "current snapshot for thread {thread_id} is not canonically encoded: expected {}, canonical {canonical_hash}",
@@ -610,7 +614,9 @@ fn validate_snapshot_last_event_object(
     };
     let event: ThreadEvent =
         read_cas_object(cas_root, chain_lock, event_hash, "snapshot last event")?;
-    let canonical_hash = lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&event.to_value())
+        .context("failed to canonicalize snapshot last event")?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != event_hash {
         anyhow::bail!(
             "snapshot last event is not canonically encoded: expected {event_hash}, canonical {canonical_hash}"
@@ -678,8 +684,9 @@ pub(crate) fn read_thread_snapshot_with_trust(
                     chain_state.chain_root_id
                 );
             }
-            let canonical_hash =
-                lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
+            let canonical = lillux::canonical_json(&chain_state.to_value())
+                .context("failed to canonicalize cached chain head")?;
+            let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
             if canonical_hash != signed_ref.target_hash {
                 anyhow::bail!(
                     "cached chain head hash mismatch: signed {}, canonical {canonical_hash}",
@@ -867,7 +874,8 @@ pub(crate) fn create_chain_with_trust_under_lock(
 
     // Serialize the complete prospective closure before the first CAS write.
     let snapshot_value = initial_snapshot.to_value();
-    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_json = lillux::canonical_json(&snapshot_value)
+        .context("failed to canonicalize initial snapshot")?;
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
 
@@ -898,7 +906,8 @@ pub(crate) fn create_chain_with_trust_under_lock(
     chain_state.validate()?;
     validation::validate_chain_positions(&chain_state)?;
     let chain_state_value = chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize initial chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     write_cas_batch(
@@ -936,6 +945,157 @@ pub(crate) fn create_chain_with_trust_under_lock(
         snapshot_hash,
         snapshot: initial_snapshot,
         events: vec![],
+    })
+}
+
+/// Create a root thread and its initial durable events under one signed head.
+///
+/// The caller owns the pinned state authority, CAS-mutation guard, and chain
+/// lock. Snapshot metadata, event linkage, CAS publication, and the recovery
+/// journal therefore form the same indivisible mutation used by every other
+/// authoritative chain write.
+pub(crate) fn create_chain_with_events_and_trust_under_lock(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_root_id: &str,
+    mut initial_snapshot: ThreadSnapshot,
+    mut events: Vec<ThreadEvent>,
+    signer: &dyn Signer,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+) -> anyhow::Result<AddThreadWithEventsResult> {
+    ensure_lock_protects(lock, chain_root_id)?;
+    crate::signer::ensure_signer_trusted(signer, trust_store)?;
+    if initial_snapshot.thread_id != chain_root_id
+        || initial_snapshot.chain_root_id != chain_root_id
+    {
+        anyhow::bail!(
+            "root thread snapshot must have thread_id and chain_root_id equal to {chain_root_id}"
+        );
+    }
+    if events.is_empty() {
+        anyhow::bail!("cannot create root chain with empty event list");
+    }
+    for event in &events {
+        event.validate()?;
+        if event.chain_root_id != chain_root_id || event.thread_id != chain_root_id {
+            anyhow::bail!("initial root event identity must equal chain_root_id");
+        }
+    }
+    lock.ensure_protects(refs_root, chain_root_id)?;
+    verify_expected_current_head(lock, chain_root_id, None, trust_store)?;
+
+    let initial_floor = initial_snapshot.created_at.clone();
+    let append_timestamp = validation::normalize_event_timestamps(&mut events, &initial_floor)?;
+    let event_count_u64 = u64::try_from(events.len()).context("event batch is too large")?;
+    let mut last_event_hash = None;
+    let mut stored_events = Vec::with_capacity(events.len());
+    let mut pending_writes = Vec::new();
+    for (offset, mut event) in events.into_iter().enumerate() {
+        let sequence = u64::try_from(offset)
+            .context("event batch is too large")?
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("chain sequence exhausted"))?;
+        event.chain_seq = sequence;
+        event.thread_seq = sequence;
+        event.prev_chain_event_hash = last_event_hash.clone();
+        event.prev_thread_event_hash = last_event_hash.clone();
+        event.validate()?;
+
+        let event_json = lillux::canonical_json(&event.to_value())
+            .context("failed to canonicalize initial root event")?;
+        let event_hash = lillux::sha256_hex(event_json.as_bytes());
+        let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
+        pending_writes.push((event_path, event_json.into_bytes()));
+        last_event_hash = Some(event_hash);
+        stored_events.push(event);
+    }
+
+    let mut root_entry = ChainThreadEntry {
+        snapshot_hash: String::new(),
+        last_event_hash: last_event_hash.clone(),
+        last_thread_seq: event_count_u64,
+        status: initial_snapshot.status,
+    };
+    validation::stamp_snapshot_position(
+        &mut initial_snapshot,
+        &root_entry,
+        event_count_u64,
+    );
+    validation::normalize_and_validate_new_thread(
+        &mut initial_snapshot,
+        chain_root_id,
+        &append_timestamp,
+    )?;
+    validation::validate_snapshot_last_event(
+        &initial_snapshot,
+        initial_snapshot
+            .last_event_hash
+            .as_deref()
+            .ok_or_else(|| anyhow!("root snapshot is missing its final event hash"))?,
+        stored_events
+            .last()
+            .expect("root creation rejects an empty event list"),
+    )?;
+
+    let snapshot_json = lillux::canonical_json(&initial_snapshot.to_value())
+        .context("failed to canonicalize initial root snapshot")?;
+    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+    pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
+    root_entry.snapshot_hash.clone_from(&snapshot_hash);
+
+    let mut threads = BTreeMap::new();
+    threads.insert(chain_root_id.to_string(), root_entry);
+    let chain_state = ChainState {
+        schema: 1,
+        kind: "chain_state".to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        prev_chain_state_hash: None,
+        last_event_hash,
+        last_chain_seq: event_count_u64,
+        updated_at: validation::monotonic_now([
+            append_timestamp.as_str(),
+            initial_snapshot.updated_at.as_str(),
+        ])?,
+        threads,
+    };
+    chain_state.validate()?;
+    validation::validate_chain_positions(&chain_state)?;
+    let chain_state_json = lillux::canonical_json(&chain_state.to_value())
+        .context("failed to canonicalize initial root chain state")?;
+    let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
+    let chain_state_path =
+        lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
+    pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
+
+    write_cas_batch(cas_root, lock, &pending_writes)
+        .context("failed to store initial root chain closure in CAS")?;
+    publish_chain_head(
+        cas_root,
+        refs_root,
+        lock,
+        chain_root_id,
+        None,
+        &chain_state_hash,
+        &chain_state.updated_at,
+        signer,
+        trust_store,
+    )?;
+    head_cache.insert(
+        chain_root_id.to_string(),
+        CachedHead::new(chain_state_hash.clone(), chain_state),
+    );
+
+    Ok(AddThreadWithEventsResult {
+        chain_state_hash,
+        snapshot_hash,
+        snapshot: initial_snapshot,
+        first_chain_seq: 1,
+        event_count: stored_events.len(),
+        events: stored_events,
+        snapshot_updates: Vec::new(),
     })
 }
 
@@ -1103,7 +1263,8 @@ pub(crate) fn append_events_with_trust_under_lock(
         event.validate()?;
 
         let event_value = event.to_value();
-        let event_json = lillux::canonical_json(&event_value);
+        let event_json = lillux::canonical_json(&event_value)
+            .context("failed to canonicalize appended event")?;
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
         let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
         pending_writes.push((event_path, event_json.into_bytes()));
@@ -1160,7 +1321,8 @@ pub(crate) fn append_events_with_trust_under_lock(
         }
 
         let snapshot_value = update.new_snapshot.to_value();
-        let snapshot_json = lillux::canonical_json(&snapshot_value);
+        let snapshot_json = lillux::canonical_json(&snapshot_value)
+            .context("failed to canonicalize updated snapshot")?;
         let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
         let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
         pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
@@ -1196,13 +1358,13 @@ pub(crate) fn append_events_with_trust_under_lock(
             .map(|update| update.new_snapshot.updated_at.as_str()),
     );
 
+    let current_chain_state_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
     let new_chain_state = ChainState {
         schema: 1,
         kind: "chain_state".to_string(),
         chain_root_id: chain_root_id.to_string(),
-        prev_chain_state_hash: Some(lillux::sha256_hex(
-            lillux::canonical_json(&current_chain_state.to_value()).as_bytes(),
-        )),
+        prev_chain_state_hash: Some(lillux::sha256_hex(current_chain_state_json.as_bytes())),
         last_event_hash,
         last_chain_seq: final_chain_seq,
         updated_at: validation::monotonic_now(timestamp_floors)?,
@@ -1212,7 +1374,8 @@ pub(crate) fn append_events_with_trust_under_lock(
     new_chain_state.validate()?;
     validation::validate_chain_positions(&new_chain_state)?;
     let chain_state_value = new_chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize new chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
@@ -1365,7 +1528,8 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
 
     // Serialize the complete prospective closure before the first CAS write.
     let snapshot_value = new_snapshot.to_value();
-    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_json = lillux::canonical_json(&snapshot_value)
+        .context("failed to canonicalize branch snapshot")?;
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
 
@@ -1381,8 +1545,9 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
         },
     );
 
-    let prev_hash =
-        lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes());
+    let current_chain_state_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
+    let prev_hash = lillux::sha256_hex(current_chain_state_json.as_bytes());
 
     let new_chain_state = ChainState {
         schema: 1,
@@ -1401,7 +1566,8 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
     new_chain_state.validate()?;
     validation::validate_chain_positions(&new_chain_state)?;
     let chain_state_value = new_chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize updated chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     write_cas_batch(
@@ -1585,7 +1751,8 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
         event.validate()?;
 
         let event_value = event.to_value();
-        let event_json = lillux::canonical_json(&event_value);
+        let event_json = lillux::canonical_json(&event_value)
+            .context("failed to canonicalize new-thread event")?;
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
         let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
         pending_writes.push((event_path, event_json.into_bytes()));
@@ -1622,7 +1789,8 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     )?;
 
     let snapshot_value = new_snapshot.to_value();
-    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_json = lillux::canonical_json(&snapshot_value)
+        .context("failed to canonicalize branch snapshot")?;
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
     pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
@@ -1631,8 +1799,9 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     let mut new_threads = current_chain_state.threads.clone();
     new_threads.insert(new_snapshot.thread_id.clone(), new_entry);
 
-    let prev_hash =
-        lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes());
+    let current_chain_state_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
+    let prev_hash = lillux::sha256_hex(current_chain_state_json.as_bytes());
     let new_chain_state = ChainState {
         schema: 1,
         kind: "chain_state".to_string(),
@@ -1651,7 +1820,8 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     new_chain_state.validate()?;
     validation::validate_chain_positions(&new_chain_state)?;
     let chain_state_value = new_chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize updated chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
@@ -1682,6 +1852,335 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
         first_chain_seq,
         event_count,
         events: stored_events,
+        snapshot_updates: Vec::new(),
+    })
+}
+
+/// Add one thread and append events to an existing thread in one signed head
+/// transition. This is the generic cross-thread primitive for continuation
+/// creation: neither thread's relation event can become authoritative alone.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_root_id: &str,
+    mut new_snapshot: ThreadSnapshot,
+    mut new_thread_events: Vec<ThreadEvent>,
+    existing_thread_id: &str,
+    mut existing_thread_events: Vec<ThreadEvent>,
+    mut snapshot_updates: Vec<SnapshotUpdate>,
+    signer: &dyn Signer,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+    lock: &ChainLock,
+) -> anyhow::Result<AddThreadWithEventsResult> {
+    ensure_lock_protects(lock, chain_root_id)?;
+    crate::signer::ensure_signer_trusted(signer, trust_store)?;
+    if new_snapshot.chain_root_id != chain_root_id {
+        anyhow::bail!(
+            "snapshot chain_root_id mismatch: expected {chain_root_id}, got {}",
+            new_snapshot.chain_root_id
+        );
+    }
+    if new_snapshot.thread_id == chain_root_id {
+        anyhow::bail!("use root creation for root threads");
+    }
+    if new_thread_events.is_empty() || existing_thread_events.is_empty() {
+        anyhow::bail!("atomic add-and-append requires events for both threads");
+    }
+    for event in &new_thread_events {
+        event.validate()?;
+        if event.chain_root_id != chain_root_id || event.thread_id != new_snapshot.thread_id {
+            anyhow::bail!("new-thread event identity does not match its snapshot");
+        }
+    }
+    for event in &existing_thread_events {
+        event.validate()?;
+        if event.chain_root_id != chain_root_id || event.thread_id != existing_thread_id {
+            anyhow::bail!("existing-thread event identity does not match its target");
+        }
+    }
+
+    let current_chain_state = read_chain_head_for_mutation(
+        cas_root,
+        refs_root,
+        Some(lock),
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )
+    .context("failed to read current chain head")?;
+    if current_chain_state
+        .threads
+        .contains_key(&new_snapshot.thread_id)
+    {
+        anyhow::bail!(
+            "thread {} already exists in chain {chain_root_id}",
+            new_snapshot.thread_id
+        );
+    }
+    let existing_entry = current_chain_state
+        .threads
+        .get(existing_thread_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("thread {existing_thread_id} not found in chain {chain_root_id}"))?;
+
+    let mut previous_snapshots = BTreeMap::new();
+    for update in &snapshot_updates {
+        validation::validate_update_identity(
+            &update.thread_id,
+            &update.new_snapshot,
+            chain_root_id,
+        )?;
+        if update.thread_id == new_snapshot.thread_id {
+            anyhow::bail!("new thread snapshot must be supplied through the add operation");
+        }
+        if previous_snapshots.contains_key(&update.thread_id) {
+            anyhow::bail!(
+                "duplicate snapshot update for thread {} in one transition",
+                update.thread_id
+            );
+        }
+        let previous = read_current_snapshot_for_mutation(
+            cas_root,
+            Some(lock),
+            &current_chain_state,
+            &update.thread_id,
+        )?;
+        validation::validate_snapshot_transition_identity(&previous, &update.new_snapshot)?;
+        previous_snapshots.insert(update.thread_id.clone(), previous);
+    }
+
+    let new_thread_timestamp = validation::normalize_event_timestamps(
+        &mut new_thread_events,
+        &current_chain_state.updated_at,
+    )?;
+    let append_timestamp = validation::normalize_event_timestamps(
+        &mut existing_thread_events,
+        &new_thread_timestamp,
+    )?;
+    let new_event_count =
+        u64::try_from(new_thread_events.len()).context("new-thread event batch is too large")?;
+    let existing_event_count = u64::try_from(existing_thread_events.len())
+        .context("existing-thread event batch is too large")?;
+    let total_event_count = new_event_count
+        .checked_add(existing_event_count)
+        .ok_or_else(|| anyhow!("event batch is too large"))?;
+    let first_chain_seq = current_chain_state
+        .last_chain_seq
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("chain sequence exhausted"))?;
+    let final_chain_seq = current_chain_state
+        .last_chain_seq
+        .checked_add(total_event_count)
+        .ok_or_else(|| anyhow!("chain sequence exhausted"))?;
+    let existing_final_thread_seq = existing_entry
+        .last_thread_seq
+        .checked_add(existing_event_count)
+        .ok_or_else(|| anyhow!("thread {existing_thread_id} sequence exhausted"))?;
+
+    let mut pending_writes = Vec::new();
+    let mut stored_events =
+        Vec::with_capacity(new_thread_events.len() + existing_thread_events.len());
+    let mut last_chain_event_hash = current_chain_state.last_event_hash.clone();
+    let mut new_thread_last_hash = None;
+    for (offset, mut event) in new_thread_events.into_iter().enumerate() {
+        let offset = u64::try_from(offset).context("new-thread event batch is too large")?;
+        event.chain_seq = first_chain_seq
+            .checked_add(offset)
+            .ok_or_else(|| anyhow!("chain sequence exhausted"))?;
+        event.thread_seq = offset
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("new-thread sequence exhausted"))?;
+        event.prev_chain_event_hash = last_chain_event_hash.clone();
+        event.prev_thread_event_hash = new_thread_last_hash.clone();
+        event.validate()?;
+        let event_json = lillux::canonical_json(&event.to_value())
+            .context("failed to canonicalize new-thread event")?;
+        let event_hash = lillux::sha256_hex(event_json.as_bytes());
+        let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
+        pending_writes.push((event_path, event_json.into_bytes()));
+        last_chain_event_hash = Some(event_hash.clone());
+        new_thread_last_hash = Some(event_hash);
+        stored_events.push(event);
+    }
+
+    let mut existing_thread_last_hash = existing_entry.last_event_hash.clone();
+    for (offset, mut event) in existing_thread_events.into_iter().enumerate() {
+        let offset = u64::try_from(offset).context("existing-thread event batch is too large")?;
+        event.chain_seq = first_chain_seq
+            .checked_add(new_event_count)
+            .and_then(|sequence| sequence.checked_add(offset))
+            .ok_or_else(|| anyhow!("chain sequence exhausted"))?;
+        event.thread_seq = existing_entry
+            .last_thread_seq
+            .checked_add(offset)
+            .and_then(|sequence| sequence.checked_add(1))
+            .ok_or_else(|| anyhow!("thread {existing_thread_id} sequence exhausted"))?;
+        event.prev_chain_event_hash = last_chain_event_hash.clone();
+        event.prev_thread_event_hash = existing_thread_last_hash.clone();
+        event.validate()?;
+        let event_json = lillux::canonical_json(&event.to_value())
+            .context("failed to canonicalize existing-thread event")?;
+        let event_hash = lillux::sha256_hex(event_json.as_bytes());
+        let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
+        pending_writes.push((event_path, event_json.into_bytes()));
+        last_chain_event_hash = Some(event_hash.clone());
+        existing_thread_last_hash = Some(event_hash);
+        stored_events.push(event);
+    }
+
+    let mut new_threads = current_chain_state.threads.clone();
+    let mut new_entry = ChainThreadEntry {
+        snapshot_hash: String::new(),
+        last_event_hash: new_thread_last_hash,
+        last_thread_seq: new_event_count,
+        status: new_snapshot.status,
+    };
+    validation::stamp_snapshot_position(&mut new_snapshot, &new_entry, final_chain_seq);
+    validation::normalize_and_validate_new_thread(
+        &mut new_snapshot,
+        chain_root_id,
+        &append_timestamp,
+    )?;
+    let new_thread_last_event_index = usize::try_from(new_event_count - 1)
+        .context("new-thread event batch is too large")?;
+    validation::validate_snapshot_last_event(
+        &new_snapshot,
+        new_snapshot
+            .last_event_hash
+            .as_deref()
+            .ok_or_else(|| anyhow!("new thread snapshot is missing its final event hash"))?,
+        &stored_events[new_thread_last_event_index],
+    )?;
+    let snapshot_json = lillux::canonical_json(&new_snapshot.to_value())
+        .context("failed to canonicalize new thread snapshot")?;
+    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+    pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
+    new_entry.snapshot_hash.clone_from(&snapshot_hash);
+    new_threads.insert(new_snapshot.thread_id.clone(), new_entry);
+
+    let existing = new_threads
+        .get_mut(existing_thread_id)
+        .expect("existing thread was checked above");
+    existing.last_event_hash = existing_thread_last_hash;
+    existing.last_thread_seq = existing_final_thread_seq;
+
+    for update in &mut snapshot_updates {
+        let prospective_entry = new_threads
+            .get(&update.thread_id)
+            .cloned()
+            .expect("snapshot predecessor was checked above");
+        validation::stamp_snapshot_position(
+            &mut update.new_snapshot,
+            &prospective_entry,
+            final_chain_seq,
+        );
+        let previous = previous_snapshots
+            .remove(&update.thread_id)
+            .expect("snapshot predecessor was loaded above");
+        validation::normalize_and_validate_snapshot_transition(
+            &previous,
+            &mut update.new_snapshot,
+            &append_timestamp,
+        )?;
+        if update.thread_id == existing_thread_id {
+            let expected_hash = update
+                .new_snapshot
+                .last_event_hash
+                .as_deref()
+                .ok_or_else(|| anyhow!("existing thread snapshot is missing its final event hash"))?;
+            validation::validate_snapshot_last_event(
+                &update.new_snapshot,
+                expected_hash,
+                stored_events
+                    .last()
+                    .expect("atomic add-and-append requires existing-thread events"),
+            )?;
+        } else {
+            validate_snapshot_last_event_object(cas_root, Some(lock), &update.new_snapshot)?;
+        }
+        let update_json = lillux::canonical_json(&update.new_snapshot.to_value())
+            .context("failed to canonicalize updated thread snapshot")?;
+        let update_hash = lillux::sha256_hex(update_json.as_bytes());
+        let update_path = lillux::shard_path(cas_root, "objects", &update_hash, ".json");
+        pending_writes.push((update_path, update_json.into_bytes()));
+        let entry = new_threads
+            .get_mut(&update.thread_id)
+            .expect("snapshot update existence was checked above");
+        entry.snapshot_hash = update_hash;
+        entry.status = update.new_snapshot.status;
+    }
+
+    let mut changed_threads = snapshot_updates
+        .iter()
+        .map(|update| update.thread_id.clone())
+        .collect::<Vec<_>>();
+    changed_threads.push(existing_thread_id.to_string());
+    validation::validate_untouched_entries(
+        &current_chain_state.threads,
+        &new_threads,
+        changed_threads,
+    )?;
+
+    let mut timestamp_floors = vec![
+        current_chain_state.updated_at.as_str(),
+        append_timestamp.as_str(),
+        new_snapshot.updated_at.as_str(),
+    ];
+    timestamp_floors.extend(
+        snapshot_updates
+            .iter()
+            .map(|update| update.new_snapshot.updated_at.as_str()),
+    );
+    let current_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
+    let new_chain_state = ChainState {
+        schema: 1,
+        kind: "chain_state".to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        prev_chain_state_hash: Some(lillux::sha256_hex(current_json.as_bytes())),
+        last_event_hash: last_chain_event_hash,
+        last_chain_seq: final_chain_seq,
+        updated_at: validation::monotonic_now(timestamp_floors)?,
+        threads: new_threads,
+    };
+    new_chain_state.validate()?;
+    validation::validate_chain_positions(&new_chain_state)?;
+    let chain_state_json = lillux::canonical_json(&new_chain_state.to_value())
+        .context("failed to canonicalize atomic add-and-append chain state")?;
+    let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
+    let chain_state_path =
+        lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
+    pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
+
+    write_cas_batch(cas_root, lock, &pending_writes)
+        .context("failed to store atomic add-and-append chain closure in CAS")?;
+    publish_chain_head(
+        cas_root,
+        refs_root,
+        lock,
+        chain_root_id,
+        new_chain_state.prev_chain_state_hash.as_deref(),
+        &chain_state_hash,
+        &new_chain_state.updated_at,
+        signer,
+        trust_store,
+    )?;
+    head_cache.insert(
+        chain_root_id.to_string(),
+        CachedHead::new(chain_state_hash.clone(), new_chain_state),
+    );
+
+    Ok(AddThreadWithEventsResult {
+        chain_state_hash,
+        snapshot_hash,
+        snapshot: new_snapshot,
+        first_chain_seq,
+        event_count: stored_events.len(),
+        events: stored_events,
+        snapshot_updates,
     })
 }
 
@@ -1722,8 +2221,9 @@ pub(crate) fn read_thread_snapshot(
 ) -> anyhow::Result<ReadSnapshotResult> {
     let chain_state = read_chain_head(cas_root, refs_root, chain_root_id, trust_store, head_cache)?;
 
-    let chain_state_hash =
-        lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&chain_state.to_value())
+        .context("failed to canonicalize chain head")?;
+    let chain_state_hash = lillux::sha256_hex(canonical.as_bytes());
 
     // Check if thread exists in chain
     let thread_entry = match chain_state.threads.get(thread_id) {
@@ -1745,8 +2245,9 @@ pub(crate) fn read_thread_snapshot(
         serde_json::from_str(&snapshot_json).context("failed to parse snapshot")?;
 
     validation::validate_stored_snapshot(&chain_state, thread_id, thread_entry, &snapshot)?;
-    let actual_snapshot_hash =
-        lillux::sha256_hex(lillux::canonical_json(&snapshot.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&snapshot.to_value())
+        .context("failed to canonicalize thread snapshot")?;
+    let actual_snapshot_hash = lillux::sha256_hex(canonical.as_bytes());
     if actual_snapshot_hash != thread_entry.snapshot_hash {
         anyhow::bail!(
             "snapshot CAS hash mismatch for thread {thread_id}: expected {}, got {actual_snapshot_hash}",
@@ -2177,8 +2678,11 @@ mod tests {
                 .unwrap()
                 .snapshot
                 .unwrap();
-        let event_hash =
-            lillux::sha256_hex(lillux::canonical_json(&result.events[0].to_value()).as_bytes());
+        let event_hash = lillux::sha256_hex(
+            lillux::canonical_json(&result.events[0].to_value())
+                .unwrap()
+                .as_bytes(),
+        );
         assert_eq!(stored.status, crate::objects::ThreadStatus::Running);
         assert_eq!(stored.last_event_hash.as_deref(), Some(event_hash.as_str()));
         assert_eq!(stored.last_chain_seq, 1);
@@ -2340,7 +2844,9 @@ mod tests {
         assert_eq!(
             result.events[1].prev_thread_event_hash,
             Some(lillux::sha256_hex(
-                lillux::canonical_json(&result.events[0].to_value()).as_bytes()
+                lillux::canonical_json(&result.events[0].to_value())
+                    .unwrap()
+                    .as_bytes()
             ))
         );
 

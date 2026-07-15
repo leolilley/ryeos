@@ -124,6 +124,7 @@ bundle_payload_bins() {
         standard)
             printf '%s\n' \
                 ryeos-directive-runtime \
+                ryeos-directive-launch-preparer \
                 ryeos-graph-runtime \
                 ryeos-knowledge-runtime \
                 rye-composer-extends-chain \
@@ -602,6 +603,7 @@ stale_bins=(
     ryeos-core-tools
     ryeos-tui
     ryeos-directive-runtime
+    ryeos-directive-launch-preparer
     ryeos-graph-runtime
     ryeos-knowledge-runtime
     rye-parser-yaml-document

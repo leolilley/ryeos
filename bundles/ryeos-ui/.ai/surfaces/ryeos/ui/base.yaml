@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:f8d1a0f027befd65a13a0bdd049be1007e93c17f77412d0aa3d3da412f066de0:2vfNhAzjMZB/6TvpXNlhpEhmMOChQyY45FN0UoCw1qmmGYHvX+RLCpia6sVO3/Qg3qLkFS8fXV0SyIXEIasXCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:366ad6a47a357cc18dba9335cbd8589c441bca1d42393b7d2e67ad58eabe004f:99Rw2jEKRrGKuOgMxxKEJpJDBI0//Pwsgpp4V589FMXiY0dv6Yi2yEFacUsjTKPBIDhPDGZKqjLjh3ZFiLyrCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-base
 version: "1.0.0"
 description: RyeOS UI home space
@@ -78,8 +78,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

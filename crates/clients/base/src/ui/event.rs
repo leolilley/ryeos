@@ -99,6 +99,7 @@ pub enum RyeOsUiIntent {
     },
     ExecuteItem {
         item_ref: String,
+        ref_bindings: std::collections::BTreeMap<String, String>,
         parameters: serde_json::Value,
     },
     /// Steer the route's head thread via `service:commands/submit`

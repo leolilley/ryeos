@@ -562,6 +562,7 @@ mod tests {
             spec_version: 1,
             schedule_id: schedule_id.to_owned(),
             item_ref: "directive:test/hello".to_owned(),
+            ref_bindings: std::collections::BTreeMap::new(),
             schedule_type: "interval".to_owned(),
             expression: "60".to_owned(),
             params: serde_json::json!({}),

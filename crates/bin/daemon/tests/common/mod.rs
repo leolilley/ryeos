@@ -690,6 +690,7 @@ impl DaemonHarness {
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
         let body = serde_json::json!({
             "item_ref": item_ref,
+            "ref_bindings": {},
             "project_path": project_path,
             "parameters": params,
         });

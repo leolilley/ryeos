@@ -2608,6 +2608,131 @@ impl StateDb {
         ))
     }
 
+    /// Create a root snapshot and its initial durable events in one head update
+    /// and one projection transaction.
+    #[cfg(test)]
+    pub fn create_chain_with_events(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        let guard = self.pinned_authority()?.acquire_shared_guard()?;
+        self.create_chain_with_events_inner(
+            chain_root_id,
+            snapshot,
+            events,
+            signer,
+            None,
+            &guard,
+        )
+    }
+
+    pub fn create_chain_with_events_admitted(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        self.create_chain_with_events_inner(
+            chain_root_id,
+            snapshot,
+            events,
+            signer,
+            Some(runtime_liveness),
+            cas_mutation_guard,
+        )
+    }
+
+    fn create_chain_with_events_inner(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        if events.iter().any(|event| !event.durability.is_cas_stored()) {
+            anyhow::bail!("StateDb::create_chain_with_events cannot persist ephemeral events");
+        }
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        self.converge_pending_before_set_locked(
+            chain_root_id,
+            false,
+            runtime_liveness,
+            &chain_lock,
+        )?;
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = match chain::create_chain_with_events_and_trust_under_lock(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot,
+            events,
+            signer,
+            self.trust_store.as_ref(),
+            &mut cache,
+            &chain_lock,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.note_pending_transition_error(
+                    chain_root_id,
+                    "create_chain_with_events",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.mark_pending_set_applying_locked(
+            chain_root_id,
+            &result.chain_state_hash,
+            &chain_lock,
+        ) {
+            self.note_pending_transition_error(
+                chain_root_id,
+                "create_chain_with_events",
+                &error,
+            );
+            return Err(error);
+        }
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot_with_events_in_transaction(
+                    &self.projection,
+                    &result.snapshot,
+                    chain_root_id,
+                    &result.events,
+                )
+                .context("projecting exact committed root thread and initial events")
+            },
+        );
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write_locked(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "create_chain_with_events",
+            projected,
+            &chain_lock,
+        ))
+    }
+
     /// Add a new thread to an existing chain.
     ///
     /// Delegates to [`chain::add_thread_to_chain`] then projects the snapshot.
@@ -3000,6 +3125,185 @@ impl StateDb {
             chain_root_id,
             &committed_hash,
             "add_thread_with_events",
+            projected,
+            &chain_lock,
+        ))
+    }
+
+    /// Add a thread and append events to an existing thread under one signed
+    /// chain head, then project the entire cross-thread transition in one
+    /// projection transaction.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
+    pub fn add_thread_with_events_and_append(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        new_thread_events: Vec<ThreadEvent>,
+        existing_thread_id: &str,
+        existing_thread_events: Vec<ThreadEvent>,
+        snapshot_updates: Vec<SnapshotUpdate>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        let guard = self.pinned_authority()?.acquire_shared_guard()?;
+        self.add_thread_with_events_and_append_inner(
+            chain_root_id,
+            snapshot,
+            new_thread_events,
+            existing_thread_id,
+            existing_thread_events,
+            snapshot_updates,
+            signer,
+            None,
+            &guard,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_thread_with_events_and_append_admitted(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        new_thread_events: Vec<ThreadEvent>,
+        existing_thread_id: &str,
+        existing_thread_events: Vec<ThreadEvent>,
+        snapshot_updates: Vec<SnapshotUpdate>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        self.add_thread_with_events_and_append_inner(
+            chain_root_id,
+            snapshot,
+            new_thread_events,
+            existing_thread_id,
+            existing_thread_events,
+            snapshot_updates,
+            signer,
+            Some(runtime_liveness),
+            cas_mutation_guard,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_thread_with_events_and_append_inner(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        new_thread_events: Vec<ThreadEvent>,
+        existing_thread_id: &str,
+        existing_thread_events: Vec<ThreadEvent>,
+        snapshot_updates: Vec<SnapshotUpdate>,
+        signer: &dyn Signer,
+        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        if new_thread_events
+            .iter()
+            .chain(existing_thread_events.iter())
+            .any(|event| !event.durability.is_cas_stored())
+        {
+            anyhow::bail!(
+                "StateDb::add_thread_with_events_and_append cannot persist ephemeral events"
+            );
+        }
+
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
+            chain_root_id,
+            ProspectiveChainMutation::AddSnapshot(&snapshot),
+            &chain_lock,
+        )?;
+        let cancelled_remove = self.converge_pending_before_set_locked(
+            chain_root_id,
+            invalidates_retirement,
+            runtime_liveness,
+            &chain_lock,
+        )?;
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = match chain::add_thread_to_chain_with_events_and_append_with_trust_under_lock(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot,
+            new_thread_events,
+            existing_thread_id,
+            existing_thread_events,
+            snapshot_updates,
+            signer,
+            self.trust_store.as_ref(),
+            &mut cache,
+            &chain_lock,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let error = self.failed_write_after_cancelled_remove(
+                    chain_root_id,
+                    cancelled_remove.as_ref(),
+                    &chain_lock,
+                    error,
+                );
+                self.note_pending_transition_error(
+                    chain_root_id,
+                    "add_thread_with_events_and_append",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.mark_pending_set_applying_locked(
+            chain_root_id,
+            &result.chain_state_hash,
+            &chain_lock,
+        ) {
+            self.note_pending_transition_error(
+                chain_root_id,
+                "add_thread_with_events_and_append",
+                &error,
+            );
+            return Err(error);
+        }
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot_with_events_in_transaction(
+                    &self.projection,
+                    &result.snapshot,
+                    chain_root_id,
+                    &result.events,
+                )
+                .context("projecting atomic new-thread and existing-thread events")?;
+                for update in &result.snapshot_updates {
+                    projection::project_thread_snapshot(
+                        &self.projection,
+                        &update.new_snapshot,
+                        chain_root_id,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "projecting atomic snapshot update for thread {}",
+                            update.thread_id
+                        )
+                    })?;
+                }
+                Ok(())
+            },
+        );
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write_locked(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "add_thread_with_events_and_append",
             projected,
             &chain_lock,
         ))

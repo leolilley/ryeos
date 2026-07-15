@@ -1260,7 +1260,7 @@ mod tests {
                 },
                 "mode": 0o755,
             });
-            let sidecar_body = lillux::cas::canonical_json(&item_source);
+            let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
             let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
             std::fs::write(
                 bin_path.with_file_name(format!("{name}.item_source.json")),

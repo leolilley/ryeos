@@ -7,7 +7,7 @@
 
 use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -130,9 +130,10 @@ pub struct SandboxLimitsPolicy {
 /// Backend resolution facts and the exact policy snapshot used by a runtime.
 ///
 /// Doctor and status surfaces consume this value rather than reparsing the
-/// source file with a second implementation. `resolved_executable` is absent
-/// while the sandbox is disabled because disabled policy does not inspect the
-/// configured backend.
+/// source file with a second implementation. Enforced policy loading captures
+/// the configured backend immediately. A disabled snapshot captures it during
+/// successful runtime admission only when the registry requires a mandatory
+/// private launch-preparer profile.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SandboxInspection {
     pub source: Option<PathBuf>,
@@ -179,8 +180,20 @@ pub struct SandboxRuntime {
     app_root_destination: Option<PathBuf>,
     daemon_socket: Option<PinnedDaemonSocket>,
     verified_artifacts: Option<Arc<VerifiedArtifactStore>>,
-    /// Exact startup-captured backend inode executed for every enforced apply.
-    backend_handle: Option<Arc<std::fs::File>>,
+    /// Exact daemon-lifetime backend capture used by every enforced apply and
+    /// every mandatory private profile, irrespective of the general mode.
+    /// Disabled snapshots publish this once when an admitted runtime registry
+    /// first requires a private profile, so every existing clone and later
+    /// engine rebuild reuses the same bytes.
+    backend_capture: Arc<OnceLock<CapturedSandboxBackend>>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedSandboxBackend {
+    resolved_executable: PathBuf,
+    handle: Arc<std::fs::File>,
+    digest: String,
+    version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -758,9 +771,10 @@ impl SandboxRuntime {
     /// Load the node-owned policy from its fixed path and resolve its runtime.
     ///
     /// Missing files, malformed YAML, unknown fields, and unsupported versions
-    /// are errors in both modes. Disabled mode deliberately does not inspect or
-    /// canonicalize the configured backend. Enforced mode validates all static
-    /// backend and limit facts before this value is returned.
+    /// are errors in both modes. Enforced mode validates and captures the
+    /// configured backend before this value is returned. Disabled mode defers
+    /// backend admission unless an engine's runtime registry requires a
+    /// mandatory launch-preparer profile.
     pub fn load(app_root: &Path) -> Result<Self, EngineError> {
         Self::load_inner(app_root, None)
     }
@@ -912,6 +926,116 @@ impl SandboxRuntime {
 
     pub fn is_enforced(&self) -> bool {
         self.state == SandboxRuntimeState::Enforced
+    }
+
+    /// Capture the configured Bubblewrap backend into a detached tentative
+    /// snapshot. The daemon-wide capture is not changed until the caller has
+    /// validated every runtime/preparer edge against this exact handle.
+    pub fn tentative_mandatory_bubblewrap_backend(&self) -> Result<Self, EngineError> {
+        if let Some(backend) = self.backend_capture.get() {
+            return Ok(self.with_backend_inspection(backend));
+        }
+        let artifacts = self.verified_artifacts.as_deref().ok_or_else(|| {
+            refused(
+                "mandatory Bubblewrap profile requires a production sandbox snapshot".to_string(),
+            )
+        })?;
+        let backend = SandboxBackendPolicy {
+            kind: self.inspection.backend.kind,
+            executable: self.inspection.backend.configured_executable.clone(),
+        };
+        let (resolved_executable, handle, digest, version) =
+            resolve_backend(&backend, artifacts)?;
+        let candidate = CapturedSandboxBackend {
+            resolved_executable,
+            handle,
+            digest,
+            version,
+        };
+        let backend_capture = Arc::new(OnceLock::new());
+        backend_capture
+            .set(candidate)
+            .expect("a fresh tentative backend cell accepts its capture");
+        let mut captured = self.clone();
+        captured.backend_capture = backend_capture;
+        let backend = captured
+            .backend_capture
+            .get()
+            .expect("tentative backend capture is initialized");
+        captured.inspection.backend.resolved_executable =
+            Some(backend.resolved_executable.clone());
+        captured.inspection.backend.captured_digest = Some(backend.digest.clone());
+        captured.inspection.backend.captured_version = Some(backend.version.clone());
+        Ok(captured)
+    }
+
+    /// Publish a fully validated tentative backend into the daemon snapshot.
+    /// Returns the exact published snapshot and whether another concurrent
+    /// admission won the race with a different handle. A reconciled caller must
+    /// validate its runtime/preparer graph again against the returned winner.
+    pub fn publish_mandatory_bubblewrap_backend(
+        &self,
+        tentative: &Self,
+    ) -> Result<(Self, bool), EngineError> {
+        let same_artifact_store = match (
+            self.verified_artifacts.as_ref(),
+            tentative.verified_artifacts.as_ref(),
+        ) {
+            (Some(current), Some(candidate)) => Arc::ptr_eq(current, candidate),
+            (None, None) => true,
+            _ => false,
+        };
+        if self.inspection.source != tentative.inspection.source
+            || self.inspection.digest != tentative.inspection.digest
+            || self.inspection.backend.kind != tentative.inspection.backend.kind
+            || self.inspection.backend.configured_executable
+                != tentative.inspection.backend.configured_executable
+            || !same_artifact_store
+        {
+            return Err(refused(
+                "tentative mandatory backend belongs to a different sandbox policy snapshot"
+                    .to_string(),
+            ));
+        }
+        let candidate = tentative.backend_capture.get().ok_or_else(|| {
+            refused("tentative mandatory backend has no captured executable".to_string())
+        })?;
+        let _ = self.backend_capture.set(candidate.clone());
+        let published = self
+            .backend_capture
+            .get()
+            .expect("mandatory backend publication selects a winner");
+        let reconciled = !Arc::ptr_eq(&candidate.handle, &published.handle);
+        Ok((self.with_backend_inspection(published), reconciled))
+    }
+
+    fn with_backend_inspection(&self, backend: &CapturedSandboxBackend) -> Self {
+        let mut captured = self.clone();
+        captured.inspection.backend.resolved_executable =
+            Some(backend.resolved_executable.clone());
+        captured.inspection.backend.captured_digest = Some(backend.digest.clone());
+        captured.inspection.backend.captured_version = Some(backend.version.clone());
+        captured
+    }
+
+    /// Return a content-captured Bubblewrap executable for a mandatory private
+    /// profile such as launch preparation. This consumes the immutable policy
+    /// snapshot instead of reopening `sandbox.yaml`. General sandbox mode does
+    /// not disable mandatory profiles; runtime admission validates a tentative
+    /// capture before atomically publishing it with the bound preparer registry.
+    /// This accessor never reopens node policy or executable paths.
+    pub fn capture_mandatory_bubblewrap_backend(
+        &self,
+    ) -> Result<Arc<std::fs::File>, EngineError> {
+        self.backend_capture
+            .get()
+            .map(|backend| backend.handle.clone())
+            .ok_or_else(|| {
+                refused(
+                    "mandatory Bubblewrap profile requires a production sandbox snapshot with a daemon-captured backend"
+                        .to_string(),
+                )
+            })
     }
 
     /// Apply this immutable policy snapshot to one executable request.
@@ -1089,16 +1213,12 @@ impl SandboxRuntime {
             )));
         }
 
-        let backend_path = self
-            .inspection
-            .backend
-            .resolved_executable
-            .as_ref()
-            .expect("enforced sandbox runtime has a resolved backend");
-        let backend_handle = self
-            .backend_handle
-            .as_ref()
-            .expect("enforced sandbox runtime has a captured backend handle");
+        let backend = self
+            .backend_capture
+            .get()
+            .expect("enforced sandbox runtime has a captured backend");
+        let backend_path = &backend.resolved_executable;
+        let backend_handle = &backend.handle;
         let canonical_state_root = context
             .state_root
             .map(|path| canonicalize_context_mount("state root", path))
@@ -1660,15 +1780,36 @@ impl SandboxRuntime {
         };
         if state == SandboxRuntimeState::Enforced {
             validate_enforced_limits(&policy.limits)?;
+            if app_root.is_none() {
+                return Err(refused(
+                    "enforced sandbox runtime requires an app root".to_string(),
+                ));
+            }
         }
-        let verified_artifacts = if state == SandboxRuntimeState::Enforced {
-            let app_root = app_root_authority.as_deref().ok_or_else(|| {
-                refused("enforced sandbox runtime requires pinned app-root authority".to_string())
-            })?;
-            Some(Arc::new(VerifiedArtifactStore::create(
+        // Production snapshots capture Bubblewrap immediately when enforcement
+        // is enabled. Disabled snapshots defer that work until runtime admission
+        // knows whether a mandatory private profile exists. The `None` branch is
+        // retained solely for the in-memory `Default` fixture, which has no app
+        // root.
+        let verified_artifacts = match app_root_authority.as_deref() {
+            Some(app_root) => Some(Arc::new(VerifiedArtifactStore::create(
                 app_root,
                 &policy.limits,
-            )?))
+            )?)),
+            None => None,
+        };
+        let captured_backend = if state == SandboxRuntimeState::Enforced {
+            let artifacts = verified_artifacts.as_deref().ok_or_else(|| {
+                refused("enforced sandbox runtime requires an artifact store".to_string())
+            })?;
+            let (resolved_executable, handle, digest, version) =
+                resolve_backend(&policy.backend, artifacts)?;
+            Some(CapturedSandboxBackend {
+                resolved_executable,
+                handle,
+                digest,
+                version,
+            })
         } else {
             None
         };
@@ -1691,18 +1832,21 @@ impl SandboxRuntime {
         } else {
             None
         };
-        let (resolved_executable, backend_handle, captured_digest, captured_version) =
-            match policy.mode {
-                SandboxMode::Disabled => (None, None, None, None),
-                SandboxMode::Enforce => {
-                    let artifacts = verified_artifacts
-                        .as_deref()
-                        .expect("enforced sandbox runtime has a verified artifact store");
-                    let (resolved, artifact, digest, version) =
-                        resolve_backend(&policy.backend, artifacts)?;
-                    (Some(resolved), Some(artifact), Some(digest), Some(version))
-                }
-            };
+        let resolved_executable = captured_backend
+            .as_ref()
+            .map(|backend| backend.resolved_executable.clone());
+        let captured_digest = captured_backend
+            .as_ref()
+            .map(|backend| backend.digest.clone());
+        let captured_version = captured_backend
+            .as_ref()
+            .map(|backend| backend.version.clone());
+        let backend_capture = Arc::new(OnceLock::new());
+        if let Some(captured_backend) = captured_backend {
+            backend_capture
+                .set(captured_backend)
+                .expect("a fresh backend capture cell accepts its initial value");
+        }
         Ok(Self {
             inspection: SandboxInspection {
                 source,
@@ -1728,7 +1872,7 @@ impl SandboxRuntime {
             app_root_destination,
             daemon_socket,
             verified_artifacts,
-            backend_handle,
+            backend_capture,
         })
     }
 
@@ -1995,8 +2139,16 @@ fn probe_bubblewrap_backend(handle: &Arc<std::fs::File>) -> Result<String, Engin
     for required in [
         "--args",
         "--bind-fd",
+        "--cap-drop",
+        "--chdir",
+        "--clearenv",
+        "--dev-bind",
+        "--die-with-parent",
         "--json-status-fd",
+        "--new-session",
         "--ro-bind-fd",
+        "--tmpfs",
+        "--unshare-all",
         "--argv0",
     ] {
         if !help_tokens.contains(required) {
@@ -3238,11 +3390,12 @@ mod tests {
     }
 
     #[test]
-    fn disabled_runtime_does_not_inspect_missing_backend() {
+    #[cfg(target_os = "linux")]
+    fn disabled_runtime_captures_backend_only_for_mandatory_profile() {
         let app_root = tempfile::tempdir().unwrap();
         write_policy(
             app_root.path(),
-            &policy_yaml("disabled", Path::new("/definitely/missing-bwrap")),
+            &policy_yaml("disabled", Path::new("/usr/bin/bwrap")),
         );
 
         let runtime = SandboxRuntime::load(app_root.path()).unwrap();
@@ -3253,6 +3406,44 @@ mod tests {
         assert_eq!(runtime.source(), Some(expected_source.as_path()));
         assert!(runtime.digest().unwrap().starts_with("sha256:"));
         assert!(runtime.inspection().backend.resolved_executable.is_none());
+        assert!(runtime.inspection().backend.captured_digest.is_none());
+        assert!(runtime.inspection().backend.captured_version.is_none());
+        assert!(runtime.capture_mandatory_bubblewrap_backend().is_err());
+
+        let tentative = runtime.tentative_mandatory_bubblewrap_backend().unwrap();
+        assert!(tentative.inspection().backend.resolved_executable.is_some());
+        assert!(tentative.inspection().backend.captured_digest.is_some());
+        assert!(tentative.inspection().backend.captured_version.is_some());
+        assert!(runtime.capture_mandatory_bubblewrap_backend().is_err());
+
+        let contender = runtime.tentative_mandatory_bubblewrap_backend().unwrap();
+        let contender_handle = contender.capture_mandatory_bubblewrap_backend().unwrap();
+        let tentative_handle = tentative.capture_mandatory_bubblewrap_backend().unwrap();
+        let (captured, reconciled) = runtime
+            .publish_mandatory_bubblewrap_backend(&tentative)
+            .unwrap();
+        assert!(!reconciled);
+        let captured_handle = captured.capture_mandatory_bubblewrap_backend().unwrap();
+        let published_handle = runtime.capture_mandatory_bubblewrap_backend().unwrap();
+        assert!(Arc::ptr_eq(&tentative_handle, &captured_handle));
+        assert!(Arc::ptr_eq(&captured_handle, &published_handle));
+
+        let (race_winner, reconciled) = runtime
+            .publish_mandatory_bubblewrap_backend(&contender)
+            .unwrap();
+        assert!(reconciled);
+        assert!(!Arc::ptr_eq(&contender_handle, &published_handle));
+        assert!(Arc::ptr_eq(
+            &published_handle,
+            &race_winner.capture_mandatory_bubblewrap_backend().unwrap()
+        ));
+
+        let rebuilt = runtime.tentative_mandatory_bubblewrap_backend().unwrap();
+        assert_eq!(rebuilt.inspection().backend, captured.inspection().backend);
+        assert!(Arc::ptr_eq(
+            &captured_handle,
+            &rebuilt.capture_mandatory_bubblewrap_backend().unwrap()
+        ));
     }
 
     #[test]

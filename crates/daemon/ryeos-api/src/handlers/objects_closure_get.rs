@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
@@ -30,8 +30,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     for hash in &report.object_hashes {
         if let Some(value) = cas.get_object(hash)? {
-            let object_bytes =
-                u64::try_from(lillux::canonical_json(&value).len()).unwrap_or(u64::MAX);
+            let canonical = lillux::canonical_json(&value)
+                .context("failed to canonicalize closure object")?;
+            let object_bytes = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
             total_object_bytes = total_object_bytes.saturating_add(object_bytes);
             if total_object_bytes > req.max_total_object_bytes {
                 bail!(

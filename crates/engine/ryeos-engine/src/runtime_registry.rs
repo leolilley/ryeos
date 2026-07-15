@@ -15,7 +15,8 @@
 //! resolution against the CAS lives in dispatch and is wired in a
 //! later task.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,16 @@ use crate::trust::TrustStore;
 /// Bump when the LaunchEnvelope, callback ABI, or any other
 /// daemon↔runtime contract surface changes incompatibly.
 pub const SUPPORTED_RUNTIME_ABI_VERSION: &str = "v1";
+
+const MAX_LAUNCH_BINDINGS: usize = 32;
+const MAX_LAUNCH_RUNTIME_DATA_KEYS: usize = 32;
+const MAX_LAUNCH_CONFIG_INPUTS: usize = 16;
+const MAX_LAUNCH_RUNTIME_FACTS: usize = 128;
+const MAX_LAUNCH_SECRET_NAMES: usize = 32;
+const MAX_LAUNCH_FACT_BYTES: u32 = 16 * 1024;
+const MAX_LAUNCH_NAME_BYTES: usize = 64;
+const MAX_CONFIG_IDENTITY_BYTES: usize = 512;
+const MAX_CONFIG_SEGMENT_BYTES: usize = 128;
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -56,8 +67,11 @@ pub struct RuntimeYaml {
     pub abi_version: String,
     #[serde(default)]
     pub required_caps: Vec<String>,
-    #[serde(default)]
-    pub required_envelope_fields: Vec<String>,
+    /// Complete, runtime-owned declaration of the inputs and preparation
+    /// required to construct its launch envelope. This is intentionally
+    /// required: adding a runtime without declaring its launch boundary is a
+    /// boot-time error.
+    pub launch_contract: LaunchContractDecl,
     #[serde(default)]
     pub description: Option<String>,
     /// Replay-aware resume policy for this runtime. Presence ⇒ this runtime
@@ -74,6 +88,101 @@ pub struct RuntimeYaml {
         deserialize_with = "deserialize_native_resume"
     )]
     pub native_resume: Option<NativeResumeSpec>,
+}
+
+/// Declarative launch boundary for one runtime.
+///
+/// Every collection is required in YAML, including collections that are
+/// empty. Runtime-specific launch knowledge belongs here or in the declared
+/// launch-preparer handler, never in the executor.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchContractDecl {
+    pub primary_allowed_kinds: Vec<String>,
+    pub primary_allowed_spaces: Vec<LaunchItemSpace>,
+    pub primary_allowed_trust: Vec<TrustClass>,
+    pub ref_bindings: BTreeMap<String, RefBindingDecl>,
+    pub preparation: LaunchPreparationDecl,
+    pub config_inputs: BTreeMap<String, LaunchConfigInputDecl>,
+    pub secret_policy: LaunchSecretPolicyDecl,
+    pub required_runtime_data: Vec<String>,
+    pub runtime_facts: BTreeMap<String, RuntimeFactDecl>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefBindingDecl {
+    pub required: bool,
+    pub allowed_kinds: Vec<String>,
+    pub allowed_spaces: Vec<LaunchItemSpace>,
+    pub allowed_trust: Vec<TrustClass>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchPreparationDecl {
+    None,
+    Handler {
+        handler: String,
+        config: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchConfigInputDecl {
+    Item {
+        id: String,
+        required: bool,
+        merge: ConfigMergeMode,
+        allowed_spaces: Vec<LaunchItemSpace>,
+        allowed_trust: Vec<TrustClass>,
+    },
+    Catalog {
+        prefix: String,
+        required: bool,
+        entry_merge: ConfigMergeMode,
+        allowed_spaces: Vec<LaunchItemSpace>,
+        allowed_trust: Vec<TrustClass>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigMergeMode {
+    DeepMerge,
+    FirstMatch,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchItemSpace {
+    Bundle,
+    Project,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchSecretPolicyDecl {
+    pub max_requirements: u16,
+    pub allowed_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeFactDecl {
+    pub required: bool,
+    pub kind: RuntimeFactKind,
+    pub max_bytes: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeFactKind {
+    Bool,
+    Integer,
+    String,
+    Json,
 }
 
 /// `deserialize_with` for `RuntimeYaml::native_resume`: route the present value
@@ -144,6 +253,7 @@ impl RuntimeRegistry {
 
             for path in &paths {
                 let verified = load_and_verify_runtime_yaml(path, bundle_root, *root_trust, trust)?;
+                validate_launch_contract_kinds(path, &verified.yaml, kinds)?;
                 if by_ref.contains_key(&verified.canonical_ref) {
                     return Err(EngineError::DuplicateRuntimeRef {
                         canonical_ref: verified.canonical_ref.to_string(),
@@ -282,6 +392,15 @@ impl RuntimeRegistry {
     pub fn all(&self) -> impl Iterator<Item = &VerifiedRuntime> {
         self.by_ref.values()
     }
+
+    pub fn requires_launch_preparer(&self) -> bool {
+        self.by_ref.values().any(|runtime| {
+            matches!(
+                &runtime.yaml.launch_contract.preparation,
+                LaunchPreparationDecl::Handler { .. }
+            )
+        })
+    }
 }
 
 // ── Internals ────────────────────────────────────────────────────────
@@ -417,7 +536,385 @@ pub(crate) fn validate_runtime_yaml(
             found: yaml.abi_version.clone(),
         });
     }
+    validate_launch_contract(yaml_path, yaml)?;
     Ok(())
+}
+
+fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), EngineError> {
+    let contract = &yaml.launch_contract;
+
+    validate_non_empty_unique(
+        yaml_path,
+        "launch_contract.primary_allowed_kinds",
+        &contract.primary_allowed_kinds,
+    )?;
+    validate_non_empty_unique(
+        yaml_path,
+        "launch_contract.primary_allowed_spaces",
+        &contract.primary_allowed_spaces,
+    )?;
+    validate_non_empty_unique(
+        yaml_path,
+        "launch_contract.primary_allowed_trust",
+        &contract.primary_allowed_trust,
+    )?;
+    if !contract
+        .primary_allowed_kinds
+        .iter()
+        .any(|kind| kind == &yaml.serves)
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.primary_allowed_kinds must include the served kind `{}`",
+                yaml.serves
+            ),
+        );
+    }
+
+    if contract.ref_bindings.len() > MAX_LAUNCH_BINDINGS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.ref_bindings exceeds the limit of {MAX_LAUNCH_BINDINGS}"
+            ),
+        );
+    }
+    for (name, binding) in &contract.ref_bindings {
+        validate_launch_name(yaml_path, "launch_contract.ref_bindings", name)?;
+        validate_non_empty_unique(
+            yaml_path,
+            &format!("launch_contract.ref_bindings.{name}.allowed_kinds"),
+            &binding.allowed_kinds,
+        )?;
+        validate_non_empty_unique(
+            yaml_path,
+            &format!("launch_contract.ref_bindings.{name}.allowed_spaces"),
+            &binding.allowed_spaces,
+        )?;
+        validate_non_empty_unique(
+            yaml_path,
+            &format!("launch_contract.ref_bindings.{name}.allowed_trust"),
+            &binding.allowed_trust,
+        )?;
+    }
+
+    if let LaunchPreparationDecl::Handler { handler, .. } = &contract.preparation {
+        let parsed = CanonicalRef::parse(handler).map_err(|error| {
+            EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: format!(
+                    "launch_contract.preparation.handler `{handler}` is not a canonical ref: {error}"
+                ),
+            }
+        })?;
+        if parsed.kind != "handler" || parsed.suffix.is_some() {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.preparation.handler must be an unsuffixed `handler:` ref, got `{handler}`"
+                ),
+            );
+        }
+    }
+
+    if contract.config_inputs.len() > MAX_LAUNCH_CONFIG_INPUTS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.config_inputs exceeds the limit of {MAX_LAUNCH_CONFIG_INPUTS}"
+            ),
+        );
+    }
+    for (name, input) in &contract.config_inputs {
+        validate_launch_name(yaml_path, "launch_contract.config_inputs", name)?;
+        let (identity_field, identity, allowed_spaces, allowed_trust) = match input {
+            LaunchConfigInputDecl::Item {
+                id,
+                allowed_spaces,
+                allowed_trust,
+                ..
+            } => ("id", id, allowed_spaces, allowed_trust),
+            LaunchConfigInputDecl::Catalog {
+                prefix,
+                allowed_spaces,
+                allowed_trust,
+                ..
+            } => ("prefix", prefix, allowed_spaces, allowed_trust),
+        };
+        validate_config_identity(
+            yaml_path,
+            &format!("launch_contract.config_inputs.{name}.{identity_field}"),
+            identity,
+        )?;
+        validate_non_empty_unique(
+            yaml_path,
+            &format!("launch_contract.config_inputs.{name}.allowed_spaces"),
+            allowed_spaces,
+        )?;
+        validate_non_empty_unique(
+            yaml_path,
+            &format!("launch_contract.config_inputs.{name}.allowed_trust"),
+            allowed_trust,
+        )?;
+    }
+
+    let secret_policy = &contract.secret_policy;
+    if secret_policy.allowed_names.len() > MAX_LAUNCH_SECRET_NAMES {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.secret_policy.allowed_names exceeds the limit of {MAX_LAUNCH_SECRET_NAMES}"
+            ),
+        );
+    }
+    if usize::from(secret_policy.max_requirements) > MAX_LAUNCH_SECRET_NAMES {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.secret_policy.max_requirements exceeds the daemon limit of {MAX_LAUNCH_SECRET_NAMES}"
+            ),
+        );
+    }
+    if usize::from(secret_policy.max_requirements) > secret_policy.allowed_names.len() {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.secret_policy.max_requirements exceeds allowed_names length",
+        );
+    }
+    if has_duplicates(&secret_policy.allowed_names) {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.secret_policy.allowed_names contains duplicates",
+        );
+    }
+    for name in &secret_policy.allowed_names {
+        crate::protocol_vocabulary::validate_env_name(name).map_err(|error| {
+            EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: format!(
+                    "launch_contract.secret_policy.allowed_names contains invalid name `{name}`: {error}"
+                ),
+            }
+        })?;
+    }
+
+    if contract.required_runtime_data.len() > MAX_LAUNCH_RUNTIME_DATA_KEYS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.required_runtime_data exceeds the limit of {MAX_LAUNCH_RUNTIME_DATA_KEYS}"
+            ),
+        );
+    }
+    if has_duplicates(&contract.required_runtime_data) {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.required_runtime_data contains duplicates",
+        );
+    }
+    for name in &contract.required_runtime_data {
+        validate_launch_name(yaml_path, "launch_contract.required_runtime_data", name)?;
+    }
+
+    if contract.runtime_facts.len() > MAX_LAUNCH_RUNTIME_FACTS {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "launch_contract.runtime_facts exceeds the limit of {MAX_LAUNCH_RUNTIME_FACTS}"
+            ),
+        );
+    }
+    for (name, fact) in &contract.runtime_facts {
+        validate_launch_name(yaml_path, "launch_contract.runtime_facts", name)?;
+        if fact.max_bytes == 0 || fact.max_bytes > MAX_LAUNCH_FACT_BYTES {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.runtime_facts.{name}.max_bytes must be in 1..={MAX_LAUNCH_FACT_BYTES}"
+                ),
+            );
+        }
+    }
+
+    if matches!(&contract.preparation, LaunchPreparationDecl::None)
+        && (!contract.config_inputs.is_empty()
+            || secret_policy.max_requirements != 0
+            || !secret_policy.allowed_names.is_empty()
+            || !contract.required_runtime_data.is_empty()
+            || !contract.runtime_facts.is_empty())
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "launch_contract.preparation kind `none` requires empty config_inputs, secret_policy, required_runtime_data, and runtime_facts",
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_launch_contract_kinds(
+    yaml_path: &Path,
+    yaml: &RuntimeYaml,
+    kinds: &KindRegistry,
+) -> Result<(), EngineError> {
+    let contract = &yaml.launch_contract;
+    for kind in &contract.primary_allowed_kinds {
+        // The existing registry-level `serves` check below reports the
+        // dedicated RuntimeServesUnknownKind error for the served kind.
+        if kind != &yaml.serves && !kinds.contains(kind) {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.primary_allowed_kinds contains unknown kind `{kind}`"
+                ),
+            );
+        }
+    }
+    for (name, binding) in &contract.ref_bindings {
+        for kind in &binding.allowed_kinds {
+            if !kinds.contains(kind) {
+                return runtime_yaml_error(
+                    yaml_path,
+                    format!(
+                        "launch_contract.ref_bindings.{name}.allowed_kinds contains unknown kind `{kind}`"
+                    ),
+                );
+            }
+        }
+    }
+
+    let registered_extensions: HashSet<&str> = if contract.config_inputs.is_empty() {
+        HashSet::new()
+    } else {
+        kinds
+            .extension_strs("config")
+            .ok_or_else(|| EngineError::RuntimeYamlInvalid {
+                path: yaml_path.to_owned(),
+                reason: "launch_contract.config_inputs requires the registered `config` kind"
+                    .to_owned(),
+            })?
+            .into_iter()
+            .collect()
+    };
+    for (name, input) in &contract.config_inputs {
+        let (field, identity) = match input {
+            LaunchConfigInputDecl::Item { id, .. } => ("id", id),
+            LaunchConfigInputDecl::Catalog { prefix, .. } => ("prefix", prefix),
+        };
+        if let Some(extension) = registered_extensions
+            .iter()
+            .find(|extension| identity.ends_with(**extension))
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.config_inputs.{name}.{field} must omit the registered file extension `{extension}`"
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_non_empty_unique<T>(
+    yaml_path: &Path,
+    field: &str,
+    values: &[T],
+) -> Result<(), EngineError>
+where
+    T: Eq + Hash,
+{
+    if values.is_empty() {
+        return runtime_yaml_error(yaml_path, format!("{field} must be non-empty"));
+    }
+    if has_duplicates(values) {
+        return runtime_yaml_error(yaml_path, format!("{field} contains duplicates"));
+    }
+    Ok(())
+}
+
+fn has_duplicates<T>(values: &[T]) -> bool
+where
+    T: Eq + Hash,
+{
+    let mut seen = HashSet::with_capacity(values.len());
+    values.iter().any(|value| !seen.insert(value))
+}
+
+fn validate_launch_name(
+    yaml_path: &Path,
+    field: &str,
+    name: &str,
+) -> Result<(), EngineError> {
+    let valid = !name.is_empty()
+        && name.len() <= MAX_LAUNCH_NAME_BYTES
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !name.ends_with('_')
+        && !name.contains("__");
+    if !valid {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "{field} name `{name}` must match [a-z][a-z0-9]*(?:_[a-z0-9]+)* and be at most {MAX_LAUNCH_NAME_BYTES} bytes"
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn validate_config_identity(
+    yaml_path: &Path,
+    field: &str,
+    identity: &str,
+) -> Result<(), EngineError> {
+    let valid = !identity.is_empty()
+        && identity.len() <= MAX_CONFIG_IDENTITY_BYTES
+        && !identity.starts_with('/')
+        && !identity.ends_with('/')
+        && !identity.contains('\\')
+        && !identity.contains('\0')
+        && identity.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.len() <= MAX_CONFIG_SEGMENT_BYTES
+                && segment
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || byte == b'.'
+                        || byte == b'_'
+                        || byte == b'-'
+                })
+        });
+    if !valid {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "{field} `{identity}` is not a valid extensionless config identity"
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn runtime_yaml_error<T>(
+    yaml_path: &Path,
+    reason: impl Into<String>,
+) -> Result<T, EngineError> {
+    Err(EngineError::RuntimeYamlInvalid {
+        path: yaml_path.to_owned(),
+        reason: reason.into(),
+    })
 }
 
 #[cfg(test)]
@@ -433,7 +930,20 @@ mod tests {
             binary_ref: "bin/x86_64-unknown-linux-gnu/test-runtime".to_owned(),
             abi_version: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
             required_caps: vec![],
-            required_envelope_fields: vec![],
+            launch_contract: LaunchContractDecl {
+                primary_allowed_kinds: vec!["test_kind".to_owned()],
+                primary_allowed_spaces: vec![LaunchItemSpace::Bundle],
+                primary_allowed_trust: vec![TrustClass::TrustedBundle],
+                ref_bindings: BTreeMap::new(),
+                preparation: LaunchPreparationDecl::None,
+                config_inputs: BTreeMap::new(),
+                secret_policy: LaunchSecretPolicyDecl {
+                    max_requirements: 0,
+                    allowed_names: vec![],
+                },
+                required_runtime_data: vec![],
+                runtime_facts: BTreeMap::new(),
+            },
             description: None,
             native_resume: None,
         }
@@ -444,8 +954,25 @@ mod tests {
     }
 
     /// Minimal valid runtime YAML body; callers append a `native_resume:` line.
-    const BASE_YAML: &str =
-        "kind: runtime\nserves: test_kind\nbinary_ref: bin/test\nabi_version: v1\n";
+    const BASE_YAML: &str = concat!(
+        "kind: runtime\n",
+        "serves: test_kind\n",
+        "binary_ref: bin/test\n",
+        "abi_version: v1\n",
+        "launch_contract:\n",
+        "  primary_allowed_kinds: [test_kind]\n",
+        "  primary_allowed_spaces: [bundle]\n",
+        "  primary_allowed_trust: [trusted_bundle]\n",
+        "  ref_bindings: {}\n",
+        "  preparation:\n",
+        "    kind: none\n",
+        "  config_inputs: {}\n",
+        "  secret_policy:\n",
+        "    max_requirements: 0\n",
+        "    allowed_names: []\n",
+        "  required_runtime_data: []\n",
+        "  runtime_facts: {}\n",
+    );
 
     #[test]
     fn native_resume_absent_is_none() {
@@ -516,6 +1043,7 @@ mod tests {
     fn registry_with(serves: &str, ref_str: &str) -> RuntimeRegistry {
         let mut yaml = minimal_yaml();
         yaml.serves = serves.to_owned();
+        yaml.launch_contract.primary_allowed_kinds = vec![serves.to_owned()];
         let canon = CanonicalRef::parse(ref_str).expect("valid ref");
         let vr = VerifiedRuntime {
             canonical_ref: canon.clone(),

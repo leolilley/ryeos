@@ -128,6 +128,7 @@ mod tests {
         ScheduleSpecRecord {
             schedule_id: "test".to_string(),
             item_ref: "directive:test".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             params: "{}".to_string(),
             schedule_type: "cron".to_string(),
             expression: "* * * * * *".to_string(),

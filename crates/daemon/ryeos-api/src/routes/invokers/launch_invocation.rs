@@ -1,9 +1,9 @@
 //! Launch invoker — spawns a background dispatch and returns `Accepted`.
 //!
 //! Used by `launch` mode routes (webhooks, async triggers). The invoker
-//! mints a thread ID, spawns `spawn_dispatch_launch` in a background task,
-//! and returns `RouteInvocationResult::Accepted` immediately. The caller
-//! (mode) frames it as HTTP 202.
+//! mints a thread ID, spawns the dispatch in a background task, and returns
+//! `RouteInvocationResult::Accepted` only after authoritative launch handoff.
+//! The caller (mode) frames it as HTTP 202.
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
@@ -44,6 +44,23 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             .ok_or_else(|| {
                 RouteDispatchError::Internal("launch invoker: missing project_path in input".into())
             })?;
+        let ref_bindings = serde_json::from_value::<
+            std::collections::BTreeMap<String, String>,
+        >(
+            ctx.input
+                .get("ref_bindings")
+                .ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "launch invoker: missing ref_bindings in input".into(),
+                    )
+                })?
+                .clone(),
+        )
+        .map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "launch invoker: invalid ref_bindings in input: {error}"
+            ))
+        })?;
 
         let parameters = ctx
             .input
@@ -80,6 +97,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             &item_ref,
             &project_path,
             &parameters,
+            &ref_bindings,
             &principal_id,
             &principal_scopes,
             None,
@@ -102,8 +120,11 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "threaded dispatch preflight returned no root admission".to_string(),
             )
         })?;
-        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(root_admission)
-            .map_err(|error| {
+        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+            root_admission,
+            ref_bindings,
+        )
+        .map_err(|error| {
                 RouteDispatchError::Internal(format!(
                     "validated launch contract rejected at dispatch boundary: {error:#}"
                 ))
@@ -124,7 +145,8 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             launch_options.project_path().to_path_buf(),
             ctx.state.engine.clone(),
         );
-        let handle = crate::routes::launch::spawn_dispatch_launch(
+        let (mut handle, ready) =
+            crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
             parameters,
@@ -135,7 +157,33 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             launch_options,
         );
 
-        // Detached watcher: await the handle and log outcome.
+        let ready_thread_id = tokio::select! {
+            biased;
+            readiness = ready => match readiness {
+                Ok(Ok(ready_thread_id)) => ready_thread_id,
+                Ok(Err(failure)) => {
+                    return Err(RouteDispatchError::Structured {
+                        code: failure.code,
+                        status: failure.status,
+                        body: failure.body,
+                    });
+                }
+                Err(_) => {
+                    return Err(launch_task_error(handle.await));
+                }
+            },
+            result = &mut handle => {
+                return Err(launch_task_error(result));
+            }
+        };
+        if ready_thread_id != thread_id {
+            return Err(RouteDispatchError::Internal(
+                "authoritative handoff returned a different thread identity".to_string(),
+            ));
+        }
+
+        // Detached watcher: the ID is now safe to expose; continue observing
+        // the launched task after the response is returned.
         let watch_route_id = route_id;
         let watch_thread_id = thread_id.clone();
         tokio::spawn(async move {
@@ -171,5 +219,30 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         Ok(RouteInvocationResult::Accepted {
             thread_id: thread_id.to_string(),
         })
+    }
+}
+
+fn launch_task_error(
+    result: Result<
+        Result<(), crate::routes::launch::LaunchSpawnError>,
+        tokio::task::JoinError,
+    >,
+) -> RouteDispatchError {
+    match result {
+        Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
+            RouteDispatchError::Structured {
+                code: error.code().to_string(),
+                status: error.http_status().as_u16(),
+                body: ryeos_executor::structured_error::StructuredErrorPayload::from(&error)
+                    .to_value(),
+            }
+        }
+        Ok(Err(crate::routes::launch::LaunchSpawnError::InvalidRef { ref_str, reason })) => {
+            RouteDispatchError::BadRequest(format!("invalid item_ref '{ref_str}': {reason}"))
+        }
+        Ok(Ok(())) => RouteDispatchError::Internal(
+            "launch completed without authoritative handoff".to_string(),
+        ),
+        Err(error) => RouteDispatchError::Internal(format!("launch task failed: {error}")),
     }
 }

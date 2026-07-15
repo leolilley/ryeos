@@ -114,6 +114,7 @@ pub(super) fn prepare_managed_launch(
                     verified_subject.clone(),
                     node_history_policy,
                     subject.thread_profile.clone(),
+                    request.ref_bindings.clone(),
                     request.usage_subject.clone(),
                     request.usage_subject_asserted_by.clone(),
                 )
@@ -134,6 +135,7 @@ pub(super) fn prepare_managed_launch(
         usage_subject: request.usage_subject.clone(),
         usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         parameters: request.params.clone(),
+        ref_bindings: request.ref_bindings.clone(),
         resolved_item,
         plan_context: ctx.plan_ctx.clone(),
         root_admission,

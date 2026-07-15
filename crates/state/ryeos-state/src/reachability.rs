@@ -289,12 +289,12 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
     fn write_object(cas_root: &Path, value: &Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         write_object_at(cas_root, &hash, value);
         hash

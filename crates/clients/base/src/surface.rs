@@ -32,6 +32,7 @@ pub struct SurfaceProvenanceNode {
     pub requested_id: String,
     pub resolved_ref: String,
     pub source_path: PathBuf,
+    pub source_space: SurfaceItemSpace,
     pub trust_class: String,
     pub alias_resolution: Option<serde_json::Value>,
     pub added_by: String,
@@ -46,8 +47,16 @@ pub struct SurfaceProvenanceEdge {
     pub from_source_path: PathBuf,
     pub to_ref: String,
     pub to_source_path: PathBuf,
+    pub to_source_space: SurfaceItemSpace,
     pub trust_class: String,
     pub added_by: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SurfaceItemSpace {
+    Bundle,
+    Project,
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +789,7 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
             requested_id: requested_ref.to_string(),
             resolved_ref: requested_ref.to_string(),
             source_path: PathBuf::new(),
+            source_space: SurfaceItemSpace::Project,
             trust_class: "unsigned".into(),
             alias_resolution: None,
             added_by: "pipeline_init".into(),
@@ -992,6 +1002,7 @@ mod tests {
             "requested_id": ref_,
             "resolved_ref": ref_,
             "source_path": format!("/mock/{ref_}"),
+            "source_space": "bundle",
             "trust_class": "trusted_bundle",
             "alias_resolution": null,
             "added_by": added_by,

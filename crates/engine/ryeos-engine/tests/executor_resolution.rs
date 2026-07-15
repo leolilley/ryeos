@@ -19,7 +19,9 @@ impl FakeCas {
     }
 
     fn store_object(&self, value: Value) -> String {
-        let hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&value).as_bytes());
+        let hash = lillux::cas::sha256_hex(
+            lillux::cas::canonical_json(&value).unwrap().as_bytes(),
+        );
         self.objects.lock().unwrap().insert(hash.clone(), value);
         hash
     }

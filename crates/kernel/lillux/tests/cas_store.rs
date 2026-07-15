@@ -113,7 +113,7 @@ fn store_object_rehashes_and_rejects_a_corrupt_existing_entry() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());
     let value = serde_json::json!({"kind": "test", "value": 7});
-    let canonical = lillux::cas::canonical_json(&value);
+    let canonical = lillux::cas::canonical_json(&value).unwrap();
     let hash = sha256_hex(canonical.as_bytes());
     let path = shard_path(store.root(), "objects", &hash, ".json");
     fs::create_dir_all(path.parent().unwrap()).expect("create shard");

@@ -671,7 +671,9 @@ fn load_hashed_chain_state(cas: &lillux::CasStore, hash: &str) -> anyhow::Result
         .ok_or_else(|| anyhow::anyhow!("authoritative ChainState object {hash} is absent"))?;
     let state: ChainState = serde_json::from_value(value)
         .with_context(|| format!("decode authoritative ChainState object {hash}"))?;
-    let canonical_hash = lillux::sha256_hex(lillux::canonical_json(&state.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&state.to_value())
+        .with_context(|| format!("canonicalize authoritative ChainState {hash}"))?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != hash {
         anyhow::bail!(
             "authoritative ChainState is not canonically encoded: expected {hash}, canonical {canonical_hash}"
@@ -700,8 +702,9 @@ fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Th
         .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
     let snapshot: ThreadSnapshot = serde_json::from_value(value)
         .with_context(|| format!("decode authoritative snapshot object {hash}"))?;
-    let canonical_hash =
-        lillux::sha256_hex(lillux::canonical_json(&snapshot.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&snapshot.to_value())
+        .with_context(|| format!("canonicalize authoritative snapshot {hash}"))?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != hash {
         anyhow::bail!(
             "authoritative snapshot is not canonically encoded: expected {hash}, canonical {canonical_hash}"
@@ -717,7 +720,9 @@ fn load_hashed_event(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Threa
         .ok_or_else(|| anyhow::anyhow!("authoritative event object {hash} is absent"))?;
     let event: ThreadEvent = serde_json::from_value(value)
         .with_context(|| format!("decode authoritative event object {hash}"))?;
-    let canonical_hash = lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&event.to_value())
+        .with_context(|| format!("canonicalize authoritative event {hash}"))?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != hash {
         anyhow::bail!(
             "authoritative event is not canonically encoded: expected {hash}, canonical {canonical_hash}"
@@ -1171,7 +1176,7 @@ mod tests {
     }
 
     fn write_value(cas_root: &Path, value: serde_json::Value) -> String {
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();

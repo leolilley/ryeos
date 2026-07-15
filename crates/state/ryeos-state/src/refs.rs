@@ -449,7 +449,8 @@ pub(crate) fn write_signed_ref(
 fn encode_signed_ref(mut signed_ref: SignedRef, signer: &dyn Signer) -> anyhow::Result<Vec<u8>> {
     // Compute signature over the ref without the signature field
     let unsigned = signed_ref.without_signature();
-    let canonical = lillux::canonical_json(&unsigned);
+    let canonical = lillux::canonical_json(&unsigned)
+        .context("failed to canonicalize unsigned ref")?;
     let sig_bytes = signer.sign(canonical.as_bytes());
     signed_ref.signature = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
 
@@ -458,7 +459,9 @@ fn encode_signed_ref(mut signed_ref: SignedRef, signer: &dyn Signer) -> anyhow::
 
     // Serialize to canonical JSON
     let value = signed_ref.to_value();
-    Ok(lillux::canonical_json(&value).into_bytes())
+    Ok(lillux::canonical_json(&value)
+        .context("failed to canonicalize signed ref")?
+        .into_bytes())
 }
 
 /// Publish a signed ref relative to an already-pinned directory inode.
@@ -604,7 +607,8 @@ pub fn verify_signed_ref(
 
     // Reconstruct the canonical JSON without the signature
     let unsigned = signed_ref.without_signature();
-    let canonical = lillux::canonical_json(&unsigned);
+    let canonical = lillux::canonical_json(&unsigned)
+        .context("failed to canonicalize unsigned ref")?;
 
     // Decode the signature from base64
     let sig_bytes = base64::engine::general_purpose::STANDARD
@@ -3414,7 +3418,7 @@ mod tests {
         let head_path = generic_head_file_path(&refs_root, "admissions/policy", "subject").unwrap();
         let mut tampered = read_signed_ref_envelope_structural(&head_path).unwrap();
         tampered.signature = "AAAA".to_string();
-        let encoded = lillux::canonical_json(&tampered.to_value());
+        let encoded = lillux::canonical_json(&tampered.to_value()).unwrap();
         lillux::atomic_write(&head_path, encoded.as_bytes()).unwrap();
 
         let error = advance_verified_generic_head_ref(
@@ -3478,8 +3482,8 @@ mod tests {
         let mut r2 = make_signed_ref();
         r2.signature = "same_sig".to_string();
 
-        let json1 = lillux::canonical_json(&r1.to_value());
-        let json2 = lillux::canonical_json(&r2.to_value());
+        let json1 = lillux::canonical_json(&r1.to_value()).unwrap();
+        let json2 = lillux::canonical_json(&r2.to_value()).unwrap();
         assert_eq!(json1, json2);
     }
 }

@@ -176,7 +176,9 @@ pub fn load_exact_cas_object(
     }
     let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to parse CAS object {requested_hash}"))?;
-    if lillux::canonical_json(&value).as_bytes() != bytes.as_slice() {
+    let canonical = lillux::canonical_json(&value)
+        .with_context(|| format!("failed to canonicalize CAS object {requested_hash}"))?;
+    if canonical.as_bytes() != bytes.as_slice() {
         anyhow::bail!("CAS object {requested_hash} is not stored as canonical JSON bytes");
     }
     Ok(value)
@@ -194,7 +196,9 @@ pub fn load_exact_cas_object_with_cas(
     let value = cas
         .get_object(requested_hash)?
         .ok_or_else(|| anyhow::anyhow!("CAS object {requested_hash} is missing"))?;
-    let byte_len = u64::try_from(lillux::canonical_json(&value).len()).unwrap_or(u64::MAX);
+    let canonical = lillux::canonical_json(&value)
+        .with_context(|| format!("failed to canonicalize CAS object {requested_hash}"))?;
+    let byte_len = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
     if byte_len > max_bytes {
         anyhow::bail!("CAS object {requested_hash} exceeds byte limit: {byte_len} > {max_bytes}");
     }
@@ -453,7 +457,9 @@ impl ClosureCas<'_> {
                 let bytes = match namespace {
                     "objects" => cas
                         .get_object(hash)?
-                        .map(|value| lillux::canonical_json(&value).into_bytes()),
+                        .map(|value| lillux::canonical_json(&value).map(String::into_bytes))
+                        .transpose()
+                        .with_context(|| format!("failed to canonicalize CAS object {hash}"))?,
                     "blobs" => cas.get_blob(hash)?,
                     _ => anyhow::bail!("unsupported CAS namespace {namespace}"),
                 };
@@ -545,7 +551,16 @@ fn collect_object_closure_from_source(
                 continue;
             }
         };
-        let canonical = lillux::canonical_json(&value);
+        let canonical = match lillux::canonical_json(&value) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                report.malformed_objects.push(MalformedObject {
+                    hash,
+                    reason: format!("object cannot be canonicalized: {error}"),
+                });
+                continue;
+            }
+        };
         if canonical.as_bytes() != content.as_slice() {
             report.malformed_objects.push(MalformedObject {
                 hash,
@@ -1108,7 +1123,7 @@ mod tests {
     }
 
     fn write_object(cas_root: &Path, value: &Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
         if let Some(parent) = path.parent() {
@@ -1209,7 +1224,7 @@ mod tests {
             "kind": "source_manifest",
             "item_source_hashes": {}
         });
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value).unwrap();
 
         let wrong_hash = h("12");
         write_raw_object_at(&cas_root, &wrong_hash, canonical.as_bytes());

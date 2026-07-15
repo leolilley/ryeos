@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:18:43Z:f32340cf7dcb103a4b1eeb3fd487e68a1b54f3bcbc4a5bd5b9f896bd499c47cb:dnCWELwWjJIINBkRcAA9YbGKYGpUpCpnKJAYi5FqY77LC18/EeUMlhZ2339DHCuApJb1KR3dAtiaStMvTT/5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:30:43Z:aedf05a3445a9510cea2d062ecede96504e1ea7538e181e0c6a9dd245e5b7f4d:8dATcsuctsxDqfRuXjmRByxLlbhMQkE3H+mwE//I9uyGkFH1ZVc9TvTm9Q2xqPwJHob8rhf7BO8HJOCiLqkbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "register"
 kind: service
@@ -7,6 +7,7 @@ required_caps: ["ryeos.execute.service.scheduler/register"]
 schema:
   schedule_id: string
   item_ref: string
+  ref_bindings: object
   schedule_type: string
   expression: string
   params: object

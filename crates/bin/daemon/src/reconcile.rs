@@ -41,7 +41,9 @@ fn continuation_shape(thread: &ThreadDetail) -> bool {
 ///     duplicate relaunch would spawn a second child),
 ///   - NO `native_resume` policy — set only once the launch runs (a launched-then-
 ///     crashed child carries it and is recovered by the native-resume path),
-///   - it is some non-cleared waiter's child chain root.
+///   - complete current-format resume, sealed-root, and parent authority whose
+///     identities agree with the authoritative row, and
+///   - an exact sealed-authority match with its non-cleared waiter slot.
 ///
 /// A row failing any clause is left to the normal `reconcile` / native-resume /
 /// finalize paths — never skipped here and never relaunched.
@@ -52,24 +54,56 @@ fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> Result<bo
     if thread.runtime.pgid.is_some() {
         return Ok(false);
     }
-    if thread
-        .runtime
-        .launch_metadata
-        .as_ref()
-        .and_then(|m| m.native_resume.as_ref())
-        .is_some()
+    let Some(metadata) = thread.runtime.launch_metadata.as_ref() else {
+        return Ok(false);
+    };
+    if metadata.native_resume.is_some() {
+        return Ok(false);
+    }
+    let Some(waiter) = state
+        .state_store
+        .get_follow_waiter_by_child_chain(&thread.chain_root_id)?
+    else {
+        return Ok(false);
+    };
+    let Some(slot) = waiter
+        .children
+        .iter()
+        .find(|child| child.child_thread_id == thread.thread_id)
+    else {
+        return Ok(false);
+    };
+    let (Some(resume), Some(sealed), Some(parent_context)) = (
+        metadata.resume_context.as_ref(),
+        metadata.sealed_root_request.as_ref(),
+        metadata.follow_parent_context.as_ref(),
+    ) else {
+        // Current-format child birth installs all three values before the
+        // authoritative root becomes visible. A partial row is not launch
+        // authority and must fall through to ordinary reconciliation.
+        return Ok(false);
+    };
+    if slot.child_chain_root_id != thread.chain_root_id
+        || resume.kind != thread.kind
+        || resume.item_ref != thread.item_ref
+        || resume.item_ref != slot.item_ref
+        || resume.launch_mode != thread.launch_mode
+        || resume.launch_mode != "detached"
+        || resume.executor_ref.as_deref() != Some(sealed.executor_ref())
+        || resume.runtime_ref.as_deref() != Some(sealed.runtime_ref())
+        || sealed.item_ref() != slot.item_ref
+        || parent_context.parent_thread_id != waiter.parent_thread_id
     {
         return Ok(false);
     }
-    Ok(state
-        .state_store
-        .get_follow_waiter_by_child_chain(&thread.chain_root_id)?
-        .is_some_and(|waiter| {
-            waiter
-                .children
-                .iter()
-                .any(|child| child.child_thread_id == thread.thread_id)
-        }))
+    if serde_json::to_value(sealed)? != serde_json::to_value(&slot.sealed_root_request)? {
+        anyhow::bail!(
+            "follow child {} sealed launch authority differs from waiter {} slot",
+            thread.thread_id,
+            waiter.follow_key
+        );
+    }
+    Ok(true)
 }
 
 /// Machine-only proof that `successor` is an autonomous MACHINE continuation of
@@ -1050,9 +1084,9 @@ fn waiting_follow_action(
 /// `continued`, reconcile's native resume of the parent re-drives the idempotent
 /// `spawn_follow_child` and converges it — leave it. If the parent HAS continued
 /// (suspended past its follow node, so it will never re-drive), converge here: adopt
-/// its follow-resume successor if unrecorded, mark `waiting`, then apply the waiting
-/// recovery. A continued parent with no child row is unreconstructable corruption —
-/// clear the orphan.
+/// its follow-resume successor if unrecorded, commit the durable `waiting`/`ready`
+/// phase, then immediately emit the matching recovery action. A continued parent
+/// with no child row is unreconstructable corruption — clear the orphan.
 fn converge_reserved_follow(
     state: &AppState,
     w: &ryeos_app::runtime_db::FollowWaiter,
@@ -1097,7 +1131,13 @@ fn converge_reserved_follow(
             }
         }
     }
-    state.state_store.mark_follow_waiting(&w.follow_key)?;
+    let phase = state.state_store.mark_follow_waiting(&w.follow_key)?;
+    if phase == ryeos_app::runtime_db::follow_phase::READY {
+        tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter directly to ready");
+        return Ok(vec![FollowReconcileAction::Resume {
+            follow_key: w.follow_key.clone(),
+        }]);
+    }
     tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter to waiting");
     match state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
         Some(updated) => waiting_follow_action(state, &updated),
@@ -1125,6 +1165,7 @@ mod tests {
         ResumeContext {
             kind: "tool_run".into(),
             item_ref: "ns/foo".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "detached".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {

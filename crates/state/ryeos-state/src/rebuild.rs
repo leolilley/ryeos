@@ -1645,7 +1645,9 @@ fn load_chain_state(
         .with_context(|| format!("invalid ChainState {hash}"))?;
     crate::chain::validate_chain_positions(&state)
         .with_context(|| format!("invalid ChainState cursor positions {hash}"))?;
-    let canonical_hash = lillux::sha256_hex(lillux::canonical_json(&state.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&state.to_value())
+        .with_context(|| format!("failed to canonicalize ChainState {hash}"))?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != hash {
         anyhow::bail!(
             "ChainState {hash} is not canonically encoded: canonical hash is {canonical_hash}"
@@ -1671,8 +1673,9 @@ fn load_thread_snapshot(cas: &lillux::CasStore, hash: &str) -> Result<ThreadSnap
     snapshot
         .validate()
         .with_context(|| format!("invalid thread_snapshot {hash}"))?;
-    let canonical_hash =
-        lillux::sha256_hex(lillux::canonical_json(&snapshot.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&snapshot.to_value())
+        .with_context(|| format!("failed to canonicalize thread_snapshot {hash}"))?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != hash {
         anyhow::bail!(
             "thread_snapshot {hash} is not canonically encoded: canonical hash is {canonical_hash}"
@@ -1884,7 +1887,9 @@ fn load_thread_event(
     event
         .validate()
         .with_context(|| format!("invalid thread event {hash}"))?;
-    let canonical_hash = lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes());
+    let canonical = lillux::canonical_json(&event.to_value())
+        .with_context(|| format!("failed to canonicalize thread event {hash}"))?;
+    let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
     if canonical_hash != hash {
         anyhow::bail!(
             "thread event {hash} is not canonically encoded: canonical hash is {canonical_hash}"
@@ -1971,7 +1976,7 @@ mod tests {
     }
 
     fn write_object(cas_root: &Path, value: &Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
         if let Some(parent) = path.parent() {

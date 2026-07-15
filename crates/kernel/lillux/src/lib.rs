@@ -22,7 +22,7 @@ pub use atomic_fs::{
 };
 pub use cas::{
     atomic_write_batch, atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path,
-    valid_hash, CasPutOutcome, CasStore,
+    valid_hash, CanonicalJsonError, CasPutOutcome, CasStore,
 };
 pub use locks::{with_exclusive_file_lock, ExclusiveFileLock};
 pub use secure_fs::{

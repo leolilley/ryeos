@@ -33,6 +33,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         state
             .callback_tokens
             .validate(&params.callback_token, &params.thread_id, &project_path)?;
+    crate::execution::launch_preparation::validate_ref_bindings(&params.action.ref_bindings)?;
 
     // V5.5 P2 — daemon-enforced callback caps. The token carries the
     // composed `effective_caps` minted at launch time; the runtime is
@@ -43,6 +44,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &cap.effective_caps,
         &state.authorizer,
     )?;
+    for binding_ref in params.action.ref_bindings.values() {
+        enforce_callback_caps(binding_ref, &cap.effective_caps, &state.authorizer)?;
+    }
 
     let child_provenance = cap.provenance.clone_for_borrowed_child();
 
@@ -131,6 +135,7 @@ async fn handle_execute(
             cap,
             child_provenance,
             &params.action.item_id,
+            &params.action.ref_bindings,
             &params.action.params,
             params.action.facets.as_ref(),
             params.action.launch_window.as_ref(),
@@ -226,6 +231,7 @@ async fn handle_execute(
         target_site_id: None,
         validate_only: false,
         params: params.action.params.clone(),
+        ref_bindings: params.action.ref_bindings.clone(),
         acting_principal: caller_principal_id.as_str(),
         project_path: project_path.as_path(),
         provenance: child_provenance,

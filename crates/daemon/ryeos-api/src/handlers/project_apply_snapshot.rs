@@ -1261,6 +1261,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: snap-track-discover-feed-scrape
     item_ref: graph:snap-track/discover_feed_scrape
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 */15 * * * *"
     timezone: UTC
@@ -1300,6 +1301,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: duplicate-schedule
     item_ref: graph:snap-track/discover_feed_scrape
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 */15 * * * *"
     timezone: UTC
@@ -1335,6 +1337,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: bad-schedule
     item_ref: graph:snap-track/discover_feed_scrape
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 */15 * * * *"
     execution:
@@ -1367,6 +1370,7 @@ schema_version: 1.0.0
 schedules:
   - schedule_id: wrong-root
     item_ref: graph:snap-track/discover_feed_scrape
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 */15 * * * *"
     timezone: UTC

@@ -157,7 +157,7 @@ pub(crate) fn append_bundle_event_pinned(
         &chain_head_name,
     )?;
 
-    let request_fingerprint = compute_request_fingerprint(&bundle_id, &request);
+    let request_fingerprint = compute_request_fingerprint(&bundle_id, &request)?;
     if let Some(result) = maybe_return_idempotent(
         cas,
         refs_directory,
@@ -215,7 +215,8 @@ pub(crate) fn append_bundle_event_pinned(
     };
     event.validate()?;
     let event_value = event.to_value();
-    let expected_event_hash = hash_bundle_event(&event);
+    let expected_event_hash =
+        hash_bundle_event(&event).context("failed to canonicalize bundle event")?;
     let stored = cas
         .put_object(&event_value)
         .context("failed to store bundle event in CAS")?;
@@ -736,7 +737,9 @@ fn read_bundle_event_by_hash_with_cas(
         .get_object(event_hash)
         .with_context(|| format!("failed to read bundle event object {event_hash}"))?
         .ok_or_else(|| anyhow::anyhow!("bundle event object {event_hash} is missing"))?;
-    let object_bytes = lillux::canonical_json(&value).len();
+    let object_bytes = lillux::canonical_json(&value)
+        .context("failed to canonicalize bundle event while checking its size")?
+        .len();
     if object_bytes > MAX_BUNDLE_EVENT_SERIALIZED_BYTES {
         anyhow::bail!(
             "bundle event object {} is {} serialized bytes (max {})",
@@ -748,7 +751,8 @@ fn read_bundle_event_by_hash_with_cas(
     let event: BundleEventObject = serde_json::from_value(value)
         .with_context(|| format!("failed to parse bundle event {}", event_hash))?;
     event.validate()?;
-    let actual_hash = hash_bundle_event(&event);
+    let actual_hash = hash_bundle_event(&event)
+        .context("failed to canonicalize bundle event while verifying its hash")?;
     if actual_hash != event_hash {
         anyhow::bail!(
             "bundle event hash mismatch: expected {}, got {}",
@@ -959,7 +963,10 @@ fn idempotency_ref_name(
     format!("{}/{}/idempotency/{}", bundle_id, event_kind, key_hash)
 }
 
-fn compute_request_fingerprint(bundle_id: &str, request: &BundleEventAppendRequest) -> String {
+fn compute_request_fingerprint(
+    bundle_id: &str,
+    request: &BundleEventAppendRequest,
+) -> anyhow::Result<String> {
     let value = serde_json::json!({
         "bundle_id": bundle_id,
         "event_kind": request.event_kind,
@@ -971,11 +978,15 @@ fn compute_request_fingerprint(bundle_id: &str, request: &BundleEventAppendReque
         "correlation_id": request.correlation_id,
         "causation_id": request.causation_id,
     });
-    lillux::sha256_hex(lillux::canonical_json(&value).as_bytes())
+    let canonical = lillux::canonical_json(&value)
+        .context("failed to canonicalize bundle event request fingerprint")?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 fn validate_payload_size(payload: &serde_json::Value) -> anyhow::Result<()> {
-    let bytes = lillux::canonical_json(payload).len();
+    let bytes = lillux::canonical_json(payload)
+        .context("failed to canonicalize bundle event payload")?
+        .len();
     if bytes > MAX_BUNDLE_EVENT_PAYLOAD_BYTES {
         anyhow::bail!(
             "bundle event payload too large: {} > {}",
@@ -1218,7 +1229,7 @@ mod tests {
         malformed.chain_seq = 2;
         malformed.prev_chain_event_hash = None;
         malformed.created_at = lillux::time::iso8601_now();
-        let malformed_json = lillux::canonical_json(&malformed.to_value());
+        let malformed_json = lillux::canonical_json(&malformed.to_value()).unwrap();
         let malformed_hash = lillux::sha256_hex(malformed_json.as_bytes());
         let malformed_path = lillux::shard_path(&cas_root, "objects", &malformed_hash, ".json");
         lillux::atomic_write(&malformed_path, malformed_json.as_bytes()).unwrap();

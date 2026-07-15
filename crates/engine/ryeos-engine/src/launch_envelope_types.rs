@@ -3,9 +3,10 @@
 //!
 //! Moved from `crates/engine/ryeos-runtime/src/envelope.rs` so the protocol vocabulary
 //! module (in this crate) can reference them without creating a dependency
-//! cycle. `ryeos-runtime` re-exports these types for compatibility.
+//! cycle. `ryeos-runtime` re-exports these engine-owned protocol types for
+//! runtime consumers.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::resolution::ResolutionOutput;
@@ -59,15 +60,10 @@ pub struct LaunchEnvelope {
     /// `ToolSchema`).
     #[serde(default)]
     pub inventory: HashMap<String, Vec<ItemDescriptor>>,
-    /// Daemon-resolved, frozen provider snapshot. The daemon resolves
-    /// the provider config once at preflight, validates it, and embeds
-    /// the result here. Runtimes deserialize into their own typed
-    /// `ResolvedProviderSnapshot` — the engine cannot depend on
-    /// `ryeos-runtime` so this is an opaque JSON value here.
-    ///
-    /// Absent for non-directive runtimes that don't need provider config.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_snapshot: Option<Value>,
+    /// Runtime-owned, launch-prepared data. Keys and value shapes are declared
+    /// by the serving runtime's signed launch contract; the engine treats both
+    /// as opaque and only enforces the declared key set.
+    pub runtime_data: BTreeMap<String, Value>,
 }
 
 /// Builder for [`LaunchEnvelope`].
@@ -87,6 +83,7 @@ pub struct LaunchEnvelope {
 ///     EnvelopePolicy::new(caps, limits),
 ///     EnvelopeCallback::new(socket, token),
 ///     resolution,
+///     runtime_data,
 /// )
 /// .inventory(inv)
 /// .build();
@@ -101,7 +98,7 @@ pub struct LaunchEnvelopeBuilder {
     callback: EnvelopeCallback,
     resolution: ResolutionOutput,
     inventory: HashMap<String, Vec<ItemDescriptor>>,
-    provider_snapshot: Option<Value>,
+    runtime_data: BTreeMap<String, Value>,
 }
 
 impl LaunchEnvelopeBuilder {
@@ -114,6 +111,7 @@ impl LaunchEnvelopeBuilder {
         policy: EnvelopePolicy,
         callback: EnvelopeCallback,
         resolution: ResolutionOutput,
+        runtime_data: BTreeMap<String, Value>,
     ) -> Self {
         Self {
             invocation_id,
@@ -124,19 +122,13 @@ impl LaunchEnvelopeBuilder {
             callback,
             resolution,
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data,
         }
     }
 
     /// Set the pre-baked inventory map.
     pub fn inventory(mut self, inventory: HashMap<String, Vec<ItemDescriptor>>) -> Self {
         self.inventory = inventory;
-        self
-    }
-
-    /// Set the daemon-resolved provider snapshot for directive runtimes.
-    pub fn provider_snapshot(mut self, snapshot: Value) -> Self {
-        self.provider_snapshot = Some(snapshot);
         self
     }
 
@@ -151,7 +143,7 @@ impl LaunchEnvelopeBuilder {
             callback: self.callback,
             resolution: self.resolution,
             inventory: self.inventory,
-            provider_snapshot: self.provider_snapshot,
+            runtime_data: self.runtime_data,
         }
     }
 }
@@ -367,12 +359,13 @@ mod tests {
                 token: "cbt-test".to_string(),
             },
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data: BTreeMap::new(),
             resolution: ResolutionOutput {
                 root: crate::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),
                     resolved_ref: "directive:my/agent".to_string(),
                     source_path: PathBuf::from("/project/.ai/directives/my/agent.directive.md"),
+                    source_space: crate::contracts::ItemSpace::Project,
                     trust_class: crate::resolution::TrustClass::Unsigned,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
@@ -468,6 +461,7 @@ mod tests {
                 requested_id: "directive:test".to_string(),
                 resolved_ref: "directive:test".to_string(),
                 source_path: PathBuf::from("/project/.ai/directives/test.directive.md"),
+                source_space: crate::contracts::ItemSpace::Project,
                 trust_class: crate::resolution::TrustClass::Unsigned,
                 alias_resolution: None,
                 added_by: crate::resolution::ResolutionStepName::PipelineInit,
@@ -498,6 +492,7 @@ mod tests {
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),
             EnvelopeCallback::new(PathBuf::from("/tmp/ryeosd.sock"), "token-abc".to_string()),
             resolution,
+            BTreeMap::new(),
         )
         .build();
 

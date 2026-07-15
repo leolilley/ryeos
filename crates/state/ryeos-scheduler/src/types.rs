@@ -2,6 +2,7 @@
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -18,6 +19,7 @@ pub struct ScheduleSourceRecord {
     pub spec_version: u32,
     pub schedule_id: String,
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     pub schedule_type: String,
     pub expression: String,
     pub params: Value,
@@ -38,6 +40,7 @@ struct ScheduleSourceWire {
     spec_version: u32,
     schedule_id: String,
     item_ref: String,
+    ref_bindings: BTreeMap<String, String>,
     schedule_type: String,
     expression: String,
     params: Value,
@@ -68,6 +71,7 @@ impl<'de> Deserialize<'de> for ScheduleSourceRecord {
             spec_version: wire.spec_version,
             schedule_id: wire.schedule_id,
             item_ref: wire.item_ref,
+            ref_bindings: wire.ref_bindings,
             schedule_type: wire.schedule_type,
             expression: wire.expression,
             params: wire.params,
@@ -127,6 +131,7 @@ impl ScheduleSourceRecord {
         }
         ryeos_engine::canonical_ref::CanonicalRef::parse(&self.item_ref)
             .with_context(|| format!("invalid scheduled item_ref: {}", self.item_ref))?;
+        validate_schedule_ref_bindings(&self.ref_bindings)?;
         super::crontab::validate_expression(&self.schedule_type, &self.expression)?;
         super::crontab::validate_timezone(&self.timezone)?;
         super::misfire::parse_misfire_policy(&self.misfire_policy)?;
@@ -177,6 +182,7 @@ impl ScheduleSourceRecord {
         let record = ScheduleSpecRecord {
             schedule_id: self.schedule_id.clone(),
             item_ref: self.item_ref.clone(),
+            ref_bindings: self.ref_bindings.clone(),
             params: serde_json::to_string(&self.params)
                 .context("encode authored schedule params")?,
             schedule_type: self.schedule_type.clone(),
@@ -249,6 +255,46 @@ fn require_non_empty(value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_schedule_ref_bindings(ref_bindings: &BTreeMap<String, String>) -> Result<()> {
+    if ref_bindings.len() > 32 {
+        anyhow::bail!("schedule ref_bindings exceeds the limit of 32");
+    }
+    for (name, raw_ref) in ref_bindings {
+        let mut segments = name.split('_');
+        let valid_name = !name.is_empty()
+            && name.len() <= 64
+            && segments.next().is_some_and(|segment| {
+                segment
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_lowercase)
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            })
+            && segments.all(|segment| {
+                !segment.is_empty()
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            });
+        if !valid_name {
+            anyhow::bail!(
+                "schedule ref binding names must be lower snake case and at most 64 bytes"
+            );
+        }
+        if raw_ref.len() > 2_048 {
+            anyhow::bail!("schedule ref binding '{name}' exceeds 2048 UTF-8 bytes");
+        }
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(raw_ref)
+            .with_context(|| format!("schedule ref binding '{name}' is not a canonical ref"))?;
+        if canonical.to_string() != *raw_ref {
+            anyhow::bail!("schedule ref binding '{name}' is not in canonical form");
+        }
+    }
+    Ok(())
+}
+
 fn is_canonical_hash(value: &str) -> bool {
     lillux::cas::valid_hash(value) && value.bytes().all(|byte| !byte.is_ascii_uppercase())
 }
@@ -305,6 +351,7 @@ fn validate_canonical_source_path(value: &str) -> Result<()> {
 pub struct ScheduleSpecRecord {
     pub schedule_id: String,
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     pub params: String,
     pub schedule_type: String,
     pub expression: String,
@@ -334,6 +381,7 @@ pub fn validate_schedule_spec_record(record: &ScheduleSpecRecord) -> Result<()> 
     super::crontab::validate_schedule_id(&record.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&record.item_ref)
         .with_context(|| format!("invalid scheduled item_ref: {}", record.item_ref))?;
+    validate_schedule_ref_bindings(&record.ref_bindings)?;
     super::crontab::validate_expression(&record.schedule_type, &record.expression)?;
     super::crontab::validate_timezone(&record.timezone)?;
     super::misfire::parse_misfire_policy(&record.misfire_policy)?;

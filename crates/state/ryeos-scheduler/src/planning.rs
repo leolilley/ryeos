@@ -237,6 +237,7 @@ mod tests {
         ScheduleSpecRecord {
             schedule_id: "test".to_string(),
             item_ref: "directive:test".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             params: "{}".to_string(),
             schedule_type: schedule_type.to_string(),
             expression: expression.to_string(),

@@ -285,7 +285,14 @@ mod tests {
         let input = json!({
             "route": {
                 "invoke": { "type": "service", "ref": "service:threads/input" },
-                "params": { "directive": "directive:ryeos/ops/base" }
+                "params": {
+                    "target": {
+                        "kind": "fresh",
+                        "item_ref": "directive:ryeos/ops/base",
+                        "project_path": "/tmp/project",
+                        "ref_bindings": { "model": "directive:ryeos/ops/base" }
+                    }
+                }
             }
         });
         let route = InputRoute::from_surface_input(Some(&input)).expect("route parses");
@@ -296,7 +303,7 @@ mod tests {
             })
         );
         assert_eq!(
-            route.params.get("directive").and_then(Value::as_str),
+            route.params.pointer("/target/item_ref").and_then(Value::as_str),
             Some("directive:ryeos/ops/base")
         );
         assert!(route.thread.is_none());

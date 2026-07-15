@@ -26,6 +26,7 @@ rmp-serde = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-executor = { workspace = true }
+ryeos-handler-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }

@@ -124,7 +124,9 @@ pub fn export_chain_pinned(
             .get_object(&hash)
             .with_context(|| format!("read exported chain object {hash}"))?
             .ok_or_else(|| anyhow::anyhow!("exported chain object {hash} disappeared"))?;
-        let data = lillux::canonical_json(&value).into_bytes();
+        let data = lillux::canonical_json(&value)
+            .with_context(|| format!("canonicalize exported chain object {hash}"))?
+            .into_bytes();
         total_bytes += data.len();
         entries.push(SyncEntry {
             hash,
@@ -214,7 +216,9 @@ pub fn reconcile_export_pinned(
             .get_object(&hash)
             .with_context(|| format!("read reconciled chain object {hash}"))?
             .ok_or_else(|| anyhow::anyhow!("reconciled chain object {hash} disappeared"))?;
-        let data = lillux::canonical_json(&value).into_bytes();
+        let data = lillux::canonical_json(&value)
+            .with_context(|| format!("canonicalize reconciled chain object {hash}"))?
+            .into_bytes();
         total_bytes += data.len();
         entries.push(SyncEntry {
             hash,
@@ -427,7 +431,8 @@ fn put_sync_entry(cas: &lillux::CasStore, entry: &SyncEntry) -> Result<lillux::C
     }
     let value: serde_json::Value = serde_json::from_slice(&entry.data)
         .with_context(|| format!("decode sync object {}", entry.hash))?;
-    let canonical = lillux::canonical_json(&value);
+    let canonical = lillux::canonical_json(&value)
+        .with_context(|| format!("canonicalize sync object {}", entry.hash))?;
     if canonical.as_bytes() != entry.data {
         anyhow::bail!("sync object {} is not canonically encoded", entry.hash);
     }
@@ -649,12 +654,12 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
     fn object_hash(value: &serde_json::Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         lillux::sha256_hex(canonical.as_bytes())
     }
 
@@ -679,7 +684,9 @@ mod tests {
             },
         }))
         .build();
-        let snapshot_data = lillux::canonical_json(&snapshot.to_value()).into_bytes();
+        let snapshot_data = lillux::canonical_json(&snapshot.to_value())
+            .unwrap()
+            .into_bytes();
         let snapshot_hash = lillux::sha256_hex(&snapshot_data);
         let chain_state = crate::ChainState {
             schema: crate::objects::SCHEMA_VERSION,
@@ -699,7 +706,9 @@ mod tests {
                 },
             )]),
         };
-        let chain_state_data = lillux::canonical_json(&chain_state.to_value()).into_bytes();
+        let chain_state_data = lillux::canonical_json(&chain_state.to_value())
+            .unwrap()
+            .into_bytes();
         let chain_head_hash = lillux::sha256_hex(&chain_state_data);
         let total_bytes = snapshot_data.len() + chain_state_data.len();
         ExportPayload {
@@ -1134,7 +1143,7 @@ mod tests {
                 }
             }
         });
-        let snap_bytes = lillux::canonical_json(&snap).into_bytes();
+        let snap_bytes = lillux::canonical_json(&snap).unwrap().into_bytes();
         let snap_hash = lillux::sha256_hex(&snap_bytes);
         let cs = serde_json::json!({
             "kind": "chain_state",
@@ -1153,7 +1162,7 @@ mod tests {
                 }
             }
         });
-        let cs_bytes = lillux::canonical_json(&cs).into_bytes();
+        let cs_bytes = lillux::canonical_json(&cs).unwrap().into_bytes();
         let cs_hash = lillux::sha256_hex(&cs_bytes);
         let payload = ExportPayload {
             chain_root_id: "T-imported".to_string(),

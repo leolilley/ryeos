@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ryeos-handler-protocol = { workspace = true }
+ryeos-directive-core = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -36,6 +37,10 @@ path = "src/bin/composer_graph_permissions.rs"
 [[bin]]
 name = "rye-composer-identity"
 path = "src/bin/composer_identity.rs"
+
+[[bin]]
+name = "ryeos-directive-launch-preparer"
+path = "src/bin/directive_launch_preparer.rs"
 
 [lib]
 path = "src/lib.rs"

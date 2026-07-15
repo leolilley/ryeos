@@ -413,12 +413,14 @@ impl RyeOsCore {
                         };
                         params["input"] = serde_json::Value::String(plain);
                         if let Some(thread) = &route.thread {
-                            params["thread"] = serde_json::Value::String(thread.clone());
+                            params["target"] = serde_json::json!({
+                                "kind": "thread",
+                                "thread_id": thread,
+                            });
                         }
                         // Live-delivery intent for a running-thread target. Only
-                        // set for interrupt; steer is the daemon default (and the
-                        // wire-compatible value for older daemons). Ignored by the
-                        // daemon on non-running targets.
+                        // set for interrupt; omission means cooperative steer.
+                        // Ignored by the daemon on non-running targets.
                         if interrupt {
                             params["intent"] = serde_json::Value::String("interrupt".to_string());
                         }
@@ -1044,7 +1046,8 @@ mod tests {
                 ..
             }) if item_ref == "service:threads/input"
                 && params["input"] == "run this"
-                && params["directive"] == "directive:demo/base"
+                && params["target"]["kind"] == "fresh"
+                && params["target"]["item_ref"] == "directive:demo/base"
         ));
         // Buffer survives until delivery succeeds.
         assert_eq!(focused_input_text(&core), "  run this  ");
@@ -1052,8 +1055,7 @@ mod tests {
 
     #[test]
     fn plain_submit_carries_no_interrupt_intent() {
-        // Steer is the daemon default → the wire omits `intent` entirely
-        // (backward-compatible with older daemons).
+        // Steer is the daemon default, so the wire omits `intent` entirely.
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
         set_focused_input(&mut core, "steer me");

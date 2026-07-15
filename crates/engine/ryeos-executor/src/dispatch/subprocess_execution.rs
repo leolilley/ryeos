@@ -143,6 +143,7 @@ pub(crate) async fn dispatch_subprocess(
         role,
         root_subject,
         hop_runtime,
+        launch_handoff,
     } = sctx;
     let schema = ctx.engine.kinds.get(&current_ref.kind).ok_or_else(|| {
         let mut available: Vec<String> = ctx.engine.kinds.kinds().map(|k| k.to_string()).collect();
@@ -208,6 +209,7 @@ pub(crate) async fn dispatch_subprocess(
                     role,
                     root_subject,
                     hop_runtime,
+                    launch_handoff,
                 },
                 protocol,
             )
@@ -242,6 +244,7 @@ async fn dispatch_managed_subprocess(
         ctx,
         state,
         role,
+        launch_handoff,
     } = sctx;
 
     if classify_managed_protocol(protocol, &canonical_ref.kind)?
@@ -336,14 +339,16 @@ async fn dispatch_managed_subprocess(
         capability_policy: crate::execution::launch::CapabilityPolicy::Fresh,
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
+        launch_handoff,
     })
     .await
-    .map_err(|e| match &e {
+    .map_err(|e| match e {
+        launch::BuildAndLaunchError::LaunchPreparation(error) => error,
         launch::BuildAndLaunchError::MissingSecrets { item_ref, secrets } => {
             let first = secrets.first().expect("missing secret error has a secret");
             let source = first.primary_source();
             DispatchError::RequiredSecretMissing {
-                item_ref: item_ref.clone(),
+                item_ref,
                 env_var: first.name.clone(),
                 source_kind: source.kind_for_wire().to_string(),
                 source_name: source.name_for_wire(),
@@ -351,12 +356,10 @@ async fn dispatch_managed_subprocess(
             }
         }
         launch::BuildAndLaunchError::CapabilityRejected { reason } => {
-            DispatchError::CapabilityRejected {
-                reason: reason.clone(),
-            }
+            DispatchError::CapabilityRejected { reason }
         }
-        _ => {
-            let msg = e.to_string();
+        other => {
+            let msg = other.to_string();
             if msg.contains("manifest")
                 || msg.contains("binary")
                 || msg.contains("blob")
@@ -369,7 +372,7 @@ async fn dispatch_managed_subprocess(
                     detail: msg,
                 }
             } else {
-                DispatchError::Internal(e.into())
+                DispatchError::Internal(other.into())
             }
         }
     })?;
@@ -664,6 +667,7 @@ async fn dispatch_streaming_subprocess(
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.params.clone(),
+            ref_bindings: request.ref_bindings.clone(),
             resolved_item: verified_subject.resolved.clone(),
             plan_context: ctx.plan_ctx.clone(),
             root_admission,
@@ -949,6 +953,7 @@ async fn dispatch_tool_subprocess(
             site_id: &ctx.plan_ctx.current_site_id,
             project_path: request.project_path,
             item_ref: &item_ref,
+            ref_bindings: request.ref_bindings.clone(),
             launch_mode: request.launch_mode,
             parameters: request.params.clone(),
             requested_by: request.acting_principal.to_string(),
@@ -956,12 +961,12 @@ async fn dispatch_tool_subprocess(
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             caller_scopes: ctx.caller_scopes.clone(),
             validate_only: request.validate_only,
-            creates_chain_root: true,
+            creates_chain_root: request.previous_thread_id.is_none()
+                && request.root_admission.is_none(),
         },
     )?;
 
     resolved.kind = thread_profile.to_string();
-
     // Data-driven execution routine: walk the wrapper's executor chain to its
     // terminal and branch on the terminal's typed `terminal_executor.kind` —
     // never on the alias name or the terminal ref. Every terminal must declare
@@ -981,6 +986,24 @@ async fn dispatch_tool_subprocess(
         })?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
         return dispatch_via_method_executor(&resolved, request, ctx, state).await;
+    }
+
+    // A method-dispatch wrapper carries the target's admission through the
+    // recursive request above. Only a concrete subprocess root may attach that
+    // admission to the locally resolved subject.
+    if request.previous_thread_id.is_none() {
+        if let Some(admission) = request.root_admission.as_ref() {
+            let local_subject = verified.ok_or_else(|| {
+                DispatchError::InvalidRef(
+                    item_ref.clone(),
+                    "terminal subprocess root did not resolve and verify".to_string(),
+                )
+            })?;
+            admission
+                .ensure_matches_subject(&ctx.engine, local_subject, thread_profile)
+                .map_err(DispatchError::Internal)?;
+            resolved.root_admission = Some(admission.clone());
+        }
     }
 
     if let Some(target) = request.target_site_id {

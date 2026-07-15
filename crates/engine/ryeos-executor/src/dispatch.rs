@@ -56,6 +56,7 @@ use ryeos_engine::kind_registry::{
     MethodRuntimeConfigRequirement, MethodScope, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
+use ryeos_engine::protocol_vocabulary::CallbackChannel;
 
 use crate::dispatch_error::DispatchError;
 use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
@@ -256,6 +257,8 @@ pub struct DispatchRequest<'a> {
     pub target_site_id: Option<&'a str>,
     pub validate_only: bool,
     pub params: Value,
+    /// Complete canonical secondary execution identities for this request.
+    pub ref_bindings: BTreeMap<String, String>,
     pub acting_principal: &'a str,
     /// Effective project root used for resolution (matches
     /// `ResolvedProjectContext.effective_path`).
@@ -340,6 +343,7 @@ pub(crate) struct SubprocessDispatchContext<'a> {
     role: &'a SubprocessRole,
     root_subject: Option<RootSubject>,
     hop_runtime: Option<VerifiedRuntime>,
+    launch_handoff: Option<&'a crate::execution::launch::LaunchHandoff>,
 }
 
 // ── A4: per-hop resolution helper + HopAction ─────────────────────────
@@ -1330,6 +1334,11 @@ pub(crate) async fn dispatch_method(
         admission
             .ensure_matches_subject(&ctx.engine, history_subject, thread_profile_str)
             .map_err(DispatchError::Internal)?;
+        if admission.ref_bindings() != &request.ref_bindings {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "method root admission ref bindings differ from the dispatch request"
+            )));
+        }
         admission.clone()
     } else {
         ryeos_app::thread_lifecycle::admit_verified_root_execution(
@@ -1338,6 +1347,7 @@ pub(crate) async fn dispatch_method(
             history_subject.clone(),
             &state.node_history_policy,
             thread_profile_str.to_string(),
+            request.ref_bindings.clone(),
             request.usage_subject.clone(),
             request.usage_subject_asserted_by.clone(),
         )
@@ -1402,6 +1412,7 @@ pub(crate) async fn dispatch_method(
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.params.clone(),
+            ref_bindings: request.ref_bindings.clone(),
             resolved_item: history_subject.resolved.clone(),
             plan_context: ctx.plan_ctx.clone(),
             root_admission: Some(root_admission.clone()),
@@ -2398,6 +2409,7 @@ async fn dispatch_via_method_executor(
         target_site_id: request.target_site_id,
         validate_only: request.validate_only,
         params: args,
+        ref_bindings: request.ref_bindings.clone(),
         acting_principal: request.acting_principal,
         project_path: request.project_path,
         provenance: request.provenance.clone(),
@@ -2773,7 +2785,41 @@ pub async fn dispatch(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    dispatch_inner(item_ref, None, None, request, ctx, state).await
+    dispatch_inner(item_ref, None, None, request, ctx, state, None).await
+}
+
+/// Dispatch a launch whose caller needs proof that the durable managed launch
+/// has been handed to the spawn task before exposing its thread ID. The signal
+/// is published only by a managed LaunchEnvelope leaf; non-envelope paths never
+/// publish it.
+pub async fn dispatch_with_launch_handoff(
+    item_ref: &str,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    launch_handoff: &crate::execution::launch::LaunchHandoff,
+) -> Result<Value, DispatchError> {
+    let result = dispatch_inner(
+        item_ref,
+        None,
+        None,
+        request,
+        ctx,
+        state,
+        Some(launch_handoff),
+    )
+    .await;
+    match &result {
+        Err(error) => launch_handoff.publish_dispatch_failure(error),
+        Ok(_) if launch_handoff.is_pending() => launch_handoff.publish_failure(
+            "managed_launch_handoff_missing",
+            "dispatch completed without reaching a managed LaunchEnvelope handoff",
+            500,
+            false,
+        ),
+        Ok(_) => {}
+    }
+    result
 }
 
 /// Dispatch an item whose root resolution and verification have already been
@@ -2786,7 +2832,7 @@ pub async fn dispatch_verified(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    dispatch_inner(item_ref, Some(verified), None, request, ctx, state).await
+    dispatch_inner(item_ref, Some(verified), None, request, ctx, state, None).await
 }
 
 /// Dispatch an already-verified root while carrying trusted local context for
@@ -2807,6 +2853,7 @@ pub async fn dispatch_verified_with_handler_context(
         request,
         ctx,
         state,
+        None,
     )
     .await
 }
@@ -2818,6 +2865,7 @@ async fn dispatch_inner(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
@@ -2827,6 +2875,41 @@ async fn dispatch_inner(
     let mut verified_root = verified_root;
     if let Some(admission) = request.root_admission.as_ref() {
         admission.validate().map_err(DispatchError::Internal)?;
+    }
+
+    // Secondary execution identities are independently authorized before any
+    // binding resolution or launch preparation. Their slot declarations are
+    // selected later from the actual managed-envelope runtime contract.
+    crate::execution::launch_preparation::validate_ref_bindings(&request.ref_bindings)?;
+    for (binding_name, raw_ref) in &request.ref_bindings {
+        let canonical = CanonicalRef::parse(raw_ref)
+            .map_err(|error| DispatchError::InvalidRef(raw_ref.clone(), error.to_string()))?;
+        let required = ryeos_runtime::authorizer::canonical_cap(
+            &canonical.kind,
+            &canonical.bare_id,
+            "execute",
+        );
+        state
+            .authorizer
+            .authorize(
+                &ctx.caller_scopes,
+                &ryeos_runtime::authorizer::AuthorizationPolicy::require(&required),
+            )
+            .map_err(|_| DispatchError::LaunchPolicyForbidden {
+                code: "ref_binding_unauthorized".to_owned(),
+                message: format!("ref binding `{binding_name}` is not authorized"),
+                binding: Some(binding_name.clone()),
+            })?;
+    }
+
+    if !request.ref_bindings.is_empty() {
+        if let LaunchContractApplicability::NonEnvelope { class } =
+            launch_contract_applicability(item_ref, ctx)?
+        {
+            return Err(DispatchError::RefBindingNotApplicable {
+                class: class.as_str().to_owned(),
+            });
+        }
     }
 
     // Reject a method call (`call.method`/`call.args`) aimed at a kind that
@@ -2964,6 +3047,7 @@ async fn dispatch_inner(
                     state,
                     &role,
                     local_handler_context,
+                    launch_handoff,
                 )
                 .await;
             }
@@ -3004,6 +3088,8 @@ pub enum RootDispatchClass {
     /// Managed subprocess — directive/graph via runtime-registry delegate,
     /// or a runtime invoked directly. Honors a pre-minted thread id.
     ManagedSubprocess,
+    /// Managed lifecycle protocol that bypasses LaunchEnvelope construction.
+    ManagedNonEnvelope,
     /// Method dispatch (e.g. `knowledge`). Honors a pre-minted thread id.
     MethodDispatch,
     /// Managed protocol execution with no callback channel. It returns protocol
@@ -3013,6 +3099,216 @@ pub enum RootDispatchClass {
     /// In-process execution (services). Runs synchronously and does NOT
     /// thread a pre-minted id — not eligible for accepted/background launch.
     InProcess,
+}
+
+#[derive(Debug, Clone)]
+pub enum LaunchContractApplicability {
+    ManagedEnvelope { runtime: VerifiedRuntime },
+    NonEnvelope { class: RootDispatchClass },
+}
+
+/// Resolve the actual terminal protocol boundary. This deliberately follows
+/// aliases/delegates and checks the selected protocol's callback shape; a
+/// managed lifecycle label alone does not imply LaunchEnvelope construction.
+pub fn launch_contract_applicability(
+    item_ref: &str,
+    ctx: &ExecutionContext,
+) -> Result<LaunchContractApplicability, DispatchError> {
+    const MAX_HOPS: usize = 8;
+    let mut visited = HashSet::new();
+    let mut current = CanonicalRef::parse(item_ref)
+        .map_err(|error| DispatchError::InvalidRef(item_ref.to_owned(), error.to_string()))?;
+    let mut selected_runtime = ctx.engine.runtimes.lookup_by_ref(&current).cloned();
+
+    for _ in 0..MAX_HOPS {
+        if !visited.insert(current.clone()) {
+            let mut visited = visited
+                .into_iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>();
+            visited.sort();
+            return Err(DispatchError::AliasCycle {
+                root_ref: item_ref.to_owned(),
+                visited,
+            });
+        }
+        let hop = resolve_dispatch_hop(&current, ctx)?;
+        match hop.next {
+            HopAction::FollowAlias(next) => {
+                current = next;
+            }
+            HopAction::UseRegistry(next) => {
+                selected_runtime = ctx.engine.runtimes.lookup_by_ref(&next).cloned();
+                current = next;
+            }
+            HopAction::DispatchMethod { .. } => {
+                return Ok(LaunchContractApplicability::NonEnvelope {
+                    class: RootDispatchClass::MethodDispatch,
+                });
+            }
+            HopAction::Terminate(TerminatorDecl::InProcess { .. }, _) => {
+                return Ok(LaunchContractApplicability::NonEnvelope {
+                    class: RootDispatchClass::InProcess,
+                });
+            }
+            HopAction::Terminate(TerminatorDecl::Subprocess { protocol_ref }, _) => {
+                let protocol = ctx
+                    .engine
+                    .protocols
+                    .require(&protocol_ref)
+                    .map_err(|_| DispatchError::ProtocolNotRegistered(protocol_ref))?;
+                use ryeos_engine::protocol_vocabulary::LifecycleMode;
+                if protocol.descriptor.lifecycle.mode != LifecycleMode::Managed {
+                    return Ok(LaunchContractApplicability::NonEnvelope {
+                        class: RootDispatchClass::TerminalSubprocess,
+                    });
+                }
+                if protocol.descriptor.callback_channel == CallbackChannel::None {
+                    return Ok(LaunchContractApplicability::NonEnvelope {
+                        class: RootDispatchClass::ManagedNonEnvelope,
+                    });
+                }
+                let runtime = selected_runtime
+                    .or_else(|| ctx.engine.runtimes.lookup_by_ref(&current).cloned())
+                    .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                        kind: current.kind.clone(),
+                        detail: format!("managed envelope path `{current}` has no selected runtime"),
+                    })?;
+                return Ok(LaunchContractApplicability::ManagedEnvelope { runtime });
+            }
+        }
+    }
+    Err(DispatchError::AliasChainTooLong {
+        root_ref: item_ref.to_owned(),
+        max_hops: MAX_HOPS,
+    })
+}
+
+/// Threadless admission pass for accepted/SSE launch producers. The live
+/// launcher repeats this preparation authoritatively immediately before its
+/// durable audit and spawn; no prepared runtime data crosses this seam.
+pub fn admit_launch_contract(
+    applicability: &LaunchContractApplicability,
+    primary: &ResolvedItem,
+    ref_bindings: &BTreeMap<String, String>,
+    project_path: &Path,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<(), DispatchError> {
+    let Some(prepared) = prepare_launch_contract(
+        applicability,
+        primary,
+        ref_bindings,
+        project_path,
+        ctx,
+    )? else {
+        return Ok(());
+    };
+    let mut names = primary.metadata.required_secrets.clone();
+    names.extend(prepared.required_secrets.into_iter().map(|secret| secret.name));
+    names.sort();
+    names.dedup();
+    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
+    ryeos_app::vault::read_required_secrets(
+        state.vault.as_ref(),
+        &ctx.principal_fingerprint,
+        &names,
+        &dotenv_dirs,
+    )
+    .map(|_| ())
+    .map_err(|error| match error {
+        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+            let name = names.into_iter().next().unwrap_or_else(|| "unknown".to_owned());
+            DispatchError::RequiredSecretMissing {
+                item_ref: primary.canonical_ref.to_string(),
+                env_var: name.clone(),
+                source_kind: "launch_preparation".to_owned(),
+                source_name: "symbolic_requirement".to_owned(),
+                remediation: crate::dispatch_error::required_secret_remediation(&name),
+            }
+        }
+        ryeos_app::vault::VaultReadError::Internal(error) => DispatchError::LaunchPreparationFailed {
+            code: "launch_secret_check_failed".to_owned(),
+            message: error.to_string(),
+            classification: "internal".to_owned(),
+            binding: None,
+            details: BTreeMap::new(),
+        },
+    })
+}
+
+/// Execute the generic, threadless launch-contract preparation pass without
+/// reading secret values. Environment diagnostics use this to discover the
+/// validated symbolic secret set; admission adds the availability check.
+pub fn prepare_launch_contract(
+    applicability: &LaunchContractApplicability,
+    primary: &ResolvedItem,
+    ref_bindings: &BTreeMap<String, String>,
+    project_path: &Path,
+    ctx: &ExecutionContext,
+) -> Result<Option<crate::execution::launch_preparation::PreparedRuntimeLaunch>, DispatchError> {
+    let runtime = match applicability {
+        LaunchContractApplicability::NonEnvelope { class } => {
+            if ref_bindings.is_empty() {
+                return Ok(None);
+            }
+            return Err(DispatchError::RefBindingNotApplicable {
+                class: class.as_str().to_owned(),
+            });
+        }
+        LaunchContractApplicability::ManagedEnvelope { runtime } => runtime,
+    };
+    let roots = ctx.engine.resolution_roots(Some(project_path.to_path_buf()));
+    let parsers = ctx
+        .engine
+        .effective_parser_dispatcher(Some(project_path))
+        .map_err(|error| DispatchError::LaunchPreparationFailed {
+            code: "launch_parser_registry_failed".to_owned(),
+            message: error.to_string(),
+            classification: "configuration".to_owned(),
+            binding: None,
+            details: BTreeMap::new(),
+        })?;
+    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+        &primary.canonical_ref,
+        &ctx.engine.kinds,
+        &parsers,
+        &roots,
+        &ctx.engine.trust_store,
+        &ctx.engine.composers,
+    )
+    .map_err(|error| DispatchError::LaunchPreparationFailed {
+        code: "primary_resolution_failed".to_owned(),
+        message: error.to_string(),
+        classification: "caller".to_owned(),
+        binding: None,
+        details: BTreeMap::new(),
+    })?;
+    crate::execution::launch_preparation::prepare_runtime_launch(
+        crate::execution::launch_preparation::PrepareRuntimeLaunchRequest {
+            engine: &ctx.engine,
+            runtime,
+            primary: &resolution,
+            ref_bindings,
+            roots: &roots,
+            parsers: &parsers,
+            principal: &ctx.plan_ctx.requested_by,
+        },
+    )
+    .map(Some)
+}
+
+impl RootDispatchClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TerminalSubprocess => "terminal_subprocess",
+            Self::ManagedSubprocess => "managed_subprocess",
+            Self::ManagedNonEnvelope => "managed_non_envelope",
+            Self::MethodDispatch => "method_dispatch",
+            Self::UnthreadedStreamingSubprocess => "unthreaded_streaming_subprocess",
+            Self::InProcess => "in_process",
+        }
+    }
 }
 
 impl RootDispatchClass {
@@ -3042,6 +3338,7 @@ fn finish_root_dispatch_preflight(
     requested_subject: VerifiedItem,
     root_subject: VerifiedItem,
     thread_profile: String,
+    ref_bindings: &BTreeMap<String, String>,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
     ctx: &ExecutionContext,
@@ -3053,6 +3350,7 @@ fn finish_root_dispatch_preflight(
         root_subject,
         &state.node_history_policy,
         thread_profile,
+        ref_bindings.clone(),
         usage_subject.cloned(),
         usage_subject_asserted_by.map(str::to_string),
     )
@@ -3087,6 +3385,7 @@ pub fn preflight_root_dispatch(
     item_ref: &str,
     original_root_kind: &str,
     params: &Value,
+    ref_bindings: &BTreeMap<String, String>,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
     ctx: &ExecutionContext,
@@ -3325,6 +3624,7 @@ pub fn preflight_root_dispatch(
                                             &target_ref,
                                             target_canonical.kind.as_str(),
                                             &inner_params,
+                                            ref_bindings,
                                             usage_subject,
                                             usage_subject_asserted_by,
                                             &inner_ctx,
@@ -3346,6 +3646,7 @@ pub fn preflight_root_dispatch(
                                     )
                                 })?,
                                 hop_profile,
+                                ref_bindings,
                                 usage_subject,
                                 usage_subject_asserted_by,
                                 ctx,
@@ -3390,11 +3691,19 @@ pub fn preflight_root_dispatch(
                                     "managed root did not resolve and verify".to_string(),
                                 )
                             })?;
+                            let class = if protocol.descriptor.callback_channel
+                                == CallbackChannel::None
+                            {
+                                RootDispatchClass::ManagedNonEnvelope
+                            } else {
+                                RootDispatchClass::ManagedSubprocess
+                            };
                             return finish_root_dispatch_preflight(
-                                RootDispatchClass::ManagedSubprocess,
+                                class,
                                 admitted_requested_subject,
                                 subject,
                                 profile,
+                                ref_bindings,
                                 usage_subject,
                                 usage_subject_asserted_by,
                                 ctx,
@@ -3450,6 +3759,7 @@ pub fn preflight_root_dispatch(
                         kind,
                         detail: "method root has no execution thread profile".to_string(),
                     })?,
+                    ref_bindings,
                     usage_subject,
                     usage_subject_asserted_by,
                     ctx,
@@ -3483,6 +3793,7 @@ async fn dispatch_by(
     state: &AppState,
     role: &SubprocessRole,
     local_handler_context: Option<ryeos_app::handler_context::HandlerContext>,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let DispatchByParams {
         terminator,
@@ -3508,6 +3819,7 @@ async fn dispatch_by(
                 role,
                 root_subject,
                 hop_runtime: runtime,
+                launch_handoff,
             })
             .await
         }
@@ -3544,6 +3856,7 @@ mod tests {
     use std::path::PathBuf;
 
     use lillux::crypto::SigningKey;
+    use ryeos_engine::contracts::ItemSpace;
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
@@ -3770,6 +4083,7 @@ metadata:
             usage_subject: None,
             usage_subject_asserted_by: None,
             parameters: serde_json::Value::Null,
+            ref_bindings: std::collections::BTreeMap::new(),
             root_admission: None,
             resolved_item,
             plan_context: test_plan_context(source_root.to_path_buf()),
@@ -5219,7 +5533,12 @@ requires:
 
     // ── project_single_root ──────────────────────────────────────────
 
-    fn make_ancestor(ref_str: &str, content: &str, trust: EngineTrustClass) -> ResolvedAncestor {
+    fn make_ancestor(
+        ref_str: &str,
+        content: &str,
+        source_space: ItemSpace,
+        trust: EngineTrustClass,
+    ) -> ResolvedAncestor {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -5229,6 +5548,7 @@ requires:
             requested_id: ref_str.to_string(),
             resolved_ref: ref_str.to_string(),
             source_path: std::path::PathBuf::from(format!("/tmp/{ref_str}")),
+            source_space,
             trust_class: trust,
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
@@ -5240,7 +5560,12 @@ requires:
 
     #[test]
     fn project_single_root_root_only() {
-        let root = make_ancestor("knowledge:my/doc", "hello", EngineTrustClass::TrustedBundle);
+        let root = make_ancestor(
+            "knowledge:my/doc",
+            "hello",
+            ItemSpace::Bundle,
+            EngineTrustClass::TrustedBundle,
+        );
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![],
@@ -5267,16 +5592,19 @@ requires:
         let root = make_ancestor(
             "directive:base",
             "base body",
+            ItemSpace::Bundle,
             EngineTrustClass::TrustedBundle,
         );
         let mid = make_ancestor(
             "directive:mid",
             "mid body",
+            ItemSpace::Project,
             EngineTrustClass::TrustedProject,
         );
         let leaf = make_ancestor(
             "directive:leaf",
             "leaf body",
+            ItemSpace::Project,
             EngineTrustClass::TrustedProject,
         );
         let output = ResolutionOutput {
@@ -5313,11 +5641,13 @@ requires:
         let root = make_ancestor(
             "knowledge:main",
             "main content",
+            ItemSpace::Project,
             EngineTrustClass::TrustedProject,
         );
         let ref_item = make_ancestor(
             "knowledge:other",
             "other content",
+            ItemSpace::Bundle,
             EngineTrustClass::TrustedBundle,
         );
         let output = ResolutionOutput {
@@ -5328,6 +5658,7 @@ requires:
                 from_source_path: std::path::PathBuf::from("/tmp/main"),
                 to_ref: "knowledge:other".to_string(),
                 to_source_path: std::path::PathBuf::from("/tmp/other"),
+                to_source_space: ItemSpace::Bundle,
                 trust_class: EngineTrustClass::TrustedBundle,
                 added_by: ResolutionStepName::ResolveReferences,
             }],
@@ -5355,12 +5686,30 @@ requires:
     #[test]
     fn project_single_root_trust_class_mapping() {
         // Engine TrustClass → Wire TrustClass mapping must preserve trust exactly.
-        let root_bundle = make_ancestor("item:bundle", "bundle", EngineTrustClass::TrustedBundle);
-        let root_project =
-            make_ancestor("item:project", "project", EngineTrustClass::TrustedProject);
-        let root_untrusted =
-            make_ancestor("item:untrusted", "un", EngineTrustClass::UntrustedProject);
-        let root_unsigned = make_ancestor("item:unsigned", "us", EngineTrustClass::Unsigned);
+        let root_bundle = make_ancestor(
+            "item:bundle",
+            "bundle",
+            ItemSpace::Bundle,
+            EngineTrustClass::TrustedBundle,
+        );
+        let root_project = make_ancestor(
+            "item:project",
+            "project",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
+        let root_untrusted = make_ancestor(
+            "item:untrusted",
+            "un",
+            ItemSpace::Project,
+            EngineTrustClass::UntrustedProject,
+        );
+        let root_unsigned = make_ancestor(
+            "item:unsigned",
+            "us",
+            ItemSpace::Project,
+            EngineTrustClass::Unsigned,
+        );
 
         let cases: Vec<(ResolvedAncestor, WireTrustClass)> = vec![
             (root_bundle, WireTrustClass::TrustedBundle),
@@ -5395,6 +5744,7 @@ requires:
         let root = make_ancestor(
             "knowledge:main",
             "content",
+            ItemSpace::Project,
             EngineTrustClass::TrustedProject,
         );
         let output = ResolutionOutput {
@@ -5405,6 +5755,7 @@ requires:
                 from_source_path: std::path::PathBuf::from("/tmp/main"),
                 to_ref: "knowledge:missing".to_string(), // not in referenced_items!
                 to_source_path: std::path::PathBuf::from("/tmp/missing"),
+                to_source_space: ItemSpace::Bundle,
                 trust_class: EngineTrustClass::TrustedBundle,
                 added_by: ResolutionStepName::ResolveReferences,
             }],
@@ -5431,15 +5782,22 @@ requires:
     fn project_single_root_referenced_items_in_payload() {
         // Verify that referenced_items are included in items_by_ref
         // (not just root + ancestors).
-        let root = make_ancestor("knowledge:main", "main", EngineTrustClass::TrustedProject);
+        let root = make_ancestor(
+            "knowledge:main",
+            "main",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
         let ref1 = make_ancestor(
             "knowledge:ref1",
             "ref1 content",
+            ItemSpace::Bundle,
             EngineTrustClass::TrustedBundle,
         );
         let ref2 = make_ancestor(
             "knowledge:ref2",
             "ref2 content",
+            ItemSpace::Project,
             EngineTrustClass::TrustedProject,
         );
         let output = ResolutionOutput {
@@ -5451,6 +5809,7 @@ requires:
                     from_source_path: std::path::PathBuf::from("/tmp/main"),
                     to_ref: "knowledge:ref1".to_string(),
                     to_source_path: std::path::PathBuf::from("/tmp/ref1"),
+                    to_source_space: ItemSpace::Bundle,
                     trust_class: EngineTrustClass::TrustedBundle,
                     added_by: ResolutionStepName::ResolveReferences,
                 },
@@ -5459,6 +5818,7 @@ requires:
                     from_source_path: std::path::PathBuf::from("/tmp/main"),
                     to_ref: "knowledge:ref2".to_string(),
                     to_source_path: std::path::PathBuf::from("/tmp/ref2"),
+                    to_source_space: ItemSpace::Project,
                     trust_class: EngineTrustClass::TrustedProject,
                     added_by: ResolutionStepName::ResolveReferences,
                 },
@@ -5489,11 +5849,13 @@ requires:
         let root = make_ancestor(
             "knowledge:dup",
             "root version",
+            ItemSpace::Bundle,
             EngineTrustClass::TrustedBundle,
         );
         let ref_dup = make_ancestor(
             "knowledge:dup",
             "ref version",
+            ItemSpace::Project,
             EngineTrustClass::TrustedProject,
         );
         let output = ResolutionOutput {

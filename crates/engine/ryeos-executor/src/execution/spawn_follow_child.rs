@@ -15,11 +15,12 @@
 //! callback token (source-aware follow bounding). The request only says WHICH
 //! follow this is and WHAT child to run.
 //!
-//! **Ordering.** Reserve the waiter, mint the child root row (created, not
-//! launched), create the parent successor row (which settles the parent
-//! `continued`), mark the waiter `waiting` — and ONLY THEN launch the child
-//! detached. The child can never reach terminal before a durable waiter exists to
-//! catch it.
+//! **Ordering.** Admit the complete cohort, reserve stable child identities,
+//! authoritatively prepare each exact identity, commit each child root together
+//! with its launch audit, create
+//! the parent successor (which settles the parent `continued`), and mark the
+//! waiter `waiting` before launching admitted children. The call acknowledges
+//! only after each immediate launch crosses the managed spawn-task handoff.
 //!
 //! **Idempotency.** Get-or-create by `follow_key`; each step is guarded by the
 //! waiter's recorded IDs so a same-call re-drive converges rather than
@@ -59,12 +60,7 @@ struct SpawnFollowChildParams {
     graph_run_id: String,
     follow_node: String,
     step_count: i64,
-    #[serde(default)]
-    child_item_ref: Option<String>,
-    #[serde(default)]
-    child_parameters: Value,
-    #[serde(default)]
-    children: Option<Vec<ryeos_runtime::callback::FollowChildSpec>>,
+    children: Vec<ryeos_runtime::callback::FollowChildSpec>,
     #[serde(default)]
     launch_window_width: Option<u32>,
     #[serde(default)]
@@ -75,18 +71,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: SpawnFollowChildParams = serde_json::from_value(params.clone())
         .context("invalid runtime.spawn_follow_child params")?;
 
-    let fanout = params.children.is_some();
-    let children = match (params.child_item_ref.as_ref(), params.children.as_ref()) {
-        (Some(item_ref), None) => vec![ryeos_runtime::callback::FollowChildSpec {
-            item_ref: item_ref.clone(),
-            parameters: params.child_parameters.clone(),
-            facets: None,
-        }],
-        (None, Some(children)) if !children.is_empty() => children.clone(),
-        _ => {
-            bail!("follow: exactly one of child_item_ref or a nonempty children cohort is required")
-        }
-    };
+    if params.children.is_empty() {
+        bail!("follow: children must be nonempty");
+    }
+    let fanout = params.children.len() > 1;
+    let children = params.children;
     if params.launch_window_width == Some(0) {
         bail!("follow: launch_window_width must be greater than zero");
     }
@@ -165,13 +154,19 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let spec_hashes: Vec<String> = children
         .iter()
         .map(|child| {
-            follow_child_spec_hash(&child.item_ref, &child.parameters, child.facets.as_ref())
+            follow_child_spec_hash(
+                &child.item_ref,
+                &child.ref_bindings,
+                &child.parameters,
+                child.facets.as_ref(),
+            )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     // ── Admission (authorize before resource resolution; before any mutation) ─
     let mut resolved_children = Vec::with_capacity(children.len());
     for (item_index, child) in children.iter().enumerate() {
+        crate::execution::launch_preparation::validate_ref_bindings(&child.ref_bindings)?;
         let child_ref = CanonicalRef::parse(&child.item_ref)
             .with_context(|| format!("follow: invalid child item_ref '{}'", child.item_ref))?;
 
@@ -193,6 +188,25 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         );
         }
 
+        for (binding_name, binding_ref) in &child.ref_bindings {
+            let canonical = CanonicalRef::parse(binding_ref).with_context(|| {
+                format!(
+                    "follow: invalid ref binding '{binding_name}' value '{binding_ref}'"
+                )
+            })?;
+            let required = canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
+            let policy = AuthorizationPolicy::require_all(&[&required]);
+            if state
+                .authorizer
+                .authorize(&cap.effective_caps, &policy)
+                .is_err()
+            {
+                bail!(
+                    "follow admission denied: parent lacks execute authority '{required}' over \
+                     ref binding '{binding_name}'"
+                );
+            }
+        }
         let item_index = u32::try_from(item_index).context("follow: too many children")?;
         let sealed_root_request = if let Some(slot) = state
             .state_store
@@ -234,10 +248,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     item_ref: &child.item_ref,
                     launch_mode: "detached",
                     parameters: child.parameters.clone(),
+                    ref_bindings: child.ref_bindings.clone(),
                     requested_by: thread_auth.acting_principal.clone(),
                     usage_subject: None,
                     usage_subject_asserted_by: None,
-                    caller_scopes: thread_auth.caller_scopes.clone(),
+                    caller_scopes: cap.effective_caps.clone(),
                     validate_only: false,
                     creates_chain_root: true,
                 },
@@ -257,6 +272,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         };
         let restored = sealed_root_request.restore(cap.provenance.request_engine())?;
         if restored.item_ref != child.item_ref
+            || restored.ref_bindings != child.ref_bindings
             || restored.parameters != child.parameters
             || restored.launch_mode != "detached"
             || restored.current_site_id != parent.current_site_id
@@ -271,12 +287,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
         resolved_children.push(sealed_root_request);
     }
-
-    // Follow-nesting depth: walk the follow-waiter lineage server-side. If the
-    // parent's chain is itself some waiter's child chain, the parent is a follow
-    // child; hop up via that waiter's parent chain and count. Enforced ONLY at
-    // admission — never re-enforced when reconcile re-drives an admitted waiter.
-    enforce_follow_nesting_depth(state, &parent.chain_root_id)?;
 
     // ── Ordered spawn sequence, idempotent by follow_key ────────────────────
     // 1. Reserve the waiter. ALWAYS go through `reserve_follow` (never a pre-read):
@@ -294,9 +304,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         fanout,
         expected_children: u32::try_from(children.len()).context("follow: too many children")?,
     })?;
-
-    // Normalize and validate the complete immutable cohort before any idempotent
-    // return. A re-drive may not silently adopt a changed count, ref, or spec.
     if waiter.expected_children as usize != children.len() {
         bail!("follow: persisted child count conflicts with re-driven cohort");
     }
@@ -313,97 +320,195 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
     }
 
-    // Already past reservation (waiting/ready/resuming): a duplicate call for an
-    // in-flight or completed follow. Idempotent no-op — return the recorded IDs.
-    if waiter.phase != follow_phase::RESERVED {
-        return Ok(json!({
-            "follow_key": follow_key,
-            "phase": waiter.phase,
-            "child_thread_id": state.state_store.get_follow_child(&follow_key, 0)?.map(|c| c.child_thread_id),
-            "child_thread_ids": (0..waiter.expected_children).map(|i| state.state_store.get_follow_child(&follow_key, i).map(|c| c.map(|c| c.child_thread_id))).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect::<Vec<_>>(),
-            "parent_successor_thread_id": waiter.parent_successor_thread_id,
-            "idempotent": true,
-        }));
+    // The waiter phase says whether the parent suspension committed; it does not
+    // say which child roots committed before a crash. Reserve every stable slot
+    // first, then classify each slot from its own durable row.
+    let re_drive = waiter.phase != follow_phase::RESERVED;
+    let window_key = params
+        .launch_window_width
+        .map(|_| format!("follow:{follow_key}"));
+    let expected_launch_window = params.launch_window_width.map(|width| FollowLaunchWindow {
+        key: format!("follow:{follow_key}"),
+        width,
+    });
+
+    if !re_drive {
+        // Follow-nesting depth is an admission limit, not a condition that can
+        // retroactively invalidate an already-admitted duplicate drive.
+        enforce_follow_nesting_depth(state, &parent.chain_root_id)?;
     }
 
-    // 2. Child root row (created, NOT launched) + seeded launch identity. A follow
-    //    child is a FRESH ROOT: its own chain root, no upstream braid.
-    let requested_by = EffectivePrincipal::Local(Principal {
-        fingerprint: thread_auth.acting_principal.clone(),
-        scopes: thread_auth.caller_scopes.clone(),
-    });
-    let persisted_parent_context = PersistedParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-    };
-    let mut child_thread_ids = Vec::with_capacity(children.len());
+    // Reserve the exact stable identities before launch authority is prepared.
+    // Augmentations, checkpoint paths, audit, metadata, and the eventual root
+    // commit must all name the same child ID.
+    let mut reserved_child_ids = std::collections::BTreeMap::new();
     for (item_index, (child, sealed_root_request)) in
         children.iter().zip(resolved_children.iter()).enumerate()
     {
-        let spec_hash = spec_hashes[item_index].clone();
-        let child_execution = sealed_root_request.restore(cap.provenance.request_engine())?;
+        let spec_hash = &spec_hashes[item_index];
         let child_thread_id = match state
             .state_store
             .get_follow_child(&follow_key, item_index as u32)?
         {
             Some(existing) => {
-                if existing.spec_hash != spec_hash {
+                if existing.item_ref != child.item_ref || existing.spec_hash != *spec_hash {
                     bail!("follow: child spec conflict at index {item_index}");
+                }
+                if existing.child_chain_root_id != existing.child_thread_id {
+                    bail!("follow: child slot at index {item_index} is not a root identity");
                 }
                 existing.child_thread_id
             }
-            None => {
-                // Persist the stable slot identity first. If creation crashes, a
-                // re-drive recreates this exact root rather than minting an orphan.
+            None if !re_drive => {
                 let child_id = new_thread_id();
                 state.state_store.set_follow_child(
                     &follow_key,
                     item_index as u32,
                     &child.item_ref,
-                    &spec_hash,
+                    spec_hash,
                     &child_id,
                     &child_id,
                     sealed_root_request,
                 )?;
                 child_id
             }
+            None => {
+                bail!("follow: persisted cohort is missing child index {item_index}");
+            }
         };
+        reserved_child_ids.insert(item_index, child_thread_id);
+    }
 
-        // The slot is the stable identity authority. Every reserved re-drive repairs
-        // the row and all pre-launch materialization before proceeding.
-        if state.threads.get_thread(&child_thread_id)?.is_none() {
-            state
-                .threads
-                .create_root_thread_with_id(&child_thread_id, &child_execution)?;
+    let expected_parent_context = PersistedParentExecutionContext {
+        parent_thread_id: cap.thread_id.clone(),
+        hard_limits: cap.hard_limits.clone(),
+        depth: cap.depth,
+    };
+    let mut child_thread_ids = Vec::with_capacity(children.len());
+    let mut queued_child_thread_ids = Vec::new();
+    let mut fresh_indices = std::collections::BTreeSet::new();
+    let mut existing_created_indices = std::collections::BTreeSet::new();
+    let mut existing_launchable_indices = std::collections::BTreeSet::new();
+    let mut persisted_launch_metadata = std::collections::BTreeMap::new();
+    for (item_index, child_spec) in children.iter().enumerate() {
+        let child_id = reserved_child_ids
+            .get(&item_index)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("follow: missing child ID at index {item_index}"))?;
+        child_thread_ids.push(child_id.clone());
+        let Some(child_row) = state.threads.get_thread(&child_id)? else {
+            if re_drive {
+                bail!("follow: persisted child row is missing: {child_id}");
+            }
+            fresh_indices.insert(item_index);
+            continue;
+        };
+        let metadata = state
+            .state_store
+            .get_launch_metadata(&child_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow: child {child_id} has no authoritative launch metadata")
+            })?;
+        let resume = metadata.resume_context.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("follow: child {child_id} has no persisted ResumeContext")
+        })?;
+        if child_row.kind != resume.kind
+            || child_row.item_ref != resume.item_ref
+            || resume.item_ref != child_spec.item_ref
+            || resume.ref_bindings != child_spec.ref_bindings
+            || resume.parameters != child_spec.parameters
+            || resume.launch_mode != "detached"
+            || serde_json::to_value(&metadata.sealed_root_request)?
+                != serde_json::to_value(resolved_children.get(item_index))?
+            || metadata.follow_parent_context.as_ref() != Some(&expected_parent_context)
+            || metadata.follow_launch_window != expected_launch_window
+        {
+            bail!("follow: child metadata conflicts at index {item_index}");
         }
+        persisted_launch_metadata.insert(item_index, metadata);
+        if child_row.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
+            continue;
+        }
+        existing_created_indices.insert(item_index);
+        if let Some(window) = expected_launch_window.as_ref() {
+            if !state.state_store.launch_window_is_member(&child_id)? {
+                state.state_store.launch_window_insert_only(
+                    &child_id,
+                    &window.key,
+                    window.width,
+                    lillux::time::timestamp_millis(),
+                )?;
+            }
+            if state.state_store.launch_window_is_queued(&child_id)? {
+                queued_child_thread_ids.push(child_id);
+                continue;
+            }
+        }
+        existing_launchable_indices.insert(item_index);
+    }
 
-        // The resume context independently captures launch-envelope identity and
-        // parent authority; the sealed request is the exact fresh-root subject.
-        // The launcher requires both to agree before crossing first launch.
-        let meta = RuntimeLaunchMetadata::default()
-            .with_resume_context(ResumeContext {
+    // A reserved partial crash may contain any mix of committed and missing
+    // roots. Every missing root needs fresh authority; every existing Created
+    // root uses its persisted birth identity. A later-phase duplicate prepares
+    // only rows that are already admitted and need a handoff now.
+    let authority_indices: std::collections::BTreeSet<usize> = if re_drive {
+        existing_launchable_indices.clone()
+    } else {
+        fresh_indices
+            .union(&existing_created_indices)
+            .copied()
+            .collect()
+    };
+
+    // Complete the generic authority pass before any missing child row becomes
+    // observable. Fresh rows use current generic authority; existing rows use
+    // their exact stored birth identity and never recapture a snapshot. The
+    // in-memory values own secret material and are consumed exactly once.
+    let requested_by = EffectivePrincipal::Local(Principal {
+        fingerprint: thread_auth.acting_principal.clone(),
+        scopes: cap.effective_caps.clone(),
+    });
+    let persisted_parent_context = expected_parent_context.clone();
+    let launch_provenance = cap.provenance.clone_for_borrowed_child();
+    let launch_parent_context = crate::dispatch::ParentExecutionContext {
+        parent_thread_id: cap.thread_id.clone(),
+        hard_limits: cap.hard_limits.clone(),
+        depth: cap.depth,
+    };
+    let mut child_metadata = std::collections::BTreeMap::new();
+    let mut prepared_children = std::collections::BTreeMap::new();
+    for (item_index, child) in children.iter().enumerate() {
+        if !authority_indices.contains(&item_index) {
+            continue;
+        }
+        let existing_row = existing_created_indices.contains(&item_index);
+        let meta = if existing_row {
+            persisted_launch_metadata
+                .get(&item_index)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: missing persisted launch metadata at index {item_index}"
+                    )
+                })?
+        } else {
+            let sealed_root_request = resolved_children.get(item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing sealed child authority at index {item_index}")
+            })?;
+            let child_execution =
+                sealed_root_request.restore(cap.provenance.request_engine())?;
+            let mut meta = RuntimeLaunchMetadata::default()
+                .with_resume_context(ResumeContext {
                 kind: child_execution.kind.clone(),
                 item_ref: child.item_ref.clone(),
+                ref_bindings: child.ref_bindings.clone(),
                 launch_mode: "detached".to_string(),
                 parameters: child.parameters.clone(),
-                // Resume identity derives from validated server-side state
-                // (the token's provenance), never the request body: the wire
-                // `project_path` is the token-equality proof and, under a
-                // state-root override, points at the STATE root — persisting
-                // it here would make a reconcile relaunch resolve items
-                // against runtime state instead of the source.
                 project_context: ProjectContext::LocalPath {
                     path: cap.provenance.effective_path().to_path_buf(),
                 },
                 original_snapshot_hash: inherited_snapshot_hash.clone(),
-                // A follow child borrows the parent's workspace; it never
-                // owns snapshot lineage, so no pushed-head identity is
-                // seeded (rebuilding one would take over pin/foldback the
-                // parent owns).
                 original_pushed_head_ref: None,
-                // The parent's state-root override carries to the child so
-                // its state/callback anchor stays isolated with the parent's.
                 state_root: cap
                     .provenance
                     .state_root_override()
@@ -416,14 +521,125 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 executor_ref: Some(child_execution.executor_ref.clone()),
                 runtime_ref: Some(sealed_root_request.runtime_ref().to_string()),
             })
-            .with_sealed_root_request(sealed_root_request.clone());
-        let mut meta = meta;
-        meta.follow_parent_context = Some(persisted_parent_context.clone());
-        meta.follow_launch_window = params.launch_window_width.map(|width| FollowLaunchWindow {
-            key: format!("follow:{follow_key}"),
-            width,
-        });
-        let persisted_meta = state.state_store.get_launch_metadata(&child_thread_id)?;
+                .with_sealed_root_request(sealed_root_request.clone());
+            meta.follow_parent_context = Some(persisted_parent_context.clone());
+            meta.follow_launch_window = expected_launch_window.clone();
+            meta
+        };
+        let child_thread_id = reserved_child_ids.get(&item_index).ok_or_else(|| {
+            anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
+        })?;
+        let prepared = if existing_row {
+            crate::execution::launch::prepare_existing_follow_child_launch(
+                state,
+                child_thread_id,
+                &meta,
+                launch_provenance.clone(),
+                launch_parent_context.clone(),
+            )
+            .await?
+        } else {
+            crate::execution::launch::prepare_follow_child_launch(
+                state,
+                child_thread_id,
+                &meta,
+                launch_provenance.clone(),
+                launch_parent_context.clone(),
+            )
+            .await?
+        };
+        child_metadata.insert(item_index, prepared.launch_metadata().clone());
+        prepared_children.insert(item_index, prepared);
+    }
+
+    // 2. Child root row (created, NOT launched) + seeded launch identity. A follow
+    //    child is a FRESH ROOT: its own chain root, no upstream braid. The root
+    //    snapshot and authoritative launch audit share one signed birth commit.
+    let mut prepared_by_child = std::collections::BTreeMap::new();
+    for (item_index, child) in children.iter().enumerate() {
+        let child_thread_id = reserved_child_ids
+            .get(&item_index)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
+            })?;
+        let mut prepared = prepared_children.remove(&item_index);
+        if fresh_indices.contains(&item_index) {
+            let meta = child_metadata.remove(&item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing prepared metadata for child index {item_index}")
+            })?;
+            let fresh_prepared = prepared.take().ok_or_else(|| {
+                anyhow::anyhow!("follow: missing prepared authority for child index {item_index}")
+            })?;
+            let mut initial_events = fresh_prepared.initial_audit_events()?;
+            if let Some(Value::Object(facets)) = child.facets.as_ref() {
+                for (key, value) in facets {
+                    if key.trim().is_empty() {
+                        continue;
+                    }
+                    let value = value
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string());
+                    initial_events.push(NewEventRecord {
+                        event_type: ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
+                            .as_str()
+                            .to_string(),
+                        storage_class:
+                            ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
+                                .storage_class()
+                                .as_str()
+                                .to_string(),
+                        payload: json!({"key": key, "value": value}),
+                    });
+                }
+            }
+            state
+                .threads
+                .create_root_thread_with_events_and_launch_metadata(
+                    &child_thread_id,
+                    fresh_prepared.resolved_request(),
+                    initial_events,
+                    Some(fresh_prepared.launch_metadata()),
+                )?;
+            prepared = Some(fresh_prepared.with_persisted_birth_audit());
+            let persisted = state
+                .state_store
+                .get_launch_metadata(&child_thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: child {child_thread_id} has no authoritative launch metadata"
+                    )
+            })?;
+            if persisted.resume_context != meta.resume_context
+                || serde_json::to_value(&persisted.sealed_root_request)?
+                    != serde_json::to_value(&meta.sealed_root_request)?
+                || persisted.follow_parent_context != meta.follow_parent_context
+                || persisted.follow_launch_window != meta.follow_launch_window
+            {
+                bail!("follow: child metadata conflicts at index {item_index}");
+            }
+        } else if authority_indices.contains(&item_index) {
+            let expected = child_metadata.remove(&item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing persisted metadata at child index {item_index}")
+            })?;
+            let persisted = state
+                .state_store
+                .get_launch_metadata(&child_thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: child {child_thread_id} has no authoritative launch metadata"
+                    )
+            })?;
+            if persisted.resume_context != expected.resume_context
+                || serde_json::to_value(&persisted.sealed_root_request)?
+                    != serde_json::to_value(&expected.sealed_root_request)?
+                || persisted.follow_parent_context != expected.follow_parent_context
+                || persisted.follow_launch_window != expected.follow_launch_window
+            {
+                bail!("follow: child metadata changed during preparation at index {item_index}");
+            }
+        }
         let inherited_stop = match state.state_store.record_child_link(
             &parent_thread_id,
             &child_thread_id,
@@ -481,208 +697,266 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         // Portable cross-chain lineage: unlike an ordinary graph dispatch, a
         // follow child is spawned inside this daemon callback, so the graph
         // walker never receives a dispatch result from which it could emit
-        // `child_thread_spawned`. Repair the durable edge here before the
-        // parent is settled `continued`. The projection existence check makes
-        // a RESERVED-phase re-drive idempotent while the event itself keeps the
-        // relationship rebuild-safe (runtime_db's child link remains the
-        // separate operational cascade copy).
-        if !state
-            .state_store
-            .thread_edge_exists(&parent_thread_id, &child_thread_id)?
-        {
-            let event_type = ryeos_runtime::events::RuntimeEventType::ChildThreadSpawned;
-            let persisted = state.threads.append_thread_events(
-                &parent.chain_root_id,
-                &parent_thread_id,
-                &[NewEventRecord {
-                    event_type: event_type.as_str().to_string(),
-                    storage_class: event_type.storage_class().as_str().to_string(),
-                    payload: json!({
-                        "child_thread_id": child_thread_id,
-                        "node": params.follow_node,
-                        "step": params.step_count,
-                        "item_id": child.item_ref,
-                        "cohort_index": item_index,
-                        "spawn_reason": "follow",
-                    }),
-                }],
-            )?;
-            if persisted.is_none() {
+        // `child_thread_spawned`. Record the durable edge here before the
+        // parent is settled `continued`. The store serializes the edge absence
+        // check and signed append, making concurrent RESERVED-phase re-drives
+        // exactly-once while the event stays rebuild-safe (runtime_db's child
+        // link remains the separate operational cascade copy).
+        match state.threads.append_child_thread_spawned_once(
+            &parent.chain_root_id,
+            &parent_thread_id,
+            &child_thread_id,
+            json!({
+                "child_thread_id": child_thread_id,
+                "node": params.follow_node,
+                "step": params.step_count,
+                "item_id": child.item_ref,
+                "cohort_index": item_index,
+                "spawn_reason": "follow",
+            }),
+        )? {
+            ryeos_app::state_store::ChildLineageAppendOutcome::Appended
+            | ryeos_app::state_store::ChildLineageAppendOutcome::AlreadyPresent => {}
+            ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled => {
                 bail!(
                     "follow: parent {parent_thread_id} settled before child lineage was recorded"
                 );
             }
         }
-        if let Some(persisted) = persisted_meta
-            .as_ref()
-            .filter(|m| m.resume_context.is_some())
-        {
-            if persisted.resume_context != meta.resume_context
-                || serde_json::to_value(&persisted.sealed_root_request)?
-                    != serde_json::to_value(&meta.sealed_root_request)?
-                || persisted.follow_parent_context != meta.follow_parent_context
-                || persisted.follow_launch_window != meta.follow_launch_window
-            {
-                bail!("follow: launched child metadata conflicts at index {item_index}");
-            }
-        } else {
-            if let Some(Value::Object(facets)) = child.facets.as_ref() {
-                let current: std::collections::HashMap<_, _> = state
-                    .state_store
-                    .get_facets(&child_thread_id)?
-                    .into_iter()
-                    .collect();
-                for (key, value) in facets {
-                    if key.trim().is_empty() {
-                        continue;
-                    }
-                    let value = value
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| value.to_string());
-                    if current.get(key) == Some(&value) {
-                        continue;
-                    }
-                    state
-                        .events
-                        .append(&ryeos_app::event_store_service::EventAppendParams {
-                            thread_id: child_thread_id.clone(),
-                            event: ryeos_app::event_store_service::EventAppendItem {
-                                event_type: ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
-                                    .as_str()
-                                    .to_string(),
-                                storage_class:
-                                    ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
-                                        .storage_class()
-                                        .as_str()
-                                        .to_string(),
-                                payload: json!({"key": key, "value": value}),
-                            },
-                        })?;
-                }
-            }
-            // resume_context is the commit marker and is written last.
-            state
-                .state_store
-                .seed_launch_metadata(&child_thread_id, &meta)?;
+        if let Some(prepared) = prepared {
+            prepared_by_child.insert(child_thread_id, prepared);
         }
-        child_thread_ids.push(child_thread_id);
     }
 
-    // 3. Parent successor row (created, NOT launched). This atomically settles the
+    // 3. Establish launch-window membership before the irreversible parent
+    //    continuation commit. A membership failure now leaves the parent running
+    //    and the reserved waiter safely re-drivable.
+    let mut admitted = if re_drive {
+        existing_launchable_indices
+            .iter()
+            .map(|item_index| child_thread_ids[*item_index].clone())
+            .collect()
+    } else if let (Some(width), Some(window_key)) =
+        (params.launch_window_width, window_key.as_deref())
+    {
+        for item_index in fresh_indices.iter().copied() {
+            let child_id = &child_thread_ids[item_index];
+            state.state_store.launch_window_insert_only(
+                child_id,
+                window_key,
+                width,
+                lillux::time::timestamp_millis(),
+            )?;
+        }
+        Vec::new()
+    } else {
+        authority_indices
+            .iter()
+            .map(|item_index| child_thread_ids[*item_index].clone())
+            .collect()
+    };
+
+    // 4. Parent successor row (created, NOT launched). This atomically settles the
     //    parent `continued` and copies the parent's captured launch identity to the
     //    successor (requires the parent running + the single-successor invariant).
     //    The successor is launched later, on child-terminal, by the reconcile /
     //    follow-resume path — never here.
-    let parent_successor_thread_id = match waiter.parent_successor_thread_id.clone() {
-        Some(id) => id,
-        None => {
-            // Creating the successor atomically settles the parent `continued`, so
-            // a prior attempt that crashed AFTER creating it but BEFORE recording it
-            // on the waiter leaves the parent already continued. Re-creating would
-            // fail (parent no longer running) and strand the follow — so first
-            // recover: if the parent already carries its follow-resume successor,
-            // adopt it onto the waiter and continue.
-            if let Some(existing) = parent.successor_thread_id.clone() {
-                if !state
-                    .state_store
-                    .is_follow_resume_successor(&parent_thread_id, &existing)?
-                {
-                    bail!(
-                        "follow: parent {parent_thread_id} already continued into a non-follow \
-                         successor {existing}; cannot suspend it for follow"
-                    );
+    let parent_successor_thread_id = if re_drive {
+        waiter.parent_successor_thread_id.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "follow: {} waiter has no parent successor",
+                waiter.phase
+            )
+        })?
+    } else {
+        match waiter.parent_successor_thread_id.clone() {
+            Some(id) => id,
+            None => {
+                // Creating the successor atomically settles the parent `continued`, so
+                // a prior attempt that crashed AFTER creating it but BEFORE recording it
+                // on the waiter leaves the parent already continued. Re-creating would
+                // fail (parent no longer running) and strand the follow — so first
+                // recover: if the parent already carries its follow-resume successor,
+                // adopt it onto the waiter and continue.
+                if let Some(existing) = parent.successor_thread_id.clone() {
+                    if !state
+                        .state_store
+                        .is_follow_resume_successor(&parent_thread_id, &existing)?
+                    {
+                        bail!(
+                            "follow: parent {parent_thread_id} already continued into a non-follow \
+                             successor {existing}; cannot suspend it for follow"
+                        );
+                    }
+                    if let Err(error) = state
+                        .state_store
+                        .set_follow_parent_successor(&follow_key, &existing)
+                    {
+                        tracing::error!(
+                            follow_key,
+                            successor_id = %existing,
+                            error = %error,
+                            "follow successor adoption was not recorded; reserved reconciliation will repair it"
+                        );
+                    }
+                    existing
+                } else {
+                    let successor_id = new_thread_id();
+                    // Via the lifecycle service so the parent-`continued` + successor-
+                    // `created` events reach live subscribers, not just the event store.
+                    state.threads.create_follow_resume_successor(
+                        &NewThreadRecord {
+                            thread_id: successor_id.clone(),
+                            chain_root_id: parent.chain_root_id.clone(),
+                            kind: parent.kind.clone(),
+                            item_ref: parent.item_ref.clone(),
+                            executor_ref: parent.executor_ref.clone(),
+                            launch_mode: parent.launch_mode.clone(),
+                            current_site_id: parent.current_site_id.clone(),
+                            origin_site_id: parent.origin_site_id.clone(),
+                            upstream_thread_id: Some(parent_thread_id.clone()),
+                            requested_by: parent.requested_by.clone(),
+                            project_root: parent
+                                .project_root
+                                .as_ref()
+                                .map(std::path::PathBuf::from),
+                            usage_subject: None,
+                            usage_subject_asserted_by: None,
+                            captured_history_policy: None,
+                        },
+                        &parent_thread_id,
+                        &parent.chain_root_id,
+                    )?;
+                    if let Err(error) = state
+                        .state_store
+                        .set_follow_parent_successor(&follow_key, &successor_id)
+                    {
+                        tracing::error!(
+                            follow_key,
+                            successor_id = %successor_id,
+                            error = %error,
+                            "follow successor committed but waiter update failed; reserved reconciliation will repair it"
+                        );
+                    }
+                    successor_id
                 }
-                state
-                    .state_store
-                    .set_follow_parent_successor(&follow_key, &existing)?;
-                existing
-            } else {
-                let successor_id = new_thread_id();
-                // Via the lifecycle service so the parent-`continued` + successor-
-                // `created` events reach live subscribers, not just the event store.
-                state.threads.create_follow_resume_successor(
-                    &NewThreadRecord {
-                        thread_id: successor_id.clone(),
-                        chain_root_id: parent.chain_root_id.clone(),
-                        kind: parent.kind.clone(),
-                        item_ref: parent.item_ref.clone(),
-                        executor_ref: parent.executor_ref.clone(),
-                        launch_mode: parent.launch_mode.clone(),
-                        current_site_id: parent.current_site_id.clone(),
-                        origin_site_id: parent.origin_site_id.clone(),
-                        upstream_thread_id: Some(parent_thread_id.clone()),
-                        requested_by: parent.requested_by.clone(),
-                        project_root: parent.project_root.as_ref().map(std::path::PathBuf::from),
-                        usage_subject: None,
-                        usage_subject_asserted_by: None,
-                        captured_history_policy: None,
-                    },
-                    &parent_thread_id,
-                    &parent.chain_root_id,
-                )?;
-                state
-                    .state_store
-                    .set_follow_parent_successor(&follow_key, &successor_id)?;
-                successor_id
             }
         }
     };
 
-    // 4. Enqueue the complete ordered cohort before exposing `waiting`. Calling
-    // enqueue once per member would admit early members before later FIFO rows
-    // existed, but none are launched until the complete cohort is durable.
-    let admitted = if let Some(width) = params.launch_window_width {
-        let window_key = format!("follow:{follow_key}");
-        let mut admitted = Vec::new();
-        for child_id in &child_thread_ids {
-            admitted.extend(state.state_store.launch_window_enqueue(
-                child_id,
-                &window_key,
-                width,
-                crate::execution::launch::global_live_fanout_limit(),
-                lillux::time::timestamp_millis(),
-            )?);
+    // 5. Commit the fresh waiter's truthful post-suspension phase: all IDs and
+    // window membership are recorded, and the parent is suspended. A cohort
+    // that settled concurrently advances directly to `ready` and must resume;
+    // its terminal children must never be launched again.
+    let mut response_phase = waiter.phase.clone();
+    if !re_drive {
+        match state.state_store.mark_follow_waiting(&follow_key) {
+            Ok(phase) => response_phase = phase,
+            Err(error) => {
+                // The parent continuation is already authoritative. Returning
+                // an error would invite a caller retry that cannot undo it;
+                // retain the reserved waiter and let its reconciler adopt the
+                // successor/complete the waiting transition.
+                tracing::error!(
+                    follow_key,
+                    error = %error,
+                    "follow suspension committed but waiter transition failed; accepted for reserved reconciliation"
+                );
+                admitted.clear();
+                queued_child_thread_ids.extend(
+                    authority_indices
+                        .iter()
+                        .map(|item_index| child_thread_ids[*item_index].clone()),
+                );
+            }
         }
-        admitted
-    } else {
-        child_thread_ids.clone()
-    };
+        if response_phase == follow_phase::WAITING {
+            if let Some(window_key) = window_key.as_deref() {
+                match state.state_store.launch_window_admit(
+                    window_key,
+                    crate::execution::launch::global_live_fanout_limit(),
+                    lillux::time::timestamp_millis(),
+                ) {
+                    Ok(newly_admitted) => admitted = newly_admitted,
+                    Err(error) => {
+                        // Membership and `waiting` are durable. Report a truthful
+                        // queued acceptance and let the periodic/startup window
+                        // sweep retry admission; never turn an already-continued
+                        // parent into an error response.
+                        tracing::error!(
+                            follow_key,
+                            error = %error,
+                            "follow launch-window admission failed after suspension; queued for sweep"
+                        );
+                    }
+                }
+                queued_child_thread_ids.extend(
+                    authority_indices
+                        .iter()
+                        .map(|item_index| child_thread_ids[*item_index].clone())
+                        .filter(|child_id| !admitted.contains(child_id)),
+                );
+            }
+        }
+    }
+    queued_child_thread_ids.retain(|child_id| !admitted.contains(child_id));
+    if response_phase == follow_phase::READY {
+        admitted.clear();
+        queued_child_thread_ids.clear();
+        for child_thread_id in &child_thread_ids {
+            crate::execution::launch::kick_launch_window_for_terminal(state, child_thread_id);
+        }
+        if let Some(child_thread_id) = child_thread_ids.first() {
+            crate::execution::launch::kick_follow_resume_if_ready(state, child_thread_id);
+        }
+    }
+    queued_child_thread_ids.sort();
+    queued_child_thread_ids.dedup();
 
-    // 5. Mark the waiter durably `waiting`: all IDs and window membership are
-    // recorded, and the parent is suspended.
-    state.state_store.mark_follow_waiting(&follow_key)?;
-
-    // 6. ONLY NOW launch the child, detached. The durable `waiting` waiter above
-    //    means a terminal child can be matched to its suspended parent even if this
-    //    daemon dies right after the spawn. Fire-and-forget preparation persists
-    //    the launch claim before returning, so a lost spawn is safe to re-drive.
-    // Hot-path launch uses the parent's BORROWED-CHILD provenance (derived from
-    // the validated callback token), preserving pushed-head / effective workspace
-    // / request engine — not the root-live-fs fallback the resume-context path
-    // would reconstruct. Reconcile re-drives with `None` (documented limit).
-    let launch_provenance = cap.provenance.clone_for_borrowed_child();
-    // Parent execution ceiling from the VALIDATED cap (never `child_parameters`),
-    // so the child is clamped to the parent's hard limits and launches at parent
-    // depth + 1 — the same context a normal callback-dispatched child receives.
-    let launch_parent_context = crate::dispatch::ParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-    };
+    // 6. ONLY NOW launch admitted children. Each task consumes the exact
+    // pre-birth authority and must cross the managed spawn handoff before this
+    // callback acknowledges the cohort.
+    let mut launch_receivers = Vec::new();
     for launch_child_id in admitted {
-        if let crate::execution::launch::RecoveryLaunchOutcome::Skipped(reason) =
-            crate::execution::launch::prepare_and_spawn_follow_child(
-                state.clone(),
+        let launch_state = state.clone();
+        let prepared = prepared_by_child.remove(&launch_child_id).ok_or_else(|| {
+            anyhow::anyhow!("follow: admitted unknown child {launch_child_id}")
+        })?;
+        let (launch_handoff, launch_ready) =
+            crate::execution::launch::LaunchHandoff::channel();
+        launch_receivers.push((launch_child_id.clone(), launch_ready));
+        tokio::spawn(async move {
+            if let Err(e) = crate::execution::launch::launch_prepared_follow_child(
+                launch_state,
                 &launch_child_id,
-                Some(launch_provenance.clone()),
-                Some(launch_parent_context.clone()),
-            )?
-        {
-            tracing::debug!(
-                child_thread_id = %launch_child_id,
-                reason,
-                "follow child detached launch skipped"
+                prepared,
+                &launch_handoff,
+            )
+            .await
+            {
+                tracing::error!(
+                    child_thread_id = %launch_child_id,
+                    error = %e,
+                    "follow child detached launch failed",
+                );
+            }
+        });
+    }
+    for (expected_child_id, receiver) in launch_receivers {
+        let handed_off = receiver
+            .await
+            .context("follow: child launch task closed before spawn handoff")?
+            .map_err(|failure| {
+                anyhow::anyhow!(
+                    "follow: child launch rejected before handoff ({}): {}",
+                    failure.code,
+                    failure.message
+                )
+            })?;
+        if handed_off != expected_child_id {
+            bail!(
+                "follow: child launch handed off unexpected thread {handed_off} \
+                 (expected {expected_child_id})"
             );
         }
     }
@@ -700,10 +974,12 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
 
     Ok(json!({
         "follow_key": follow_key,
-        "phase": follow_phase::WAITING,
+        "phase": response_phase,
         "child_thread_id": child_thread_id,
         "child_thread_ids": child_thread_ids,
+        "queued_child_thread_ids": queued_child_thread_ids,
         "parent_successor_thread_id": parent_successor_thread_id,
+        "idempotent": re_drive,
     }))
 }
 

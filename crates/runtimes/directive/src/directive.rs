@@ -3,11 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// Re-export types now canonically owned by the shared model-resolution
-// module in ryeos-runtime. Existing `use crate::directive::*` imports
-// in the directive-runtime continue to resolve these names.
+// Re-export directive-domain types from the directive-owned shared crate.
+// The launch preparer and runtime consume this one strict schema.
 #[allow(unused_imports)]
-pub use ryeos_runtime::model_resolution::{
+pub use ryeos_directive_core::{
     AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
     ProtocolFamily, ProviderConfig, ProviderProfile, SamplingConfig, SchemasConfig, StreamPaths,
     SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
@@ -19,7 +18,7 @@ pub use ryeos_runtime::model_resolution::{
 /// `KindComposedView::ExtendsChain(...).composed`.
 ///
 /// The runtime owns the typed shape of the fields it **consumes**
-/// (`model`, `permissions`, `limits`, `outputs`, `context`, `hooks`,
+/// (`permissions`, `limits`, `outputs`, `context`, `hooks`,
 /// `extends`, `name`).  `deny_unknown_fields` is mandatory — relaxing
 /// it once already masked a routing-config regression by accepting
 /// fields the runtime quietly ignored.
@@ -40,8 +39,6 @@ pub struct DirectiveHeader {
     pub name: Option<String>,
     #[serde(default)]
     pub extends: Option<String>,
-    #[serde(default)]
-    pub model: Option<ModelSpec>,
     #[serde(default)]
     pub limits: Option<LimitsSpec>,
     #[serde(default)]
@@ -72,7 +69,6 @@ pub struct DirectiveHeader {
 pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
     "name",
     "extends",
-    "model",
     "limits",
     "outputs",
     "context",
@@ -364,8 +360,6 @@ impl Default for ExecutionConfig {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
     pub execution: ExecutionConfig,
-    pub model_routing: Option<ModelRoutingConfig>,
-    pub provider: Option<ProviderConfig>,
     pub tools: Vec<ToolSchema>,
     pub system_prompt: Option<String>,
     pub user_prompt: String,

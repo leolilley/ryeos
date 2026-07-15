@@ -29,7 +29,9 @@ pub fn project_thread_snapshot(
         .as_ref()
         .map(serde_json::to_value)
         .transpose()?
-        .map(|value| lillux::canonical_json(&value));
+        .map(|value| lillux::canonical_json(&value))
+        .transpose()
+        .context("failed to canonicalize captured history policy")?;
 
     db.connection()
         .execute(

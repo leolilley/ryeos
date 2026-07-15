@@ -11,6 +11,7 @@
 //! Persisted as a JSON blob in `runtime_db.thread_runtime.launch_metadata`
 //! so the struct can be extended without schema migrations.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ryeos_engine::contracts::{
@@ -34,10 +35,10 @@ where
 
 /// Version tag for the JSON payload persisted into
 /// `runtime_db.thread_runtime.launch_metadata`. Bump when an
-/// incompatible shape change ships; readers MUST decode loudly so a
+/// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 2;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -213,6 +214,9 @@ impl OriginalPushedHeadRef {
 pub struct ResumeContext {
     pub kind: String,
     pub item_ref: String,
+    /// Complete canonical secondary execution identity. Required on disk;
+    /// absence is a schema error, never an empty-map fallback.
+    pub ref_bindings: BTreeMap<String, String>,
     pub launch_mode: String,
     pub parameters: serde_json::Value,
     /// Full engine `ProjectContext` from the original `PlanContext`.
@@ -451,6 +455,7 @@ mod tests {
             native_resume: None,
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
         };
@@ -562,6 +567,7 @@ mod tests {
         let ctx = ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "ns/foo".to_string(),
+            ref_bindings: BTreeMap::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),

@@ -280,7 +280,8 @@ fn compact_single_project(
         let value = rewritten.to_value();
         ProjectSnapshot::from_value(&value)
             .context("validate rewritten project snapshot before CAS publication")?;
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value)
+            .with_context(|| format!("failed to canonicalize rewritten snapshot {snap_hash}"))?;
         let new_hash = lillux::sha256_hex(canonical.as_bytes());
 
         if new_hash != *snap_hash {
@@ -614,7 +615,7 @@ mod tests {
     }
 
     fn write_object(cas_root: &Path, value: &serde_json::Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
         if let Some(parent) = path.parent() {
@@ -713,7 +714,7 @@ mod tests {
             source: "manual_push".to_string(),
         };
         let value = snapshot.to_value();
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value).unwrap();
         let actual_hash = lillux::sha256_hex(canonical.as_bytes());
         write_raw_object(&cas_root, &actual_hash, canonical.as_bytes());
         load_project_snapshot(&cas_root, &actual_hash).unwrap();
@@ -729,7 +730,7 @@ mod tests {
 
         let mut old_schema = value;
         old_schema["schema"] = serde_json::json!(ProjectSnapshot::SCHEMA - 1);
-        let old_canonical = lillux::canonical_json(&old_schema);
+        let old_canonical = lillux::canonical_json(&old_schema).unwrap();
         let old_hash = lillux::sha256_hex(old_canonical.as_bytes());
         write_raw_object(&cas_root, &old_hash, old_canonical.as_bytes());
         assert!(load_project_snapshot(&cas_root, &old_hash).is_err());
@@ -750,7 +751,7 @@ mod tests {
         }
         .to_value();
         value["created_at"] = serde_json::json!("2026-07-14T00:00:00+00:00");
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         write_raw_object(&cas_root, &hash, canonical.as_bytes());
         assert!(load_project_snapshot(&cas_root, &hash).is_err());

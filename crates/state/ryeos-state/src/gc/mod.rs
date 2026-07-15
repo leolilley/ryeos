@@ -864,7 +864,7 @@ mod tests {
         trust_store.insert(signer.fingerprint().to_string(), signer.verifying_key());
 
         fn write_object(cas_root: &std::path::Path, value: &serde_json::Value) -> String {
-            let canonical = lillux::canonical_json(value);
+            let canonical = lillux::canonical_json(value).unwrap();
             let hash = lillux::sha256_hex(canonical.as_bytes());
             let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
             if let Some(parent) = path.parent() {
@@ -1002,7 +1002,7 @@ mod tests {
         fs::create_dir_all(&refs_root).unwrap();
 
         let write_object = |value: serde_json::Value| {
-            let canonical = lillux::canonical_json(&value);
+            let canonical = lillux::canonical_json(&value).unwrap();
             let hash = lillux::sha256_hex(canonical.as_bytes());
             let path = lillux::shard_path(&cas_root, "objects", &hash, ".json");
             fs::create_dir_all(path.parent().unwrap()).unwrap();

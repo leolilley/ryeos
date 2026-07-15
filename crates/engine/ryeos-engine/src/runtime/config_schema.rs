@@ -36,7 +36,8 @@ fn validator_for_cached(schema: &Value) -> Result<Arc<jsonschema::Validator>, St
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    let key = lillux::sha256_hex(lillux::canonical_json(schema).as_bytes());
+    let canonical = lillux::canonical_json(schema).map_err(|error| error.to_string())?;
+    let key = lillux::sha256_hex(canonical.as_bytes());
     if let Some(validator) = cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())

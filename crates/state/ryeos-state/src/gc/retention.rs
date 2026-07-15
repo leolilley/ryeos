@@ -193,7 +193,7 @@ impl FireRecord {
 
     pub fn canonical_json_line(&self) -> Result<String> {
         self.validate()?;
-        Ok(lillux::cas::canonical_json(&serde_json::to_value(self)?))
+        Ok(lillux::cas::canonical_json(&serde_json::to_value(self)?)?)
     }
 
     fn latest_timestamp(&self) -> i64 {

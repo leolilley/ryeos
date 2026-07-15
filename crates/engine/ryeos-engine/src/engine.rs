@@ -13,6 +13,7 @@ use crate::contracts::{
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
+use crate::launch_preparers::LaunchPreparerRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
@@ -97,6 +98,11 @@ pub struct Engine {
     /// a runtimes scan still compile.
     pub runtimes: RuntimeRegistry,
 
+    /// Boot-bound runtime→launch-preparer registry. Handler preparation is
+    /// always resolved through this verified binding rather than looking up a
+    /// handler dynamically at launch time.
+    pub launch_preparers: LaunchPreparerRegistry,
+
     /// Protocol registry — loaded from base roots at engine init.
     /// Protocol descriptors declare wire contracts for subprocess
     /// terminators. Empty by default for test compatibility.
@@ -125,6 +131,7 @@ impl Engine {
             node_trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
             runtimes: RuntimeRegistry::default(),
+            launch_preparers: LaunchPreparerRegistry::default(),
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
@@ -156,6 +163,11 @@ impl Engine {
     /// `Engine::new` initializes the field to an empty registry.
     pub fn with_runtimes(mut self, runtimes: RuntimeRegistry) -> Self {
         self.runtimes = runtimes;
+        self
+    }
+
+    pub fn with_launch_preparers(mut self, launch_preparers: LaunchPreparerRegistry) -> Self {
+        self.launch_preparers = launch_preparers;
         self
     }
 
@@ -359,20 +371,10 @@ impl Engine {
             // error variants so consumers can branch on error code.
             use crate::resolution::ResolutionError;
             match &e {
-                ResolutionError::StepFailed { reason, .. } => {
-                    if reason.starts_with("unknown kind:")
-                        || reason.contains("not found")
-                        || reason.contains("not in manifest")
-                        || reason.contains("missing")
-                    {
-                        EngineError::EffectiveItemNotFound {
-                            canonical_ref: ref_str.clone(),
-                        }
-                    } else {
-                        EngineError::EffectiveItemCompositionFailed {
-                            canonical_ref: ref_str.clone(),
-                            reason: e.to_string(),
-                        }
+                ResolutionError::StepFailed { .. } => {
+                    EngineError::EffectiveItemCompositionFailed {
+                        canonical_ref: ref_str.clone(),
+                        reason: e.to_string(),
                     }
                 }
                 ResolutionError::CycleDetected { .. }

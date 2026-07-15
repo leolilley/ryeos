@@ -70,7 +70,7 @@ pub enum EnvSourceKind {
     BaseAllowlist,
     DaemonRoot,
     DeclaredSecret,
-    ProviderSecret,
+    LaunchSecret,
     EnginePlanEnv,
     RuntimeDescriptor,
     RuntimeInterpreter,
@@ -85,7 +85,7 @@ pub enum EnvSourceDetail {
     BaseAllowlist,
     DaemonRoot,
     DeclaredSecret,
-    ProviderSecret,
+    LaunchSecret,
     EnginePlanEnv,
     RuntimeDescriptor,
     RuntimeInterpreter,
@@ -101,7 +101,7 @@ impl From<EnvSourceKind> for EnvSourceDetail {
             EnvSourceKind::BaseAllowlist => EnvSourceDetail::BaseAllowlist,
             EnvSourceKind::DaemonRoot => EnvSourceDetail::DaemonRoot,
             EnvSourceKind::DeclaredSecret => EnvSourceDetail::DeclaredSecret,
-            EnvSourceKind::ProviderSecret => EnvSourceDetail::ProviderSecret,
+            EnvSourceKind::LaunchSecret => EnvSourceDetail::LaunchSecret,
             EnvSourceKind::EnginePlanEnv => EnvSourceDetail::EnginePlanEnv,
             EnvSourceKind::RuntimeDescriptor => EnvSourceDetail::RuntimeDescriptor,
             EnvSourceKind::RuntimeInterpreter => EnvSourceDetail::RuntimeInterpreter,
@@ -296,7 +296,7 @@ fn validate_binding_name(binding: &EnvBinding) -> Result<(), EnvContractError> {
             DAEMON_ROOT_NAMES,
             "not a daemon root env name",
         ),
-        EnvSourceDetail::DeclaredSecret | EnvSourceDetail::ProviderSecret => {
+        EnvSourceDetail::DeclaredSecret | EnvSourceDetail::LaunchSecret => {
             validate_application_controlled_name(binding)
         }
         EnvSourceDetail::EnginePlanEnv => require_name_in(

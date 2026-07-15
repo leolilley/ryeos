@@ -29,6 +29,7 @@ use crate::routes::invocation::{
 pub(crate) struct DispatchSourceConfig {
     /// Absolute path to the project root for engine resolution.
     pub project_path: String,
+    pub ref_bindings: std::collections::BTreeMap<String, String>,
     /// Business parameters forwarded to `dispatch::dispatch` as `params`.
     #[serde(default)]
     pub parameters: serde_json::Value,
@@ -114,6 +115,35 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             } => (fingerprint.clone(), scopes.clone()),
         };
 
+        ryeos_executor::execution::launch_preparation::validate_ref_bindings(
+            &config.ref_bindings,
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("invalid ref_bindings: {error}"))
+        })?;
+        for (name, bound_ref) in &config.ref_bindings {
+            let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref)
+                .map_err(|error| {
+                    RouteDispatchError::BadRequest(format!(
+                        "invalid ref_bindings.{name}: {error}"
+                    ))
+                })?;
+            let required = ryeos_runtime::authorizer::canonical_cap(
+                &canonical.kind,
+                &canonical.bare_id,
+                "execute",
+            );
+            let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(&required);
+            ctx.state
+                .authorizer
+                .authorize(&principal_scopes, &policy)
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability for ref binding '{name}': {required}"
+                    ))
+                })?;
+        }
+
         let site_id = ctx.state.threads.site_id().to_string();
 
         let plan_ctx = PlanContext {
@@ -149,6 +179,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             target_site_id: None,
             validate_only: false,
             params: config.parameters,
+            ref_bindings: config.ref_bindings,
             acting_principal: principal_id.as_str(),
             project_path: &project_path,
             provenance,

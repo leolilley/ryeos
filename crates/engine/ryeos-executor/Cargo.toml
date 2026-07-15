@@ -13,6 +13,7 @@ rand = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-handler-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-tracing = { workspace = true }

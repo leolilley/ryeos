@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
+    ChildLineageAppendOutcome,
     FinalizeCreatedUnattachedOutcome as StoreFinalizeCreatedUnattachedOutcome,
     FinalizeIfNonterminalOutcome as StoreFinalizeIfNonterminalOutcome, FinalizeThreadRecord,
     NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord, StateStore,
@@ -578,6 +580,7 @@ pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
 /// needs; scopes are sorted so ordering is not significant.
 pub fn continuation_request_fingerprint(
     item_ref: &str,
+    ref_bindings: &BTreeMap<String, String>,
     project_path: &str,
     principal_fingerprint: &str,
     scopes: &[String],
@@ -590,6 +593,7 @@ pub fn continuation_request_fingerprint(
     scopes_sorted.sort_unstable();
     let canonical = json!({
         "item_ref": item_ref,
+        "ref_bindings": ref_bindings,
         "project_path": project_path,
         "principal": principal_fingerprint,
         "scopes": scopes_sorted,
@@ -652,6 +656,7 @@ pub struct ResolvedExecutionRequest {
     pub usage_subject: Option<UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
     pub parameters: Value,
+    pub ref_bindings: BTreeMap<String, String>,
     /// The engine's resolved item — carried through for verify/build_plan/execute.
     pub resolved_item: ResolvedItem,
     /// The PlanContext used during resolution — reused for verify/build_plan.
@@ -1040,6 +1045,7 @@ pub struct SealedRootExecutionRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     usage_subject_asserted_by: Option<String>,
     parameters: Value,
+    ref_bindings: BTreeMap<String, String>,
     verified_subject: SealedResolvedItem,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     verified_signer_fingerprint: Option<String>,
@@ -1084,6 +1090,7 @@ impl SealedRootExecutionRequest {
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.parameters.clone(),
+            ref_bindings: request.ref_bindings.clone(),
             verified_subject: SealedResolvedItem::from(&verified.resolved),
             verified_signer_fingerprint: verified.signer.as_ref().map(|value| value.0.clone()),
             verified_trust_class: verified.trust_class,
@@ -1156,6 +1163,7 @@ impl SealedRootExecutionRequest {
             usage_subject: None,
             usage_subject_asserted_by: None,
             parameters: json!({}),
+            ref_bindings: BTreeMap::new(),
             verified_subject: SealedResolvedItem {
                 canonical_ref: canonical_item_ref.clone(),
                 kind: "graph".to_string(),
@@ -1260,6 +1268,7 @@ impl SealedRootExecutionRequest {
             thread_profile: self.kind.clone(),
             usage_subject: self.usage_subject.clone(),
             usage_subject_asserted_by: self.usage_subject_asserted_by.clone(),
+            ref_bindings: self.ref_bindings.clone(),
             resolved_history_policy: self.resolved_history_policy.clone(),
             captured_history_policy: self.captured_history_policy.clone(),
         };
@@ -1276,6 +1285,7 @@ impl SealedRootExecutionRequest {
             usage_subject: self.usage_subject.clone(),
             usage_subject_asserted_by: self.usage_subject_asserted_by.clone(),
             parameters: self.parameters.clone(),
+            ref_bindings: self.ref_bindings.clone(),
             resolved_item,
             plan_context,
             root_admission: Some(admission.clone()),
@@ -1297,6 +1307,7 @@ pub struct RootExecutionAdmission {
     thread_profile: String,
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
+    ref_bindings: BTreeMap<String, String>,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
 }
@@ -1323,6 +1334,10 @@ impl RootExecutionAdmission {
 
     pub fn captured_history_policy(&self) -> &ryeos_state::objects::CapturedThreadHistoryPolicy {
         &self.captured_history_policy
+    }
+
+    pub fn ref_bindings(&self) -> &BTreeMap<String, String> {
+        &self.ref_bindings
     }
 
     pub fn project_root(&self) -> Option<&Path> {
@@ -1357,6 +1372,7 @@ impl RootExecutionAdmission {
             usage_subject: self.usage_subject.clone(),
             usage_subject_asserted_by: self.usage_subject_asserted_by.clone(),
             parameters,
+            ref_bindings: self.ref_bindings.clone(),
             resolved_item: resolved.clone(),
             plan_context: self.plan_context.clone(),
             root_admission: Some(self.clone()),
@@ -1527,6 +1543,9 @@ impl RootExecutionAdmission {
             bail!(
                 "resolved execution request usage attribution does not match the sealed root admission"
             );
+        }
+        if request.ref_bindings != self.ref_bindings {
+            bail!("resolved execution request secondary identities do not match the sealed root admission");
         }
         if request.current_site_id != self.plan_context.current_site_id
             || request.origin_site_id != self.plan_context.origin_site_id
@@ -1995,6 +2014,67 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
     }
 
+    /// Managed-launch root creation with an authoritative initial event set.
+    /// Publishes only after the root snapshot and all events commit together.
+    pub fn create_root_thread_with_events(
+        &self,
+        thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        initial_events: Vec<NewEventRecord>,
+    ) -> Result<ThreadDetail> {
+        self.create_root_thread_with_events_and_launch_metadata(
+            thread_id,
+            request,
+            initial_events,
+            None,
+        )
+    }
+
+    /// Managed-launch root creation with its durable resume identity prepared
+    /// before the authoritative root commit is published.
+    pub fn create_root_thread_with_events_and_launch_metadata(
+        &self,
+        thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+    ) -> Result<ThreadDetail> {
+        validate_kind(&request.kind, self.kind_profiles())?;
+        validate_thread_id_format(thread_id)?;
+        let admission = request.root_admission.as_ref().ok_or_else(|| {
+            anyhow!("managed root `{thread_id}` has no admitted execution contract")
+        })?;
+        admission.validate_for_persistence(&self.engine)?;
+        admission.ensure_matches_request(request)?;
+        let thread_record = NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: request.kind.clone(),
+            item_ref: request.item_ref.clone(),
+            executor_ref: request.executor_ref.clone(),
+            launch_mode: request.launch_mode.clone(),
+            current_site_id: request.current_site_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            upstream_thread_id: None,
+            requested_by: request.requested_by.clone(),
+            project_root: local_project_root(&request.plan_context),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+            captured_history_policy: Some(admission.captured_history_policy.clone()),
+        };
+        let persisted = self
+            .state_store
+            .create_root_thread_with_events_and_launch_metadata(
+                &thread_record,
+                initial_events,
+                launch_metadata,
+            )?;
+        let detail = self.get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("created root thread missing from database: {thread_id}"))?;
+        self.publish_records(&persisted);
+        Ok(detail)
+    }
+
     /// Create a chain successor for `source_thread_id` with a pre-minted id and
     /// a launch-ready `request`, then return it. Mirrors
     /// `create_root_thread_with_id` but braids onto the source's chain: the
@@ -2019,6 +2099,26 @@ impl ThreadLifecycleService {
         source_thread_id: &str,
         request: &ResolvedExecutionRequest,
         reason: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+    ) -> Result<ThreadDetail> {
+        self.create_continuation_with_id_and_launch_metadata(
+            successor_thread_id,
+            source_thread_id,
+            request,
+            reason,
+            initial_events,
+            None,
+        )
+    }
+
+    pub fn create_continuation_with_id_and_launch_metadata(
+        &self,
+        successor_thread_id: &str,
+        source_thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        reason: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
     ) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         validate_thread_id_format(successor_thread_id)?;
@@ -2054,6 +2154,8 @@ impl ThreadLifecycleService {
             &source.thread_id,
             &source.chain_root_id,
             reason,
+            initial_events,
+            launch_metadata,
         )?;
         self.publish_records(&persisted);
 
@@ -2077,7 +2179,8 @@ impl ThreadLifecycleService {
         source_thread_id: &str,
         reason: Option<&str>,
         request_fingerprint: &str,
-        resume_context: &crate::launch_metadata::ResumeContext,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        initial_events: Vec<NewEventRecord>,
     ) -> Result<OperatorContinuation> {
         validate_kind(&successor.kind, self.kind_profiles())?;
 
@@ -2121,7 +2224,8 @@ impl ThreadLifecycleService {
             &source.chain_root_id,
             reason,
             request_fingerprint,
-            Some(resume_context),
+            Some(launch_metadata),
+            initial_events,
         )?;
 
         match outcome {
@@ -3301,10 +3405,15 @@ impl ThreadLifecycleService {
         skip(self, params),
         fields(thread_id = %params.thread_id)
     )]
-    pub fn request_continuation(
+    pub fn request_continuation_with_events(
         &self,
         params: &ThreadContinuationParams,
+        successor_thread_id: &str,
+        expected_resume_context: &crate::launch_metadata::ResumeContext,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        initial_events: Vec<NewEventRecord>,
     ) -> Result<ThreadContinuationResult> {
+        validate_thread_id_format(successor_thread_id)?;
         let source = self
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("source thread not found: {}", params.thread_id))?;
@@ -3319,9 +3428,8 @@ impl ThreadLifecycleService {
         }
 
         // Create successor thread in the same chain
-        let successor_id = new_thread_id();
         let successor_record = NewThreadRecord {
-            thread_id: successor_id.clone(),
+            thread_id: successor_thread_id.to_string(),
             chain_root_id: source.chain_root_id.clone(),
             kind: source.kind.clone(),
             item_ref: source.item_ref.clone(),
@@ -3343,17 +3451,22 @@ impl ThreadLifecycleService {
         // first), then settle the source `continued`. A race or seed failure
         // aborts with the source still running — never `continued` behind an
         // unlaunchable successor.
-        let persisted = self.state_store.create_machine_continuation(
+        let persisted = self.state_store.create_machine_continuation_with_events(
             &successor_record,
             &source.thread_id,
             &source.chain_root_id,
             params.reason.as_deref(),
+            expected_resume_context,
+            successor_launch_metadata,
+            initial_events,
         )?;
-        self.publish_records(&persisted);
 
         let successor = self
-            .get_thread(&successor_id)?
-            .ok_or_else(|| anyhow!("successor thread missing after creation: {successor_id}"))?;
+            .get_thread(successor_thread_id)?
+            .ok_or_else(|| {
+                anyhow!("successor thread missing after creation: {successor_thread_id}")
+            })?;
+        self.publish_records(&persisted);
 
         Ok(ThreadContinuationResult {
             source_thread_id: source.thread_id,
@@ -3424,6 +3537,27 @@ impl ThreadLifecycleService {
             self.publish_records(records);
         }
         Ok(persisted)
+    }
+
+    /// Record one portable cross-chain parent→child edge exactly once and
+    /// publish it only after the signed authoritative append succeeds.
+    pub fn append_child_thread_spawned_once(
+        &self,
+        chain_root_id: &str,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        payload: Value,
+    ) -> Result<ChildLineageAppendOutcome> {
+        let result = self.state_store.append_child_thread_spawned_once(
+            chain_root_id,
+            parent_thread_id,
+            child_thread_id,
+            payload,
+        )?;
+        if result.outcome == ChildLineageAppendOutcome::Appended {
+            self.publish_records(&result.persisted);
+        }
+        Ok(result.outcome)
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {
@@ -3746,6 +3880,7 @@ pub struct ResolveRootExecutionParams<'a> {
     pub site_id: &'a str,
     pub project_path: &'a Path,
     pub item_ref: &'a str,
+    pub ref_bindings: BTreeMap<String, String>,
     pub launch_mode: &'a str,
     pub parameters: Value,
     /// Exact acting principal identifier. Root execution never invents a local
@@ -3770,6 +3905,7 @@ pub fn resolve_root_execution(
         site_id,
         project_path,
         item_ref,
+        ref_bindings,
         launch_mode,
         parameters,
         requested_by,
@@ -3829,6 +3965,7 @@ pub fn resolve_root_execution(
                 verified,
                 node_history_policy,
                 thread_kind.clone(),
+                ref_bindings.clone(),
                 usage_subject.clone(),
                 usage_subject_asserted_by.clone(),
             )
@@ -3858,6 +3995,7 @@ pub fn resolve_root_execution(
         usage_subject,
         usage_subject_asserted_by,
         parameters,
+        ref_bindings,
         resolved_item: resolved,
         plan_context: plan_ctx,
         root_admission,
@@ -3917,6 +4055,7 @@ pub fn admit_verified_root_execution(
     verified_subject: VerifiedItem,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
     thread_profile: String,
+    ref_bindings: BTreeMap<String, String>,
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
 ) -> Result<RootExecutionAdmission> {
@@ -3966,6 +4105,7 @@ pub fn admit_verified_root_execution(
         thread_profile,
         usage_subject,
         usage_subject_asserted_by,
+        ref_bindings,
         captured_history_policy: capture_thread_history_policy(&history)?,
         resolved_history_policy: history,
     };
@@ -4060,6 +4200,7 @@ pub fn preflight_root_execution(
         site_id,
         project_path,
         item_ref,
+        ref_bindings,
         launch_mode,
         requested_by,
         usage_subject,
@@ -4128,6 +4269,7 @@ pub fn preflight_root_execution(
         verified.clone(),
         node_history_policy,
         thread_profile,
+        ref_bindings,
         usage_subject,
         usage_subject_asserted_by,
     )?;
@@ -4496,6 +4638,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
             launch_metadata.with_resume_context(crate::launch_metadata::ResumeContext {
                 kind: resolved.kind.clone(),
                 item_ref: resolved.item_ref.clone(),
+                ref_bindings: resolved.ref_bindings.clone(),
                 launch_mode: resolved.launch_mode.clone(),
                 parameters: resolved.parameters.clone(),
                 project_context: resolved.plan_context.project_context.clone(),

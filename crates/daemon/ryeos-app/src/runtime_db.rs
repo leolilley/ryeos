@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -269,21 +269,24 @@ pub struct FollowWaiterChild {
     pub updated_at_ms: i64,
 }
 
-/// Stable identity for one normalized follow child specification. The spawn
-/// path uses this exact encoding so an idempotent re-drive can never adopt a
-/// different item, parameter set, or facet set at an already-recorded cohort
-/// index.
+/// Stable identity for one normalized follow child specification. An idempotent
+/// re-drive can never adopt different execution identity, parameters, or facets
+/// at an already-recorded cohort index.
 pub fn follow_child_spec_hash(
     item_ref: &str,
+    ref_bindings: &BTreeMap<String, String>,
     parameters: &Value,
     facets: Option<&Value>,
-) -> String {
+) -> Result<String> {
     let spec = serde_json::json!({
         "item_ref": item_ref,
+        "ref_bindings": ref_bindings,
         "parameters": parameters,
         "facets": facets.cloned().unwrap_or(Value::Null),
     });
-    lillux::sha256_hex(lillux::canonical_json(&spec).as_bytes())
+    let canonical = lillux::canonical_json(&spec)
+        .context("failed to canonicalize normalized follow child specification")?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// A durable parent↔child follow dependency. The graph checkpoint owns the
@@ -1291,6 +1294,13 @@ impl RuntimeDb {
             params![thread_id, chain_root_id],
         )?;
         Ok(())
+    }
+
+    pub fn delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM thread_runtime WHERE thread_id = ?1",
+            params![thread_id],
+        )?)
     }
 
     pub fn touch_seat_lease(
@@ -2502,7 +2512,8 @@ impl RuntimeDb {
         let sealed_root_request = lillux::canonical_json(
             &serde_json::to_value(sealed_root_request)
                 .context("encode sealed follow-child root request")?,
-        );
+        )
+        .context("canonicalize sealed follow-child root request")?;
         let expected_children = tx
             .query_row(
                 "SELECT expected_children FROM follow_waiter WHERE follow_key = ?1",
@@ -2582,15 +2593,15 @@ impl RuntimeDb {
         Ok(())
     }
 
-    /// Transition → waiting. Only `reserved → waiting` (idempotent on
-    /// `waiting`); requires the child + successor recorded first. Never regresses
-    /// a later phase.
-    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<()> {
+    /// Transition a reserved waiter to its durable post-suspension phase. A
+    /// complete cohort advances directly to `ready`; otherwise it advances to
+    /// `waiting`. Idempotent only on `waiting` and never regresses a later phase.
+    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<String> {
         let tx = self.conn.unchecked_transaction()?;
         let w = self.require_follow_waiter(follow_key)?;
         if w.phase == follow_phase::WAITING {
             tx.commit()?;
-            return Ok(());
+            return Ok(follow_phase::WAITING.to_string());
         }
         if w.phase != follow_phase::RESERVED {
             bail!(
@@ -2624,7 +2635,7 @@ impl RuntimeDb {
             bail!("follow waiter {follow_key} reserved transition raced");
         }
         tx.commit()?;
-        Ok(())
+        Ok(target.to_string())
     }
 
     /// Transition → resuming. Only `ready → resuming` (idempotent on
@@ -3084,6 +3095,27 @@ impl RuntimeDb {
         global_live_limit: Option<u32>,
         now_ms: i64,
     ) -> Result<Vec<String>> {
+        // Follow cohorts stage their complete membership before the parent is
+        // irreversibly continued. Keep those rows ineligible until the waiter
+        // durably reaches `waiting`; this gate is inside the primitive so direct
+        // admission, terminal-release admission, and maintenance sweeps all obey
+        // the same ordering. `ready`/`resuming` are not launchable phases: they
+        // prove the complete child cohort is already terminal. A missing waiter
+        // also fails closed. Detached windows do not use the `follow:` namespace.
+        if let Some(follow_key) = window_key.strip_prefix("follow:") {
+            let phase = self
+                .conn
+                .query_row(
+                    "SELECT phase FROM follow_waiter WHERE follow_key = ?1",
+                    params![follow_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if phase.as_deref() != Some(follow_phase::WAITING) {
+                return Ok(Vec::new());
+            }
+        }
+
         let mut admitted = Vec::new();
         loop {
             let candidate: Option<(String, u32)> = self
@@ -4379,7 +4411,7 @@ mod tests {
             follow_key,
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &parameters, None),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &parameters, None).unwrap(),
             child_thread_id,
             child_chain_root_id,
             &sealed,
@@ -4454,7 +4486,13 @@ mod tests {
             "fk-cohort",
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &params_0, None),
+            &follow_child_spec_hash(
+                item_ref,
+                &BTreeMap::new(),
+                &params_0,
+                None,
+            )
+            .unwrap(),
             "child-0",
             "chain-0",
             &sealed,
@@ -4468,7 +4506,13 @@ mod tests {
             "fk-cohort",
             1,
             item_ref,
-            &follow_child_spec_hash(item_ref, &params_1, None),
+            &follow_child_spec_hash(
+                item_ref,
+                &BTreeMap::new(),
+                &params_1,
+                None,
+            )
+            .unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -4512,7 +4556,13 @@ mod tests {
             "fk1",
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &first, None),
+            &follow_child_spec_hash(
+                item_ref,
+                &BTreeMap::new(),
+                &first,
+                None,
+            )
+            .unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -4523,7 +4573,13 @@ mod tests {
                 "fk1",
                 0,
                 item_ref,
-                &follow_child_spec_hash(item_ref, &changed, None),
+                &follow_child_spec_hash(
+                    item_ref,
+                    &BTreeMap::new(),
+                    &changed,
+                    None,
+                )
+                .unwrap(),
                 "child-1",
                 "chain-1",
                 &sealed,

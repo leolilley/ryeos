@@ -8,6 +8,7 @@ pub mod arch_check;
 pub mod cache;
 pub mod ingest;
 pub mod launch;
+pub mod launch_preparation;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod lillux_bridge;

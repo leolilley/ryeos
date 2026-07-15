@@ -201,6 +201,7 @@ fn digest_node_json(node: &ResolutionDigestNode, current: &HashMap<&str, &str>) 
         json!({
             "requested_id": node.requested_id,
             "resolved_ref": node.resolved_ref,
+            "source_space": node.source_space,
             "trust_class": node.trust_class,
             "raw_content_digest": node.raw_content_digest,
             "changed": changed,
@@ -294,6 +295,7 @@ fn map_engine_error(e: EngineError) -> HandlerError {
 
             HandlerError::Structured {
                 code: "contract_violation".into(),
+                status: axum::http::StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
                 body,
             }
         }
@@ -330,6 +332,7 @@ mod tests {
         ResolutionDigestNode {
             requested_id: resolved_ref.to_string(),
             resolved_ref: resolved_ref.to_string(),
+            source_space: ryeos_engine::contracts::ItemSpace::Bundle,
             trust_class: TrustClass::TrustedBundle,
             raw_content_digest: digest.to_string(),
         }
@@ -403,7 +406,7 @@ mod tests {
         let he = map_engine_error(err);
 
         match he {
-            crate::handler_error::HandlerError::Structured { code, body } => {
+            crate::handler_error::HandlerError::Structured { code, body, .. } => {
                 assert_eq!(code, "contract_violation");
                 assert_eq!(body["error_code"], "contract_violation");
                 assert!(body["error"]

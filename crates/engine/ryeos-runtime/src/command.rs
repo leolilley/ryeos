@@ -312,12 +312,18 @@ pub enum ControlFlagBinding {
     /// the resolved project source while runtime state is placed under this
     /// path instead.
     StateRoot,
+    /// Takes a `name=canonical-ref` value and inserts it into the request's
+    /// complete secondary execution identity map.
+    RefBinding,
 }
 
 impl ControlFlagBinding {
     /// Whether the flag consumes a following value (vs a presence boolean).
     pub fn takes_value(self) -> bool {
-        matches!(self, Self::CallMethod | Self::CallArgs | Self::StateRoot)
+        matches!(
+            self,
+            Self::CallMethod | Self::CallArgs | Self::StateRoot | Self::RefBinding
+        )
     }
 }
 

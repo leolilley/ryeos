@@ -1,0 +1,9 @@
+# ryeos:signed:2026-07-15T00:27:46Z:cb9925643c19305fac014e500ffaae3d4611929e4f4ecdc9319591c2852c8582:68kh4aGsJsPWDVmR2OviLLTGe7cpa1mGlw+BIjgEdIVlmRMm6U32Hu0Xva4UtE27z+zJooHm4qmJ8skxTPzcDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: ryeos/standard
+name: directive-launch
+kind: handler
+serves: launch_preparer
+binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-launch-preparer
+abi_version: "v1"
+required_caps: []
+description: "Pure directive model/provider launch preparer"

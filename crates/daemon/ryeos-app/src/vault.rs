@@ -628,8 +628,9 @@ impl NodeVault for SealedEnvelopeVault {
 }
 
 /// Read a single named secret from the vault. Returns `Ok(Some(value))`
-/// when present, `Ok(None)` when absent. Use this for the narrow
-/// provider-secret injection path after model-target preflight.
+/// when present and `Ok(None)` when absent. Generic launch preparation uses
+/// this only after validating a symbolic requirement against the signed
+/// runtime contract.
 pub fn read_named_secret(
     vault: &dyn NodeVault,
     principal: &str,

@@ -526,7 +526,7 @@ pub(crate) async fn upload_missing(
         validate_upload_response(&response.blob_hashes, &expected, "blob")?;
         validate_upload_response(&response.object_hashes, &[], "object")?;
     }
-    for batch in chunk_object_uploads(&objects) {
+    for batch in chunk_object_uploads(&objects)? {
         let expected = batch
             .iter()
             .map(|(hash, _)| hash.clone())
@@ -557,10 +557,22 @@ fn chunk_blob_uploads(entries: &[(String, BlobUpload)]) -> Vec<&[(String, BlobUp
 
 fn chunk_object_uploads(
     entries: &[(String, serde_json::Value)],
-) -> Vec<&[(String, serde_json::Value)]> {
-    chunk_upload_entries(entries, |(_, value)| {
-        lillux::canonical_json(value).len().saturating_add(64)
-    })
+) -> Result<Vec<&[(String, serde_json::Value)]>> {
+    let mut encoded_sizes = Vec::with_capacity(entries.len());
+    for (_, value) in entries {
+        encoded_sizes.push(
+            lillux::canonical_json(value)
+                .context("failed to canonicalize object upload entry")?
+                .len()
+                .saturating_add(64),
+        );
+    }
+    let mut index = 0;
+    Ok(chunk_upload_entries(entries, |_| {
+        let size = encoded_sizes[index];
+        index += 1;
+        size
+    }))
 }
 
 fn chunk_upload_entries<T, F>(entries: &[T], mut encoded_size: F) -> Vec<&[T]>

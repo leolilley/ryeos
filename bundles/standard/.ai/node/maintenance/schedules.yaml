@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:18:43Z:b33c7aa951307fb44a3d2a033f1be712647f2ccd185f6cee3292031a89719d65:4vnN5+Aqf6a7M6W5zeSawaPPbeiulTVrV8NUBohj1RBF5yAVlQUcdK6Rp7jwxTKYZVM+0Eyq+LYsz0upDfGFBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:30:43Z:dbcb081db1d45e93e46d3944a29b0b3ba9c04d276453c0271aedf3c49f4cd409:aXLjSrahQif794vL7HrZJkN4+jCorBZ+D0Y19PpH/XPZM4w+7t1tcKsQ8Nvr81whT+bSrGiMFqScMz6bCltYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Bundle-authored maintenance schedule declaration (standard bundle).
 #
 # The daemon reconciles this into a signed node schedule spec at init
@@ -22,6 +22,7 @@ spec_version: 1
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"   # 04:00:00 UTC daily
     timezone: UTC

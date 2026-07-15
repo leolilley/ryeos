@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:bd785d0766e3ee2e941d1f3deae2dec2c24819fb5696fc1d37892b58315fa76a:K9NBe4MJ18HUDz8R0nSrALxYskmhaFWs4jwQpxmvx0kZB26PIRXOMcE4vRjESLDUXat2BtrXo1RhXaK43DU1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:b999ba305e2873890878f9879cc6a4222432ebe3dfcfb0be7864baae4938888c:ziwsnfmqzMERiPL54N19QEYhPvXpzgnmDWfRU4bE9gSTjRJSRer+Bs2Ft7u742ZxUlXX/cOoGQPVsYuWCcziDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 version: "1.0.0"
 description: Node overview for all live threads, projects, events, remotes, and maintenance
@@ -44,8 +44,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

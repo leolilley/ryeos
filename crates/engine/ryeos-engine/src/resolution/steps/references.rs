@@ -25,7 +25,9 @@ use std::path::{Path, PathBuf};
 use crate::canonical_ref::CanonicalRef;
 
 use crate::resolution::context::{ensure_canonical, field_as_list, ResolutionContext};
-use crate::resolution::types::{ResolutionEdge, ResolutionError, ResolutionStepName};
+use crate::resolution::types::{
+    ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionStepName,
+};
 
 pub(crate) fn run(
     ctx: &mut ResolutionContext<'_>,
@@ -100,11 +102,13 @@ fn walk(
     let canonical = ensure_canonical(&after_alias, parent_kind);
     let ref_ = CanonicalRef::parse(&canonical).map_err(|e| ResolutionError::StepFailed {
         step: ResolutionStepName::ResolveReferences,
+        class: ResolutionFailureClass::InvalidDefinition,
         reason: format!("invalid canonical ref `{canonical}`: {e}"),
     })?;
 
     let loaded = ctx.load_item(&ref_, requested_id, ResolutionStepName::ResolveReferences)?;
     let to_path = loaded.source_path.clone();
+    let to_source_space = loaded.source_space;
     let trust_class = loaded.trust_class;
 
     // Extract the parsed value before consuming loaded for the ancestor.
@@ -115,6 +119,7 @@ fn walk(
         from_source_path: from_path.to_path_buf(),
         to_ref: ref_.to_string(),
         to_source_path: to_path.clone(),
+        to_source_space,
         trust_class,
         added_by: ResolutionStepName::ResolveReferences,
     };

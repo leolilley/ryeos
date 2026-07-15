@@ -9,6 +9,8 @@
 //! the braid. Graph hooks are observers — the control result a hook may return
 //! is ignored; routing stays the walker's job.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use ryeos_runtime::callback::{ActionPayload, CallbackError, DispatchActionRequest, MethodCall};
@@ -77,6 +79,20 @@ fn hook_action_payload(action: &Value) -> Result<ActionPayload, CallbackError> {
         .unwrap_or("")
         .to_string();
     let params = action.get("params").cloned().unwrap_or(Value::Null);
+    let ref_bindings = action
+        .get("ref_bindings")
+        .ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "hook action is missing required `ref_bindings`"
+            ))
+        })
+        .and_then(|value| {
+            serde_json::from_value::<BTreeMap<String, String>>(value.clone()).map_err(|e| {
+                CallbackError::Transport(anyhow::anyhow!(
+                    "invalid hook `ref_bindings` map: {e}"
+                ))
+            })
+        })?;
     let thread = action
         .get("thread")
         .and_then(|v| v.as_str())
@@ -92,6 +108,7 @@ fn hook_action_payload(action: &Value) -> Result<ActionPayload, CallbackError> {
     };
     Ok(ActionPayload {
         item_id,
+        ref_bindings,
         params,
         thread,
         call,

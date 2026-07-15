@@ -40,7 +40,9 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
 
     let payload =
         serde_json::to_vec(&event.payload).context("failed to serialize event payload")?;
-    let event_hash = lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes());
+    let canonical_event = lillux::canonical_json(&event.to_value())
+        .context("failed to canonicalize projected event")?;
+    let event_hash = lillux::sha256_hex(canonical_event.as_bytes());
     let durability = event.durability.to_string();
 
     db.connection()

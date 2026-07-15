@@ -16,6 +16,7 @@
 //! The impl doc calls this "one production implementation of
 //! push/execute/pull".
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -42,6 +43,8 @@ pub struct RemoteForwardRequest<'a> {
     pub remote: &'a ResolvedRemote,
     /// Canonical item ref to execute on the remote.
     pub item_ref: &'a str,
+    /// Complete canonical secondary execution identity.
+    pub ref_bindings: &'a BTreeMap<String, String>,
     /// Local project root path. `None` for --no-project mode.
     pub local_project_path: Option<&'a Path>,
     /// Remote project path used in push-head ref and /execute body.
@@ -277,6 +280,7 @@ pub async fn execute_unary_forward(
     let remote_result = match client
         .execute_with_options(
             req.item_ref,
+            req.ref_bindings,
             req.remote_project_path,
             &req.parameters,
             "pushed_head",

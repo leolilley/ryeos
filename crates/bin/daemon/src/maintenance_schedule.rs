@@ -57,6 +57,7 @@ struct MaintenanceDeclarationFile {
 struct MaintenanceScheduleDeclaration {
     schedule_id: String,
     item_ref: String,
+    ref_bindings: BTreeMap<String, String>,
     schedule_type: String,
     expression: String,
     timezone: String,
@@ -439,6 +440,13 @@ fn validate_declaration(decl: &MaintenanceScheduleDeclaration) -> Result<()> {
     ryeos_scheduler::crontab::validate_schedule_id(&decl.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&decl.item_ref)
         .with_context(|| format!("invalid item_ref '{}'", decl.item_ref))?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&decl.ref_bindings)
+        .with_context(|| {
+            format!(
+                "maintenance schedule '{}' has invalid ref_bindings",
+                decl.schedule_id
+            )
+        })?;
     ryeos_scheduler::crontab::validate_expression(&decl.schedule_type, &decl.expression)?;
     ryeos_scheduler::crontab::validate_timezone(&decl.timezone)?;
     ryeos_scheduler::overlap::parse_overlap_policy(&decl.overlap_policy).with_context(|| {
@@ -491,6 +499,7 @@ fn maintenance_spec_body(
         "spec_version": 1,
         "schedule_id": decl.schedule_id,
         "item_ref": decl.item_ref,
+        "ref_bindings": decl.ref_bindings,
         "schedule_type": decl.schedule_type,
         "expression": decl.expression,
         "timezone": decl.timezone,

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -24,8 +24,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
     pub vault_bindings: &'a [(String, String)],
-    pub provider_secret_name: Option<&'a str>,
-    pub thread_auth_token: Option<&'a str>,
+    pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub sandbox: &'a ryeos_engine::sandbox::SandboxRuntime,
     pub verified_command: &'a ryeos_engine::sandbox::SandboxVerifiedCode,
@@ -36,18 +35,48 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub is_resume: bool,
 }
 
-struct AttachedProcessGuard<'a> {
-    state: &'a ryeos_app::state::AppState,
-    thread_id: &'a str,
+pub(super) struct SpawnedRuntime {
+    process: Option<lillux::RunningProcess>,
+    attached_process: Option<AttachedProcessGuard>,
+    workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    immediate_result: Option<RuntimeResult>,
+}
+
+impl SpawnedRuntime {
+    pub(super) fn wait(mut self) -> Result<RuntimeResult> {
+        if let Some(result) = self.immediate_result.take() {
+            return Ok(result);
+        }
+        let process = self
+            .process
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("spawned runtime has no process or immediate result"))?;
+        let result = process.wait();
+        drop(self.attached_process.take());
+        drop(self.workspace_lifeline.take());
+        if !result.success {
+            return Ok(runtime_failure_result(
+                &result.stderr,
+                result.timed_out,
+                result.output_limit_exceeded.map(|limit| limit.as_str()),
+            ));
+        }
+        decode_runtime_stdout(&result.stdout)
+    }
+}
+
+struct AttachedProcessGuard {
+    state: ryeos_app::state::AppState,
+    thread_id: String,
     identity: ryeos_app::process::ExecutionProcessIdentity,
 }
 
-impl Drop for AttachedProcessGuard<'_> {
+impl Drop for AttachedProcessGuard {
     fn drop(&mut self) {
         match self
             .state
             .state_store
-            .clear_thread_process_if_matches(self.thread_id, &self.identity)
+            .clear_thread_process_if_matches(&self.thread_id, &self.identity)
         {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
@@ -63,7 +92,12 @@ impl Drop for AttachedProcessGuard<'_> {
     }
 }
 
-pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
+/// Build the protocol subprocess request and start the child, returning as
+/// soon as stdin has been handed to the successfully spawned process. Waiting
+/// and result decoding are deliberately separate so accepted launch surfaces
+/// can acknowledge the durable spawn-task handoff without waiting for runtime
+/// completion.
+pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRuntime> {
     let SpawnRuntimeParams {
         state,
         descriptor,
@@ -79,7 +113,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         callback,
         thread_id,
         vault_bindings,
-        provider_secret_name,
         thread_auth_token,
         roots,
         sandbox,
@@ -125,7 +158,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         timeout: std::time::Duration::from_secs(timeout_secs),
         acting_principal,
         cas_root,
-        thread_auth_token,
+        thread_auth_token: Some(thread_auth_token),
     };
     let mut spec = ryeos_engine::protocols::build_subprocess_spec(descriptor, &build_request)
         .map_err(|error| anyhow::anyhow!("builder failed: {error}"))?;
@@ -164,11 +197,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
 
     let declared_secret_bindings = secret_map
         .iter()
-        .filter(|(key, _)| Some(key.as_str()) != provider_secret_name)
-        .map(|(key, value)| (key.clone(), value.clone()));
-    let provider_secret_bindings = secret_map
-        .iter()
-        .filter(|(key, _)| Some(key.as_str()) == provider_secret_name)
         .map(|(key, value)| (key.clone(), value.clone()));
     spec.env = ryeos_app::env_contract::EnvContractBuilder::new()
         .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
@@ -181,10 +209,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         .with_bindings(
             ryeos_app::env_contract::EnvSourceKind::DeclaredSecret,
             declared_secret_bindings,
-        )?
-        .with_bindings(
-            ryeos_app::env_contract::EnvSourceKind::ProviderSecret,
-            provider_secret_bindings,
         )?
         .with_typed_bindings(protocol_bindings)?
         .build();
@@ -211,12 +235,16 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
     let spawned = match lillux::spawn(request) {
         Ok(spawned) => spawned,
         Err(result) => {
-            drop(workspace_lifeline);
-            return Ok(runtime_failure_result(
-                &result.stderr,
-                result.timed_out,
-                result.output_limit_exceeded.map(|limit| limit.as_str()),
-            ));
+            return Ok(SpawnedRuntime {
+                process: None,
+                attached_process: None,
+                workspace_lifeline,
+                immediate_result: Some(runtime_failure_result(
+                    &result.stderr,
+                    result.timed_out,
+                    result.output_limit_exceeded.map(|limit| limit.as_str()),
+                )),
+            });
         }
     };
     let process_identity =
@@ -235,9 +263,9 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         };
     // Install compare-clear ownership before the in-process attach. The runtime
     // can win the UDS self-attach race, then stop/finalize before this call.
-    let _attached_process_guard = AttachedProcessGuard {
-        state,
-        thread_id,
+    let attached_process = AttachedProcessGuard {
+        state: state.clone(),
+        thread_id: thread_id.to_string(),
         identity: process_identity.clone(),
     };
     if let Err(error) =
@@ -258,19 +286,12 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         drop(workspace_lifeline);
         return Err(error.context("attach managed runtime process identity"));
     }
-    let result = spawned.wait();
-    drop(_attached_process_guard);
-    drop(workspace_lifeline);
-
-    if !result.success {
-        return Ok(runtime_failure_result(
-            &result.stderr,
-            result.timed_out,
-            result.output_limit_exceeded.map(|limit| limit.as_str()),
-        ));
-    }
-
-    decode_runtime_stdout(&result.stdout)
+    Ok(SpawnedRuntime {
+        process: Some(spawned),
+        attached_process: Some(attached_process),
+        workspace_lifeline,
+        immediate_result: None,
+    })
 }
 
 fn runtime_failure_result(

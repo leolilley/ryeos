@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:3f72c34f2eb7c50fa46c1486dbd7892754c2dcfc87a4e1955cd917e066db41fc:VFbe6xuj6wL/lSNl5MVpf+SDIJMnRagf1LnYYmeavB87Z3rlxe9jtSrTPHGtATI0anmkT7mJaBAJKNnjG5j+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:e95c4b254877d0f1f91d06ffd3fc6f3b6ee8de3e9b5737c0afa1a0a0349b092f:Vtehli+fsAqMFebx0V91xHEsBcCsG4FR3aXgyVCtN+PVRyysEkE8axMzwZ5AQ3nGuGOaK7YGe458MeVSOUrmCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
 description: Focused thread transcript over the live prism backdrop
@@ -37,8 +37,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

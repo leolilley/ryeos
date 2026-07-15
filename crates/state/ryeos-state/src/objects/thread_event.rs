@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
@@ -115,7 +116,9 @@ impl ThreadEvent {
         if let Some(hash) = &self.prev_thread_event_hash {
             validate_canonical_hash("prev_thread_event_hash", hash)?;
         }
-        let serialized_bytes = lillux::canonical_json(&self.to_value()).len();
+        let serialized_bytes = lillux::canonical_json(&self.to_value())
+            .context("failed to canonicalize thread event")?
+            .len();
         if serialized_bytes > MAX_THREAD_EVENT_SERIALIZED_BYTES {
             anyhow::bail!(
                 "thread event is {} serialized bytes (max {})",
@@ -233,10 +236,10 @@ impl NewEvent {
 }
 
 /// Compute the CAS content hash of a [`ThreadEvent`] using canonical JSON.
-pub fn hash_event(event: &ThreadEvent) -> String {
+pub fn hash_event(event: &ThreadEvent) -> Result<String, lillux::CanonicalJsonError> {
     let value = event.to_value();
-    let canonical = lillux::canonical_json(&value);
-    lillux::sha256_hex(canonical.as_bytes())
+    let canonical = lillux::canonical_json(&value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// Compute the CAS content hash of a [`serde_json::Value`] as a deterministic map.
@@ -395,8 +398,8 @@ mod tests {
             .payload(serde_json::json!({"z": 1, "a": 2, "m": 3}))
             .build_with_ts("2026-04-21T12:34:56Z".to_string());
 
-        let hash1 = hash_event(&event);
-        let hash2 = hash_event(&event);
+        let hash1 = hash_event(&event).unwrap();
+        let hash2 = hash_event(&event).unwrap();
         assert_eq!(hash1, hash2, "canonical JSON must be deterministic");
         assert!(lillux::valid_hash(&hash1), "hash must be 64 hex chars");
     }
@@ -415,7 +418,7 @@ mod tests {
             .payload(serde_json::json!({"key": "value_b"}))
             .build_with_ts("2026-04-21T12:34:56Z".to_string());
 
-        assert_ne!(hash_event(&event_a), hash_event(&event_b));
+        assert_ne!(hash_event(&event_a).unwrap(), hash_event(&event_b).unwrap());
     }
 
     #[test]

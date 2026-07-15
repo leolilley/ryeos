@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:e7fb76531dc3cdf9242eb1ecf49548aa38edd5cbe1b4a9b713f11763a4ae7c51:qSg+0mBkhTOwG1zAB5zGL7JQC/dPA2euAY7xZuGMAmGUgbOFPwoBq8FPMovHTjkPTcNelPiHn7jree/PJuBrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T02:11:39Z:7d8f7ef395d0114a782ca0ff733d39a0c984638b7defac9607006b4c7e52a2d0:YtJpFXgD4sIhmgTUJjoK9idaQCX3fSJ+vXfm9uX/No5m0zpooJGK6ZzJ0FA2hh/WiDAQ/CUVUh5PG5Ig//QxAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-project
 version: "1.0.0"
 description: Active project explorer for files, signed items, and related execution
@@ -42,8 +42,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

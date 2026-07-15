@@ -109,8 +109,13 @@ mod integration_tests {
         let sealed =
             ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let item_ref = sealed.item_ref();
-        let spec_hash =
-            ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &serde_json::json!({}), None);
+        let spec_hash = ryeos_app::runtime_db::follow_child_spec_hash(
+            item_ref,
+            &std::collections::BTreeMap::new(),
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
         store
             .set_follow_child(follow_key, 0, item_ref, &spec_hash, child, root, &sealed)
             .unwrap();
@@ -161,8 +166,13 @@ mod integration_tests {
         let sealed =
             ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let item_ref = sealed.item_ref();
-        let hash =
-            ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &serde_json::json!({}), None);
+        let hash = ryeos_app::runtime_db::follow_child_spec_hash(
+            item_ref,
+            &std::collections::BTreeMap::new(),
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
         assert!(store
             .set_follow_child("k1", 0, item_ref, &hash, "C2", "C2", &sealed)
             .is_err());
@@ -241,6 +251,7 @@ mod integration_tests {
                 &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
                     kind: kind.into(),
                     item_ref: "test/item".into(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     launch_mode: "inline".into(),
                     parameters: serde_json::json!({}),
                     project_context: ProjectContext::LocalPath {
@@ -1021,6 +1032,7 @@ mod integration_tests {
         let resume_ctx = || ResumeContext {
             kind: "directive".into(),
             item_ref: "test/item".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
@@ -1125,6 +1137,7 @@ mod integration_tests {
         let resume_ctx = || ResumeContext {
             kind: "directive".into(),
             item_ref: "test/item".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {

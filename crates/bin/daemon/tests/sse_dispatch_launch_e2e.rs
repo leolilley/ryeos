@@ -327,6 +327,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -432,6 +433,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -479,6 +481,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
+            "ref_bindings": {},
             "project_path": project_path,
             "parameters": {"name": "World"},
             "launch_mode": "detached"
@@ -503,6 +506,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
+            "ref_bindings": {},
             "project_path": project_path,
             "parameters": {"name": "World"},
             "validate_only": true
@@ -527,6 +531,7 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
+            "ref_bindings": {},
             "project_path": project_path,
             "parameters": {"name": "World"},
             "target_site_id": "site:not-local"
@@ -685,6 +690,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 
     let body_obj = serde_json::json!({
         "item_ref": "config:any/thing",
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": {},
     });
@@ -726,6 +732,7 @@ async fn sse_dispatch_launch_rejects_relative_project_path() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
+        "ref_bindings": {},
         "project_path": "relative/path",
         "parameters": {},
     });

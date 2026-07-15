@@ -732,7 +732,7 @@ config:
   start: fetch
   nodes:
     fetch:
-      action: {item_id: "tool:test/fetch"}
+      action: {item_id: "tool:test/fetch", ref_bindings: {}}
       retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}
       next: {type: unconditional, to: done}
     done:
@@ -759,7 +759,7 @@ config:
   start: fetch
   nodes:
     fetch:
-      action: {item_id: "tool:test/fetch"}
+      action: {item_id: "tool:test/fetch", ref_bindings: {}}
       retry: {attempts: 3, backoff_ms: 1000, backof_max: 30000}
       next: {type: unconditional, to: done}
     done:

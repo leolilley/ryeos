@@ -15,10 +15,10 @@
 //! machinery: no waiter reservation, no parent successor, no `mark_waiting`, and
 //! no native-resume gate — the parent never suspends, so it needs neither a
 //! durable catch nor to be checkpoint-resumable. What it KEEPS is identical: the
-//! server-side trust derivation, managed-runtime resolution, the fresh-root
-//! child row + seeded launch identity, and the detached `launch_follow_child`
-//! spawn (which is waiter-agnostic — `kick_follow_resume_if_ready` is a no-op
-//! without a waiter).
+//! server-side trust derivation, managed-runtime resolution and preparation,
+//! the fresh-root child row with its authoritative launch audit, and an
+//! acknowledged managed spawn-task handoff (which is waiter-agnostic —
+//! `kick_follow_resume_if_ready` is a no-op without a waiter).
 //!
 //! **Trust.** Every trust-bearing fact is server-side: the acting principal from
 //! the validated `thread_auth`, the parent chain root / launch identity from the
@@ -26,13 +26,16 @@
 //! callback capability. The action only says WHICH child to run and WHAT cohort
 //! facets to stamp.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
-use ryeos_app::event_store_service::{EventAppendItem, EventAppendParams};
 use ryeos_app::execution_provenance::ExecutionProvenance;
-use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+use ryeos_app::launch_metadata::{
+    PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -57,14 +60,16 @@ pub async fn spawn_detached_child(
     cap: &CallbackCapability,
     child_provenance: ExecutionProvenance,
     child_item_ref: &str,
+    child_ref_bindings: &BTreeMap<String, String>,
     child_parameters: &Value,
     facets: Option<&Value>,
     launch_window: Option<&ryeos_runtime::callback::LaunchWindow>,
 ) -> Result<Value> {
     let parent_thread_id = cap.thread_id.clone();
 
-    // Parent thread row → chain root + launch identity (launch_mode, site ids).
-    // Never trust the caller for these.
+    // Parent thread row → chain root + site identity. Never trust the caller
+    // for these. This launch's mode is the daemon-selected detached mode below,
+    // not the mode under which the parent itself was launched.
     let parent = state
         .threads
         .get_thread(&parent_thread_id)?
@@ -109,8 +114,8 @@ pub async fn spawn_detached_child(
     // Managed-runtime children only: a child kind served by a registered runtime
     // resolves here; a leaf tool/service kind does not. The same lookup yields the
     // child row's `native:<binary>` executor identity.
-    let child_runtime = child_provenance
-        .request_engine()
+    let child_engine = child_provenance.request_engine();
+    let child_runtime = child_engine
         .runtimes
         .resolve_for_launch(None, &child_ref.kind)
         .map_err(|e| {
@@ -131,8 +136,7 @@ pub async fn spawn_detached_child(
     // `graph_run`), not the item kind: profile-driven continuation / resume /
     // operator behavior keys off the profile name, so a fresh child row and its
     // captured identity must carry the profile, exactly like a normal launch.
-    let child_thread_profile = child_provenance
-        .request_engine()
+    let child_thread_profile = child_engine
         .kinds
         .get(&child_ref.kind)
         .and_then(|schema| schema.execution())
@@ -151,21 +155,22 @@ pub async fn spawn_detached_child(
     // records via `parent_execution_context`, not a shared chain root.
     let requested_by = EffectivePrincipal::Local(Principal {
         fingerprint: thread_auth.acting_principal.clone(),
-        scopes: thread_auth.caller_scopes.clone(),
+        scopes: cap.effective_caps.clone(),
     });
     let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-            engine: child_provenance.request_engine(),
+            engine: child_engine,
             node_history_policy: &state.node_history_policy,
             site_id: &parent.current_site_id,
             project_path: child_provenance.effective_path(),
             item_ref: child_item_ref,
-            launch_mode: &parent.launch_mode,
+            launch_mode: "detached",
             parameters: child_parameters.clone(),
+            ref_bindings: child_ref_bindings.clone(),
             requested_by: thread_auth.acting_principal.clone(),
             usage_subject: None,
             usage_subject_asserted_by: None,
-            caller_scopes: thread_auth.caller_scopes.clone(),
+            caller_scopes: cap.effective_caps.clone(),
             validate_only: false,
             creates_chain_root: true,
         },
@@ -174,54 +179,94 @@ pub async fn spawn_detached_child(
     let child_root_admission = child_preflight.root_admission;
     let child_execution = child_root_admission.execution_request(
         child_executor_ref.clone(),
-        parent.launch_mode.clone(),
+        "detached".to_string(),
         child_parameters.clone(),
     )?;
     let sealed_root_request =
         SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref.clone())?;
+
+    // Build the complete immutable launch identity and authoritative generic
+    // launch authority before minting any observable row. `effective_caps`
+    // carries the PARENT's caps — the bounding authority handed to
+    // `CapabilityPolicy::FollowChildHybrid`.
+    let mut meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
+        kind: child_thread_profile.clone(),
+        item_ref: child_item_ref.to_string(),
+        ref_bindings: child_ref_bindings.clone(),
+        launch_mode: "detached".to_string(),
+        parameters: child_parameters.clone(),
+        // Resume identity derives from validated server-side provenance, never
+        // the request body — same rule as follow.
+        project_context: ProjectContext::LocalPath {
+            path: cap.provenance.effective_path().to_path_buf(),
+        },
+        original_snapshot_hash: inherited_snapshot_hash,
+        // A detached child borrows the parent's workspace; it never owns snapshot
+        // lineage, so no pushed-head identity is seeded.
+        original_pushed_head_ref: None,
+        // The parent's state-root override carries to the child so its
+        // state/callback anchor stays isolated with the parent's.
+        state_root: cap
+            .provenance
+            .state_root_override()
+            .map(|p| p.to_path_buf()),
+        current_site_id: parent.current_site_id.clone(),
+        origin_site_id: parent.origin_site_id.clone(),
+        requested_by: requested_by.clone(),
+        execution_hints: ExecutionHints::default(),
+        effective_caps: cap.effective_caps.clone(),
+        executor_ref: Some(child_executor_ref.clone()),
+        runtime_ref: Some(child_runtime_ref.clone()),
+    })
+    .with_sealed_root_request(sealed_root_request);
+    let launch_parent_context = crate::dispatch::ParentExecutionContext {
+        parent_thread_id: cap.thread_id.clone(),
+        hard_limits: cap.hard_limits.clone(),
+        depth: cap.depth,
+    };
+    meta.follow_parent_context = Some(PersistedParentExecutionContext {
+        parent_thread_id: launch_parent_context.parent_thread_id.clone(),
+        hard_limits: launch_parent_context.hard_limits.clone(),
+        depth: launch_parent_context.depth,
+    });
     let child_thread_id = new_thread_id();
+    let prepared = crate::execution::launch::prepare_follow_child_launch(
+        state,
+        &child_thread_id,
+        &meta,
+        child_provenance,
+        launch_parent_context,
+    )
+    .await?;
+    let mut initial_events = prepared.initial_audit_events()?;
+    if let Some(Value::Object(map)) = facets {
+        for (key, value) in map {
+            if key.trim().is_empty() {
+                continue;
+            }
+            let value = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            initial_events.push(ryeos_app::state_store::NewEventRecord {
+                event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
+                storage_class: RuntimeEventType::ThreadFacetSet
+                    .storage_class()
+                    .as_str()
+                    .to_string(),
+                payload: json!({ "key": key, "value": value }),
+            });
+        }
+    }
     state
         .threads
-        .create_root_thread_with_id(&child_thread_id, &child_execution)?;
-
-    // Persist two agreeing authorities before launch: ResumeContext carries the
-    // envelope/provenance identity and the sealed request carries the exact
-    // verified fresh-root subject. `effective_caps` is the PARENT's bounding
-    // authority for `CapabilityPolicy::FollowChildHybrid`; the child's composed
-    // caps replace it after first-launch policy resolution.
-    let meta = RuntimeLaunchMetadata::default()
-        .with_resume_context(ResumeContext {
-            kind: child_thread_profile.clone(),
-            item_ref: child_item_ref.to_string(),
-            launch_mode: parent.launch_mode.clone(),
-            parameters: child_parameters.clone(),
-            // Resume identity derives from validated server-side provenance, never
-            // the request body — same rule as follow.
-            project_context: ProjectContext::LocalPath {
-                path: cap.provenance.effective_path().to_path_buf(),
-            },
-            original_snapshot_hash: inherited_snapshot_hash,
-            // A detached child borrows the parent's workspace; it never owns snapshot
-            // lineage, so no pushed-head identity is seeded.
-            original_pushed_head_ref: None,
-            // The parent's state-root override carries to the child so its
-            // state/callback anchor stays isolated with the parent's.
-            state_root: cap
-                .provenance
-                .state_root_override()
-                .map(|p| p.to_path_buf()),
-            current_site_id: parent.current_site_id.clone(),
-            origin_site_id: parent.origin_site_id.clone(),
-            requested_by: requested_by.clone(),
-            execution_hints: ExecutionHints::default(),
-            effective_caps: cap.effective_caps.clone(),
-            executor_ref: Some(child_executor_ref.clone()),
-            runtime_ref: Some(child_runtime_ref.clone()),
-        })
-        .with_sealed_root_request(sealed_root_request);
-    state
-        .state_store
-        .seed_launch_metadata(&child_thread_id, &meta)?;
+        .create_root_thread_with_events_and_launch_metadata(
+            &child_thread_id,
+            prepared.resolved_request(),
+            initial_events,
+            Some(prepared.launch_metadata()),
+        )?;
+    let prepared = prepared.with_persisted_birth_audit();
     let inherited_stop =
         match state
             .state_store
@@ -275,36 +320,6 @@ pub async fn spawn_detached_child(
         );
     }
 
-    // ── Cohort facets ───────────────────────────────────────────────────────
-    // Stamp `(key, value)` tags BEFORE launch so a `threads.list --facet` query
-    // sees the cohort the instant the child appears. Event-backed (survives a
-    // projection rebuild), exactly like `threads.set_facet`.
-    if let Some(Value::Object(map)) = facets {
-        for (key, value) in map {
-            if key.trim().is_empty() {
-                continue;
-            }
-            let value_str = match value {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            state
-                .events
-                .append(&EventAppendParams {
-                    thread_id: child_thread_id.clone(),
-                    event: EventAppendItem {
-                        event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
-                        storage_class: RuntimeEventType::ThreadFacetSet
-                            .storage_class()
-                            .as_str()
-                            .to_string(),
-                        payload: json!({ "key": key, "value": value_str }),
-                    },
-                })
-                .with_context(|| format!("detach: stamping facet '{key}' on {child_thread_id}"))?;
-        }
-    }
-
     // ── Launch admission (bounded fanout) ───────────────────────────────────
     // A windowed spawn minted its row / identity / facets above
     // unconditionally — the launch table and cohort are complete the moment
@@ -319,13 +334,24 @@ pub async fn spawn_detached_child(
     let mut co_admitted: Vec<String> = Vec::new();
     if let Some(w) = launch_window {
         let window_key = format!("{parent_thread_id}:{}", w.key);
-        let admitted = state.state_store.launch_window_enqueue(
+        let admitted = match state.state_store.launch_window_enqueue(
             &child_thread_id,
             &window_key,
             w.width,
             crate::execution::launch::global_live_fanout_limit(),
             lillux::time::timestamp_millis(),
-        )?;
+        ) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                settle_detached_pre_handoff_failure(
+                    state,
+                    &child_thread_id,
+                    "launch_window_enqueue_failed",
+                    &error.to_string(),
+                )?;
+                return Err(error).context("detach: enqueue child in launch window");
+            }
+        };
         queued = !admitted.iter().any(|c| c == &child_thread_id);
         co_admitted = admitted
             .into_iter()
@@ -334,30 +360,64 @@ pub async fn spawn_detached_child(
     }
 
     // ── Launch detached ─────────────────────────────────────────────────────
-    // Fire-and-forget: preparation persists the launch claim before returning,
-    // so a daemon loss is safe for the reconcile sweep to re-drive. The launch uses the parent's
-    // BORROWED-CHILD provenance (moved in) — pushed-head / effective workspace /
-    // request engine preserved. Parent execution ceiling from the VALIDATED cap
-    // (never `child_parameters`): the child launches clamped to the parent's hard
-    // limits at parent depth + 1, recording the `dispatch` child-link edge.
+    // A non-queued launch is acknowledged only once the runtime spawn task owns
+    // the prepared authority and secrets. The outer task remains detached for
+    // the runtime's lifetime, but preparation and pre-handoff failures are
     if !queued {
-        let launch_parent_context = crate::dispatch::ParentExecutionContext {
-            parent_thread_id: cap.thread_id.clone(),
-            hard_limits: cap.hard_limits.clone(),
-            depth: cap.depth,
+        let launch_state = state.clone();
+        let launch_child_id = child_thread_id.clone();
+        let (launch_handoff, launch_ready) =
+            crate::execution::launch::LaunchHandoff::channel();
+        tokio::spawn(async move {
+            if let Err(e) = crate::execution::launch::launch_prepared_follow_child(
+                launch_state,
+                &launch_child_id,
+                prepared,
+                &launch_handoff,
+            )
+            .await
+            {
+                tracing::error!(
+                    child_thread_id = %launch_child_id,
+                    error = %e,
+                    "detached child launch failed",
+                );
+            }
+        });
+        let handed_off = match launch_ready.await {
+            Ok(Ok(thread_id)) => thread_id,
+            Ok(Err(failure)) => {
+                settle_detached_pre_handoff_failure(
+                    state,
+                    &child_thread_id,
+                    &failure.code,
+                    &failure.message,
+                )?;
+                anyhow::bail!(
+                    "detach: child launch rejected before handoff ({}): {}",
+                    failure.code,
+                    failure.message
+                );
+            }
+            Err(error) => {
+                settle_detached_pre_handoff_failure(
+                    state,
+                    &child_thread_id,
+                    "launch_handoff_closed",
+                    &error.to_string(),
+                )?;
+                return Err(error).context("detach: child launch task closed before spawn handoff");
+            }
         };
-        if let crate::execution::launch::RecoveryLaunchOutcome::Skipped(reason) =
-            crate::execution::launch::prepare_and_spawn_follow_child(
-                state.clone(),
+        if handed_off != child_thread_id {
+            settle_detached_pre_handoff_failure(
+                state,
                 &child_thread_id,
-                Some(child_provenance),
-                Some(launch_parent_context),
-            )?
-        {
-            tracing::debug!(
-                child_thread_id = %child_thread_id,
-                reason,
-                "detached child launch skipped"
+                "launch_handoff_identity_mismatch",
+                &format!("handed off {handed_off}"),
+            )?;
+            anyhow::bail!(
+                "detach: child launch handed off unexpected thread {handed_off} (expected {child_thread_id})"
             );
         }
     }
@@ -394,4 +454,22 @@ pub async fn spawn_detached_child(
             "queued": queued,
         },
     }))
+}
+
+fn settle_detached_pre_handoff_failure(
+    state: &AppState,
+    child_thread_id: &str,
+    code: &str,
+    reason: &str,
+) -> Result<()> {
+    let outcome = crate::dispatch::finalize_child_link_failure_if_current(
+        state,
+        child_thread_id,
+        json!({ "code": code, "reason": reason }),
+    )?;
+    if outcome.is_settled() {
+        crate::execution::launch::kick_follow_resume_if_ready(state, child_thread_id);
+        crate::execution::launch::kick_launch_window_for_terminal(state, child_thread_id);
+    }
+    Ok(())
 }

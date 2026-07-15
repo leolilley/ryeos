@@ -57,6 +57,7 @@ mod tests {
             "spec_version": 1,
             "schedule_id": "my-schedule",
             "item_ref": "directive:test/hello",
+            "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "60",
             "timezone": "UTC",

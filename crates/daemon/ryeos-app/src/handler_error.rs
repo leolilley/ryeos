@@ -52,6 +52,7 @@ pub enum HandlerError {
     #[error("structured error: {code}")]
     Structured {
         code: String,
+        status: u16,
         body: serde_json::Value,
     },
 }

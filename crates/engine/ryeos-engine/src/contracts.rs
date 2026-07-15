@@ -2806,7 +2806,7 @@ pub struct ResolvedSourceFormat {
 
 /// The resolution space where an item was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ItemSpace {
     Project,
     Bundle,
