@@ -727,9 +727,11 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
             "service:threads/input",
             &project_path,
             serde_json::json!({
-                "thread": first_id.clone(),
-                "project_path": project_path.clone(),
                 "input": "continue",
+                "target": {
+                    "kind": "thread",
+                    "thread_id": first_id.clone(),
+                },
             }),
         )
         .await

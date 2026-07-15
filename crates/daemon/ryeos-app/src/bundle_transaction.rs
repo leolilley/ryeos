@@ -93,7 +93,7 @@ impl BundleTransaction {
             );
         }
         let generation_digest = tree_digest(staging)?;
-        let registration_digest = registration_digest(&registration);
+        let registration_digest = registration_digest(&registration)?;
         self.write_journal(&Journal {
             bundle_name: self.name.clone(),
             operation,
@@ -205,7 +205,7 @@ impl BundleTransaction {
             .registration
             .as_ref()
             .context("present transaction missing registration")?;
-        if registration_digest(registration)
+        if registration_digest(registration)?
             != journal
                 .registration_digest
                 .as_deref()
@@ -380,8 +380,9 @@ fn validate_journal(app_root: &Path, name: &str, journal: &Journal) -> Result<()
     Ok(())
 }
 
-fn registration_digest(value: &serde_json::Value) -> String {
-    lillux::sha256_hex(lillux::canonical_json(value).as_bytes())
+fn registration_digest(value: &serde_json::Value) -> Result<String> {
+    let canonical = lillux::canonical_json(value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 fn tree_digest(root: &Path) -> Result<String> {

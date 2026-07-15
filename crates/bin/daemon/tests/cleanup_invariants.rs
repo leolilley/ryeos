@@ -564,8 +564,9 @@ fn gate_18_remote_execute_request_defaults() {
     let req: ryeos_api::handlers::remote_execute::Request =
         serde_json::from_value(serde_json::json!({
             "item_ref": "directive:some/test",
+            "ref_bindings": {},
         }))
-        .expect("Request with only item_ref must parse");
+        .expect("Request with required identity fields must parse");
     assert!(
         !req.no_project,
         "no_project must default to false (the CLI must set it explicitly for --no-project mode)"

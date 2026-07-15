@@ -417,7 +417,7 @@ mod tests {
     }
 
     fn write_object(cas_root: &Path, value: &Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(cas_root, "objects", &hash, ".json");
         if let Some(parent) = path.parent() {

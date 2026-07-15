@@ -304,11 +304,13 @@ impl DaemonClient {
     pub async fn execute_stream(
         &self,
         item_ref: &str,
+        ref_bindings: &std::collections::BTreeMap<String, String>,
         project_path: &str,
         parameters: &serde_json::Value,
     ) -> Result<SseStream, ClientError> {
         let body = serde_json::json!({
             "item_ref": item_ref,
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "stream": true,
@@ -355,6 +357,7 @@ impl DaemonClient {
         }
         let mut body = serde_json::json!({
             "item_ref": "service:items/effective",
+            "ref_bindings": {},
             "parameters": params,
         });
         if let Some(pp) = project_path {
@@ -387,6 +390,7 @@ impl DaemonClient {
         };
         let mut body = serde_json::json!({
             "item_ref": "service:items/effective",
+            "ref_bindings": {},
             "parameters": params,
         });
         if let Some(pp) = project_path {

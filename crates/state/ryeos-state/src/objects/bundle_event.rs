@@ -96,9 +96,11 @@ impl BundleEventObject {
     }
 }
 
-pub fn hash_bundle_event(event: &BundleEventObject) -> String {
-    let canonical = lillux::canonical_json(&event.to_value());
-    lillux::sha256_hex(canonical.as_bytes())
+pub fn hash_bundle_event(
+    event: &BundleEventObject,
+) -> Result<String, lillux::CanonicalJsonError> {
+    let canonical = lillux::canonical_json(&event.to_value())?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 pub fn validate_bundle_identifier(label: &str, value: &str) -> anyhow::Result<()> {
@@ -165,7 +167,7 @@ mod tests {
         event.validate().unwrap();
         let value = event.to_value();
         assert!(value.get("event_hash").is_none());
-        assert_eq!(hash_bundle_event(&event).len(), 64);
+        assert_eq!(hash_bundle_event(&event).unwrap().len(), 64);
     }
 
     #[test]

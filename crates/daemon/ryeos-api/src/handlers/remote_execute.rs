@@ -6,6 +6,7 @@
 //! request parsing, project binding resolution, and ignore rule loading
 //! in the handler.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,6 +30,8 @@ pub struct Request {
     pub remote: String,
     /// Item to execute (canonical ref).
     pub item_ref: String,
+    /// Complete canonical secondary execution identity.
+    pub ref_bindings: BTreeMap<String, String>,
     /// `--no-project` flag from the CLI. Mutually exclusive with
     /// `project`. The two flat fields are translated into a
     /// `ProjectPathSpec` inside the handler.
@@ -59,7 +62,12 @@ fn default_remote() -> String {
 // all use the same constant.
 pub use ryeos_executor::execution::project_source::NO_PROJECT_SENTINEL;
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> HandlerResult<Value> {
+    authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
     // Build the project spec from the two flat CLI fields.
     let project_spec = match (req.no_project, req.project.as_ref()) {
         (true, Some(_)) => {
@@ -177,10 +185,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         forward::RemoteForwardRequest {
             remote: &resolved_remote,
             item_ref: &req.item_ref,
+            ref_bindings: &req.ref_bindings,
             local_project_path: abs_project_path.as_deref(),
             remote_project_path: &project_path_for_ref,
             parameters: req.parameters.clone(),
-            acting_principal: "",
+            acting_principal: &ctx.fingerprint,
             remote_ignore: &remote_ignore,
             call: req.call.as_ref(),
         },
@@ -211,10 +220,38 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }))
 }
 
+fn authorize_execution_refs(
+    item_ref: &str,
+    ref_bindings: &BTreeMap<String, String>,
+    ctx: &crate::handler_context::HandlerContext,
+    state: &AppState,
+) -> HandlerResult<()> {
+    ctx.require_verified()?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(ref_bindings)
+        .map_err(|error| HandlerError::BadRequest(format!("invalid ref_bindings: {error}")))?;
+    for (label, value) in std::iter::once(("item_ref", item_ref))
+        .chain(ref_bindings.iter().map(|(name, value)| (name.as_str(), value.as_str())))
+    {
+        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(value)
+            .map_err(|error| HandlerError::BadRequest(format!("invalid {label}: {error}")))?;
+        let required = ryeos_runtime::authorizer::canonical_cap(
+            &canonical.kind,
+            &canonical.bare_id,
+            "execute",
+        );
+        let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(&required);
+        state
+            .authorizer
+            .authorize(&ctx.scopes, &policy)
+            .map_err(|_| HandlerError::Forbidden(format!("missing required capability: {required}")))?;
+    }
+    Ok(())
+}
+
 fn remote_forward_error_to_handler_error(e: forward::RemoteForwardError) -> HandlerError {
     match e {
         forward::RemoteForwardError::MissingSnapshotHash => HandlerError::BadRequest(
-            "remote execution completed but no snapshot_hash in result — async remote execute not supported in v1"
+            "remote execution completed but no snapshot_hash in result — async remote execute is not supported"
                 .into(),
         ),
         forward::RemoteForwardError::PullLocalConflict { path } => {
@@ -251,10 +288,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.execute",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/admin"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await.map_err(Into::into)
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };

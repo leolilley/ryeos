@@ -128,13 +128,19 @@ fn ancestor_to_verified(a: &ryeos_engine::resolution::ResolvedAncestor) -> Verif
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::contracts::ItemSpace;
     use ryeos_engine::resolution::KindComposedView;
     use ryeos_engine::resolution::{
         ResolutionEdge, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
         TrustClass as EngineTrustClass,
     };
 
-    fn make_ancestor(ref_str: &str, content: &str, trust: EngineTrustClass) -> ResolvedAncestor {
+    fn make_ancestor(
+        ref_str: &str,
+        content: &str,
+        source_space: ItemSpace,
+        trust: EngineTrustClass,
+    ) -> ResolvedAncestor {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -144,6 +150,7 @@ mod tests {
             requested_id: ref_str.to_string(),
             resolved_ref: ref_str.to_string(),
             source_path: std::path::PathBuf::from(format!("/tmp/{ref_str}")),
+            source_space,
             trust_class: trust,
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
@@ -170,7 +177,12 @@ mod tests {
 
     #[test]
     fn projection_single_position_single_root() {
-        let root = make_ancestor("knowledge:doc", "content", EngineTrustClass::TrustedProject);
+        let root = make_ancestor(
+            "knowledge:doc",
+            "content",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
         let mut per_root = BTreeMap::new();
         per_root.insert(
             "knowledge:doc".to_string(),
@@ -195,8 +207,18 @@ mod tests {
 
     #[test]
     fn projection_two_positions_disjoint() {
-        let root1 = make_ancestor("knowledge:a", "a", EngineTrustClass::TrustedProject);
-        let root2 = make_ancestor("knowledge:b", "b", EngineTrustClass::TrustedBundle);
+        let root1 = make_ancestor(
+            "knowledge:a",
+            "a",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
+        let root2 = make_ancestor(
+            "knowledge:b",
+            "b",
+            ItemSpace::Bundle,
+            EngineTrustClass::TrustedBundle,
+        );
         let mut per_root = BTreeMap::new();
         per_root.insert(
             "knowledge:a".to_string(),
@@ -218,9 +240,24 @@ mod tests {
 
     #[test]
     fn projection_shared_ancestor_deduped() {
-        let base = make_ancestor("knowledge:base", "base", EngineTrustClass::TrustedBundle);
-        let child1 = make_ancestor("knowledge:c1", "c1", EngineTrustClass::TrustedProject);
-        let child2 = make_ancestor("knowledge:c2", "c2", EngineTrustClass::TrustedProject);
+        let base = make_ancestor(
+            "knowledge:base",
+            "base",
+            ItemSpace::Bundle,
+            EngineTrustClass::TrustedBundle,
+        );
+        let child1 = make_ancestor(
+            "knowledge:c1",
+            "c1",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
+        let child2 = make_ancestor(
+            "knowledge:c2",
+            "c2",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
 
         let mut per_root = BTreeMap::new();
         per_root.insert(
@@ -244,13 +281,24 @@ mod tests {
 
     #[test]
     fn projection_reference_edges_included() {
-        let root = make_ancestor("knowledge:main", "main", EngineTrustClass::TrustedProject);
-        let ref_item = make_ancestor("knowledge:other", "other", EngineTrustClass::TrustedBundle);
+        let root = make_ancestor(
+            "knowledge:main",
+            "main",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
+        let ref_item = make_ancestor(
+            "knowledge:other",
+            "other",
+            ItemSpace::Bundle,
+            EngineTrustClass::TrustedBundle,
+        );
         let ref_edge = ResolutionEdge {
             from_ref: "knowledge:main".to_string(),
             from_source_path: std::path::PathBuf::from("/tmp/main"),
             to_ref: "knowledge:other".to_string(),
             to_source_path: std::path::PathBuf::from("/tmp/other"),
+            to_source_space: ItemSpace::Bundle,
             trust_class: EngineTrustClass::TrustedBundle,
             added_by: ResolutionStepName::ResolveReferences,
         };
@@ -274,13 +322,19 @@ mod tests {
 
     #[test]
     fn projection_missing_edge_endpoint_errors() {
-        let root = make_ancestor("knowledge:main", "main", EngineTrustClass::TrustedProject);
+        let root = make_ancestor(
+            "knowledge:main",
+            "main",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
         // Edge references an item NOT in referenced_items (dangling edge).
         let ref_edge = ResolutionEdge {
             from_ref: "knowledge:main".to_string(),
             from_source_path: std::path::PathBuf::from("/tmp/main"),
             to_ref: "knowledge:missing".to_string(),
             to_source_path: std::path::PathBuf::from("/tmp/missing"),
+            to_source_space: ItemSpace::Bundle,
             trust_class: EngineTrustClass::TrustedBundle,
             added_by: ResolutionStepName::ResolveReferences,
         };
@@ -302,7 +356,12 @@ mod tests {
 
     #[test]
     fn projection_missing_position_root_errors() {
-        let root = make_ancestor("knowledge:a", "a", EngineTrustClass::TrustedProject);
+        let root = make_ancestor(
+            "knowledge:a",
+            "a",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
         let mut per_root = BTreeMap::new();
         per_root.insert(
             "knowledge:a".to_string(),
@@ -325,7 +384,12 @@ mod tests {
 
     #[test]
     fn projection_budgets_included() {
-        let root = make_ancestor("knowledge:doc", "c", EngineTrustClass::TrustedProject);
+        let root = make_ancestor(
+            "knowledge:doc",
+            "c",
+            ItemSpace::Project,
+            EngineTrustClass::TrustedProject,
+        );
         let mut per_root = BTreeMap::new();
         per_root.insert(
             "knowledge:doc".to_string(),

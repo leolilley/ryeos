@@ -261,7 +261,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
@@ -356,7 +356,11 @@ mod tests {
             "signer": "test",
             "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert_eq!(set.chain_root_ids.len(), 1);
@@ -413,7 +417,11 @@ mod tests {
             "signer": "test",
             "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert!(
@@ -446,7 +454,11 @@ mod tests {
             "signer": "test",
             "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert!(
@@ -560,7 +572,11 @@ mod tests {
             "updated_at": "2026-04-22T00:00:00Z",
             "signer": "test", "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert_eq!(set.object_hashes.len(), 4);
@@ -623,7 +639,11 @@ mod tests {
             "updated_at": "2026-04-22T00:00:00Z",
             "signer": "test", "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert_eq!(set.project_hashes.len(), 1);
@@ -785,7 +805,11 @@ mod tests {
             "updated_at": "2026-04-22T00:00:01Z",
             "signer": "test", "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         // Both chain states + both snapshots = 4 objects
@@ -877,7 +901,11 @@ mod tests {
             "updated_at": "2026-04-22T00:00:00Z",
             "signer": "test", "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
 
         // Don't write T-other head ref
 

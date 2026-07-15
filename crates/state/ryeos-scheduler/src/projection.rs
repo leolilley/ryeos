@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io::{BufRead, Write};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -346,6 +347,17 @@ fn spec_record_from_body(
     spec_hash: &str,
     registered_at: i64,
 ) -> anyhow::Result<ScheduleSpecRecord> {
+    let ref_bindings = serde_json::from_value::<BTreeMap<String, String>>(
+        body.get("ref_bindings")
+            .ok_or_else(|| anyhow::anyhow!("missing required ref_bindings"))?
+            .clone(),
+    )
+    .context("ref_bindings must be an object of canonical-ref strings")?;
+    for (name, item_ref) in &ref_bindings {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+            .with_context(|| format!("invalid ref_bindings.{name}: {item_ref}"))?;
+    }
+
     // Fail-closed: execution block is required for security.
     // Reject schedules missing it — they must be re-registered.
     let (requester_fingerprint, capabilities) = body.get("execution")
@@ -396,6 +408,7 @@ fn spec_record_from_body(
     Ok(ScheduleSpecRecord {
         schedule_id: body_str(body, "schedule_id"),
         item_ref: body_str(body, "item_ref"),
+        ref_bindings,
         params: body
             .get("params")
             .map(|v| serde_json::to_string(v).unwrap_or_default())
@@ -495,6 +508,7 @@ mod tests {
 section: schedules
 schedule_id: my-schedule
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -540,6 +554,7 @@ execution:
 section: schedules
 schedule_id: wrong-id
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 "#;
@@ -684,6 +699,7 @@ expression: "60"
 section: schedules
 schedule_id: no-exec
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -713,6 +729,7 @@ registered_at: 1700000000000
 section: schedules
 schedule_id: empty-caps
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -744,6 +761,7 @@ execution:
 section: schedules
 schedule_id: empty-fp
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -776,6 +794,7 @@ execution:
 section: schedules
 schedule_id: valid-auth
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -812,6 +831,7 @@ execution:
 section: schedules
 schedule_id: tamper-test
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -849,6 +869,7 @@ execution:
 section: schedules
 schedule_id: anchor-test
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: {fixed_ts}
@@ -882,6 +903,7 @@ execution:
 section: schedules
 schedule_id: no-anchor
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 execution:
@@ -913,6 +935,7 @@ execution:
 section: schedules
 schedule_id: unsigned
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 execution:
@@ -942,6 +965,7 @@ execution:
 section: schedules
 schedule_id: misfire-default
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -974,6 +998,7 @@ execution:
 section: schedules
 schedule_id: cron-misfire
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: cron
 expression: "0 0 * * * *"
 registered_at: 1700000000000
@@ -1005,6 +1030,7 @@ execution:
 section: schedules
 schedule_id: no-caps-key
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -1049,6 +1075,7 @@ execution:
 section: schedules
 schedule_id: trusted-sig
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -1080,6 +1107,7 @@ execution:
 section: schedules
 schedule_id: untrusted-sig
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -1126,6 +1154,7 @@ execution:
 section: schedules
 schedule_id: forged-sig
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000
@@ -1190,6 +1219,7 @@ execution:
 section: schedules
 schedule_id: hash-only
 item_ref: "directive:test/hello"
+ref_bindings: {}
 schedule_type: interval
 expression: "60"
 registered_at: 1700000000000

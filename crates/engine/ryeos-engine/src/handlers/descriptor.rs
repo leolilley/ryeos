@@ -1,11 +1,11 @@
 //! Handler descriptors — bundle-shipped, signed YAML items declaring
-//! a verified binary that implements a parser or composer handler
+//! a verified binary that implements a parser, composer, or launch-preparer
 //! protocol. Loaded by `HandlerRegistry::load_base` via the Layer-1
 //! raw signed-YAML loader; never goes through ParserDispatcher.
 //!
 //! Mirrors `runtime_registry::RuntimeYaml` shape but with a
 //! distinct ABI namespace (SUPPORTED_HANDLER_ABI_VERSION) and a
-//! distinct `serves` value-set (parser | composer).
+//! distinct `serves` value-set (parser | composer | launch_preparer).
 
 use serde::{Deserialize, Serialize};
 
@@ -40,4 +40,5 @@ pub struct HandlerDescriptor {
 pub enum HandlerServes {
     Parser,
     Composer,
+    LaunchPreparer,
 }

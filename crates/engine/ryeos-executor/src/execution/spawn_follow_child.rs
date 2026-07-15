@@ -59,12 +59,7 @@ struct SpawnFollowChildParams {
     graph_run_id: String,
     follow_node: String,
     step_count: i64,
-    #[serde(default)]
-    child_item_ref: Option<String>,
-    #[serde(default)]
-    child_parameters: Value,
-    #[serde(default)]
-    children: Option<Vec<ryeos_runtime::callback::FollowChildSpec>>,
+    children: Vec<ryeos_runtime::callback::FollowChildSpec>,
     #[serde(default)]
     launch_window_width: Option<u32>,
     #[serde(default)]
@@ -75,18 +70,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: SpawnFollowChildParams = serde_json::from_value(params.clone())
         .context("invalid runtime.spawn_follow_child params")?;
 
-    let fanout = params.children.is_some();
-    let children = match (params.child_item_ref.as_ref(), params.children.as_ref()) {
-        (Some(item_ref), None) => vec![ryeos_runtime::callback::FollowChildSpec {
-            item_ref: item_ref.clone(),
-            parameters: params.child_parameters.clone(),
-            facets: None,
-        }],
-        (None, Some(children)) if !children.is_empty() => children.clone(),
-        _ => {
-            bail!("follow: exactly one of child_item_ref or a nonempty children cohort is required")
-        }
-    };
+    if params.children.is_empty() {
+        bail!("follow: children must be nonempty");
+    }
+    let fanout = params.children.len() > 1;
+    let children = params.children;
     if params.launch_window_width == Some(0) {
         bail!("follow: launch_window_width must be greater than zero");
     }
@@ -144,6 +132,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // ── Admission (authorize before resource resolution; before any mutation) ─
     let mut resolved_children = Vec::with_capacity(children.len());
     for child in &children {
+        crate::execution::launch_preparation::validate_ref_bindings(&child.ref_bindings)?;
         let child_ref = CanonicalRef::parse(&child.item_ref)
             .with_context(|| format!("follow: invalid child item_ref '{}'", child.item_ref))?;
 
@@ -163,6 +152,26 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
              child '{}'",
             child.item_ref
         );
+        }
+
+        for (binding_name, binding_ref) in &child.ref_bindings {
+            let canonical = CanonicalRef::parse(binding_ref).with_context(|| {
+                format!(
+                    "follow: invalid ref binding '{binding_name}' value '{binding_ref}'"
+                )
+            })?;
+            let required = canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
+            let policy = AuthorizationPolicy::require_all(&[&required]);
+            if state
+                .authorizer
+                .authorize(&cap.effective_caps, &policy)
+                .is_err()
+            {
+                bail!(
+                    "follow admission denied: parent lacks execute authority '{required}' over \
+                     ref binding '{binding_name}'"
+                );
+            }
         }
 
         // Managed-runtime children only: a child kind served by a registered runtime
@@ -218,6 +227,21 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         params.graph_run_id, params.follow_node, params.step_count
     );
 
+    // Normalize and validate the complete immutable cohort before persistence or
+    // any idempotent return. A re-drive may not silently adopt a changed count,
+    // ref, or spec, and non-JCS values must not leave a reserved waiter behind.
+    let spec_hashes: Vec<String> = children
+        .iter()
+        .map(|child| {
+            follow_child_spec_hash(
+                &child.item_ref,
+                &child.ref_bindings,
+                &child.parameters,
+                child.facets.as_ref(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     // 1. Reserve the waiter. ALWAYS go through `reserve_follow` (never a pre-read):
     //    it is the get-or-create primitive AND validates that an existing row's
     //    seed matches this request, so a duplicate follow_key with conflicting seed
@@ -233,15 +257,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         fanout,
         expected_children: u32::try_from(children.len()).context("follow: too many children")?,
     })?;
-
-    // Normalize and validate the complete immutable cohort before any idempotent
-    // return. A re-drive may not silently adopt a changed count, ref, or spec.
-    let spec_hashes: Vec<String> = children
-        .iter()
-        .map(|child| {
-            follow_child_spec_hash(&child.item_ref, &child.parameters, child.facets.as_ref())
-        })
-        .collect();
     if waiter.expected_children as usize != children.len() {
         bail!("follow: persisted child count conflicts with re-driven cohort");
     }
@@ -342,6 +357,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         let meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
             kind: child_thread_profile.clone(),
             item_ref: child.item_ref.clone(),
+            ref_bindings: child.ref_bindings.clone(),
             launch_mode: "detached".to_string(),
             parameters: child.parameters.clone(),
             // Resume identity derives from validated server-side state

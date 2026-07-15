@@ -521,7 +521,7 @@ mod tests {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).unwrap();
             }
-            let canonical = lillux::canonical_json(value);
+            let canonical = lillux::canonical_json(value).unwrap();
             lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
         }
 

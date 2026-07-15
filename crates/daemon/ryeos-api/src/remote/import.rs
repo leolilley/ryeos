@@ -358,7 +358,7 @@ pub fn verify_remote_attestation_record(
             record.issuer
         );
     }
-    let canonical = lillux::canonical_json(&record.attestation);
+    let canonical = lillux::canonical_json(&record.attestation)?;
     let actual = lillux::sha256_hex(canonical.as_bytes());
     if actual != record.attestation_hash {
         anyhow::bail!(
@@ -394,7 +394,7 @@ fn closure_response_to_payload(
                     .value
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("object closure entry missing value"))?;
-                let data = lillux::canonical_json(value).into_bytes();
+                let data = lillux::canonical_json(value)?.into_bytes();
                 let hash = lillux::sha256_hex(&data);
                 if hash != entry.hash {
                     anyhow::bail!(
@@ -457,7 +457,7 @@ fn append_attestation_entry(
     {
         return Ok(());
     }
-    let data = lillux::canonical_json(&attestation.attestation).into_bytes();
+    let data = lillux::canonical_json(&attestation.attestation)?.into_bytes();
     let actual = lillux::sha256_hex(&data);
     if actual != attestation.attestation_hash {
         anyhow::bail!(
@@ -531,7 +531,7 @@ mod tests {
         .sign(signer)
         .unwrap();
         let value = attestation.to_value();
-        let hash = lillux::sha256_hex(lillux::canonical_json(&value).as_bytes());
+        let hash = lillux::sha256_hex(lillux::canonical_json(&value).unwrap().as_bytes());
         (hash, value)
     }
 

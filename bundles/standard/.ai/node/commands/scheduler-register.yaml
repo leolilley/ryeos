@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-19T05:40:59Z:7853da58122e73183c156acfa36ef545b8f563e9aaedee311d413b140b174101:3le8JvjCwsGMqWdNQcwxL7908BSq+S4QejnLS0KW/xGBfAtmPJgB48Jw8j/RI7T2XUFOn5kOT/yq0e6dXVdfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:46Z:4e2724472bc549b4ae6a009b0e65c16c8fe681ca6993f0e36ce2275a0cdbd486:CGUAgJDRHcIXHN8tTQANsnmaxzAKT1ODMn0tm6o3N7FN/TGpZAWxpGZh4vYUnqVw7Tv3mVpac11I+lfWrA6JAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - register
@@ -14,6 +14,8 @@ parameter_binding:
   input_flag: input
   single_json_object_arg: true
   flag_key_normalization: hyphen_to_underscore
+defaults:
+  ref_bindings: {}
 dispatch:
   kind: execute_ref
   execute: service:scheduler/register

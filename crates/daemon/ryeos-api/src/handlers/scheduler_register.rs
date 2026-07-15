@@ -1,5 +1,6 @@
 //! `scheduler.register` — create or update a schedule spec.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -19,6 +20,7 @@ use ryeos_scheduler::types::ScheduleSpecRecord;
 pub struct Request {
     pub schedule_id: String,
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     pub schedule_type: String,
     pub expression: String,
     #[serde(default = "default_params")]
@@ -58,6 +60,8 @@ pub async fn handle(
     crontab::validate_schedule_id(&req.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
         .with_context(|| format!("invalid item_ref: {}", req.item_ref))?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
+        .with_context(|| "invalid ref_bindings")?;
     crontab::validate_expression(&req.schedule_type, &req.expression)?;
 
     let timezone = req.timezone.as_deref().unwrap_or("UTC");
@@ -156,6 +160,7 @@ pub async fn handle(
         "spec_version": 1,
         "schedule_id": req.schedule_id,
         "item_ref": req.item_ref,
+        "ref_bindings": req.ref_bindings,
         "schedule_type": req.schedule_type,
         "expression": req.expression,
         "timezone": timezone,
@@ -251,6 +256,7 @@ pub async fn handle(
     let rec = ScheduleSpecRecord {
         schedule_id: req.schedule_id.clone(),
         item_ref: req.item_ref.clone(),
+        ref_bindings: req.ref_bindings.clone(),
         params: serde_json::to_string(&req.params)?,
         schedule_type: req.schedule_type.clone(),
         expression: req.expression.clone(),
@@ -280,6 +286,7 @@ pub async fn handle(
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,
         "item_ref": req.item_ref,
+        "ref_bindings": req.ref_bindings,
         "schedule_type": req.schedule_type,
         "expression": req.expression,
         "timezone": timezone,

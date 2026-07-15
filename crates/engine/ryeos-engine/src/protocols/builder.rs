@@ -419,6 +419,7 @@ mod tests {
                     requested_id: "runtime:spawn".to_string(),
                     resolved_ref: "runtime:spawn".to_string(),
                     source_path: PathBuf::from("/project/.ai/runtimes/ryeos/core/runtime.yaml"),
+                    source_space: crate::contracts::ItemSpace::Project,
                     trust_class: TrustClass::Unsigned,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
@@ -433,7 +434,7 @@ mod tests {
                 referenced_items: vec![],
             },
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data: BTreeMap::new(),
         }
     }
 

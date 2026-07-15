@@ -1498,6 +1498,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },
@@ -1541,6 +1542,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },
@@ -1577,6 +1579,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },

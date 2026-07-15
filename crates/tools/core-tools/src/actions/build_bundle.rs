@@ -123,7 +123,7 @@ pub fn rebuild_bundle_manifest(
             let item_source_hash = cas.store_object(&item_source_value)?;
 
             // Sidecar (signed body) — canonical JSON of the ItemSource.
-            let body = lillux::cas::canonical_json(&item_source_value);
+            let body = lillux::cas::canonical_json(&item_source_value)?;
             let signed_sidecar = sign_content(&body, signing_key, "#", None);
             let sidecar_path = bin_path.with_file_name(format!("{bare}.item_source.json"));
             atomic_write_str(&sidecar_path, &signed_sidecar)?;

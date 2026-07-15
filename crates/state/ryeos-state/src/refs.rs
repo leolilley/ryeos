@@ -122,7 +122,8 @@ pub fn write_signed_ref(
 ) -> anyhow::Result<()> {
     // Compute signature over the ref without the signature field
     let unsigned = signed_ref.without_signature();
-    let canonical = lillux::canonical_json(&unsigned);
+    let canonical = lillux::canonical_json(&unsigned)
+        .context("failed to canonicalize unsigned ref")?;
     let sig_bytes = signer.sign(canonical.as_bytes());
     signed_ref.signature = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
 
@@ -131,7 +132,8 @@ pub fn write_signed_ref(
 
     // Serialize to canonical JSON
     let value = signed_ref.to_value();
-    let canonical = lillux::canonical_json(&value);
+    let canonical = lillux::canonical_json(&value)
+        .context("failed to canonicalize signed ref")?;
 
     // Create parent directories
     if let Some(parent) = path.parent() {
@@ -182,7 +184,8 @@ pub fn verify_signed_ref(
 
     // Reconstruct the canonical JSON without the signature
     let unsigned = signed_ref.without_signature();
-    let canonical = lillux::canonical_json(&unsigned);
+    let canonical = lillux::canonical_json(&unsigned)
+        .context("failed to canonicalize unsigned ref")?;
 
     // Decode the signature from base64
     let sig_bytes = base64::engine::general_purpose::STANDARD
@@ -895,8 +898,8 @@ mod tests {
         let mut r2 = make_signed_ref();
         r2.signature = "same_sig".to_string();
 
-        let json1 = lillux::canonical_json(&r1.to_value());
-        let json2 = lillux::canonical_json(&r2.to_value());
+        let json1 = lillux::canonical_json(&r1.to_value()).unwrap();
+        let json2 = lillux::canonical_json(&r2.to_value()).unwrap();
         assert_eq!(json1, json2);
     }
 }

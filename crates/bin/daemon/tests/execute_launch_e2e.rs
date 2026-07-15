@@ -363,6 +363,7 @@ async fn execute_launch_returns_inspectable_thread_id() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:ryeos/core/identity/public_key",
+                "ref_bindings": {},
                 "project_path": project_path,
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -395,6 +396,7 @@ async fn execute_launch_admits_graph_ref() {
             "/execute/launch",
             json!({
                 "item_ref": "graph:smoke",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -435,6 +437,7 @@ async fn execute_launch_admits_directive_ref() {
             "/execute/launch",
             json!({
                 "item_ref": "directive:test/launch",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -470,6 +473,7 @@ async fn execute_launch_admits_knowledge_query() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/fact",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "accepted" } },
                 "launch_mode": "accepted"
@@ -505,6 +509,7 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/fact",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": {} },
                 "launch_mode": "accepted"
@@ -542,6 +547,7 @@ async fn execute_launch_unsigned_knowledge_does_not_phantom_or_stick() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/unsigned",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "x" } },
                 "launch_mode": "accepted"
@@ -573,6 +579,7 @@ async fn execute_launch_unsigned_directive_does_not_phantom_or_stick() {
             "/execute/launch",
             json!({
                 "item_ref": "directive:test/unsigned",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -594,6 +601,7 @@ async fn execute_launch_terminal_tool_without_executor_id_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:ryeos/core/subprocess/execute",
+                "ref_bindings": {},
                 "project_path": project_path,
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -630,6 +638,7 @@ async fn execute_launch_terminal_tool_bad_manifest_requires_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:test/wrapper",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -658,6 +667,7 @@ async fn execute_launch_in_process_service_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "service:node/status",
+                "ref_bindings": {},
                 "project_path": project_path,
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -688,6 +698,7 @@ async fn execute_launch_non_root_executable_ref_does_not_return_phantom_thread_i
             "/execute/launch",
             json!({
                 "item_ref": "config:some/thing",
+                "ref_bindings": {},
                 "project_path": project_path,
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -718,6 +729,7 @@ async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:no/such-tool",
+                "ref_bindings": {},
                 "project_path": project_path,
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -760,6 +772,7 @@ async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "runtime:directive-runtime",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"

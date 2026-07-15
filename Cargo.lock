@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "base64",
@@ -1464,6 +1464,7 @@ dependencies = [
  "hmac",
  "libc",
  "rand 0.8.6",
+ "ryu",
  "serde",
  "serde_json",
  "sha2",
@@ -2365,6 +2366,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-handler-protocol",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
@@ -2450,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "base64",
@@ -2542,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "base64",
@@ -2570,6 +2572,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-directive-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lillux",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ryeos-directive-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2581,6 +2594,7 @@ dependencies = [
  "futures-util",
  "lillux",
  "regex",
+ "ryeos-directive-core",
  "reqwest",
  "ryeos-engine",
  "ryeos-runtime",
@@ -2603,6 +2617,7 @@ dependencies = [
  "base64",
  "directories",
  "jsonschema",
+ "libc",
  "lillux",
  "regex",
  "ryeos-handler-protocol",
@@ -2630,6 +2645,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
+ "ryeos-handler-protocol",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2675,6 +2691,7 @@ dependencies = [
  "anyhow",
  "base64",
  "regex",
+ "ryeos-directive-core",
  "ryeos-handler-protocol",
  "serde",
  "serde_json",
@@ -2730,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2745,7 +2762,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2857,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.33"
+version = "0.5.34"
 dependencies = [
  "anyhow",
  "arc-swap",

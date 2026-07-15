@@ -57,6 +57,7 @@ pub enum RyeOsEffectKind {
     },
     DispatchInvocation {
         item_ref: String,
+        ref_bindings: std::collections::BTreeMap<String, String>,
         params: serde_json::Value,
     },
     /// Submit a typed thread-control command (continue/cancel/kill/interrupt)

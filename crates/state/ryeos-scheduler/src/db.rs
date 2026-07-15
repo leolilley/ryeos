@@ -20,6 +20,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS schedule_specs (
     schedule_id          TEXT PRIMARY KEY,
     item_ref             TEXT NOT NULL,
+    ref_bindings         TEXT NOT NULL,
     params               TEXT NOT NULL DEFAULT '{}',
     schedule_type        TEXT NOT NULL,
     expression           TEXT NOT NULL,
@@ -86,6 +87,12 @@ fn scheduler_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "item_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "ref_bindings",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
@@ -312,81 +319,9 @@ fn prepare_owned_schema(
     ddl: &str,
     path: &Path,
 ) -> Result<()> {
-    sqlite_schema::prepare_owned(conn, spec, ddl, path, migrate_owned_scheduler_db)
-}
-
-fn migrate_owned_scheduler_db(conn: &Connection) -> Result<()> {
-    if !table_has_column(conn, "schedule_fires", "completed_at")? {
-        rebuild_schedule_fires_with_completed_at(conn)?;
-    }
-    if !table_has_column(conn, "schedule_specs", "lateness_grace_secs")? {
-        conn.execute(
-            "ALTER TABLE schedule_specs ADD COLUMN lateness_grace_secs INTEGER NOT NULL DEFAULT 60",
-            [],
-        )
-        .context("failed to migrate schedule_specs.lateness_grace_secs")?;
-    }
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS schedule_cursors (
-            schedule_id        TEXT PRIMARY KEY,
-            spec_hash          TEXT NOT NULL,
-            last_scheduled_at  INTEGER,
-            next_fire_at       INTEGER,
-            last_evaluated_at  INTEGER,
-            updated_at         INTEGER NOT NULL
-        );
-        "#,
-    )
-    .context("failed to migrate schedule_cursors")?;
-    Ok(())
-}
-
-fn rebuild_schedule_fires_with_completed_at(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE schedule_fires_new (
-            fire_id            TEXT PRIMARY KEY,
-            schedule_id        TEXT NOT NULL,
-            scheduled_at       INTEGER NOT NULL,
-            fired_at           INTEGER,
-            completed_at       INTEGER,
-            thread_id          TEXT,
-            status             TEXT NOT NULL,
-            trigger_reason     TEXT NOT NULL DEFAULT 'normal',
-            outcome            TEXT,
-            signer_fingerprint TEXT
-        );
-
-        INSERT INTO schedule_fires_new
-            (fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
-             status, trigger_reason, outcome, signer_fingerprint)
-        SELECT
-            fire_id, schedule_id, scheduled_at, fired_at, NULL, thread_id,
-            status, trigger_reason, outcome, signer_fingerprint
-        FROM schedule_fires;
-
-        DROP TABLE schedule_fires;
-        ALTER TABLE schedule_fires_new RENAME TO schedule_fires;
-
-        CREATE INDEX IF NOT EXISTS idx_fires_schedule_id
-            ON schedule_fires(schedule_id);
-        CREATE INDEX IF NOT EXISTS idx_fires_status
-            ON schedule_fires(status);
-        CREATE INDEX IF NOT EXISTS idx_fires_schedule_scheduled
-            ON schedule_fires(schedule_id, scheduled_at DESC);
-        "#,
-    )
-    .context("failed to migrate schedule_fires.completed_at")?;
-    Ok(())
-}
-
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let cols: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(cols.iter().any(|name| name == column))
+    sqlite_schema::prepare_owned(conn, spec, ddl, path, |_| Ok(())).map_err(|error| {
+        anyhow!("scheduler_projection_schema_mismatch: {error}")
+    })
 }
 
 // ── Database wrapper ────────────────────────────────────────────────
@@ -433,16 +368,18 @@ impl SchedulerDb {
 
     pub fn upsert_spec(&self, rec: &ScheduleSpecRecord) -> Result<()> {
         let capabilities_json = serde_json::to_string(&rec.capabilities)?;
+        let ref_bindings_json = serde_json::to_string(&rec.ref_bindings)?;
         self.lock()?
             .execute(
                 "INSERT INTO schedule_specs
-                (schedule_id, item_ref, params, schedule_type, expression,
+                (schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                  timezone, misfire_policy, overlap_policy, enabled,
                  project_root, signer_fingerprint, spec_hash, registered_at,
                  requester_fingerprint, capabilities, lateness_grace_secs)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(schedule_id) DO UPDATE SET
-                item_ref=excluded.item_ref, params=excluded.params,
+                item_ref=excluded.item_ref, ref_bindings=excluded.ref_bindings,
+                params=excluded.params,
                 schedule_type=excluded.schedule_type, expression=excluded.expression,
                 timezone=excluded.timezone, misfire_policy=excluded.misfire_policy,
                 overlap_policy=excluded.overlap_policy, enabled=excluded.enabled,
@@ -454,6 +391,7 @@ impl SchedulerDb {
                 params![
                     rec.schedule_id,
                     rec.item_ref,
+                    ref_bindings_json,
                     rec.params,
                     rec.schedule_type,
                     rec.expression,
@@ -490,7 +428,7 @@ impl SchedulerDb {
     pub fn get_spec(&self, schedule_id: &str) -> Result<Option<ScheduleSpecRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT schedule_id, item_ref, params, schedule_type, expression,
+            "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
                     requester_fingerprint, capabilities, lateness_grace_secs
@@ -504,7 +442,7 @@ impl SchedulerDb {
     pub fn load_enabled_specs(&self) -> Result<Vec<ScheduleSpecRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT schedule_id, item_ref, params, schedule_type, expression,
+            "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
                     requester_fingerprint, capabilities, lateness_grace_secs
@@ -523,7 +461,7 @@ impl SchedulerDb {
         enabled_only: bool,
         schedule_type: Option<&str>,
     ) -> Result<Vec<ScheduleSpecRecord>> {
-        let sel = "SELECT schedule_id, item_ref, params, schedule_type, expression,
+        let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
                           requester_fingerprint, capabilities, lateness_grace_secs";
@@ -558,7 +496,7 @@ impl SchedulerDb {
         schedule_type: Option<&str>,
         filter_requester: Option<&str>,
     ) -> Result<Vec<ScheduleSpecRecord>> {
-        let sel = "SELECT schedule_id, item_ref, params, schedule_type, expression,
+        let sel = "SELECT schedule_id, item_ref, ref_bindings, params, schedule_type, expression,
                           timezone, misfire_policy, overlap_policy, enabled,
                           project_root, signer_fingerprint, spec_hash, registered_at,
                           requester_fingerprint, capabilities, lateness_grace_secs";
@@ -1079,6 +1017,10 @@ impl SchedulerDb {
 // ── Row mappers ─────────────────────────────────────────────────────
 
 fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::Error> {
+    let ref_bindings_json: String = row.get("ref_bindings")?;
+    let ref_bindings = serde_json::from_str(&ref_bindings_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
     let capabilities_json: String = row.get("capabilities")?;
     let capabilities: Vec<String> = serde_json::from_str(&capabilities_json).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -1086,6 +1028,7 @@ fn row_to_spec(row: &rusqlite::Row<'_>) -> Result<ScheduleSpecRecord, rusqlite::
     Ok(ScheduleSpecRecord {
         schedule_id: row.get("schedule_id")?,
         item_ref: row.get("item_ref")?,
+        ref_bindings,
         params: row.get("params")?,
         schedule_type: row.get("schedule_type")?,
         expression: row.get("expression")?,
@@ -1243,6 +1186,7 @@ mod tests {
         ScheduleSpecRecord {
             schedule_id: id.to_string(),
             item_ref: "directive:test".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             params: r#"{"key":"value"}"#.to_string(),
             schedule_type: "interval".to_string(),
             expression: "60".to_string(),
@@ -1277,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn open_migrates_old_owned_schema_with_specs() {
+    fn open_refuses_stale_owned_schema() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scheduler.sqlite3");
         {
@@ -1347,10 +1291,12 @@ mod tests {
             .unwrap();
         }
 
-        let db = SchedulerDb::open(&path).unwrap();
-        let spec = db.get_spec("old-sched").unwrap().unwrap();
-        assert_eq!(spec.lateness_grace_secs, 60);
-        assert_eq!(spec.expression, "60");
+        let error = SchedulerDb::open(&path)
+            .err()
+            .expect("stale scheduler projection schema must be refused");
+        assert!(error
+            .to_string()
+            .contains("scheduler_projection_schema_mismatch"));
     }
 
     // ── Spec CRUD ──────────────────────────────────────────────

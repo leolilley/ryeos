@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -173,6 +174,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
+        "ref_bindings": resolved.ref_bindings,
         "parameters": resolved.parameters,
     });
     if resolved.async_launch {
@@ -457,6 +459,7 @@ async fn follow_stream_descriptor(
 
 struct CliResolvedExecute {
     item_ref: String,
+    ref_bindings: BTreeMap<String, String>,
     parameters: Value,
     project_path: Option<PathBuf>,
     async_launch: bool,
@@ -488,6 +491,7 @@ struct ResolvedControlFlags {
     call_method: Option<String>,
     call_args: Option<Value>,
     state_root: Option<String>,
+    ref_bindings: BTreeMap<String, String>,
 }
 
 fn resolve_command_for_daemon(
@@ -584,6 +588,7 @@ fn resolve_command_for_daemon_with_commands(
         .transpose()?;
     Ok(CliResolvedExecute {
         item_ref,
+        ref_bindings: control.ref_bindings,
         parameters,
         project_path,
         async_launch: control.async_launch,
@@ -601,7 +606,7 @@ fn resolve_command_for_daemon_with_commands(
 /// `ControlFlagBinding`. No flag spellings or destinations are hardcoded — the
 /// command data names the flags and the runtime knows only the binding
 /// vocabulary. Presence flags accept `--flag`, `--flag=true`, `--flag=false`;
-/// value flags (`call_method`/`call_args`) take `--flag value` or `--flag=v`.
+/// value flags take `--flag value` or `--flag=v`.
 fn strip_declared_control_flags(
     tail: &mut Vec<String>,
     declared: &[ryeos_runtime::CommandControlFlag],
@@ -647,6 +652,47 @@ fn strip_declared_control_flags(
                         })?);
                 }
                 Bind::StateRoot => flags.state_root = Some(value),
+                Bind::RefBinding => {
+                    let (binding_name, item_ref) = value.split_once('=').ok_or_else(|| {
+                        CliError::Local {
+                            detail: format!(
+                                "--{name} requires name=canonical-ref, got '{value}'"
+                            ),
+                        }
+                    })?;
+                    validate_ref_binding_name(binding_name)?;
+                    if item_ref.is_empty() {
+                        return Err(CliError::Local {
+                            detail: format!("--{name} requires a non-empty canonical ref"),
+                        });
+                    }
+                    if item_ref.len() > 2048 {
+                        return Err(CliError::Local {
+                            detail: format!("--{name} canonical ref exceeds 2048 bytes"),
+                        });
+                    }
+                    if flags.ref_bindings.contains_key(binding_name) {
+                        return Err(CliError::Local {
+                            detail: format!(
+                                "duplicate --{name} binding name '{binding_name}'"
+                            ),
+                        });
+                    }
+                    if flags.ref_bindings.len() >= 32 {
+                        return Err(CliError::Local {
+                            detail: format!("--{name} accepts at most 32 bindings"),
+                        });
+                    }
+                    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+                        .map_err(|error| CliError::Local {
+                            detail: format!(
+                                "invalid --{name} canonical ref for '{binding_name}': {error}"
+                            ),
+                        })?;
+                    flags
+                        .ref_bindings
+                        .insert(binding_name.to_string(), canonical.to_string());
+                }
                 _ => {}
             }
         } else {
@@ -687,6 +733,32 @@ fn strip_declared_control_flags(
     }
     *tail = out;
     Ok(flags)
+}
+
+fn validate_ref_binding_name(name: &str) -> Result<(), CliError> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name.split('_').enumerate().all(|(index, segment)| {
+            !segment.is_empty()
+                && segment.chars().enumerate().all(|(char_index, ch)| {
+                    ch.is_ascii_lowercase()
+                        || ch.is_ascii_digit() && (index > 0 || char_index > 0)
+                })
+                && (index > 0
+                    || segment
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase()))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(CliError::Local {
+            detail: format!(
+                "invalid ref binding name '{name}'; expected [a-z][a-z0-9]*(?:_[a-z0-9]+)* (max 64 bytes)"
+            ),
+        })
+    }
 }
 
 fn bind_command_parameters_for_daemon(
@@ -1484,7 +1556,43 @@ mod tests {
                 binding: B::CallArgs,
                 aliases: vec![],
             },
+            F {
+                flag: "ref-binding".into(),
+                help: "Bind a secondary execution ref".into(),
+                binding: B::RefBinding,
+                aliases: vec![],
+            },
         ]
+    }
+
+    #[test]
+    fn strip_ref_bindings_requires_unique_strict_name_ref_pairs() {
+        let cf = execute_control_flags();
+        let mut tail = s(&[
+            "--ref-binding",
+            "model=directive:models/fast",
+            "--ref-binding=guard_2=tool:guards/check",
+        ]);
+        let flags = strip_declared_control_flags(&mut tail, &cf).unwrap();
+        assert!(tail.is_empty());
+        assert_eq!(
+            flags.ref_bindings.get("model").map(String::as_str),
+            Some("directive:models/fast")
+        );
+        assert_eq!(
+            flags.ref_bindings.get("guard_2").map(String::as_str),
+            Some("tool:guards/check")
+        );
+
+        for invalid in [
+            s(&["--ref-binding", "model=tool:a", "--ref-binding", "model=tool:a"]),
+            s(&["--ref-binding", "Model=tool:a"]),
+            s(&["--ref-binding", "model"]),
+            s(&["--ref-binding", "model=not-a-ref"]),
+        ] {
+            let mut invalid = invalid;
+            assert!(strip_declared_control_flags(&mut invalid, &cf).is_err());
+        }
     }
 
     fn direct_execute_command() -> CommandDef {

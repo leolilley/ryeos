@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -100,21 +101,24 @@ pub struct FollowWaiterChild {
     pub updated_at_ms: i64,
 }
 
-/// Stable identity for one normalized follow child specification. Both the
-/// legacy migration and the spawn path use this exact encoding so an idempotent
-/// re-drive can never adopt a different item, parameter set, or facet set at an
-/// already-recorded cohort index.
+/// Stable identity for one normalized follow child specification. An idempotent
+/// re-drive can never adopt different execution identity, parameters, or facets
+/// at an already-recorded cohort index.
 pub fn follow_child_spec_hash(
     item_ref: &str,
+    ref_bindings: &BTreeMap<String, String>,
     parameters: &Value,
     facets: Option<&Value>,
-) -> String {
+) -> Result<String> {
     let spec = serde_json::json!({
         "item_ref": item_ref,
+        "ref_bindings": ref_bindings,
         "parameters": parameters,
         "facets": facets.cloned().unwrap_or(Value::Null),
     });
-    lillux::sha256_hex(lillux::canonical_json(&spec).as_bytes())
+    let canonical = lillux::canonical_json(&spec)
+        .context("failed to canonicalize normalized follow child specification")?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// A durable parent↔child follow dependency. The graph checkpoint owns the
@@ -823,7 +827,12 @@ fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
         let context = metadata
             .resume_context
             .with_context(|| format!("legacy follow {key} child has no persisted ResumeContext"))?;
-        let spec_hash = follow_child_spec_hash(&context.item_ref, &context.parameters, None);
+        let spec_hash = follow_child_spec_hash(
+            &context.item_ref,
+            &context.ref_bindings,
+            &context.parameters,
+            None,
+        )?;
         let existing = tx
             .query_row(
                 "SELECT item_ref, spec_hash, child_thread_id, child_chain_root_id,
@@ -898,6 +907,13 @@ impl RuntimeDb {
             params![thread_id, chain_root_id],
         )?;
         Ok(())
+    }
+
+    pub fn delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM thread_runtime WHERE thread_id = ?1",
+            params![thread_id],
+        )?)
     }
 
     pub fn touch_seat_lease(
@@ -2733,6 +2749,7 @@ mod tests {
         let context = ResumeContext {
             kind: "directive".into(),
             item_ref: "directive:example/child".into(),
+            ref_bindings: BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({"subject": "one"}),
             project_context: ProjectContext::LocalPath {
@@ -2813,7 +2830,13 @@ mod tests {
             .unwrap();
         }
 
-        let expected_hash = follow_child_spec_hash(&context.item_ref, &context.parameters, None);
+        let expected_hash = follow_child_spec_hash(
+            &context.item_ref,
+            &context.ref_bindings,
+            &context.parameters,
+            None,
+        )
+        .unwrap();
         for _ in 0..2 {
             let db = RuntimeDb::open(&path).unwrap();
             let waiter = db.get_follow_waiter_by_key("follow-1").unwrap().unwrap();
@@ -3013,7 +3036,7 @@ mod tests {
             follow_key,
             0,
             item_ref,
-            &follow_child_spec_hash(item_ref, &parameters, None),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &parameters, None).unwrap(),
             child_thread_id,
             child_chain_root_id,
         )
@@ -3085,7 +3108,13 @@ mod tests {
             "fk-cohort",
             0,
             "directive:test/episode",
-            &follow_child_spec_hash("directive:test/episode", &params_0, None),
+            &follow_child_spec_hash(
+                "directive:test/episode",
+                &BTreeMap::new(),
+                &params_0,
+                None,
+            )
+            .unwrap(),
             "child-0",
             "chain-0",
         )
@@ -3098,7 +3127,13 @@ mod tests {
             "fk-cohort",
             1,
             "directive:test/episode",
-            &follow_child_spec_hash("directive:test/episode", &params_1, None),
+            &follow_child_spec_hash(
+                "directive:test/episode",
+                &BTreeMap::new(),
+                &params_1,
+                None,
+            )
+            .unwrap(),
             "child-1",
             "chain-1",
         )
@@ -3139,7 +3174,13 @@ mod tests {
             "fk1",
             0,
             "directive:test/episode",
-            &follow_child_spec_hash("directive:test/episode", &first, None),
+            &follow_child_spec_hash(
+                "directive:test/episode",
+                &BTreeMap::new(),
+                &first,
+                None,
+            )
+            .unwrap(),
             "child-1",
             "chain-1",
         )
@@ -3149,7 +3190,13 @@ mod tests {
                 "fk1",
                 0,
                 "directive:test/episode",
-                &follow_child_spec_hash("directive:test/episode", &changed, None),
+                &follow_child_spec_hash(
+                    "directive:test/episode",
+                    &BTreeMap::new(),
+                    &changed,
+                    None,
+                )
+                .unwrap(),
                 "child-1",
                 "chain-1",
             )

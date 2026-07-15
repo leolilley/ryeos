@@ -17,7 +17,7 @@ mod resume;
 mod runner;
 
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
-use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
+use ryeos_directive_core::{ResolvedProviderSnapshot, PROVIDER_SNAPSHOT_KEY};
 
 /// Render the stimulus that opens a run: interpolate the directive body with the
 /// envelope inputs, then append any inputs the body did not itself reference.
@@ -119,7 +119,7 @@ fn run_directive() -> Result<RuntimeResult> {
     rt.block_on(run_with_envelope(envelope))
 }
 
-async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
+async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let project_root = envelope.roots.project_root.clone();
     // Callback identity + state-write anchor: the deliberate `state_root`
     // override when the launch carried one, otherwise the project root. The
@@ -155,16 +155,24 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     // resume a duplicate. Resume-critical: must precede all work.
     callback.attach_current_process().await?;
 
-    let provider_snapshot: ResolvedProviderSnapshot =
-        serde_json::from_value(envelope.provider_snapshot.clone().ok_or_else(|| {
+    let mut runtime_data = std::mem::take(&mut envelope.runtime_data);
+    let provider_snapshot: ResolvedProviderSnapshot = serde_json::from_value(
+        runtime_data.remove(PROVIDER_SNAPSHOT_KEY).ok_or_else(|| {
             anyhow::anyhow!(
-                "launch envelope missing provider_snapshot — the daemon must \
-                 embed the resolved provider config in the envelope"
+                "launch runtime_data missing required {PROVIDER_SNAPSHOT_KEY} value"
             )
-        })?)
-        .map_err(|e| {
-            anyhow::anyhow!("failed to deserialize provider_snapshot from envelope: {e}")
-        })?;
+        })?,
+    )
+    .map_err(|e| {
+        anyhow::anyhow!("failed to deserialize {PROVIDER_SNAPSHOT_KEY} runtime data: {e}")
+    })?;
+    if !runtime_data.is_empty() {
+        anyhow::bail!(
+            "launch runtime_data contains undeclared leftovers after consuming \
+             {PROVIDER_SNAPSHOT_KEY}: {:?}",
+            runtime_data.keys().collect::<Vec<_>>()
+        );
+    }
 
     let bootstrap_output = bootstrap::bootstrap(
         &bootstrap::BootstrapRoots {

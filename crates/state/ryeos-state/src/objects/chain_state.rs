@@ -180,29 +180,29 @@ impl ChainState {
     /// Estimate the serialized size in bytes for threshold checks.
     ///
     /// Uses canonical JSON to get a deterministic size estimate.
-    pub fn estimated_size_bytes(&self) -> usize {
+    pub fn estimated_size_bytes(&self) -> Result<usize, lillux::CanonicalJsonError> {
         let value = self.to_value();
-        let canonical = lillux::canonical_json(&value);
-        canonical.len()
+        let canonical = lillux::canonical_json(&value)?;
+        Ok(canonical.len())
     }
 
     /// Check if this chain state is in the green zone (normal operation).
-    pub fn is_green(&self) -> bool {
-        self.threads.len() < ChainStateThresholds::MAX_GREEN_THREADS
-            && self.estimated_size_bytes() < ChainStateThresholds::MAX_GREEN_BYTES
+    pub fn is_green(&self) -> Result<bool, lillux::CanonicalJsonError> {
+        Ok(self.threads.len() < ChainStateThresholds::MAX_GREEN_THREADS
+            && self.estimated_size_bytes()? < ChainStateThresholds::MAX_GREEN_BYTES)
     }
 
     /// Check if this chain state is in the yellow zone (warning metrics).
-    pub fn is_yellow(&self) -> bool {
-        self.threads.len() >= ChainStateThresholds::MAX_GREEN_THREADS
+    pub fn is_yellow(&self) -> Result<bool, lillux::CanonicalJsonError> {
+        Ok(self.threads.len() >= ChainStateThresholds::MAX_GREEN_THREADS
             && self.threads.len() < ChainStateThresholds::MAX_YELLOW_THREADS
-            && self.estimated_size_bytes() < ChainStateThresholds::MAX_YELLOW_BYTES
+            && self.estimated_size_bytes()? < ChainStateThresholds::MAX_YELLOW_BYTES)
     }
 
     /// Check if this chain state is in the red zone (needs Merkleization).
-    pub fn is_red(&self) -> bool {
-        self.threads.len() >= ChainStateThresholds::RED_THREAD_LIMIT
-            || self.estimated_size_bytes() >= ChainStateThresholds::RED_BYTE_LIMIT
+    pub fn is_red(&self) -> Result<bool, lillux::CanonicalJsonError> {
+        Ok(self.threads.len() >= ChainStateThresholds::RED_THREAD_LIMIT
+            || self.estimated_size_bytes()? >= ChainStateThresholds::RED_BYTE_LIMIT)
     }
 
     /// Convert to a `serde_json::Value` for CAS storage.
@@ -212,10 +212,10 @@ impl ChainState {
 }
 
 /// Compute the CAS content hash of a [`ChainState`] using canonical JSON.
-pub fn hash_chain_state(state: &ChainState) -> String {
+pub fn hash_chain_state(state: &ChainState) -> Result<String, lillux::CanonicalJsonError> {
     let value = state.to_value();
-    let canonical = lillux::canonical_json(&value);
-    lillux::sha256_hex(canonical.as_bytes())
+    let canonical = lillux::canonical_json(&value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// Builder for constructing [`ChainState`] instances.
@@ -429,8 +429,8 @@ mod tests {
             .thread("T-mid", make_thread_entry("03"))
             .build();
 
-        let hash1 = hash_chain_state(&state);
-        let hash2 = hash_chain_state(&state);
+        let hash1 = hash_chain_state(&state).unwrap();
+        let hash2 = hash_chain_state(&state).unwrap();
         assert_eq!(hash1, hash2, "canonical JSON must be deterministic");
         assert!(lillux::valid_hash(&hash1));
     }
@@ -446,7 +446,7 @@ mod tests {
             .build();
 
         let value = state.to_value();
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value).unwrap();
         // Check that "T-a" key appears before "T-z" key in canonical JSON
         // Use quoted keys to avoid substring matches
         let pos_a = canonical.find("\"T-a\"").unwrap();
@@ -464,7 +464,7 @@ mod tests {
             .thread("T-root", make_thread_entry("01"))
             .build();
 
-        let size = state.estimated_size_bytes();
+        let size = state.estimated_size_bytes().unwrap();
         assert!(size > 0, "estimated size should be positive");
     }
 
@@ -475,9 +475,9 @@ mod tests {
             .thread("T-root", make_thread_entry("01"))
             .build();
 
-        assert!(state.is_green());
-        assert!(!state.is_yellow());
-        assert!(!state.is_red());
+        assert!(state.is_green().unwrap());
+        assert!(!state.is_yellow().unwrap());
+        assert!(!state.is_red().unwrap());
     }
 
     #[test]

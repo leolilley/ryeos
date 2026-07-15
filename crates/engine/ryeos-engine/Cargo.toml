@@ -26,6 +26,9 @@ tracing = { workspace = true }
 # core bundle (see `crates/engine/ryeos-engine/src/test_support.rs`).
 test-support = []
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

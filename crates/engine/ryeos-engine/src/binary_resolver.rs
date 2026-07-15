@@ -624,7 +624,12 @@ fn verify_item_source_sidecar(
         });
     }
 
-    let canonical_item_source = lillux::cas::canonical_json(item_source);
+    let canonical_item_source = lillux::cas::canonical_json(item_source).map_err(|error| {
+        EngineError::BinSidecarInvalid {
+            bin: bin_name.to_string(),
+            reason: format!("item_source cannot be canonicalized: {error}"),
+        }
+    })?;
     if body != canonical_item_source {
         return Err(EngineError::BinSidecarInvalid {
             bin: bin_name.to_string(),
@@ -821,7 +826,7 @@ mod tests {
             "mode": 0o644,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
-        let sidecar_body = lillux::cas::canonical_json(&item_source);
+        let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
         let signed_sidecar =
             lillux::signature::sign_content(&sidecar_body, &signing_key, "#", None);
         std::fs::write(

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::contracts::ItemSpace;
+
 /// Trust classification for resolved items (for sandbox profile enforcement and audit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -50,7 +52,10 @@ pub struct ResolvedAncestor {
     pub resolved_ref: String,
     /// Resolved on-disk source path (audit / diagnostic only).
     pub source_path: PathBuf,
-    /// Trust label: which tier (system/user/project) this came from.
+    /// Typed resolution space. Policy must use this field rather than
+    /// inferring space from `source_path` or `trust_class`.
+    pub source_space: ItemSpace,
+    /// Verified trust classification, kept distinct from source space.
     pub trust_class: TrustClass,
     /// If an alias was involved, the expansion chain.
     pub alias_resolution: Option<AliasHop>,
@@ -78,6 +83,8 @@ pub struct ResolutionEdge {
     pub to_ref: String,
     /// Target item's on-disk canonical path.
     pub to_source_path: PathBuf,
+    /// Typed resolution space of the target item.
+    pub to_source_space: ItemSpace,
     /// Trust class of the target (edge-local, subject enforces sandbox based on it).
     pub trust_class: TrustClass,
     /// Which step added this edge.
@@ -104,6 +111,20 @@ impl std::fmt::Display for ResolutionStepName {
             ResolutionStepName::ResolveReferences => write!(f, "resolve_references"),
         }
     }
+}
+
+/// Stable classification for failures raised by a resolution step.
+///
+/// This is carried at the failure site so callers never have to infer
+/// retryability or client responsibility from a human-readable reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionFailureClass {
+    /// The resolved item's parsed or composed definition is invalid.
+    InvalidDefinition,
+    /// A resolver dependency was unavailable while resolving the item.
+    DependencyUnavailable,
+    /// An engine/handler invariant was violated.
+    InternalInvariant,
 }
 
 /// Daemon-computed composed view for a kind.
@@ -282,6 +303,7 @@ impl ResolutionOutput {
 pub struct ResolutionDigestNode {
     pub requested_id: String,
     pub resolved_ref: String,
+    pub source_space: ItemSpace,
     pub trust_class: TrustClass,
     pub raw_content_digest: String,
 }
@@ -291,6 +313,7 @@ impl From<&ResolvedAncestor> for ResolutionDigestNode {
         Self {
             requested_id: item.requested_id.clone(),
             resolved_ref: item.resolved_ref.clone(),
+            source_space: item.source_space,
             trust_class: item.trust_class,
             raw_content_digest: item.raw_content_digest.clone(),
         }
@@ -341,6 +364,7 @@ pub struct ResolutionProvenanceNode {
     pub requested_id: String,
     pub resolved_ref: String,
     pub source_path: PathBuf,
+    pub source_space: ItemSpace,
     pub trust_class: TrustClass,
     pub alias_resolution: Option<AliasHop>,
     pub added_by: ResolutionStepName,
@@ -353,6 +377,7 @@ impl From<&ResolvedAncestor> for ResolutionProvenanceNode {
             requested_id: item.requested_id.clone(),
             resolved_ref: item.resolved_ref.clone(),
             source_path: item.source_path.clone(),
+            source_space: item.source_space,
             trust_class: item.trust_class,
             alias_resolution: item.alias_resolution.clone(),
             added_by: item.added_by,
@@ -369,6 +394,7 @@ pub struct ResolutionProvenanceEdge {
     pub from_source_path: PathBuf,
     pub to_ref: String,
     pub to_source_path: PathBuf,
+    pub to_source_space: ItemSpace,
     pub trust_class: TrustClass,
     pub added_by: ResolutionStepName,
 }
@@ -380,6 +406,7 @@ impl From<&ResolutionEdge> for ResolutionProvenanceEdge {
             from_source_path: edge.from_source_path.clone(),
             to_ref: edge.to_ref.clone(),
             to_source_path: edge.to_source_path.clone(),
+            to_source_space: edge.to_source_space,
             trust_class: edge.trust_class,
             added_by: edge.added_by,
         }
@@ -429,6 +456,7 @@ pub enum ResolutionError {
     /// Generic step failure.
     StepFailed {
         step: ResolutionStepName,
+        class: ResolutionFailureClass,
         reason: String,
     },
     /// The composed value violates the kind's `composed_value_contract`.
@@ -493,7 +521,11 @@ impl std::fmt::Display for ResolutionError {
             ResolutionError::KindNotExecutable { kind } => {
                 write!(f, "kind {} has no execution block (not executable)", kind)
             }
-            ResolutionError::StepFailed { step, reason } => {
+            ResolutionError::StepFailed {
+                step,
+                class: _,
+                reason,
+            } => {
                 write!(f, "{} failed: {}", step, reason)
             }
             ResolutionError::ComposedValueContractViolation {
@@ -570,6 +602,7 @@ mod tests {
             requested_id: "x".to_string(),
             resolved_ref: "directive:x".to_string(),
             source_path: PathBuf::from("/x"),
+            source_space: ItemSpace::Bundle,
             trust_class: trust,
             alias_resolution: None,
             added_by: ResolutionStepName::ResolveExtendsChain,
@@ -637,6 +670,7 @@ mod tests {
 
         let digest = output.as_launched_digest();
         assert_eq!(digest.root.resolved_ref, "directive:root");
+        assert_eq!(digest.root.source_space, ItemSpace::Bundle);
         assert_eq!(digest.root.raw_content_digest, "rootdigest");
         assert_eq!(digest.ancestors.len(), 1);
         assert_eq!(digest.ancestors[0].resolved_ref, "directive:base");
@@ -652,6 +686,7 @@ mod tests {
         // `raw_content` (slim: digests only).
         let wire = serde_json::to_value(&digest).unwrap();
         assert!(wire["root"].get("raw_content").is_none());
+        assert_eq!(wire["root"]["source_space"], "bundle");
         let back: AsLaunchedResolutionDigest = serde_json::from_value(wire).unwrap();
         assert_eq!(back, digest);
     }

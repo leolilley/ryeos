@@ -2,6 +2,8 @@
 //!
 //! Parses schedule spec YAML files from `.ai/node/schedules/<name>.yaml`.
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +17,7 @@ pub struct ScheduleRecord {
     pub spec_version: u32,
     pub schedule_id: String,
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     pub schedule_type: String,
     pub expression: String,
     #[serde(default = "default_params")]
@@ -116,6 +119,11 @@ impl NodeConfigSection for ScheduleSection {
         ryeos_engine::canonical_ref::CanonicalRef::parse(&record.item_ref).with_context(|| {
             format!("invalid item_ref '{}' in schedule record", record.item_ref)
         })?;
+        for (name, item_ref) in &record.ref_bindings {
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).with_context(|| {
+                format!("invalid ref_bindings.{name} '{item_ref}' in schedule record")
+            })?;
+        }
 
         // Validate expression parses for the given type
         ryeos_scheduler::crontab::validate_expression(&record.schedule_type, &record.expression)?;
@@ -195,6 +203,7 @@ mod tests {
             "spec_version": 1,
             "schedule_id": "my-schedule",
             "item_ref": "directive:test/hello",
+            "ref_bindings": {},
             "schedule_type": "interval",
             "expression": "60",
             "timezone": "UTC",

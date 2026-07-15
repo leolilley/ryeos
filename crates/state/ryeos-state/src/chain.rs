@@ -174,7 +174,8 @@ pub fn create_chain(
 
     // Serialize and store the snapshot in CAS
     let snapshot_value = initial_snapshot.to_value();
-    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_json = lillux::canonical_json(&snapshot_value)
+        .context("failed to canonicalize initial snapshot")?;
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
     lillux::atomic_write(&snapshot_path, snapshot_json.as_bytes())
@@ -206,7 +207,8 @@ pub fn create_chain(
     // Validate and store the chain_state in CAS
     chain_state.validate()?;
     let chain_state_value = chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize initial chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     lillux::atomic_write(&chain_state_path, chain_state_json.as_bytes())
@@ -239,6 +241,111 @@ pub fn create_chain(
         chain_state_hash,
         snapshot_hash,
         events: vec![],
+    })
+}
+
+/// Create a root thread and its initial durable events under one chain head.
+pub fn create_chain_with_events(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_root_id: &str,
+    initial_snapshot: ThreadSnapshot,
+    events: Vec<ThreadEvent>,
+    signer: &dyn Signer,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<AddThreadWithEventsResult> {
+    let _lock = ChainLock::acquire(refs_root, chain_root_id)?;
+    initial_snapshot.validate()?;
+    if initial_snapshot.thread_id != chain_root_id
+        || initial_snapshot.chain_root_id != chain_root_id
+    {
+        anyhow::bail!("root thread snapshot identity must equal chain_root_id");
+    }
+    if events.is_empty() {
+        anyhow::bail!("cannot create root chain with empty event list");
+    }
+    for event in &events {
+        event.validate()?;
+        if event.chain_root_id != chain_root_id || event.thread_id != chain_root_id {
+            anyhow::bail!("initial root event identity must equal chain_root_id");
+        }
+    }
+
+    let snapshot_json = lillux::canonical_json(&initial_snapshot.to_value())
+        .context("failed to canonicalize initial snapshot")?;
+    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+    let mut pending_writes = vec![(snapshot_path, snapshot_json.into_bytes())];
+    let mut stored_events = Vec::with_capacity(events.len());
+    let mut last_event_hash = None;
+    for (index, mut event) in events.into_iter().enumerate() {
+        event.chain_seq = (index + 1) as u64;
+        event.thread_seq = (index + 1) as u64;
+        event.prev_chain_event_hash = last_event_hash.clone();
+        event.prev_thread_event_hash = last_event_hash.clone();
+        event.validate()?;
+        let event_json = lillux::canonical_json(&event.to_value())
+            .context("failed to canonicalize initial root event")?;
+        let event_hash = lillux::sha256_hex(event_json.as_bytes());
+        let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
+        pending_writes.push((event_path, event_json.into_bytes()));
+        last_event_hash = Some(event_hash);
+        stored_events.push(event);
+    }
+
+    let event_count = stored_events.len();
+    let mut threads = BTreeMap::new();
+    threads.insert(
+        chain_root_id.to_string(),
+        ChainThreadEntry {
+            snapshot_hash: snapshot_hash.clone(),
+            last_event_hash: last_event_hash.clone(),
+            last_thread_seq: event_count as u64,
+            status: initial_snapshot.status,
+        },
+    );
+    let chain_state = ChainState {
+        schema: 1,
+        kind: "chain_state".to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        prev_chain_state_hash: None,
+        last_event_hash,
+        last_chain_seq: event_count as u64,
+        updated_at: lillux::time::iso8601_now(),
+        threads,
+    };
+    chain_state.validate()?;
+    let chain_state_json = lillux::canonical_json(&chain_state.to_value())
+        .context("failed to canonicalize initial chain state")?;
+    let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
+    let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
+    pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
+    lillux::atomic_write_batch(&pending_writes)
+        .context("failed to store initial root chain objects in CAS")?;
+
+    let signed_ref = SignedRef::new(
+        format!("chains/{chain_root_id}/head"),
+        chain_state_hash.clone(),
+        chain_state.updated_at.clone(),
+        signer.fingerprint().to_string(),
+    );
+    let ref_path = refs_root
+        .join("generic/chains")
+        .join(chain_root_id)
+        .join("head");
+    refs::write_signed_ref(&ref_path, signed_ref, signer)
+        .context("failed to write initial root chain head")?;
+    head_cache.insert(
+        chain_root_id.to_string(),
+        crate::CachedHead::new(chain_state_hash.clone(), chain_state),
+    );
+
+    Ok(AddThreadWithEventsResult {
+        chain_state_hash,
+        snapshot_hash,
+        first_chain_seq: 1,
+        event_count,
+        events: stored_events,
     })
 }
 
@@ -330,7 +437,8 @@ pub fn append_events(
         event.validate()?;
 
         let event_value = event.to_value();
-        let event_json = lillux::canonical_json(&event_value);
+        let event_json = lillux::canonical_json(&event_value)
+            .context("failed to canonicalize appended event")?;
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
         let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
         pending_writes.push((event_path, event_json.into_bytes()));
@@ -358,7 +466,8 @@ pub fn append_events(
         update.new_snapshot.validate()?;
 
         let snapshot_value = update.new_snapshot.to_value();
-        let snapshot_json = lillux::canonical_json(&snapshot_value);
+        let snapshot_json = lillux::canonical_json(&snapshot_value)
+            .context("failed to canonicalize updated snapshot")?;
         let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
 
         let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
@@ -383,13 +492,13 @@ pub fn append_events(
     }
 
     // Create new chain_state
+    let current_chain_state_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
     let new_chain_state = ChainState {
         schema: 1,
         kind: "chain_state".to_string(),
         chain_root_id: chain_root_id.to_string(),
-        prev_chain_state_hash: Some(lillux::sha256_hex(
-            lillux::canonical_json(&current_chain_state.to_value()).as_bytes(),
-        )),
+        prev_chain_state_hash: Some(lillux::sha256_hex(current_chain_state_json.as_bytes())),
         last_event_hash,
         last_chain_seq: first_chain_seq - 1,
         updated_at: lillux::time::iso8601_now(),
@@ -399,7 +508,8 @@ pub fn append_events(
     // Store chain_state in CAS
     new_chain_state.validate()?;
     let chain_state_value = new_chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize new chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     lillux::atomic_write(&chain_state_path, chain_state_json.as_bytes())
@@ -482,7 +592,8 @@ pub fn add_thread_to_chain(
 
     // Store snapshot in CAS
     let snapshot_value = new_snapshot.to_value();
-    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_json = lillux::canonical_json(&snapshot_value)
+        .context("failed to canonicalize child snapshot")?;
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
     lillux::atomic_write(&snapshot_path, snapshot_json.as_bytes())
@@ -500,8 +611,9 @@ pub fn add_thread_to_chain(
         },
     );
 
-    let prev_hash =
-        lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes());
+    let current_chain_state_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
+    let prev_hash = lillux::sha256_hex(current_chain_state_json.as_bytes());
 
     let new_chain_state = ChainState {
         schema: 1,
@@ -517,7 +629,8 @@ pub fn add_thread_to_chain(
     // Store new chain_state in CAS
     new_chain_state.validate()?;
     let chain_state_value = new_chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize updated chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     lillux::atomic_write(&chain_state_path, chain_state_json.as_bytes())
@@ -610,7 +723,8 @@ pub fn add_thread_to_chain_with_events(
     }
 
     let snapshot_value = new_snapshot.to_value();
-    let snapshot_json = lillux::canonical_json(&snapshot_value);
+    let snapshot_json = lillux::canonical_json(&snapshot_value)
+        .context("failed to canonicalize branch snapshot")?;
     let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
     let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
 
@@ -631,7 +745,8 @@ pub fn add_thread_to_chain_with_events(
         event.validate()?;
 
         let event_value = event.to_value();
-        let event_json = lillux::canonical_json(&event_value);
+        let event_json = lillux::canonical_json(&event_value)
+            .context("failed to canonicalize branch event")?;
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
         let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
         pending_writes.push((event_path, event_json.into_bytes()));
@@ -657,8 +772,9 @@ pub fn add_thread_to_chain_with_events(
         },
     );
 
-    let prev_hash =
-        lillux::sha256_hex(lillux::canonical_json(&current_chain_state.to_value()).as_bytes());
+    let current_chain_state_json = lillux::canonical_json(&current_chain_state.to_value())
+        .context("failed to canonicalize current chain state")?;
+    let prev_hash = lillux::sha256_hex(current_chain_state_json.as_bytes());
     let new_chain_state = ChainState {
         schema: 1,
         kind: "chain_state".to_string(),
@@ -672,7 +788,8 @@ pub fn add_thread_to_chain_with_events(
 
     new_chain_state.validate()?;
     let chain_state_value = new_chain_state.to_value();
-    let chain_state_json = lillux::canonical_json(&chain_state_value);
+    let chain_state_json = lillux::canonical_json(&chain_state_value)
+        .context("failed to canonicalize branch chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
@@ -747,8 +864,9 @@ pub fn read_chain_head(
     chain_state.validate()?;
 
     // Populate cache before returning
-    let chain_state_hash =
-        lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
+    let chain_state_json = lillux::canonical_json(&chain_state.to_value())
+        .context("failed to canonicalize chain head")?;
+    let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
     head_cache.insert(
         chain_root_id.to_string(),
         CachedHead::new(chain_state_hash, chain_state.clone()),
@@ -769,8 +887,9 @@ pub fn read_thread_snapshot(
 ) -> anyhow::Result<ReadSnapshotResult> {
     let chain_state = read_chain_head(cas_root, refs_root, chain_root_id, head_cache)?;
 
-    let chain_state_hash =
-        lillux::sha256_hex(lillux::canonical_json(&chain_state.to_value()).as_bytes());
+    let chain_state_json = lillux::canonical_json(&chain_state.to_value())
+        .context("failed to canonicalize chain head")?;
+    let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
 
     // Check if thread exists in chain
     let thread_entry = match chain_state.threads.get(thread_id) {
@@ -1067,7 +1186,9 @@ mod tests {
         assert_eq!(
             result.events[1].prev_thread_event_hash,
             Some(lillux::sha256_hex(
-                lillux::canonical_json(&result.events[0].to_value()).as_bytes()
+                lillux::canonical_json(&result.events[0].to_value())
+                    .unwrap()
+                    .as_bytes()
             ))
         );
 

@@ -256,7 +256,7 @@ fn host_env_snapshot_lossy() -> Vec<(String, String)> {
         .collect()
 }
 
-fn compatibility_daemon_roots() -> anyhow::Result<DaemonRootEnv> {
+fn current_daemon_roots() -> anyhow::Result<DaemonRootEnv> {
     Ok(DaemonRootEnv {
         app_root: std::env::var_os("RYEOS_APP_ROOT").map(|p| p.to_string_lossy().into_owned()),
     })
@@ -279,7 +279,7 @@ fn compatibility_daemon_roots() -> anyhow::Result<DaemonRootEnv> {
 pub fn build_spawn_env(
     declared_secrets: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    build_spawn_env_with_roots(declared_secrets, compatibility_daemon_roots()?)
+    build_spawn_env_with_roots(declared_secrets, current_daemon_roots()?)
 }
 
 pub fn build_spawn_env_with_roots(
@@ -296,9 +296,8 @@ pub fn build_spawn_env_with_roots(
         .build())
 }
 
-/// Build the env contract for a daemon-spawned subprocess that is
-/// NOT a directive-runtime launch (those go through the model-target
-/// preflight in `execution/launch.rs`).
+/// Build the env contract for a daemon-spawned subprocess outside the managed
+/// launch-envelope path.
 ///
 /// Composition:
 ///   * allowlisted parent env (PATH/HOME/proxy/CA/...) via
@@ -306,9 +305,9 @@ pub fn build_spawn_env_with_roots(
 ///   * caller-supplied per-spawn env (e.g. `RYEOSD_THREAD_AUTH_TOKEN`)
 ///     — wins over allowlist
 ///
-/// This helper deliberately does NOT consult the vault or auto-discover
-/// provider secrets. Provider-secret injection is owned by directive
-/// launch preflight, where the resolved provider id is known.
+/// This helper deliberately does not consult the vault. Managed launches
+/// resolve their signed metadata and launch-preparer secret requirements
+/// before constructing the spawn environment.
 pub fn build_subprocess_envs(
     declared_secrets: &std::collections::BTreeMap<String, String>,
     per_spawn_env: &[(String, String)],
@@ -316,7 +315,7 @@ pub fn build_subprocess_envs(
     build_subprocess_envs_with_roots(
         declared_secrets,
         per_spawn_env,
-        compatibility_daemon_roots()?,
+        current_daemon_roots()?,
     )
 }
 

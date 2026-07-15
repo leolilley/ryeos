@@ -79,8 +79,10 @@ pub(crate) fn run_handler_subprocess(
         });
     }
 
-    serde_json::from_str(&output.stdout).map_err(|e| EngineError::HandlerProtocolViolation {
-        handler: canonical_ref,
-        detail: e.to_string(),
+    ryeos_handler_protocol::from_json_str_strict(&output.stdout).map_err(|e| {
+        EngineError::HandlerProtocolViolation {
+            handler: canonical_ref,
+            detail: e.to_string(),
+        }
     })
 }

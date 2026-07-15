@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use lillux::crypto::Verifier;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
@@ -549,12 +549,14 @@ impl RemoteClient {
     pub async fn execute(
         &self,
         item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
         project_path: &str,
         parameters: &Value,
         project_source: &str,
     ) -> Result<Value> {
         let body = serde_json::json!({
             "item_ref": item_ref,
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "project_source": { "kind": project_source },
@@ -575,6 +577,7 @@ impl RemoteClient {
     pub async fn execute_with_options(
         &self,
         item_ref: &str,
+        ref_bindings: &BTreeMap<String, String>,
         project_path: &str,
         parameters: &Value,
         project_source: &str,
@@ -582,6 +585,7 @@ impl RemoteClient {
     ) -> Result<Value> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "project_source": { "kind": project_source },
@@ -1057,7 +1061,7 @@ impl ObjectsGetResponse {
             match entry.kind.as_str() {
                 "object" if entry.value.is_some() && entry.data.is_none() => {
                     let canonical =
-                        lillux::canonical_json(entry.value.as_ref().expect("value checked above"));
+                        lillux::canonical_json(entry.value.as_ref().expect("value checked above"))?;
                     let actual = lillux::sha256_hex(canonical.as_bytes());
                     if actual != entry.hash {
                         anyhow::bail!(
@@ -1181,7 +1185,7 @@ impl ObjectsClosureGetResponse {
                         anyhow::bail!("object entry {} is not in advertised closure", entry.hash);
                     }
                     let canonical =
-                        lillux::canonical_json(entry.value.as_ref().expect("value checked above"));
+                        lillux::canonical_json(entry.value.as_ref().expect("value checked above"))?;
                     let actual = lillux::sha256_hex(canonical.as_bytes());
                     if actual != entry.hash {
                         anyhow::bail!(
@@ -1647,7 +1651,7 @@ impl RemoteSignedRef {
             "updated_at": self.updated_at,
             "signer": self.signer,
         });
-        let canonical = lillux::canonical_json(&unsigned);
+        let canonical = lillux::canonical_json(&unsigned)?;
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature)
             .context("failed to decode signed ref signature")?;
@@ -1883,7 +1887,7 @@ impl AdmissionStatusResponse {
                 let Some(attestation) = self.attestation.as_ref() else {
                     anyhow::bail!("accepted admission status missing attestation object");
                 };
-                let canonical = lillux::canonical_json(attestation);
+                let canonical = lillux::canonical_json(attestation)?;
                 let actual = lillux::sha256_hex(canonical.as_bytes());
                 if actual != hash {
                     anyhow::bail!(
@@ -1964,7 +1968,7 @@ impl AdmissionAttestationRemoteRecord {
         if !matches!(self.state.as_str(), "accepted" | "rejected") {
             anyhow::bail!("unknown admission attestation state: {}", self.state);
         }
-        let canonical = lillux::canonical_json(&self.attestation);
+        let canonical = lillux::canonical_json(&self.attestation)?;
         let actual = lillux::sha256_hex(canonical.as_bytes());
         if actual != self.attestation_hash {
             anyhow::bail!(
@@ -2193,7 +2197,9 @@ mod tests {
             "evidence": {},
             "signature": signature,
         });
-        let attestation = lillux::sha256_hex(lillux::canonical_json(&attestation_value).as_bytes());
+        let attestation = lillux::sha256_hex(
+            lillux::canonical_json(&attestation_value).unwrap().as_bytes(),
+        );
         let response: AdmissionAttestationsForSubjectResponse =
             serde_json::from_value(serde_json::json!({
                 "subject_hash": subject,

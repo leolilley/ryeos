@@ -20,13 +20,11 @@
 //!     Accepted ack used by webhook routes; the launched thread
 //!     keeps running after the HTTP response is closed.
 //!
-//! Both consumers share the same `dispatch::dispatch` call shape with
-//! `pre_minted_thread_id = Some(thread_id)`. Dispatch normally creates
-//! the pre-minted row itself; if dispatch fails before it reaches row
-//! creation, this helper creates and finalizes a failed placeholder row
-//! so the id already returned to a caller cannot remain phantom.
+//! Acknowledged consumers use the launch-handoff variant and expose the ID only
+//! after durable row/audit creation and spawn-task authority transfer.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use ryeos_app::state::AppState;
 use ryeos_executor::dispatch_error::DispatchError;
@@ -48,7 +46,7 @@ impl LaunchSpawnError {
     /// Stable machine-readable error code matching the `DispatchError`
     /// code for the `Dispatch` variant, with one launch-specific code
     /// for `InvalidRef`.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::InvalidRef { .. } => "invalid_ref",
             Self::Dispatch(e) => e.code(),
@@ -59,7 +57,8 @@ impl LaunchSpawnError {
 /// Options controlling the dispatch-launch beyond the core
 /// item_ref/project/parameters identity.
 pub(crate) struct DispatchLaunchOptions {
-    /// Launch mode (e.g. "inline", "detached"). Defaults to "inline".
+    pub ref_bindings: BTreeMap<String, String>,
+    /// Launch mode (e.g. "inline", "detached").
     pub launch_mode: String,
     /// Target site id for remote forwarding. `None` means local execution.
     pub target_site_id: Option<String>,
@@ -72,20 +71,6 @@ pub(crate) struct DispatchLaunchOptions {
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
-}
-
-impl Default for DispatchLaunchOptions {
-    fn default() -> Self {
-        Self {
-            launch_mode: "inline".to_string(),
-            target_site_id: None,
-            validate_only: false,
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            call: None,
-            previous_thread_id: None,
-        }
-    }
 }
 
 /// Spawn the kind-agnostic dispatch-launch task on the global tokio
@@ -104,9 +89,8 @@ impl Default for DispatchLaunchOptions {
 /// For human callers it is `fp:<sha256>`; for webhook callers it is a
 /// stable verifier-derived id like `webhook:hmac:<route_id>`.
 ///
-/// `options` carries launch-mode, target-site, validate-only, and
-/// op/inputs overrides. When `Default::default()` is used, the
-/// behavior is identical to the previous hard-coded defaults.
+/// `options` carries the complete secondary identity plus launch-mode,
+/// target-site, validation, and call inputs.
 // Execution plumbing: each argument is a distinct leg of the launch's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
@@ -120,6 +104,62 @@ pub(crate) fn spawn_dispatch_launch(
     principal_scopes: Vec<String>,
     pre_minted_thread_id: String,
     options: DispatchLaunchOptions,
+) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
+    spawn_dispatch_launch_inner(
+        state,
+        item_ref,
+        project_path,
+        parameters,
+        principal_id,
+        principal_scopes,
+        pre_minted_thread_id,
+        options,
+        None,
+    )
+}
+
+/// Spawn an acknowledged managed launch. The receiver resolves only after the
+/// durable launch authority has been handed to the scheduled spawn task.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_dispatch_launch_with_handoff(
+    state: &AppState,
+    item_ref: crate::routes::parsed_ref::ParsedItemRef,
+    project_path: crate::routes::abs_path::AbsolutePathBuf,
+    parameters: Value,
+    principal_id: String,
+    principal_scopes: Vec<String>,
+    pre_minted_thread_id: String,
+    options: DispatchLaunchOptions,
+) -> (
+    tokio::task::JoinHandle<Result<(), LaunchSpawnError>>,
+    tokio::sync::oneshot::Receiver<ryeos_executor::execution::launch::LaunchHandoffResult>,
+) {
+    let (handoff, ready) = ryeos_executor::execution::launch::LaunchHandoff::channel();
+    let task = spawn_dispatch_launch_inner(
+        state,
+        item_ref,
+        project_path,
+        parameters,
+        principal_id,
+        principal_scopes,
+        pre_minted_thread_id,
+        options,
+        Some(handoff),
+    );
+    (task, ready)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_dispatch_launch_inner(
+    state: &AppState,
+    item_ref: crate::routes::parsed_ref::ParsedItemRef,
+    project_path: crate::routes::abs_path::AbsolutePathBuf,
+    parameters: Value,
+    principal_id: String,
+    principal_scopes: Vec<String>,
+    pre_minted_thread_id: String,
+    options: DispatchLaunchOptions,
+    launch_handoff: Option<ryeos_executor::execution::launch::LaunchHandoff>,
 ) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
     let state_clone = state.clone();
     let project_path_buf = project_path.into_path_buf();
@@ -143,8 +183,6 @@ pub(crate) fn spawn_dispatch_launch(
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 
         let site_id = current_site_id;
-        let current_site_id_for_failure_row = site_id.clone();
-        let origin_site_id_for_failure_row = site_id.clone();
 
         let plan_ctx = PlanContext {
             requested_by: EffectivePrincipal::Local(Principal {
@@ -173,14 +211,12 @@ pub(crate) fn spawn_dispatch_launch(
             state_clone.engine.clone(),
         );
 
-        let usage_subject_for_failure_row = usage_subject.clone();
-        let usage_subject_asserted_by_for_failure_row = usage_subject_asserted_by.clone();
-
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: &launch_mode,
             target_site_id: dispatch_target_site_id.as_deref(),
             validate_only,
             params: parameters,
+            ref_bindings: options.ref_bindings,
             acting_principal: principal_id.as_str(),
             project_path: project_path_buf.as_path(),
             provenance,
@@ -192,25 +228,28 @@ pub(crate) fn spawn_dispatch_launch(
             parent_execution_context: None,
         };
 
-        match ryeos_executor::dispatch::dispatch(
-            item_ref.as_str(),
-            &dispatch_req,
-            &exec_ctx,
-            &state_clone,
-        )
-        .await
-        {
+        let dispatched = match launch_handoff.as_ref() {
+            Some(handoff) => ryeos_executor::dispatch::dispatch_with_launch_handoff(
+                item_ref.as_str(),
+                &dispatch_req,
+                &exec_ctx,
+                &state_clone,
+                handoff,
+            )
+            .await,
+            None => ryeos_executor::dispatch::dispatch(
+                item_ref.as_str(),
+                &dispatch_req,
+                &exec_ctx,
+                &state_clone,
+            )
+            .await,
+        };
+        match dispatched {
             Ok(_value) => Ok(()),
             Err(e) => {
-                // Persistence-first safety net: if dispatch created the
-                // pre-minted thread row but failed before finalizing it
-                // (e.g. a managed `build_and_launch` policy/trust/grant
-                // failure that returns before spawn), finalize it `failed`.
-                // If dispatch failed before creating the row at all (TOCTOU
-                // after accepted preflight, invalidated bundle item, etc.),
-                // create a failed placeholder row first so the id returned by
-                // accepted launch never remains phantom. No-ops when the
-                // runtime already drove the row terminal.
+                // Finalize only a real row created by dispatch. A failure before
+                // authoritative row creation leaves no synthetic placeholder.
                 let error_payload = serde_json::json!({
                     "code": e.code(),
                     "reason": e.to_string(),
@@ -220,44 +259,7 @@ pub(crate) fn spawn_dispatch_launch(
                         !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
                             .is_some_and(|s| s.is_terminal())
                     }
-                    Ok(None) => {
-                        let failure_thread_kind = state_clone
-                            .engine
-                            .kinds
-                            .get(item_ref.kind())
-                            .and_then(|schema| schema.execution())
-                            .and_then(|exec| exec.thread_profile.as_ref())
-                            .map(|profile| profile.name.clone())
-                            .unwrap_or_else(|| "system_task".to_string());
-                        let _ = state_clone.threads.create_thread(
-                            &ryeos_app::thread_lifecycle::ThreadCreateParams {
-                                thread_id: pre_minted_thread_id.clone(),
-                                chain_root_id: pre_minted_thread_id.clone(),
-                                kind: failure_thread_kind,
-                                item_ref: item_ref.as_str().to_string(),
-                                executor_ref: item_ref.as_str().to_string(),
-                                launch_mode: launch_mode.clone(),
-                                current_site_id: current_site_id_for_failure_row.clone(),
-                                origin_site_id: origin_site_id_for_failure_row.clone(),
-                                upstream_thread_id: None,
-                                requested_by: Some(principal_id.clone()),
-                                project_root: None,
-                                usage_subject: usage_subject_for_failure_row.clone(),
-                                usage_subject_asserted_by:
-                                    usage_subject_asserted_by_for_failure_row.clone(),
-                            },
-                        );
-                        state_clone
-                            .threads
-                            .get_thread(&pre_minted_thread_id)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|detail| {
-                                !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
-                                    .is_some_and(|s| s.is_terminal())
-                            })
-                    }
-                    Err(_) => false,
+                    Ok(None) | Err(_) => false,
                 };
                 if should_finalize {
                     let _ = state_clone.threads.finalize_thread(
@@ -304,17 +306,9 @@ mod tests {
     }
 
     #[test]
-    fn launch_options_default_is_inline_local() {
-        let opts = DispatchLaunchOptions::default();
-        assert_eq!(opts.launch_mode, "inline");
-        assert_eq!(opts.target_site_id, None);
-        assert!(!opts.validate_only);
-        assert!(opts.call.is_none());
-    }
-
-    #[test]
     fn launch_options_all_fields_overridable() {
         let opts = DispatchLaunchOptions {
+            ref_bindings: BTreeMap::new(),
             launch_mode: "detached".to_string(),
             target_site_id: Some("site:remote".to_string()),
             validate_only: true,

@@ -259,6 +259,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
     let url = format!("http://{}/execute", h.bind);
     let body = json!({
         "item_ref": "graph:chain",
+        "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
     });

@@ -102,6 +102,7 @@ impl SchedulerContext for AppSchedulerContext {
             target_site_id: None,
             validate_only: false,
             params,
+            ref_bindings: spec.ref_bindings.clone(),
             acting_principal: &spec.requester_fingerprint,
             project_path: std::path::Path::new(project_path),
             provenance,

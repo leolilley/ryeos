@@ -26,12 +26,13 @@ use crate::state::get_ui_state;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub target: InvocationTarget,
+    pub ref_bindings: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub params: Value,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InvocationTarget {
     Ref {
         #[serde(rename = "ref")]
@@ -233,6 +234,7 @@ async fn execute_prepared_item_ref(
         target_site_id: None,
         validate_only: false,
         params: req.params.clone(),
+        ref_bindings: req.ref_bindings.clone(),
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
         project_path: &prepared.effective_path,
         provenance,
@@ -254,7 +256,8 @@ async fn execute_prepared_item_ref(
     )
     .await
     .map_err(|e| HandlerError::Structured {
-        code: "dispatch_error".into(),
+        code: e.code().to_owned(),
+        status: e.http_status().as_u16(),
         body: ryeos_executor::structured_error::StructuredErrorPayload::from(&e).to_value(),
     })
     .map_err(Into::into)

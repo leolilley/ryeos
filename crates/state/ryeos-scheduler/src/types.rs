@@ -1,5 +1,7 @@
 //! Shared types for the scheduler module.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 /// Projection record for a schedule spec in `scheduler.sqlite3`.
@@ -7,6 +9,7 @@ use serde::Serialize;
 pub struct ScheduleSpecRecord {
     pub schedule_id: String,
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     pub params: String,
     pub schedule_type: String,
     pub expression: String,

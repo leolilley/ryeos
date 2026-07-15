@@ -15,7 +15,6 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
     pub vault_bindings: &'a [(String, String)],
-    pub provider_secret_name: Option<&'a str>,
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
     pub app_root: &'a Path,
@@ -27,7 +26,26 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub is_resume: bool,
 }
 
-pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
+pub(super) struct SpawnedRuntime {
+    process: lillux::RunningProcess,
+}
+
+impl SpawnedRuntime {
+    pub(super) fn wait(self) -> Result<RuntimeResult> {
+        let result = self.process.wait();
+        if !result.success {
+            return Ok(runtime_failure_result(&result.stderr, result.timed_out));
+        }
+        decode_runtime_stdout(&result.stdout)
+    }
+}
+
+/// Build the protocol subprocess request and start the child, returning as
+/// soon as stdin has been handed to the successfully spawned process. Waiting
+/// and result decoding are deliberately separate so accepted launch surfaces
+/// can acknowledge the durable spawn-task handoff without waiting for runtime
+/// completion.
+pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRuntime> {
     let SpawnRuntimeParams {
         descriptor,
         binary,
@@ -37,7 +55,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         callback,
         thread_id,
         vault_bindings,
-        provider_secret_name,
         thread_auth_token,
         roots,
         app_root,
@@ -107,11 +124,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
 
     let declared_secret_bindings = secret_map
         .iter()
-        .filter(|(key, _)| Some(key.as_str()) != provider_secret_name)
-        .map(|(key, value)| (key.clone(), value.clone()));
-    let provider_secret_bindings = secret_map
-        .iter()
-        .filter(|(key, _)| Some(key.as_str()) == provider_secret_name)
         .map(|(key, value)| (key.clone(), value.clone()));
     spec.env = ryeos_app::env_contract::EnvContractBuilder::new()
         .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
@@ -124,10 +136,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         .with_bindings(
             ryeos_app::env_contract::EnvSourceKind::DeclaredSecret,
             declared_secret_bindings,
-        )?
-        .with_bindings(
-            ryeos_app::env_contract::EnvSourceKind::ProviderSecret,
-            provider_secret_bindings,
         )?
         .with_typed_bindings(protocol_bindings)?
         .build();
@@ -142,13 +150,14 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeRes
         thread_id,
     )
     .map_err(|error| anyhow::anyhow!("sandbox_wrap failed: {error}"))?;
-    let result = lillux::run(request);
-
-    if !result.success {
-        return Ok(runtime_failure_result(&result.stderr, result.timed_out));
-    }
-
-    decode_runtime_stdout(&result.stdout)
+    let process = lillux::lib_spawn(request).map_err(|result| {
+        anyhow::anyhow!(
+            "runtime process spawn failed (exit={}): {}",
+            result.exit_code,
+            result.stderr
+        )
+    })?;
+    Ok(SpawnedRuntime { process })
 }
 
 fn runtime_failure_result(stderr: &str, timed_out: bool) -> RuntimeResult {

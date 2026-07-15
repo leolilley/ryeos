@@ -320,10 +320,10 @@ impl ThreadSnapshot {
 }
 
 /// Compute the CAS content hash of a [`ThreadSnapshot`] using canonical JSON.
-pub fn hash_snapshot(snapshot: &ThreadSnapshot) -> String {
+pub fn hash_snapshot(snapshot: &ThreadSnapshot) -> Result<String, lillux::CanonicalJsonError> {
     let value = snapshot.to_value();
-    let canonical = lillux::canonical_json(&value);
-    lillux::sha256_hex(canonical.as_bytes())
+    let canonical = lillux::canonical_json(&value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 /// Fluent builder for constructing [`ThreadSnapshot`] instances.
@@ -747,8 +747,8 @@ mod tests {
         .updated_at("2026-04-21T12:00:00Z".to_string())
         .build();
 
-        let hash1 = hash_snapshot(&snap);
-        let hash2 = hash_snapshot(&snap);
+        let hash1 = hash_snapshot(&snap).unwrap();
+        let hash2 = hash_snapshot(&snap).unwrap();
         assert_eq!(hash1, hash2, "canonical JSON must be deterministic");
         assert!(lillux::valid_hash(&hash1));
     }

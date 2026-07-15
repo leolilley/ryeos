@@ -153,7 +153,8 @@ pub fn admit_root(
     attestation.verify_with_key(issuer_key)?;
 
     let attestation_value = attestation.to_value();
-    let canonical = lillux::canonical_json(&attestation_value);
+    let canonical = lillux::canonical_json(&attestation_value)
+        .context("failed to canonicalize admission attestation")?;
     let attestation_hash = lillux::sha256_hex(canonical.as_bytes());
     let path = lillux::shard_path(db.cas_root(), "objects", &attestation_hash, ".json");
     if let Some(parent) = path.parent() {
@@ -306,7 +307,7 @@ mod tests {
     use serde_json::json;
 
     fn write_object(db: &StateDb, value: &serde_json::Value) -> String {
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
         let path = lillux::shard_path(db.cas_root(), "objects", &hash, ".json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -869,6 +869,7 @@ mod tests {
         ResumeContext {
             kind: "tool_run".into(),
             item_ref: "ns/foo".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "detached".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {

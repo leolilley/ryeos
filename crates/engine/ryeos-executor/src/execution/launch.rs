@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use rand::Rng;
@@ -16,11 +17,12 @@ use super::limits::{
 };
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
-use ryeos_app::event_store_service::{EventAppendItem, EventAppendParams};
+use ryeos_app::event_store_service::{EventAppendBatchParams, EventAppendItem};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
 use ryeos_runtime::events::RuntimeEventType;
+use crate::dispatch_error::DispatchError;
 
 mod runtime_request;
 mod terminal;
@@ -77,21 +79,21 @@ pub enum MaterializationError {
 #[derive(Debug, Clone)]
 pub enum SecretSource {
     Metadata,
-    Provider { provider_id: String },
+    LaunchPreparation { origin: String },
 }
 
 impl SecretSource {
     pub fn kind_for_wire(&self) -> &'static str {
         match self {
             SecretSource::Metadata => "declared",
-            SecretSource::Provider { .. } => "provider",
+            SecretSource::LaunchPreparation { .. } => "launch_preparation",
         }
     }
 
     pub fn name_for_wire(&self) -> String {
         match self {
             SecretSource::Metadata => "item metadata".to_string(),
-            SecretSource::Provider { provider_id } => provider_id.clone(),
+            SecretSource::LaunchPreparation { origin } => origin.clone(),
         }
     }
 }
@@ -110,61 +112,45 @@ pub struct MissingSecret {
 
 impl MissingSecret {
     pub fn primary_source(&self) -> &SecretSource {
-        self.sources
-            .iter()
-            .find(|source| matches!(source, SecretSource::Provider { .. }))
-            .unwrap_or(&self.sources[0])
+        &self.sources[0]
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderPreflight {
-    pub snapshot: ryeos_runtime::ResolvedProviderSnapshot,
-    pub env_var: Option<String>,
-    pub provider_id: String,
-}
-
-const ENVELOPE_FIELD_PROVIDER_SNAPSHOT: &str = "provider_snapshot";
-
-/// Whether a runtime's declared envelope fields include the provider
-/// snapshot — i.e. launching this kind resolves a provider (and possibly its
-/// auth secret). Public so read-only preflight surfaces (env-check) apply
-/// the same gate the launch path does.
-pub fn requires_provider_snapshot(required_envelope_fields: &[String]) -> bool {
-    required_envelope_fields
-        .iter()
-        .any(|field| field == ENVELOPE_FIELD_PROVIDER_SNAPSHOT)
 }
 
 pub(crate) fn build_secret_requirements(
     metadata_required_secrets: &[String],
-    provider_preflight: Option<&ProviderPreflight>,
 ) -> Vec<SecretRequirement> {
-    let mut requirements: Vec<SecretRequirement> = metadata_required_secrets
+    metadata_required_secrets
         .iter()
         .map(|name| SecretRequirement {
             name: name.clone(),
             sources: vec![SecretSource::Metadata],
         })
-        .collect();
+        .collect()
+}
 
-    if let Some(preflight) = provider_preflight {
-        if let Some(env_var) = preflight.env_var.as_ref() {
-            let provider_source = SecretSource::Provider {
-                provider_id: preflight.provider_id.clone(),
-            };
-            if let Some(existing) = requirements.iter_mut().find(|req| req.name == *env_var) {
-                existing.sources.push(provider_source);
-            } else {
-                requirements.push(SecretRequirement {
-                    name: env_var.clone(),
-                    sources: vec![provider_source],
-                });
-            }
+fn merge_prepared_secret_requirements(
+    requirements: &mut Vec<SecretRequirement>,
+    prepared: &[super::launch_preparation::PreparedSecret],
+) -> Result<(), BuildAndLaunchError> {
+    for secret in prepared {
+        let origin_value = serde_json::to_value(&secret.origin)?;
+        let source = SecretSource::LaunchPreparation {
+            origin: lillux::canonical_json(&origin_value).map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "canonicalize prepared secret origin: {error}"
+                ))
+            })?,
+        };
+        if let Some(existing) = requirements.iter_mut().find(|item| item.name == secret.name) {
+            existing.sources.push(source);
+        } else {
+            requirements.push(SecretRequirement {
+                name: secret.name.clone(),
+                sources: vec![source],
+            });
         }
     }
-
-    requirements
+    Ok(())
 }
 
 pub(crate) fn missing_secrets_from_requirements(
@@ -203,29 +189,6 @@ pub(crate) fn required_secret_missing_payload(
     .to_value()
 }
 
-fn finalize_missing_secret_launch(
-    state: &AppState,
-    thread_id: &str,
-    item_ref: &str,
-    secrets: &[MissingSecret],
-) {
-    let Some(first) = secrets.first() else {
-        return;
-    };
-    let payload = required_secret_missing_payload(item_ref, first);
-    let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
-        thread_id: thread_id.to_string(),
-        status: "failed".to_string(),
-        outcome_code: Some("required_secret_missing".to_string()),
-        result: Some(payload.clone()),
-        error: Some(payload),
-        metadata: None,
-        artifacts: Vec::new(),
-        final_cost: None,
-        summary_json: None,
-    });
-}
-
 /// Typed error returned by [`build_and_launch`]. Materialization
 /// failures carry a stable variant; everything else is `Internal`.
 #[derive(Debug, thiserror::Error)]
@@ -241,6 +204,8 @@ pub enum BuildAndLaunchError {
     /// (bundle events / vault). Mapped to `DispatchError::CapabilityRejected`.
     #[error("{reason}")]
     CapabilityRejected { reason: String },
+    #[error("{0}")]
+    LaunchPreparation(DispatchError),
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -265,6 +230,7 @@ impl BuildAndLaunchError {
             Self::Materialization(_)
             | Self::MissingSecrets { .. }
             | Self::CapabilityRejected { .. } => false,
+            Self::LaunchPreparation(error) => error.retryable(),
         }
     }
 }
@@ -578,31 +544,8 @@ pub fn resolve_native_executor_path(
     Ok(target_path)
 }
 
-/// Extract the model spec from the composed view produced by the
-/// engine's resolution pipeline. The composed view contains the
-/// directive's parsed header; we pull the `model` key out without
-/// re-parsing the directive YAML.
-fn extract_model_spec_from_resolved(
-    composed: &ryeos_engine::resolution::KindComposedView,
-) -> anyhow::Result<Option<ryeos_runtime::model_resolution::ModelSpec>> {
-    let model_value = composed.composed.get("model");
-    match model_value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => {
-            let spec: ryeos_runtime::model_resolution::ModelSpec =
-                serde_json::from_value(v.clone()).map_err(|e| {
-                    anyhow::anyhow!("failed to parse model spec from composed view: {e}")
-                })?;
-            Ok(Some(spec))
-        }
-    }
-}
-
-/// Build a `VerifiedLoader` over the same root ordering the spawned
-/// runtime will see. This ensures the daemon's preflight resolve
-/// produces the same answer the runtime would get. Trust context is
-/// the explicit operator trusted-keys dir plus the project root —
-/// matching the engine trust store's sources, not the bundle roots.
+/// Build the verified config loader used by generic execution-limit policy.
+/// Launch-preparer snapshots use the stricter engine-owned loader instead.
 fn build_verified_loader_for_thread(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     operator_trusted_keys_dir: &Path,
@@ -610,57 +553,20 @@ fn build_verified_loader_for_thread(
     let project_root = engine_roots
         .ordered
         .iter()
-        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::Project)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        })
+        .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
+        .and_then(|root| root.ai_root.parent().map(Path::to_path_buf))
         .ok_or_else(|| anyhow::anyhow!("no project root in engine resolution roots"))?;
-
-    let bundle_roots: Vec<PathBuf> = engine_roots
+    let bundle_roots = engine_roots
         .ordered
         .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        })
+        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+        .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
         .collect();
-
     Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
         project_root,
         bundle_roots,
         operator_trusted_keys_dir,
     ))
-}
-
-/// Resolve the provider a composed item would launch with (model header →
-/// provider config → auth env var), WITHOUT injecting anything. Shared by
-/// the launch/resume paths and read-only preflight surfaces (env-check),
-/// so enumeration can never diverge from what a real launch resolves.
-pub fn resolve_provider_preflight(
-    composed: &ryeos_engine::resolution::KindComposedView,
-    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
-    operator_trusted_keys_dir: &Path,
-) -> Result<ProviderPreflight, MaterializationError> {
-    let header = ryeos_runtime::model_resolution::DirectiveModelHeader {
-        model: extract_model_spec_from_resolved(composed)
-            .map_err(|e| MaterializationError::Internal(e.to_string()))?,
-    };
-    let loader = build_verified_loader_for_thread(engine_roots, operator_trusted_keys_dir)
-        .map_err(|e| MaterializationError::Internal(e.to_string()))?;
-    let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(&header, &loader)
-        .map_err(|e| MaterializationError::Internal(e.to_string()))?;
-
-    Ok(ProviderPreflight {
-        env_var: resolved_target.provider.auth.env_var.clone(),
-        provider_id: resolved_target.provider_id.clone(),
-        snapshot: resolved_target,
-    })
 }
 
 pub struct NativeLaunchResult {
@@ -880,7 +786,6 @@ pub struct BuildAndLaunchParams<'a> {
     pub provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     pub parameters: &'a Value,
     pub metadata_required_secrets: &'a [String],
-    pub required_envelope_fields: &'a [String],
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
@@ -901,6 +806,231 @@ pub struct BuildAndLaunchParams<'a> {
     /// [`CheckpointResumeMode`]. Drives `RYEOS_RESUME=1` injection and predecessor
     /// copy-forward, and only for replay-aware (`native_resume`) kinds.
     pub checkpoint_resume_mode: CheckpointResumeMode,
+    /// Optional acknowledgement seam for launch surfaces that must not expose
+    /// a thread ID until the frozen authority has crossed into a successfully
+    /// scheduled spawn task. Synchronous and reconcile paths leave this absent.
+    pub launch_handoff: Option<&'a LaunchHandoff>,
+}
+
+/// One-shot readiness signal for an acknowledged managed launch.
+///
+/// Pre-handoff failures publish a structured error; cancellation/panic closes
+/// the receiver. The dispatch task's typed error remains authoritative. Only
+/// the managed-envelope launcher can publish success.
+#[derive(Debug, Clone)]
+pub struct LaunchHandoff {
+    sender: Arc<Mutex<Option<tokio::sync::oneshot::Sender<LaunchHandoffResult>>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchHandoffFailure {
+    pub code: String,
+    pub message: String,
+    pub status: u16,
+    pub body: Value,
+}
+
+pub type LaunchHandoffResult = std::result::Result<String, LaunchHandoffFailure>;
+
+impl LaunchHandoff {
+    pub fn channel() -> (
+        Self,
+        tokio::sync::oneshot::Receiver<LaunchHandoffResult>,
+    ) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                sender: Arc::new(Mutex::new(Some(sender))),
+            },
+            receiver,
+        )
+    }
+
+    fn publish_result(&self, result: LaunchHandoffResult) {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(result);
+        }
+    }
+
+    fn publish(&self, thread_id: String) {
+        self.publish_result(Ok(thread_id));
+    }
+
+    pub(crate) fn publish_failure(
+        &self,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        status: u16,
+        retryable: bool,
+    ) {
+        let code = code.into();
+        let message = message.into();
+        self.publish_result(Err(LaunchHandoffFailure {
+            body: json!({
+                "code": code.clone(),
+                "error": message.clone(),
+                "retryable": retryable,
+            }),
+            code,
+            message,
+            status,
+        }));
+    }
+
+    pub(crate) fn publish_dispatch_failure(&self, error: &DispatchError) {
+        self.publish_result(Err(LaunchHandoffFailure {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+            status: error.http_status().as_u16(),
+            body: crate::structured_error::StructuredErrorPayload::from(error).to_value(),
+        }));
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+}
+
+/// Per-attempt launch authority produced immediately before persistence.
+///
+/// This value is deliberately in-memory only. Admission preparation is a
+/// separate pass and can never construct this type; restart/reconcile paths
+/// recompute it from reconstructed provenance instead of loading persisted
+/// runtime behavior.
+struct PreparedManagedLaunchAuthority {
+    resolution: ryeos_engine::resolution::ResolutionOutput,
+    prepared_launch: super::launch_preparation::PreparedRuntimeLaunch,
+    effective_vault: HashMap<String, String>,
+}
+
+fn launch_audit_records(
+    resolved: &ResolvedExecutionRequest,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
+    Ok([
+        (
+            RuntimeEventType::AsLaunchedResolution,
+            serde_json::to_value(resolution.as_launched_digest())?,
+        ),
+        (
+            RuntimeEventType::AsLaunchedRefBindings,
+            json!({
+                "ref_bindings": resolved.ref_bindings.clone(),
+                "records": prepared_launch.binding_records.clone(),
+            }),
+        ),
+        (
+            RuntimeEventType::RuntimeLaunchFacts,
+            json!({"facts": prepared_launch.runtime_facts.clone()}),
+        ),
+    ]
+    .into_iter()
+    .map(|(event_type, payload)| ryeos_app::state_store::NewEventRecord {
+        event_type: event_type.as_str().to_owned(),
+        storage_class: event_type.storage_class().as_str().to_owned(),
+        payload,
+    })
+    .collect())
+}
+
+fn prepare_managed_launch_authority(
+    params: &BuildAndLaunchParams<'_>,
+) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
+    let engine = params.provenance.request_engine();
+    let engine_roots = engine.resolution_roots(Some(params.project_path.to_path_buf()));
+    let effective_parsers = engine
+        .effective_parser_dispatcher(Some(params.project_path))
+        .map_err(|error| anyhow::anyhow!("effective parser dispatcher: {error}"))?;
+
+    // Resolve the primary exactly once for this authoritative pass. The same
+    // output is consumed by launch preparation and later moved into the
+    // LaunchEnvelope; the post-persistence augmentation phase may add its
+    // existing derived data without re-resolving the primary.
+    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+        &params.resolved.resolved_item.canonical_ref,
+        &engine.kinds,
+        &effective_parsers,
+        &engine_roots,
+        &engine.trust_store,
+        &engine.composers,
+    )
+    .map_err(|error| anyhow::anyhow!("resolution pipeline failed: {error}"))?;
+    enforce_effective_trust(
+        resolution.effective_trust_class,
+        &params.resolved.item_ref,
+        &params.resolved.resolved_item.kind,
+    )?;
+
+    let selected_runtime = engine
+        .runtimes
+        .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
+        .map_err(|error| {
+            BuildAndLaunchError::LaunchPreparation(DispatchError::LaunchPreparationFailed {
+                code: "runtime_launch_contract_unavailable".to_owned(),
+                message: error.to_string(),
+                classification: "configuration".to_owned(),
+                binding: None,
+                details: BTreeMap::new(),
+            })
+        })?;
+    let prepared_launch = super::launch_preparation::prepare_runtime_launch(
+        super::launch_preparation::PrepareRuntimeLaunchRequest {
+            engine,
+            runtime: selected_runtime,
+            primary: &resolution,
+            ref_bindings: &params.resolved.ref_bindings,
+            roots: &engine_roots,
+            parsers: &effective_parsers,
+            principal: &params.resolved.plan_context.requested_by,
+        },
+    )
+    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+
+    // Secret values are part of the frozen per-attempt authority. Resolve them
+    // after validating preparer output and before any fresh row is persisted.
+    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(params.project_path));
+    let mut secret_requirements =
+        build_secret_requirements(params.metadata_required_secrets);
+    merge_prepared_secret_requirements(
+        &mut secret_requirements,
+        &prepared_launch.required_secrets,
+    )?;
+    let secret_names: Vec<String> = secret_requirements
+        .iter()
+        .map(|requirement| requirement.name.clone())
+        .collect();
+    let effective_vault = ryeos_app::vault::read_required_secrets(
+        params.state.vault.as_ref(),
+        params.acting_principal,
+        &secret_names,
+        &dotenv_dirs,
+    )
+    .map_err(|error| match error {
+        VaultReadError::MissingSecrets { names, .. } => {
+            BuildAndLaunchError::MissingSecrets {
+                item_ref: params.resolved.item_ref.clone(),
+                secrets: missing_secrets_from_requirements(&names, &secret_requirements),
+            }
+        }
+        VaultReadError::Internal(error) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
+        }
+    })?;
+
+    Ok(PreparedManagedLaunchAuthority {
+        resolution,
+        prepared_launch,
+        effective_vault,
+    })
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -934,40 +1064,48 @@ impl Drop for FinalizeFailedOnDrop<'_> {
 pub async fn build_and_launch(
     params: BuildAndLaunchParams<'_>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
-    // 1. Create DB thread (status = created). A chained-resume turn
-    //    (`previous_thread_id` present) braids a successor onto the source's
-    //    chain — lineage persisted at spawn — instead of a fresh root. All the
-    //    row-creation inputs are `Copy` references, so `params` is untouched and
-    //    flows whole into the run-half.
-    let thread = match (params.pre_minted_thread_id, params.previous_thread_id) {
-        (Some(id), Some(source)) => params.state.threads.create_continuation_with_id(
-            id,
+    // Allocate identity in memory, then complete the authoritative pass before
+    // creating a fresh root or continuation row. A caller-provided ID remains
+    // unobservable until its higher-level acknowledgement path receives spawn
+    // handoff readiness.
+    let thread_id = params
+        .pre_minted_thread_id
+        .map(str::to_owned)
+        .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
+    let authority = prepare_managed_launch_authority(&params)?;
+
+    let initial_events = launch_audit_records(
+        params.resolved,
+        &authority.resolution,
+        &authority.prepared_launch,
+    )?;
+    let thread = match params.previous_thread_id {
+        Some(source) => params.state.threads.create_continuation_with_id(
+            &thread_id,
             source,
             params.resolved,
             Some("chained_resume"),
+            initial_events,
         )?,
-        (Some(id), None) => params
-            .state
-            .threads
-            .create_root_thread_with_id(id, params.resolved)?,
-        (None, Some(source)) => {
-            let id = ryeos_app::thread_lifecycle::new_thread_id();
-            params.state.threads.create_continuation_with_id(
-                &id,
-                source,
-                params.resolved,
-                Some("chained_resume"),
-            )?
-        }
-        (None, None) => params.state.threads.create_root_thread(params.resolved)?,
+        None => params.state.threads.create_root_thread_with_events(
+            &thread_id,
+            params.resolved,
+            initial_events,
+        )?,
     };
-    run_claimed_thread_row(params, thread).await
+    run_claimed_thread_row_with_authority(
+        params,
+        thread,
+        authority,
+        true,
+    )
+    .await
 }
 
 /// Run an already-created `created` thread row to completion: resolve, spawn its
 /// runtime subprocess, wait, and finalize.
 ///
-/// Split out of `build_and_launch` (which now only mints the row first) so a
+/// Split out of `build_and_launch` so a
 /// **continuation successor** — an existing `created` row carrying a captured
 /// launch identity — can be launched through the SAME path. The successor is
 /// re-resolved as **its own kind** (from `resolved.resolved_item.kind`, never
@@ -977,6 +1115,33 @@ pub async fn build_and_launch(
 async fn run_claimed_thread_row(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    // Existing-row paths (native resume/reconcile and rows created by their
+    // dedicated lifecycle) must recompute launch authority for every attempt.
+    // No persisted runtime data or admission output is accepted here.
+    let authority = match prepare_managed_launch_authority(&params) {
+        Ok(authority) => authority,
+        Err(error) => {
+            crate::dispatch::finalize_method_thread_if_needed(
+                params.state,
+                &thread.thread_id,
+                "failed",
+                Some(json!({
+                    "code": "launch_preparation_failed",
+                    "message": format!("{error:#}"),
+                })),
+            );
+            return Err(error);
+        }
+    };
+    run_claimed_thread_row_with_authority(params, thread, authority, false).await
+}
+
+async fn run_claimed_thread_row_with_authority(
+    params: BuildAndLaunchParams<'_>,
+    thread: ryeos_app::state_store::ThreadDetail,
+    authority: PreparedManagedLaunchAuthority,
+    launch_audit_already_persisted: bool,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let state = params.state;
     let thread_id = thread.thread_id.clone();
@@ -990,7 +1155,13 @@ async fn run_claimed_thread_row(
         thread_id,
         error: None,
     };
-    let result = run_claimed_thread_row_inner(params, thread).await;
+    let result = run_claimed_thread_row_inner(
+        params,
+        thread,
+        authority,
+        launch_audit_already_persisted,
+    )
+    .await;
     if let Err(ref err) = result {
         guard.error = Some(json!({
             "code": "launch_failure",
@@ -1003,6 +1174,8 @@ async fn run_claimed_thread_row(
 async fn run_claimed_thread_row_inner(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
+    authority: PreparedManagedLaunchAuthority,
+    launch_audit_already_persisted: bool,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
         state,
@@ -1014,14 +1187,19 @@ async fn run_claimed_thread_row_inner(
         provenance,
         parameters,
         metadata_required_secrets,
-        required_envelope_fields,
         pre_minted_thread_id: _,
         previous_thread_id,
         parent_execution_context,
         suppress_stimulus,
         capability_policy,
         checkpoint_resume_mode,
+        launch_handoff,
     } = params;
+    let PreparedManagedLaunchAuthority {
+        mut resolution,
+        prepared_launch,
+        effective_vault,
+    } = authority;
     let engine = provenance.request_engine();
     // Runtime-state root: the deliberate `state_root` override when one was
     // requested, otherwise the project path. Resolution stays anchored at
@@ -1147,27 +1325,6 @@ async fn run_claimed_thread_row_inner(
                 .unwrap_or(r.ai_root.clone())
         })
         .collect();
-
-    // Run the resolution pipeline (extends/references DAGs etc.) so the
-    // runtime receives pre-resolved data and never reimplements traversal.
-    // Hard fail on any pipeline error — partial pipelines never reach the
-    // runtime.
-    // The composer registry is owned by the engine — boot built it
-    // once via `ComposerRegistry::from_kinds(&kinds, &native)`,
-    // validated against it, and persisted it on `Engine::composers`.
-    // Pulling it back out here guarantees launcher and boot use the
-    // **same** instance (no split-brain).
-    let composers = &engine.composers;
-
-    let mut resolution = ryeos_engine::resolution::run_resolution_pipeline(
-        &resolved.resolved_item.canonical_ref,
-        &engine.kinds,
-        &effective_parsers,
-        &engine_roots,
-        &engine.trust_store,
-        composers,
-    )
-    .map_err(|e| anyhow::anyhow!("resolution pipeline failed: {e}"))?;
 
     tracing::info!(
         item_ref = %resolved.item_ref,
@@ -1440,8 +1597,8 @@ async fn run_claimed_thread_row_inner(
     // successor relaunches from — REAL composed `effective_caps`, unlike
     // `spawn_item`) AND for replay-aware runtimes (the `native_resume` +
     // `checkpoint_dir` reconcile reads on restart). These are independent: a graph
-    // is replay-aware before its continuation flag is set. Warn-not-fail: a fresh
-    // launch still works; the relevant path fails loudly later if identity is absent.
+    // is replay-aware before its continuation flag is set. This identity is required
+    // launch state: failure is fatal before audit, handoff, or spawn.
     let supports_continuation = state
         .threads
         .kind_profiles()
@@ -1459,6 +1616,7 @@ async fn run_claimed_thread_row_inner(
         metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
             kind: resolved.kind.clone(),
             item_ref: resolved.item_ref.clone(),
+            ref_bindings: resolved.ref_bindings.clone(),
             launch_mode: resolved.launch_mode.clone(),
             parameters: parameters.clone(),
             project_context: resolved.plan_context.project_context.clone(),
@@ -1488,16 +1646,14 @@ async fn run_claimed_thread_row_inner(
         if let Some(ckpt) = checkpoint_dir.clone() {
             metadata = metadata.with_checkpoint_dir(ckpt);
         }
-        if let Err(e) = state
+        state
             .state_store
             .seed_launch_metadata(&thread_id, &metadata)
-        {
-            tracing::warn!(
-                thread_id = %thread_id,
-                error = %e,
-                "failed to seed launch metadata"
-            );
-        }
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "required launch metadata seed failed for `{thread_id}`: {error}"
+                ))
+            })?;
     }
 
     // The launching kind schema (e.g. `directive`, `graph`) drives
@@ -1605,45 +1761,6 @@ async fn run_claimed_thread_row_inner(
     )
     .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
 
-    // 6c. Runtime envelope requirements can add derived secrets. The engine
-    //     only carries opaque envelope field names; executor owns the
-    //     `provider_snapshot` LaunchEnvelope contract and resolves it here.
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
-    let provider_preflight = if requires_provider_snapshot(required_envelope_fields) {
-        Some(resolve_provider_preflight(
-            &resolution.composed,
-            &engine_roots,
-            &operator_trusted_keys_dir,
-        )?)
-    } else {
-        None
-    };
-    let secret_requirements =
-        build_secret_requirements(metadata_required_secrets, provider_preflight.as_ref());
-    let secret_names: Vec<String> = secret_requirements
-        .iter()
-        .map(|req| req.name.clone())
-        .collect();
-    let effective_vault = ryeos_app::vault::read_required_secrets(
-        state.vault.as_ref(),
-        acting_principal,
-        &secret_names,
-        &dotenv_dirs,
-    )
-    .map_err(|e| match e {
-        VaultReadError::MissingSecrets { names, .. } => {
-            let secrets = missing_secrets_from_requirements(&names, &secret_requirements);
-            finalize_missing_secret_launch(state, &thread_id, &resolved.item_ref, &secrets);
-            BuildAndLaunchError::MissingSecrets {
-                item_ref: resolved.item_ref.clone(),
-                secrets,
-            }
-        }
-        VaultReadError::Internal(e) => {
-            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {e:#}"))
-        }
-    })?;
-
     // 7. Resolve the native executor from the system bundle's CAS.
     //    Materialized to content-addressed cache under app-root state,
     //    not the project tree (works with read-only mounts).
@@ -1660,47 +1777,36 @@ async fn run_claimed_thread_row_inner(
         ryeos_engine::resolution::TrustClass::TrustedBundle, // executor binaries ship in system bundles
     )?;
 
-    // Persist a slim as-launched resolution digest as a durable braid event
-    // (the same seam the lineage facts use): the extends chain as composed
-    // (refs + content digests), the composed policy facts, and the effective
-    // trust class. This lets the explain view render what the thread launched
-    // with instead of a fresh re-resolve. Digests only — the full composed
-    // value is reconstructable from CAS by digest. Best-effort: a failed append
-    // must not sink an otherwise-launchable thread, since the digest serves a
-    // rare drift-debug read. Emitted before `resolution` moves into the
-    // envelope below.
-    match serde_json::to_value(resolution.as_launched_digest()) {
-        Ok(payload) => {
-            if let Err(e) = state.events.append(&EventAppendParams {
+    // Fresh roots committed this audit with `thread_created` in their birth
+    // transaction. Existing-row and continuation paths still append the trio
+    // atomically before handoff.
+    if !launch_audit_already_persisted {
+        let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?
+            .into_iter()
+            .map(|event| EventAppendItem {
+                event_type: event.event_type,
+                storage_class: event.storage_class,
+                payload: event.payload,
+            })
+            .collect();
+        state
+            .events
+            .append_batch(&EventAppendBatchParams {
                 thread_id: thread_id.clone(),
-                event: EventAppendItem {
-                    event_type: RuntimeEventType::AsLaunchedResolution.as_str().to_string(),
-                    storage_class: RuntimeEventType::AsLaunchedResolution
-                        .storage_class()
-                        .as_str()
-                        .to_string(),
-                    payload,
-                },
-            }) {
-                tracing::warn!(
-                    thread_id = %thread_id,
-                    error = %e,
-                    "failed to persist as-launched resolution digest"
-                );
-            }
-        }
-        Err(e) => tracing::warn!(
-            thread_id = %thread_id,
-            error = %e,
-            "failed to serialize as-launched resolution digest"
-        ),
+                events: launch_audit,
+            })
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "atomic durable launch audit append failed: {error}"
+                ))
+            })?;
     }
 
     // 8. Build envelope
     //    Using LaunchEnvelopeBuilder to centralize construction and
     //    prevent future field drift. New fields on LaunchEnvelope
     //    only need updating in the builder, not at every call site.
-    let mut envelope_builder = LaunchEnvelopeBuilder::new(
+    let envelope = LaunchEnvelopeBuilder::new(
         cap.invocation_id.clone(),
         thread_id.clone(),
         EnvelopeRoots {
@@ -1732,15 +1838,10 @@ async fn run_claimed_thread_row_inner(
             token: cap.token.clone(),
         },
         resolution,
+        prepared_launch.runtime_data.clone(),
     )
-    .inventory(inventory);
-    if let Some(preflight) = provider_preflight.as_ref() {
-        envelope_builder = envelope_builder.provider_snapshot(
-            serde_json::to_value(&preflight.snapshot)
-                .expect("ResolvedProviderSnapshot serializable"),
-        );
-    }
-    let envelope = envelope_builder.build();
+    .inventory(inventory)
+    .build();
 
     // 8. Write thread.json (status = created, pre-execution audit).
     //    `effective_trust_class` is recorded so the on-disk audit trail
@@ -1755,12 +1856,14 @@ async fn run_claimed_thread_row_inner(
         item_ref: resolved.item_ref.clone(),
         capabilities: envelope.policy.effective_caps.clone(),
         limits: serde_json::to_value(&hard_limits)?,
-        model: None,
+        ref_bindings: resolved.ref_bindings.clone(),
+        binding_launch_records: prepared_launch.binding_records.clone(),
+        runtime_facts: prepared_launch.runtime_facts.clone(),
         started_at: lillux::time::iso8601_now(),
         completed_at: None,
         cost: None,
         outputs: None,
-        effective_trust_class: Some(effective_trust_class),
+        effective_trust_class,
     };
     let identity = &state.identity;
     super::thread_meta::write_thread_meta(runtime_state_root, &thread_id, &meta, identity)?;
@@ -1804,9 +1907,6 @@ async fn run_claimed_thread_row_inner(
         &engine_roots,
         &state.config.app_root,
     );
-    let provider_secret_name = provider_preflight
-        .as_ref()
-        .and_then(|preflight| preflight.env_var.clone());
     let app_root_owned = state.config.app_root.clone();
     let sandbox_enabled = state.config.sandbox_enabled;
     let cas_root_owned = state.config.app_root.join("cas");
@@ -1823,7 +1923,7 @@ async fn run_claimed_thread_row_inner(
     let state_root_for_spawn = runtime_state_root.to_path_buf();
     let identity_for_spawn = state.identity.clone();
 
-    let spawn_result = tokio::task::spawn_blocking(move || {
+    let spawn_handle = tokio::task::spawn_blocking(move || {
         if let Err(e) = super::thread_meta::write_thread_meta(
             &state_root_for_spawn,
             &thread_id_owned,
@@ -1845,7 +1945,6 @@ async fn run_claimed_thread_row_inner(
             callback: &callback_owned,
             thread_id: &thread_id_owned,
             vault_bindings: &vault_owned,
-            provider_secret_name: provider_secret_name.as_deref(),
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
             app_root: &app_root_owned,
@@ -1857,9 +1956,22 @@ async fn run_claimed_thread_row_inner(
             // cold one.
             is_resume,
         })
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("spawn_runtime join error: {e}"))?;
+    });
+
+    // The row and complete launch audit are durable, and the exact in-memory
+    // authority (envelope runtime_data + resolved secret injection set) is now
+    // owned by the scheduled spawn task. This is the acknowledgement boundary;
+    // actual child start may race with network delivery by design.
+    if let Some(handoff) = launch_handoff {
+        handoff.publish(thread_id.clone());
+    }
+
+    let spawned_runtime = spawn_handle
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_runtime join error: {e}"))??;
+    let spawn_result = tokio::task::spawn_blocking(move || spawned_runtime.wait())
+        .await
+        .map_err(|e| anyhow::anyhow!("runtime wait join error: {e}"))?;
 
     // 10. ALWAYS invalidate callback token (cleanup guard)
     state.callback_tokens.invalidate(&cap.token);
@@ -1878,7 +1990,7 @@ async fn run_claimed_thread_row_inner(
     let runtime_result = match spawn_result {
         Ok(result) => result,
         Err(err) => {
-            // Pre-runtime failure (provider/secret resolution, materialization,
+            // Pre-runtime failure (launch preparation, secret resolution, materialization,
             // builder): record the real cause into `error` — the ONLY field the
             // terminal `thread_failed` braid event persists — not `result`,
             // which is dropped. Without this the operator only ever sees a bare
@@ -2044,7 +2156,7 @@ pub async fn launch_successor(
     state: AppState,
     successor_id: &str,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    launch_successor_inner(state, successor_id, SuccessorMode::Machine).await
+    launch_successor_inner(state, successor_id, SuccessorMode::Machine, None, None).await
 }
 
 /// Launch a pre-created OPERATOR follow-up successor (an existing `created` row
@@ -2057,13 +2169,189 @@ pub async fn launch_operator_successor(
     state: AppState,
     successor_id: &str,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    launch_successor_inner(state, successor_id, SuccessorMode::Operator).await
+    launch_successor_inner(state, successor_id, SuccessorMode::Operator, None, None).await
+}
+
+/// Consumable authoritative pass for a not-yet-created successor. It contains
+/// secret values and must never be persisted or cloned.
+struct PreparedSuccessorLaunch {
+    mode: SuccessorMode,
+    source_thread_id: Option<String>,
+    resume_context: ryeos_app::launch_metadata::ResumeContext,
+    execution: crate::execution::runner::ExecutionParams,
+    authority: PreparedManagedLaunchAuthority,
+}
+
+pub struct PreparedOperatorSuccessorLaunch {
+    prepared: PreparedSuccessorLaunch,
+}
+
+impl PreparedOperatorSuccessorLaunch {
+    pub fn initial_audit_events(
+        &self,
+    ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
+        launch_audit_records(
+            &self.prepared.execution.resolved,
+            &self.prepared.authority.resolution,
+            &self.prepared.authority.prepared_launch,
+        )
+    }
+}
+
+pub struct PreparedMachineSuccessorLaunch {
+    prepared: PreparedSuccessorLaunch,
+}
+
+impl PreparedMachineSuccessorLaunch {
+    pub fn initial_audit_events(
+        &self,
+    ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
+        launch_audit_records(
+            &self.prepared.execution.resolved,
+            &self.prepared.authority.resolution,
+            &self.prepared.authority.prepared_launch,
+        )
+    }
+}
+
+fn prepare_successor_launch(
+    state: &AppState,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    mode: SuccessorMode,
+    previous_thread_id: Option<&str>,
+) -> Result<PreparedSuccessorLaunch, BuildAndLaunchError> {
+    let execution = crate::execution::runner::execution_params_from_resume_context(state, resume)?;
+    let project_path = execution.provenance.effective_path().to_path_buf();
+    let (suppress_stimulus, capability_policy, checkpoint_resume_mode) = match mode {
+        SuccessorMode::Machine => (
+            true,
+            CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
+            CheckpointResumeMode::MachineContinuation,
+        ),
+        SuccessorMode::Operator => (
+            false,
+            CapabilityPolicy::Fresh,
+            CheckpointResumeMode::None,
+        ),
+        SuccessorMode::Follow => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow successor authority cannot be prepared by this path"
+            )));
+        }
+    };
+    let authority = prepare_managed_launch_authority(&BuildAndLaunchParams {
+        state,
+        executor_ref: &execution.resolved.executor_ref,
+        runtime_ref: resume.runtime_ref.as_deref(),
+        acting_principal: &execution.acting_principal,
+        resolved: &execution.resolved,
+        project_path: &project_path,
+        provenance: &execution.provenance,
+        parameters: &execution.parameters,
+        metadata_required_secrets: &execution.resolved.resolved_item.metadata.required_secrets,
+        pre_minted_thread_id: None,
+        previous_thread_id,
+        parent_execution_context: None,
+        suppress_stimulus,
+        capability_policy,
+        checkpoint_resume_mode,
+        launch_handoff: None,
+    })?;
+    Ok(PreparedSuccessorLaunch {
+        mode,
+        source_thread_id: previous_thread_id.map(str::to_owned),
+        resume_context: resume.clone(),
+        execution,
+        authority,
+    })
+}
+
+pub fn prepare_operator_successor_launch(
+    state: &AppState,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+) -> Result<PreparedOperatorSuccessorLaunch, BuildAndLaunchError> {
+    Ok(PreparedOperatorSuccessorLaunch {
+        prepared: prepare_successor_launch(state, resume, SuccessorMode::Operator, None)?,
+    })
+}
+
+pub fn prepare_machine_successor_launch(
+    state: &AppState,
+    resume: &ryeos_app::launch_metadata::ResumeContext,
+    source_thread_id: &str,
+) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
+    Ok(PreparedMachineSuccessorLaunch {
+        prepared: prepare_successor_launch(
+            state,
+            resume,
+            SuccessorMode::Machine,
+            Some(source_thread_id),
+        )?,
+    })
+}
+
+/// Launch a newly persisted operator successor with the exact authoritative
+/// output computed before its row and ResumeContext were created.
+pub async fn launch_prepared_operator_successor(
+    state: AppState,
+    successor_id: &str,
+    prepared: PreparedOperatorSuccessorLaunch,
+    launch_handoff: &LaunchHandoff,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let result = launch_successor_inner(
+        state,
+        successor_id,
+        SuccessorMode::Operator,
+        Some(launch_handoff),
+        Some(prepared.prepared),
+    )
+    .await;
+    match &result {
+        Err(BuildAndLaunchError::LaunchPreparation(error)) => {
+            launch_handoff.publish_dispatch_failure(error)
+        }
+        Err(error) => launch_handoff.publish_failure(
+            "operator_successor_launch_failed",
+            error.to_string(),
+            500,
+            false,
+        ),
+        Ok(SuccessorLaunchOutcome::Skipped(reason)) if launch_handoff.is_pending() => {
+            launch_handoff.publish_failure(
+                "operator_successor_not_handed_off",
+                format!("operator successor launch skipped: {reason}"),
+                500,
+                false,
+            );
+        }
+        Ok(_) => {}
+    }
+    result
+}
+
+/// Launch a newly persisted machine successor with the exact authoritative
+/// output computed before its row and ResumeContext became observable.
+pub async fn launch_prepared_machine_successor(
+    state: AppState,
+    successor_id: &str,
+    prepared: PreparedMachineSuccessorLaunch,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    launch_successor_inner(
+        state,
+        successor_id,
+        SuccessorMode::Machine,
+        None,
+        Some(prepared.prepared),
+    )
+    .await
 }
 
 async fn launch_successor_inner(
     state: AppState,
     successor_id: &str,
     mode: SuccessorMode,
+    launch_handoff: Option<&LaunchHandoff>,
+    prepared_successor: Option<PreparedSuccessorLaunch>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     // Claim the launch FIRST — the sole authorization to spawn, and the
     // serialization point for the status + budget guards below.
@@ -2191,7 +2479,14 @@ async fn launch_successor_inner(
     }
 
     // Rebuild + run under the held claim; always release it afterwards.
-    let result = launch_claimed_successor(&state, successor, mode).await;
+    let result = launch_claimed_successor(
+        &state,
+        successor,
+        mode,
+        launch_handoff,
+        prepared_successor,
+    )
+    .await;
     let _ = state
         .state_store
         .release_thread_launch_claim(successor_id, &claim_id);
@@ -2225,6 +2520,8 @@ async fn launch_claimed_successor(
     state: &AppState,
     successor: ryeos_app::state_store::ThreadDetail,
     mode: SuccessorMode,
+    launch_handoff: Option<&LaunchHandoff>,
+    prepared_successor: Option<PreparedSuccessorLaunch>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let successor_id = successor.thread_id.clone();
     // A continuation successor must link upstream (chain-fold) and carry the
@@ -2246,29 +2543,38 @@ async fn launch_claimed_successor(
     // selection happens inside — a pushed-head record rebuilds the pinned
     // checkout + overlay engine, a snapshot-scoped record without a pushed-head
     // ref fails loudly before any resolution runs.
-    let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
+    let (params, prepared_authority) = match prepared_successor {
+        Some(prepared) => {
+            if mode != prepared.mode {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed successor authority supplied to the wrong launch mode"
+                )));
+            }
+            if prepared
+                .source_thread_id
+                .as_deref()
+                .is_some_and(|source| source != previous_thread_id.as_str())
+            {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed authority does not match persisted successor source"
+                )));
+            }
+            if !prepared.resume_context.eq(&resume) {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed authority does not match persisted successor identity"
+                )));
+            }
+            (prepared.execution, Some(prepared.authority))
+        }
+        None => (
+            crate::execution::runner::execution_params_from_resume_context(state, &resume)?,
+            None,
+        ),
+    };
     // The managed run path takes the working dir separately from the provenance;
     // derive it FROM the provenance so a pushed-head successor runs in its
     // re-materialised checkout, never the (ephemeral) spawn-time path.
     let project_path = params.provenance.effective_path().to_path_buf();
-
-    // Envelope-field requirements come from the runtime entry of the
-    // provenance-selected engine. Prefer the predecessor's captured
-    // `runtime_ref` (by-ref) so a continued thread keeps the exact runtime it
-    // launched under; a captured-but-bad ref is an error, never a silent
-    // switch to the kind default.
-    let required_envelope_fields = params
-        .provenance
-        .request_engine()
-        .runtimes
-        .resolve_for_launch(
-            resume.runtime_ref.as_deref(),
-            &params.resolved.resolved_item.kind,
-        )
-        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
-        .yaml
-        .required_envelope_fields
-        .clone();
 
     // Machine: fold the chain with NO new stimulus, and pin authority to the
     // predecessor's captured caps. Operator: inject the seeded input as the
@@ -2285,8 +2591,7 @@ async fn launch_claimed_successor(
         SuccessorMode::Operator => (false, CapabilityPolicy::Fresh),
     };
 
-    run_claimed_thread_row(
-        BuildAndLaunchParams {
+    let launch_params = BuildAndLaunchParams {
             state,
             executor_ref: &params.resolved.executor_ref,
             // Propagate the predecessor's runtime identity so this successor
@@ -2298,7 +2603,6 @@ async fn launch_claimed_successor(
             provenance: &params.provenance,
             parameters: &params.parameters,
             metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
-            required_envelope_fields: &required_envelope_fields,
             pre_minted_thread_id: None,
             previous_thread_id: Some(&previous_thread_id),
             parent_execution_context: None,
@@ -2312,10 +2616,14 @@ async fn launch_claimed_successor(
                 // result, so resume from its OWN dir — do NOT re-copy.
                 SuccessorMode::Follow => CheckpointResumeMode::SameThread,
             },
-        },
-        successor,
-    )
-    .await
+            launch_handoff,
+        };
+    match prepared_authority {
+        Some(authority) => {
+            run_claimed_thread_row_with_authority(launch_params, successor, authority, true).await
+        }
+        None => run_claimed_thread_row(launch_params, successor).await,
+    }
 }
 
 /// Inner half of a SAME-THREAD native-resume crash recovery, run once the claim
@@ -2345,19 +2653,6 @@ async fn launch_claimed_native_resume(
     let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
     let project_path = params.provenance.effective_path().to_path_buf();
 
-    let required_envelope_fields = params
-        .provenance
-        .request_engine()
-        .runtimes
-        .resolve_for_launch(
-            resume.runtime_ref.as_deref(),
-            &params.resolved.resolved_item.kind,
-        )
-        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
-        .yaml
-        .required_envelope_fields
-        .clone();
-
     run_claimed_thread_row(
         BuildAndLaunchParams {
             state,
@@ -2369,7 +2664,6 @@ async fn launch_claimed_native_resume(
             provenance: &params.provenance,
             parameters: &params.parameters,
             metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
-            required_envelope_fields: &required_envelope_fields,
             pre_minted_thread_id: None,
             // SAME thread, not a successor — no chain braid.
             previous_thread_id: None,
@@ -2379,6 +2673,7 @@ async fn launch_claimed_native_resume(
             // Pin the captured authority verbatim (same as a machine relaunch).
             capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::SameThread,
+            launch_handoff: None,
         },
         thread,
     )
@@ -2546,19 +2841,6 @@ async fn launch_claimed_follow_child(
     // parent's request engine.
     let project_path = params.provenance.effective_path().to_path_buf();
 
-    let required_envelope_fields = params
-        .provenance
-        .request_engine()
-        .runtimes
-        .resolve_for_launch(
-            identity.runtime_ref.as_deref(),
-            &params.resolved.resolved_item.kind,
-        )
-        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
-        .yaml
-        .required_envelope_fields
-        .clone();
-
     // For an unlaunched follow-child row the seeded `effective_caps` is the
     // PARENT's authority (see the fn header) — name it as such at the use site so
     // the overload is explicit and F5 seeds parent caps, never child-bounded ones.
@@ -2575,7 +2857,6 @@ async fn launch_claimed_follow_child(
             provenance: &params.provenance,
             parameters: &params.parameters,
             metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
-            required_envelope_fields: &required_envelope_fields,
             pre_minted_thread_id: None,
             // A follow child is its OWN root chain, never a continuation braid.
             previous_thread_id: None,
@@ -2593,6 +2874,7 @@ async fn launch_claimed_follow_child(
             // + 1 on the hot path; reconcile reconstructs the persisted parent
             // execution context below rather than silently granting root limits.
             parent_execution_context: parent_context.as_ref(),
+            launch_handoff: None,
         },
         thread,
     )
@@ -3225,7 +3507,7 @@ async fn launch_follow_resume_claimed(
         )));
     }
 
-    launch_claimed_successor(state, successor, SuccessorMode::Follow)
+    launch_claimed_successor(state, successor, SuccessorMode::Follow, None, None)
         .await
         .map(SuccessorLaunchOutcome::Launched)
 }

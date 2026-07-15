@@ -266,7 +266,8 @@ fn compact_single_project(
             obj.insert("parent_hashes".to_string(), serde_json::json!(new_parents));
         }
 
-        let canonical = lillux::canonical_json(&value);
+        let canonical = lillux::canonical_json(&value)
+            .with_context(|| format!("failed to canonicalize rewritten snapshot {}", snap_hash))?;
         let new_hash = lillux::sha256_hex(canonical.as_bytes());
 
         if new_hash != *snap_hash {
@@ -543,7 +544,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 

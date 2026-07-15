@@ -36,6 +36,7 @@ pub async fn bootstrap_seat(client: &DaemonClient, surface_ref: &str) -> SeatBoo
 pub async fn open_seat_thread(client: &DaemonClient, surface_ref: &str) -> Option<String> {
     let body = serde_json::json!({
         "item_ref": "service:seat/open",
+        "ref_bindings": {},
         "parameters": { "surface_ref": surface_ref, "client_ref": "client:ryeos/tui" },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
@@ -56,6 +57,7 @@ async fn reattach_seat_thread(
     // daemon-side rather than leaking into a `threads/list` client filter.
     let body = serde_json::json!({
         "item_ref": "service:seat/list",
+        "ref_bindings": {},
         "parameters": { "surface_ref": surface_ref },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
@@ -91,6 +93,7 @@ async fn reattach_seat_thread(
 async fn replay_seat_thread(client: &DaemonClient, thread_id: &str) -> Vec<SeatEvent> {
     let body = serde_json::json!({
         "item_ref": "service:events/chain_replay",
+        "ref_bindings": {},
         "parameters": { "chain_root_id": thread_id },
     });
     let Ok(envelope) = client.signed_post("/execute", &body).await else {
@@ -155,6 +158,7 @@ pub async fn append_braid(
 ) -> bool {
     let body = serde_json::json!({
         "item_ref": "service:seat/append",
+        "ref_bindings": {},
         "parameters": { "thread_id": thread_id, "events": events },
     });
     client.signed_post("/execute", &body).await.is_ok()
@@ -167,6 +171,7 @@ pub async fn close_seat_thread(client: &DaemonClient, thread_id: &str) {
             "/execute",
             &serde_json::json!({
                 "item_ref": "service:seat/close",
+                "ref_bindings": {},
                 "parameters": { "thread_id": thread_id },
             }),
         )
@@ -181,6 +186,7 @@ pub async fn touch_seat_thread(client: &DaemonClient, thread_id: &str) -> bool {
             "/execute",
             &serde_json::json!({
                 "item_ref": "service:seat/touch",
+                "ref_bindings": {},
                 "parameters": { "thread_id": thread_id },
             }),
         )

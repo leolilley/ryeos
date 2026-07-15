@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Re-export so callback/graph/runtime callers reference one method-call type
 /// without each taking a direct `ryeos-engine` dependency.
@@ -79,13 +80,8 @@ pub struct SpawnFollowChildRequest {
     pub graph_run_id: String,
     pub follow_node: String,
     pub step_count: i64,
-    /// Canonical ref of the child item to launch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_item_ref: Option<String>,
-    #[serde(default)]
-    pub child_parameters: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<FollowChildSpec>>,
+    /// Required non-empty cohort. Single-child callers emit one element.
+    pub children: Vec<FollowChildSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_window_width: Option<u32>,
     /// Optional graph frontier id, recorded on the waiter for diagnostics.
@@ -97,6 +93,7 @@ pub struct SpawnFollowChildRequest {
 #[serde(deny_unknown_fields)]
 pub struct FollowChildSpec {
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     #[serde(default)]
     pub parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +132,7 @@ pub struct TerminalCompletion {
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
     pub item_id: String,
+    pub ref_bindings: BTreeMap<String, String>,
     #[serde(default)]
     pub params: Value,
     pub thread: String,
@@ -177,6 +175,7 @@ pub struct LaunchWindow {
 /// how `facets` shipped uninterpolated.
 pub mod action_keys {
     pub const ITEM_ID: &str = "item_id";
+    pub const REF_BINDINGS: &str = "ref_bindings";
     pub const PARAMS: &str = "params";
     pub const THREAD: &str = "thread";
     pub const CALL: &str = "call";
@@ -187,7 +186,7 @@ pub mod action_keys {
     /// `interpolate_action`. `THREAD` stays literal (a dispatch mode, never
     /// a template); `CALL.method` is literal but `CALL.args` interpolates,
     /// so the whole block is included.
-    pub const INTERPOLATED: &[&str] = &[ITEM_ID, PARAMS, CALL, FACETS];
+    pub const INTERPOLATED: &[&str] = &[ITEM_ID, REF_BINDINGS, PARAMS, CALL, FACETS];
 }
 
 /// Runtime-owned control keys carried in dispatch/launch params — parent budget,
@@ -370,6 +369,7 @@ mod tests {
     fn action_payload_omits_call_when_none() {
         let payload = ActionPayload {
             item_id: "tool:t/echo".to_string(),
+            ref_bindings: BTreeMap::new(),
             params: json!({}),
             thread: "inline".to_string(),
             call: None,
@@ -387,6 +387,7 @@ mod tests {
     fn action_payload_round_trips_call() {
         let wire = json!({
             "item_id": "knowledge:arc/resources",
+            "ref_bindings": {},
             "params": {},
             "thread": "inline",
             "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
@@ -400,7 +401,11 @@ mod tests {
     #[test]
     fn action_payload_defaults_call_to_none() {
         // A wire payload with no `call` (the common case) deserializes fine.
-        let wire = json!({ "item_id": "tool:t/echo", "thread": "inline" });
+        let wire = json!({
+            "item_id": "tool:t/echo",
+            "ref_bindings": {},
+            "thread": "inline"
+        });
         let payload: ActionPayload = serde_json::from_value(wire).unwrap();
         assert!(payload.call.is_none());
     }

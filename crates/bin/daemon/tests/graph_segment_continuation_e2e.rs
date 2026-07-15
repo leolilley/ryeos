@@ -171,6 +171,7 @@ fn spawn_execute(
     let url = format!("http://{}/execute", h.bind);
     let body = json!({
         "item_ref": item_ref,
+        "ref_bindings": {},
         "project_path": project_path.to_str().unwrap(),
         "parameters": {},
     });

@@ -62,14 +62,14 @@ fn golden_thread_event_canonical_json() {
     ];
 
     for (i, object) in cases.iter().enumerate() {
-        let canonical = lillux::canonical_json(object);
+        let canonical = lillux::canonical_json(object).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
 
         assert_eq!(object["kind"], "thread_event", "case {}: invalid kind", i);
         assert_eq!(object["schema"], 1, "case {}: invalid schema", i);
 
         // Verify hash is stable (compute twice, must match)
-        let hash2 = lillux::sha256_hex(lillux::canonical_json(object).as_bytes());
+        let hash2 = lillux::sha256_hex(lillux::canonical_json(object).unwrap().as_bytes());
         assert_eq!(hash, hash2, "case {}: hash not stable", i);
         assert_eq!(hash.len(), 64, "case {}: hash must be 64 hex chars", i);
 
@@ -110,7 +110,7 @@ fn golden_thread_snapshot_canonical_json() {
     ];
 
     for (i, object) in cases.iter().enumerate() {
-        let canonical = lillux::canonical_json(object);
+        let canonical = lillux::canonical_json(object).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
 
         assert_eq!(
@@ -120,7 +120,7 @@ fn golden_thread_snapshot_canonical_json() {
         );
         assert_eq!(object["schema"], 1, "case {}: invalid schema", i);
 
-        let hash2 = lillux::sha256_hex(lillux::canonical_json(object).as_bytes());
+        let hash2 = lillux::sha256_hex(lillux::canonical_json(object).unwrap().as_bytes());
         assert_eq!(hash, hash2, "case {}: hash not stable", i);
         assert_eq!(hash.len(), 64, "case {}: hash must be 64 hex chars", i);
 
@@ -159,13 +159,13 @@ fn golden_chain_state_canonical_json() {
     ];
 
     for (i, object) in cases.iter().enumerate() {
-        let canonical = lillux::canonical_json(object);
+        let canonical = lillux::canonical_json(object).unwrap();
         let hash = lillux::sha256_hex(canonical.as_bytes());
 
         assert_eq!(object["kind"], "chain_state", "case {}: invalid kind", i);
         assert_eq!(object["schema"], 1, "case {}: invalid schema", i);
 
-        let hash2 = lillux::sha256_hex(lillux::canonical_json(object).as_bytes());
+        let hash2 = lillux::sha256_hex(lillux::canonical_json(object).unwrap().as_bytes());
         assert_eq!(hash, hash2, "case {}: hash not stable", i);
         assert_eq!(hash.len(), 64, "case {}: hash must be 64 hex chars", i);
 
@@ -212,7 +212,7 @@ fn generate_vectors() {
 
         for case in cases {
             let object = &case["object"];
-            let canonical = lillux::canonical_json(object);
+            let canonical = lillux::canonical_json(object).unwrap();
             let hash = lillux::sha256_hex(canonical.as_bytes());
 
             case["expected_hash"] = json!(hash);
@@ -247,8 +247,8 @@ fn verify_thread_event_hash_stability() {
         }
     });
 
-    let hash1 = lillux::sha256_hex(lillux::canonical_json(&event).as_bytes());
-    let hash2 = lillux::sha256_hex(lillux::canonical_json(&event).as_bytes());
+    let hash1 = lillux::sha256_hex(lillux::canonical_json(&event).unwrap().as_bytes());
+    let hash2 = lillux::sha256_hex(lillux::canonical_json(&event).unwrap().as_bytes());
 
     assert_eq!(hash1, hash2, "Hash must be stable across calls");
     assert_eq!(hash1.len(), 64, "Hash must be 64 hex characters");
@@ -269,8 +269,8 @@ fn verify_canonical_json_determinism() {
         "c": 3
     });
 
-    let canonical1 = lillux::canonical_json(&obj1);
-    let canonical2 = lillux::canonical_json(&obj2);
+    let canonical1 = lillux::canonical_json(&obj1).unwrap();
+    let canonical2 = lillux::canonical_json(&obj2).unwrap();
 
     assert_eq!(
         canonical1, canonical2,

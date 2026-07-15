@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-09T06:05:19Z:797cd808b9af93c359f5a2e8763f7814e4280a959377544ed198bc682ad5f332:Mkp7A05bp8hDz3MRV/OmJPoaVTIZ1YIz77bWxryqPy6NoWoPf4xt/XS2Sjmj68962SzXZgNuaScXU456l1h5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:46Z:4a5ec53788e4763e2dcbfbf65fd1dde685892cb6a3f5359468f45eca7b2cffc9:9FW0dqf3Pk7+YvgjkEbKjVUAA0r1jTZvxrkGug08IKOcfCaymfWulKqFM0cAZHOoQvcbfttSd/18VVs6UTqBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-lens
 version: "1.0.0"
 description: >-
@@ -91,11 +91,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      # Opt into project scoping: the client fills this empty slot with the
-      # seat's project (threads/input requires project_path). Services that
-      # don't declare it never receive it.
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

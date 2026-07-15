@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:3c9aba1bf64c26037c8cb14381728e6de8cb28ed8c962bb4b07f25ac45f39eaa:NpGjLcXZjMm9jpsIksV9C1aqLzID0bxaPFnNeDHojsHuSP8UHOCCL53Ynd6uGPltWWBMsHRfKgHdBVWAeraRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:46Z:ff0662c1d985577d04984b611970e7ce6b8589b70a5ca72ba0651ce851d59f7b:q0ya59GsHlh6oXMX1Vc+6/28oyCUjTwsAVuzucUhv7dKaCDO4e7fZT14bkDlu9B/4uVF3TWuqLifKh5D56bhCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-cockpit
 version: "1.0.0"
 description: >-
@@ -58,11 +58,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      # The terminal fills this with the cockpit's current project. Launching
-      # cognition from the cockpit therefore creates project-scoped execution
-      # that immediately appears in the left activity pane.
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

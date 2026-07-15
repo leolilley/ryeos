@@ -18,6 +18,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 futures-util = { workspace = true }
 bytes = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-directive-core = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }

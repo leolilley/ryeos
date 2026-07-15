@@ -465,7 +465,7 @@ impl CompiledResponseMode for CompiledEventStreamMode {
         let (invoker, input): (&Arc<dyn CompiledRouteInvocation>, Value) = match &self.strategy {
             EventStreamStrategy::BodyJson { invoker } => {
                 // BodyJson: pass the raw body as input for the invoker to parse.
-                let input = serde_json::from_slice(&ctx.body_raw).map_err(|e| {
+                let input = ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw).map_err(|e| {
                     RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
                 })?;
                 (invoker, input)
@@ -835,7 +835,10 @@ mod tests {
 
     #[test]
     fn launch_request_rejects_missing_fields() {
-        let body = serde_json::json!({"item_ref": "directive:foo"});
+        let body = serde_json::json!({
+            "item_ref": "directive:foo",
+            "ref_bindings": {},
+        });
         let bytes = serde_json::to_vec(&body).unwrap();
         let err = serde_json::from_slice::<LaunchRequest>(&bytes)
             .expect_err("must reject missing fields");
@@ -850,6 +853,7 @@ mod tests {
     fn launch_request_rejects_unknown_field() {
         let body = serde_json::json!({
             "item_ref": "directive:foo",
+            "ref_bindings": {},
             "project_path": "/tmp",
             "parameters": {},
             "extra": "nope",
@@ -868,6 +872,7 @@ mod tests {
     fn launch_request_accepts_complete_body() {
         let body = serde_json::json!({
             "item_ref": "directive:my/agent",
+            "ref_bindings": {},
             "project_path": "/tmp/proj",
             "parameters": {"name": "World"},
         });

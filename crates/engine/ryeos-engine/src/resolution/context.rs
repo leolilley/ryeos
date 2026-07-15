@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{ItemSpace, TrustClass as ContractTrustClass};
+use crate::error::{EngineError, ParseErrKind};
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
@@ -22,8 +23,8 @@ use crate::trust::TrustStore;
 use super::alias::AliasResolver;
 use super::decl::ResolutionStepDecl;
 use super::types::{
-    effective_trust, ResolutionEdge, ResolutionError, ResolutionOutput, ResolutionStepName,
-    ResolvedAncestor, TrustClass,
+    effective_trust, ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput,
+    ResolutionStepName, ResolvedAncestor, TrustClass,
 };
 
 /// Result of loading an item: identity / trust / raw bytes (as a
@@ -35,6 +36,7 @@ use super::types::{
 /// full `ResolvedAncestor`.
 pub(crate) struct LoadedItem {
     pub source_path: PathBuf,
+    pub source_space: ItemSpace,
     pub trust_class: TrustClass,
     pub raw_content: String,
     pub raw_content_digest: String,
@@ -62,6 +64,7 @@ impl LoadedItem {
             requested_id,
             resolved_ref,
             source_path: self.source_path,
+            source_space: self.source_space,
             trust_class: self.trust_class,
             alias_resolution,
             added_by,
@@ -145,6 +148,7 @@ impl<'a> ResolutionContext<'a> {
             requested_id: current_ref.to_string(),
             resolved_ref: current_ref.to_string(),
             source_path: root_loaded.source_path.clone(),
+            source_space: root_loaded.source_space,
             trust_class: root_loaded.trust_class,
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
@@ -295,12 +299,14 @@ pub(crate) fn load_item_at(
         .get(&ref_.kind)
         .ok_or_else(|| ResolutionError::StepFailed {
             step,
+            class: ResolutionFailureClass::InvalidDefinition,
             reason: format!("unknown kind: {}", ref_.kind),
         })?;
     let source_format = kind_schema
         .resolved_format_for(&raw.matched_ext)
         .ok_or_else(|| ResolutionError::StepFailed {
             step,
+            class: ResolutionFailureClass::InternalInvariant,
             reason: format!("no source format for ext {}", raw.matched_ext),
         })?;
 
@@ -313,6 +319,7 @@ pub(crate) fn load_item_at(
         )
         .map_err(|e| ResolutionError::StepFailed {
             step,
+            class: parser_failure_class(&e),
             reason: format!("parse {}: {e}", raw.source_path.display()),
         })?;
 
@@ -333,6 +340,7 @@ pub(crate) fn load_item_at(
 
     Ok(LoadedItem {
         source_path: raw.source_path,
+        source_space: raw.source_space,
         trust_class: raw.trust_class,
         raw_content: raw.raw_content,
         raw_content_digest: raw.raw_content_digest,
@@ -350,6 +358,7 @@ pub(crate) fn load_item_at(
 /// tolerate a malformed body so a bad item still reaches `validate`).
 pub(crate) struct RawLoadedItem {
     pub source_path: PathBuf,
+    pub source_space: ItemSpace,
     pub winner_ai_root: PathBuf,
     pub matched_ext: String,
     pub trust_class: TrustClass,
@@ -372,20 +381,38 @@ pub(crate) fn load_item_raw(
         .get(&ref_.kind)
         .ok_or_else(|| ResolutionError::StepFailed {
             step,
+            class: ResolutionFailureClass::InvalidDefinition,
             reason: format!("unknown kind: {}", ref_.kind),
         })?;
 
-    let result =
-        crate::item_resolution::resolve_item_full(roots, kind_schema, ref_).map_err(|_| {
-            ResolutionError::MissingItem {
+    let result = match crate::item_resolution::resolve_item_full(roots, kind_schema, ref_) {
+        Ok(result) => result,
+        Err(EngineError::ItemNotFound { .. }) => {
+            return Err(ResolutionError::MissingItem {
                 item_ref: ref_.to_string(),
                 referenced_by: referenced_by.to_string(),
-            }
-        })?;
+            });
+        }
+        Err(EngineError::ItemResolutionUnavailable { .. }) => {
+            return Err(ResolutionError::StepFailed {
+                step,
+                class: ResolutionFailureClass::DependencyUnavailable,
+                reason: format!("resolve {ref_}: resolver storage is unavailable"),
+            });
+        }
+        Err(error) => {
+            return Err(ResolutionError::StepFailed {
+                step,
+                class: ResolutionFailureClass::InternalInvariant,
+                reason: format!("resolve {ref_}: {error}"),
+            });
+        }
+    };
 
     let content =
         std::fs::read_to_string(&result.winner_path).map_err(|e| ResolutionError::StepFailed {
             step,
+            class: ResolutionFailureClass::DependencyUnavailable,
             reason: format!("read {}: {e}", result.winner_path.display()),
         })?;
 
@@ -393,6 +420,7 @@ pub(crate) fn load_item_raw(
         .resolved_format_for(&result.matched_ext)
         .ok_or_else(|| ResolutionError::StepFailed {
             step,
+            class: ResolutionFailureClass::InternalInvariant,
             reason: format!("no source format for ext {}", result.matched_ext),
         })?;
 
@@ -440,6 +468,7 @@ pub(crate) fn load_item_raw(
 
     Ok(RawLoadedItem {
         source_path: result.winner_path,
+        source_space: result.winner_space,
         winner_ai_root: result.winner_ai_root,
         matched_ext: result.matched_ext,
         trust_class,
@@ -469,12 +498,14 @@ pub(crate) fn field_as_string(
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(Value::Null) => Err(super::types::ResolutionError::StepFailed {
             step: super::types::ResolutionStepName::ResolveExtendsChain,
+            class: super::types::ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "field `{field}` is explicitly null; omit the field instead of declaring it null"
             ),
         }),
         Some(Value::Array(_)) => Err(super::types::ResolutionError::StepFailed {
             step: super::types::ResolutionStepName::ResolveExtendsChain,
+            class: super::types::ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "field `{field}` must be a single string; multi-parent extends \
                  is deferred to the advanced resolution path"
@@ -482,6 +513,7 @@ pub(crate) fn field_as_string(
         }),
         Some(other) => Err(super::types::ResolutionError::StepFailed {
             step: super::types::ResolutionStepName::ResolveExtendsChain,
+            class: super::types::ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "field `{field}` must be a string; got {}",
                 other_type(other)
@@ -528,6 +560,7 @@ pub(crate) fn field_as_list(
                     other => {
                         return Err(super::types::ResolutionError::StepFailed {
                             step,
+                            class: super::types::ResolutionFailureClass::InvalidDefinition,
                             reason: format!(
                                 "field `{field}` element [{i}] must be a string; got {}",
                                 other_type(other)
@@ -540,17 +573,42 @@ pub(crate) fn field_as_list(
         }
         Some(Value::Null) => Err(super::types::ResolutionError::StepFailed {
             step,
+            class: super::types::ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "field `{field}` is explicitly null; omit the field instead of declaring it null"
             ),
         }),
         Some(other) => Err(super::types::ResolutionError::StepFailed {
             step,
+            class: super::types::ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "field `{field}` must be a string or array of strings; got {}",
                 other_type(other)
             ),
         }),
+    }
+}
+
+fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
+    match error {
+        EngineError::ParserFailed {
+            kind: ParseErrKind::Syntax | ParseErrKind::Schema,
+            ..
+        } => ResolutionFailureClass::InvalidDefinition,
+        EngineError::HandlerBinaryMissing { .. }
+        | EngineError::HandlerSpawnFailed { .. } => {
+            ResolutionFailureClass::DependencyUnavailable
+        }
+        EngineError::ParserFailed {
+            kind: ParseErrKind::Internal,
+            ..
+        }
+        | EngineError::ParserNotRegistered { .. }
+        | EngineError::HandlerExitNonZero { .. }
+        | EngineError::HandlerProtocolViolation { .. }
+        | EngineError::Handler(_)
+        | EngineError::Internal(_) => ResolutionFailureClass::InternalInvariant,
+        _ => ResolutionFailureClass::InternalInvariant,
     }
 }
 

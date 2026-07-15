@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +65,7 @@ struct ScheduleDeclarationFile {
 struct ScheduleDeclaration {
     schedule_id: String,
     item_ref: String,
+    ref_bindings: BTreeMap<String, String>,
     schedule_type: String,
     expression: String,
     #[serde(default)]
@@ -681,6 +682,13 @@ fn validate_schedule_declaration(
         .with_context(|| format!("invalid schedule_id in {}", rel_path))?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&schedule.item_ref)
         .with_context(|| format!("invalid item_ref for schedule '{}'", schedule.schedule_id))?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&schedule.ref_bindings)
+        .with_context(|| {
+            format!(
+                "invalid ref_bindings for schedule '{}'",
+                schedule.schedule_id
+            )
+        })?;
     ryeos_scheduler::crontab::validate_expression(&schedule.schedule_type, &schedule.expression)
         .with_context(|| format!("invalid expression for schedule '{}'", schedule.schedule_id))?;
     if schedule.schedule_type == "at"
@@ -892,6 +900,7 @@ fn write_reconciled_schedule(
         "spec_version": 1,
         "schedule_id": schedule.schedule_id,
         "item_ref": schedule.item_ref,
+        "ref_bindings": schedule.ref_bindings,
         "schedule_type": schedule.schedule_type,
         "expression": schedule.expression,
         "timezone": timezone,
@@ -935,6 +944,7 @@ fn write_reconciled_schedule(
     let rec = ScheduleSpecRecord {
         schedule_id: schedule.schedule_id.clone(),
         item_ref: schedule.item_ref.clone(),
+        ref_bindings: schedule.ref_bindings.clone(),
         params: if schedule.params.is_null() {
             "{}".to_string()
         } else {

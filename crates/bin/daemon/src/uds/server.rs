@@ -202,8 +202,8 @@ pub async fn dispatch_runtime_method(
         }
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => {
-            let result = handle_request_continuation(&clean_params, state)?;
-            spawn_machine_continuation_launch(state, &result);
+            let (result, prepared) = handle_request_continuation(&clean_params, state)?;
+            spawn_machine_continuation_launch(state, &result, prepared);
             Ok(result)
         }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
@@ -446,13 +446,18 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
 /// Autonomous machine continuation is always-on: the chain-depth cap enforced at
 /// create time (`create_machine_continuation`) bounds an autonomous run, so an
 /// unbounded chain can no longer form and there is nothing to gate. The successor
-/// row + chain link are recorded by `request_continuation`; this fires the launch.
+/// row, chain link, and authoritative audit are recorded by the continuation
+/// lifecycle; this moves the exact prepared authority into the launch task.
 ///
 /// Spawned daemon-side (NOT from the dying runtime — a lifecycle hazard) after
 /// the source is settled `continued` and the state-store write lock has dropped.
-/// `launch_successor` claims the launch lease, so a concurrent reconcile cannot
-/// double-launch the same successor.
-fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Value) {
+/// The prepared launcher claims the launch lease, so a concurrent reconcile
+/// cannot double-launch the same successor.
+fn spawn_machine_continuation_launch(
+    state: &AppState,
+    result: &serde_json::Value,
+    prepared: ryeos_executor::execution::launch::PreparedMachineSuccessorLaunch,
+) {
     let Some(successor_id) = result
         .get("successor_thread_id")
         .and_then(|v| v.as_str())
@@ -464,7 +469,13 @@ fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Valu
     let st = state.clone();
     tokio::spawn(async move {
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
-        match ryeos_executor::execution::launch::launch_successor(st, &successor_id).await {
+        match ryeos_executor::execution::launch::launch_prepared_machine_successor(
+            st,
+            &successor_id,
+            prepared,
+        )
+        .await
+        {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
             Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
                 tracing::debug!(
@@ -487,11 +498,36 @@ fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Valu
 fn handle_request_continuation(
     params: &serde_json::Value,
     state: &AppState,
-) -> Result<serde_json::Value> {
+) -> Result<(
+    serde_json::Value,
+    ryeos_executor::execution::launch::PreparedMachineSuccessorLaunch,
+)> {
     let params: ThreadContinuationParams = serde_json::from_value(params.clone())
         .context("invalid runtime.request_continuation params")?;
-    serde_json::to_value(state.threads.request_continuation(&params)?)
-        .context("failed to encode runtime.request_continuation result")
+    let resume_context = state
+        .state_store
+        .get_launch_metadata(&params.thread_id)?
+        .and_then(|metadata| metadata.resume_context)
+        .ok_or_else(|| {
+            anyhow!(
+                "source thread {} has no captured ResumeContext",
+                params.thread_id
+            )
+        })?;
+    let prepared = ryeos_executor::execution::launch::prepare_machine_successor_launch(
+        state,
+        &resume_context,
+        &params.thread_id,
+    )?;
+    let initial_events = prepared.initial_audit_events()?;
+    let result = state.threads.request_continuation_with_events(
+        &params,
+        &resume_context,
+        initial_events,
+    )?;
+    let encoded = serde_json::to_value(result)
+        .context("failed to encode runtime.request_continuation result")?;
+    Ok((encoded, prepared))
 }
 
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -1301,6 +1337,7 @@ mod tests {
                 &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
                     kind: "graph".into(),
                     item_ref: "test/graph".into(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     launch_mode: "detached".into(),
                     parameters: json!({}),
                     project_context: ProjectContext::LocalPath {
@@ -1362,7 +1399,13 @@ mod tests {
 
     fn set_test_follow_child(state: &AppState, follow_key: &str, child: &str) {
         let item_ref = "graph:test";
-        let hash = ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &json!(null), None);
+        let hash = ryeos_app::runtime_db::follow_child_spec_hash(
+            item_ref,
+            &std::collections::BTreeMap::new(),
+            &json!(null),
+            None,
+        )
+        .unwrap();
         state
             .state_store
             .set_follow_child(follow_key, 0, item_ref, &hash, child, child)
@@ -3608,7 +3651,11 @@ mod tests {
 
         let ctx = HandlerContext::new("user:test".to_string(), Vec::new(), true);
         let req: ryeos_api::handlers::threads_input::Request =
-            serde_json::from_value(json!({"input": "again", "thread": "T-pred"})).unwrap();
+            serde_json::from_value(json!({
+                "input": "again",
+                "target": {"kind": "thread", "thread_id": "T-pred"},
+            }))
+            .unwrap();
         let resp = ryeos_api::handlers::threads_input::handle(req, ctx, state.clone())
             .await
             .expect("a non-continuable kind is a refusal, not an error");

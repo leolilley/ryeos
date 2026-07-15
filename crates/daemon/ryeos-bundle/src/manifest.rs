@@ -81,6 +81,7 @@ pub struct SmokeDecl {
     /// Canonical ref of the item to execute (e.g. `tool:example/system/health`).
     #[serde(rename = "ref")]
     pub item_ref: String,
+    pub ref_bindings: std::collections::BTreeMap<String, String>,
     /// Optional label used in the smoke report; defaults to `item_ref`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -111,6 +112,25 @@ pub fn validate_smoke_decls(decls: &[SmokeDecl]) -> Result<()> {
                 "invalid smoke ref '{}': expected a canonical `<kind>:<bare-id>` ref",
                 decl.item_ref
             ),
+        }
+        for (name, item_ref) in &decl.ref_bindings {
+            let valid_name = name.len() <= 64
+                && name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_lowercase)
+                && name.split('_').all(|segment| {
+                    !segment.is_empty()
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit()
+                        })
+                });
+            if !valid_name {
+                bail!("invalid smoke ref binding name '{name}'");
+            }
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).with_context(|| {
+                format!("invalid smoke ref_bindings.{name}: {item_ref}")
+            })?;
         }
         if !seen.insert(decl.label()) {
             bail!("duplicate smoke entry label '{}'", decl.label());
@@ -1073,7 +1093,10 @@ name: test
 version: "1.0"
 smoke:
   - ref: tool:example/system/health
+    ref_bindings: {}
   - ref: directive:example/probe
+    ref_bindings:
+      model: directive:example/probe
     name: probe
     inputs:
       url: "http://localhost"
@@ -1129,6 +1152,7 @@ smoke:
     fn smoke_validation_rejects_malformed_ref_and_duplicate_labels() {
         let decl = |item_ref: &str, name: Option<&str>| SmokeDecl {
             item_ref: item_ref.to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
             name: name.map(str::to_string),
             inputs: serde_json::Value::Null,
             timeout_secs: None,
@@ -1161,6 +1185,7 @@ smoke:
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![SmokeDecl {
                 item_ref: "tool:probe/health".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
                 name: None,
                 inputs: serde_json::Value::Null,
                 timeout_secs: None,

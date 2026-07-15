@@ -818,12 +818,13 @@ impl RyeOsCore {
             }
             RyeOsUiIntent::ExecuteItem {
                 item_ref,
+                ref_bindings,
                 parameters,
             } => {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", RyeOsTone::Warn);
                     Vec::new()
-                } else if self.has_pending_invoke(&item_ref, &parameters) {
+                } else if self.has_pending_invoke(&item_ref, &ref_bindings, &parameters) {
                     self.notice(
                         format!("Run {item_ref} is already pending."),
                         RyeOsTone::Warn,
@@ -832,6 +833,7 @@ impl RyeOsCore {
                 } else {
                     vec![self.emit(RyeOsEffectKind::DispatchInvocation {
                         item_ref,
+                        ref_bindings,
                         params: parameters,
                     })]
                 }
@@ -884,13 +886,20 @@ impl RyeOsCore {
     pub(crate) fn has_pending_invoke(
         &self,
         item_ref: &str,
+        ref_bindings: &std::collections::BTreeMap<String, String>,
         parameters: &serde_json::Value,
     ) -> bool {
         self.pending_effects.values().any(|kind| {
             matches!(
                 kind,
-                RyeOsEffectKind::DispatchInvocation { item_ref: pending_ref, params }
-                    if pending_ref == item_ref && params == parameters
+                RyeOsEffectKind::DispatchInvocation {
+                    item_ref: pending_ref,
+                    ref_bindings: pending_bindings,
+                    params,
+                }
+                    if pending_ref == item_ref
+                        && pending_bindings == ref_bindings
+                        && params == parameters
             )
         })
     }
@@ -1360,6 +1369,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },
@@ -1376,6 +1386,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({ "target": "demo" }),
                 },
             },
@@ -1383,7 +1394,11 @@ mod tests {
 
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
-            Some(RyeOsEffectKind::DispatchInvocation { item_ref, params })
+            Some(RyeOsEffectKind::DispatchInvocation {
+                item_ref,
+                ref_bindings: _,
+                params,
+            })
                 if item_ref == "tool:demo/run" && params["target"] == "demo"
         ));
     }
@@ -1500,6 +1515,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({ "target": "demo" }),
                 },
             },
@@ -1510,6 +1526,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({ "target": "demo" }),
                 },
             },

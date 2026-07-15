@@ -26,6 +26,8 @@
 //! callback capability. The action only says WHICH child to run and WHAT cohort
 //! facets to stamp.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
@@ -57,6 +59,7 @@ pub async fn spawn_detached_child(
     cap: &CallbackCapability,
     child_provenance: ExecutionProvenance,
     child_item_ref: &str,
+    child_ref_bindings: &BTreeMap<String, String>,
     child_parameters: &Value,
     facets: Option<&Value>,
     launch_window: Option<&ryeos_runtime::callback::LaunchWindow>,
@@ -153,6 +156,7 @@ pub async fn spawn_detached_child(
     let meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
         kind: child_thread_profile.clone(),
         item_ref: child_item_ref.to_string(),
+        ref_bindings: child_ref_bindings.clone(),
         launch_mode: parent.launch_mode.clone(),
         parameters: child_parameters.clone(),
         // Resume identity derives from validated server-side provenance, never

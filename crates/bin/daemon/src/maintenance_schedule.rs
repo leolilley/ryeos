@@ -18,6 +18,7 @@
 //! absent. Once applied, `scheduler pause` (which flips `enabled` in the node
 //! YAML) and any operator cadence edits survive every restart untouched.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,7 @@ struct MaintenanceDeclarationFile {
 struct MaintenanceScheduleDeclaration {
     schedule_id: String,
     item_ref: String,
+    ref_bindings: BTreeMap<String, String>,
     schedule_type: String,
     expression: String,
     #[serde(default)]
@@ -94,6 +96,13 @@ fn apply_maintenance_schedules(node_dir: &Path, identity: &NodeIdentity) -> Resu
 
     let schedules_dir = node_dir.join("schedules");
     for decl in &file.schedules {
+        ryeos_executor::execution::launch_preparation::validate_ref_bindings(&decl.ref_bindings)
+            .with_context(|| {
+                format!(
+                    "invalid ref_bindings for maintenance schedule '{}'",
+                    decl.schedule_id
+                )
+            })?;
         let target = schedules_dir.join(format!("{}.yaml", decl.schedule_id));
         if target.exists() {
             tracing::debug!(
@@ -155,6 +164,13 @@ fn write_maintenance_spec(
     ryeos_scheduler::crontab::validate_schedule_id(&decl.schedule_id)?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&decl.item_ref)
         .with_context(|| format!("invalid item_ref '{}'", decl.item_ref))?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&decl.ref_bindings)
+        .with_context(|| {
+            format!(
+                "invalid ref_bindings for maintenance schedule '{}'",
+                decl.schedule_id
+            )
+        })?;
     ryeos_scheduler::crontab::validate_expression(&decl.schedule_type, &decl.expression)?;
     let timezone = decl.timezone.as_deref().unwrap_or("UTC");
     ryeos_scheduler::crontab::validate_timezone(timezone)?;
@@ -195,6 +211,7 @@ fn write_maintenance_spec(
         "spec_version": 1,
         "schedule_id": decl.schedule_id,
         "item_ref": decl.item_ref,
+        "ref_bindings": decl.ref_bindings,
         "schedule_type": decl.schedule_type,
         "expression": decl.expression,
         "timezone": timezone,
@@ -243,6 +260,7 @@ mod tests {
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"
     overlap_policy: skip
@@ -336,6 +354,7 @@ schedules:
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"
     capabilities: []

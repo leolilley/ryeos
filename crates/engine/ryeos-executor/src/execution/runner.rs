@@ -1620,6 +1620,7 @@ pub fn execution_params_from_resume_context(
         usage_subject: None,
         usage_subject_asserted_by: None,
         parameters: resume.parameters.clone(),
+        ref_bindings: resume.ref_bindings.clone(),
         resolved_item,
         plan_context: plan_ctx,
     };
@@ -1631,7 +1632,7 @@ pub fn execution_params_from_resume_context(
     // NOTE: read_required_secrets and envelope-field preflight are NOT
     // called here. They run later, inside run_existing_detached(), AFTER
     // prepare_cas_context() returns the effective_path — so dotenv overlay
-    // and provider resolution see the snapshot checkout, not the live tree.
+    // and launch-contract configuration see the snapshot checkout, not the live tree.
 
     Ok(ExecutionParams {
         resolved,
@@ -1705,79 +1706,12 @@ pub async fn run_existing_detached(
         };
     }
 
-    // ── Vault + envelope-field preflight (post-CAS) ─────────────────
-    // These MUST run after prepare_cas_context so dotenv overlay and
-    // provider resolution see the snapshot checkout, not the live tree.
+    // ── Vault preflight (post-CAS) ──────────────────────────────────
+    // Run after prepare_cas_context so dotenv overlay follows the exact
+    // materialized project used by this spawn.
     {
-        let engine = params.provenance.request_engine();
-        // Resolve via the captured runtime ref (the runtime this thread launched
-        // under) rather than the kind's current default, consistent with every
-        // other runtime-resolution site. A captured-but-bad ref (malformed,
-        // unregistered, or serving the wrong kind) is an error — fail the resume
-        // rather than silently proceeding with no envelope requirements. Only the
-        // `None` case (no captured ref, no registry entry) degrades to empty.
-        let required_envelope_fields = match engine.runtimes.resolve_for_launch(
-            params.runtime_ref.as_deref(),
-            &params.resolved.resolved_item.kind,
-        ) {
-            Ok(runtime) => runtime.yaml.required_envelope_fields.clone(),
-            Err(_) if params.runtime_ref.is_none() => Vec::new(),
-            Err(e) => {
-                guard.fail_thread("preflight_failed");
-                guard.cleanup();
-                return Err(ResumeError::Other(anyhow::anyhow!(
-                    "resume: captured runtime_ref unresolvable: {e}"
-                )));
-            }
-        };
-
-        let provider_preflight =
-            if crate::execution::launch::requires_provider_snapshot(&required_envelope_fields) {
-                let engine_roots = engine.resolution_roots(Some(effective_path.clone()));
-                let effective_parsers = engine
-                    .effective_parser_dispatcher(Some(&effective_path))
-                    .map_err(|e| {
-                    guard.fail_thread("preflight_failed");
-                    guard.cleanup();
-                    ResumeError::Other(anyhow::anyhow!("resume: effective parser dispatcher: {e}"))
-                })?;
-
-                let resolution = ryeos_engine::resolution::run_resolution_pipeline(
-                    &params.resolved.resolved_item.canonical_ref,
-                    &engine.kinds,
-                    &effective_parsers,
-                    &engine_roots,
-                    &engine.trust_store,
-                    &engine.composers,
-                )
-                .map_err(|e| {
-                    guard.fail_thread("preflight_failed");
-                    guard.cleanup();
-                    ResumeError::Other(anyhow::anyhow!(
-                        "resume: resolution pipeline for preflight: {e}"
-                    ))
-                })?;
-
-                let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-                Some(
-                    crate::execution::launch::resolve_provider_preflight(
-                        &resolution.composed,
-                        &engine_roots,
-                        &operator_trusted_keys_dir,
-                    )
-                    .map_err(|e| {
-                        guard.fail_thread("preflight_failed");
-                        guard.cleanup();
-                        ResumeError::Preflight(e)
-                    })?,
-                )
-            } else {
-                None
-            };
-
         let secret_requirements = crate::execution::launch::build_secret_requirements(
             &params.resolved.resolved_item.metadata.required_secrets,
-            provider_preflight.as_ref(),
         );
         let secret_names: Vec<String> = secret_requirements
             .iter()
@@ -1919,6 +1853,7 @@ mod tests {
         ResumeContext {
             kind: "graph".into(),
             item_ref: "graph:test/item".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "detached".into(),
             parameters: json!({}),
             project_context,

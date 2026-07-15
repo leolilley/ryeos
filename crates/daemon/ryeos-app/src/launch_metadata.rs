@@ -11,6 +11,7 @@
 //! Persisted as a JSON blob in `runtime_db.thread_runtime.launch_metadata`
 //! so the struct can be extended without schema migrations.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ryeos_engine::contracts::{
@@ -68,13 +69,10 @@ pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeLaunchMetadata {
-    /// Persisted schema version. Defaults via serde to the current
-    /// `LAUNCH_METADATA_SCHEMA_VERSION` so rows written before this
-    /// field existed deserialize without error. A loud decode failure
-    /// (see `runtime_db::get_runtime_info`) is the signal that an
-    /// incompatible payload was written.
+    /// Persisted schema version. Missing or incompatible metadata fails
+    /// decoding loudly; there is no compatibility/defaulting path.
     pub schema_version: u32,
 
     /// Cancellation policy resolved at decorate-spec time and snapshotted
@@ -199,6 +197,9 @@ impl OriginalPushedHeadRef {
 pub struct ResumeContext {
     pub kind: String,
     pub item_ref: String,
+    /// Complete canonical secondary execution identity. Required on disk;
+    /// absence is a schema error, never an empty-map fallback.
+    pub ref_bindings: BTreeMap<String, String>,
     pub launch_mode: String,
     pub parameters: serde_json::Value,
     /// Full engine `ProjectContext` from the original `PlanContext`.
@@ -211,7 +212,7 @@ pub struct ResumeContext {
     /// the original LocalPath so resume targets the pinned project
     /// version, not the current head. `None` when the original spawn
     /// went through the live-FS path with no allocated snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original_snapshot_hash: Option<String>,
     /// Pushed-head identity captured at original spawn time — set iff the
     /// spawn's provenance was `RootPushedHead`. The resume path uses it to
@@ -219,14 +220,14 @@ pub struct ResumeContext {
     /// resolving against the daemon's live engine. `None` for LocalPath
     /// spawns. NOT interchangeable with `original_snapshot_hash`, which is
     /// the LocalPath native-resume pin allocated by the runner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub original_pushed_head_ref: Option<OriginalPushedHeadRef>,
     /// Deliberate runtime state-root override captured at original spawn
     /// time (`/execute` `state_root`). Re-applied to the rebuilt provenance
     /// on resume so a crashed overridden run keeps writing its state — and
     /// advertising its callback identity — under the override instead of
     /// silently reverting into the source project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub state_root: Option<std::path::PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
@@ -236,7 +237,6 @@ pub struct ResumeContext {
     pub requested_by: EffectivePrincipal,
     /// `ExecutionHints` from the original `PlanContext`. Carried
     /// verbatim so executor-specific flags survive resume.
-    #[serde(default = "default_execution_hints")]
     pub execution_hints: ExecutionHints,
     /// Composed `effective_caps` captured at original spawn time. The
     /// reconciler re-mints a callback token for the resumed subprocess and
@@ -248,7 +248,6 @@ pub struct ResumeContext {
     /// launcher feeds to `CapabilityPolicy::FollowChildHybrid`. The child's
     /// own composed caps overwrite it in launch metadata once the child is
     /// launched and policy resolution succeeds.
-    #[serde(default)]
     pub effective_caps: Vec<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
@@ -256,17 +255,13 @@ pub struct ResumeContext {
     /// reconstructs its launch identity from this. Captured at fresh managed
     /// launch; preferred over re-deriving from the registry so a later default
     /// change cannot silently switch runtimes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_ref: Option<String>,
     /// Persisted canonical ref (`runtime:<name>`) of the runtime that launched
     /// this thread, so a successor reattaches by-ref rather than re-resolving
     /// the default for the kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_ref: Option<String>,
-}
-
-fn default_execution_hints() -> ExecutionHints {
-    ExecutionHints::default()
 }
 
 impl ResumeContext {
@@ -533,6 +528,7 @@ mod tests {
         let ctx = ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "ns/foo".to_string(),
+            ref_bindings: BTreeMap::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),

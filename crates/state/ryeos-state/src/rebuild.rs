@@ -666,7 +666,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let canonical = lillux::canonical_json(value);
+        let canonical = lillux::canonical_json(value).unwrap();
         lillux::atomic_write(&path, canonical.as_bytes()).unwrap();
     }
 
@@ -683,7 +683,11 @@ mod tests {
             "updated_at": "2026-04-22T00:00:00Z",
             "signer": "test", "signature": "test"
         });
-        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+        lillux::atomic_write(
+            &head_path,
+            lillux::canonical_json(&ref_value).unwrap().as_bytes(),
+        )
+        .unwrap();
     }
 
     fn make_chain_state(

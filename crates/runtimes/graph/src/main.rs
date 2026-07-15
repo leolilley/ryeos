@@ -350,6 +350,12 @@ fn main() -> anyhow::Result<()> {
 fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
     let envelope: ryeos_runtime::envelope::LaunchEnvelope =
         serde_json::from_slice(stdin_data).map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
+    if !envelope.runtime_data.is_empty() {
+        anyhow::bail!(
+            "graph launch runtime_data must be empty; received keys: {:?}",
+            envelope.runtime_data.keys().collect::<Vec<_>>()
+        );
+    }
 
     let graph_path = cli
         .graph_path

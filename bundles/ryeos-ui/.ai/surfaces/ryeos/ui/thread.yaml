@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-13T01:54:18Z:1a784424cd85634a72089d6a8cf8adb19e5c4d16450d1bdacbfd6a42af33250e:Nn1kGtmNc5M9m/61i/rLeoklFOa5GdwrGjNYbqjRI2Gkdprv5bou3bfN0FZ56GQznBM5AeK+UiKqzXQhbx6FBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:46Z:63f952ae48c4794906dc045adb208351ec47a2e7803ed4dde7a5299b27fcbccd:jmQlo8+Dt93rDJNucQ3xAzj6Nm7eKzfVdY/g9k8UFCxAWQ07kLrlmPwEYvmThfRJEA5xTJKYVsCmENCKEoiHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-thread
 version: "1.0.0"
 description: Directive thread — watch and drive a single execution stream
@@ -45,8 +45,12 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:ryeos/ops/base
-      project_path: ""
+      target:
+        kind: fresh
+        item_ref: directive:ryeos/ops/base
+        project_path: ""
+        ref_bindings:
+          model: directive:ryeos/ops/base
 
 ambient:
   show_background: true

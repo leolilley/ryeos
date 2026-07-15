@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T03:34:00Z:eb841493fa294efc46d23684a10fd9e0f8e170f8c1cd42275fd87c58e10085c1:mIv49NLKn3hjzsduvH16gFsIhsS6Q4QVa+Ei1PXr89PruqHU7kR+1KZ58Oc5aL7OGa5eXHTrWDfz085c1/PTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T00:27:45Z:aef3ae86f2f475287f6645898078de52d9d9d3e753b6b243bcdd8d5dcc0aa4b5:PBMINkvJqbnN84h7DABxjkjxqxpieu0P9PGBi76o/AB/SEZN0p5ef5hAzLUBlbS++ivh3iKq35tXG1kReYESCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - execute
 description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; --no-stream/--json print only the buffered JSON result (also the default when piped), and --stream forces streaming even when piped."
@@ -44,3 +44,6 @@ control_flags:
 - flag: state-root
   help: "Place runtime state (thread state, transcripts) under this path instead of the project; resolution still runs against the project source"
   binding: state_root
+- flag: ref-binding
+  help: "Bind a secondary execution ref as name=canonical-ref; repeat for multiple bindings"
+  binding: ref_binding

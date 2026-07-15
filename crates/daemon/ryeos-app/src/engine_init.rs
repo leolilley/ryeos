@@ -11,11 +11,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use ryeos_engine::boot_validation::{validate_boot, validate_protocol_builder};
+use ryeos_engine::boot_validation::{
+    validate_boot, validate_protocol_builder, validate_runtime_launch_handlers,
+};
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
+use ryeos_engine::launch_preparers::{LaunchPreparerRegistry, LaunchPreparerRunner};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::resolution::TrustClass;
@@ -253,7 +256,7 @@ pub fn build_engine_for_roots(
     //     the SAME `composers` instance used by boot validation. The
     //     launcher reads the registry back off the engine — there is
     //     no second construction site that could drift.
-    let parser_dispatcher = ParserDispatcher::new(parser_tools, handler_registry);
+    let parser_dispatcher = ParserDispatcher::new(parser_tools, handler_registry.clone());
 
     // Scan every bundle root for verified
     // `kind: runtime` YAMLs. Fail-closed on any verification error or
@@ -261,6 +264,23 @@ pub fn build_engine_for_roots(
     // problem, not a per-request one.
     let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &trust_store, &kinds)
         .context("failed to build runtime registry")?;
+    let launch_preparers = if runtimes.requires_launch_preparer() {
+        let runner = LaunchPreparerRunner::from_node_policy(&config.app_root)
+            .context("failed to initialize fixed launch-preparer sandbox")?;
+        if let Err(issues) =
+            validate_runtime_launch_handlers(&runtimes, &handler_registry, &runner)
+        {
+            let mut msg = String::from("runtime launch-preparer validation failed:\n");
+            for issue in &issues {
+                msg.push_str(&format!("  - {issue:?}\n"));
+            }
+            anyhow::bail!("{msg}");
+        }
+        LaunchPreparerRegistry::from_runtimes(&runtimes, &handler_registry, runner)
+            .context("failed to bind runtime launch preparers")?
+    } else {
+        LaunchPreparerRegistry::default()
+    };
     tracing::info!(
         count = runtimes.all().count(),
         roots = tagged_roots.len(),
@@ -272,6 +292,7 @@ pub fn build_engine_for_roots(
         .with_composers(composers)
         .with_protocols(protocol_registry)
         .with_runtimes(runtimes)
+        .with_launch_preparers(launch_preparers)
         .with_host_env(load_host_env_passthrough_allowlist(
             &config.tool_env_passthrough,
         )?);

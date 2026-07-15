@@ -19,8 +19,8 @@ pub use decl::ResolutionStepDecl;
 pub use types::{
     effective_trust, AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode,
     ResolutionEdge, ResolutionError, ResolutionOutput, ResolutionProvenance,
-    ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName, ResolvedAncestor,
-    TrustClass,
+    ResolutionFailureClass, ResolutionProvenanceEdge, ResolutionProvenanceNode,
+    ResolutionStepName, ResolvedAncestor, TrustClass,
 };
 
 use crate::canonical_ref::CanonicalRef;
@@ -90,6 +90,7 @@ pub fn run_effective_item_pipeline(
         .get(&item.kind)
         .ok_or_else(|| ResolutionError::StepFailed {
             step: ResolutionStepName::PipelineInit,
+            class: ResolutionFailureClass::InvalidDefinition,
             reason: format!("unknown kind: {}", item.kind),
         })?;
 
@@ -139,6 +140,7 @@ fn run_item_pipeline_inner(
     if extends_decls > 1 {
         return Err(ResolutionError::StepFailed {
             step: ResolutionStepName::ResolveExtendsChain,
+            class: ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "kind `{}` declares {extends_decls} `resolve_extends_chain` steps; \
                  at most one is allowed",
@@ -158,6 +160,7 @@ fn run_item_pipeline_inner(
     if references_decls > 1 {
         return Err(ResolutionError::StepFailed {
             step: ResolutionStepName::ResolveReferences,
+            class: ResolutionFailureClass::InvalidDefinition,
             reason: format!(
                 "kind `{}` declares {references_decls} `resolve_references` steps; \
                  at most one is allowed",

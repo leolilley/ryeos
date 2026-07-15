@@ -320,6 +320,7 @@ impl CallbackClient {
         follow_node: &str,
         step_count: i64,
         child_item_ref: &str,
+        ref_bindings: std::collections::BTreeMap<String, String>,
         child_parameters: Value,
         frontier_id: Option<String>,
     ) -> Result<Value> {
@@ -335,9 +336,12 @@ impl CallbackClient {
             graph_run_id: graph_run_id.to_string(),
             follow_node: follow_node.to_string(),
             step_count,
-            child_item_ref: Some(child_item_ref.to_string()),
-            child_parameters,
-            children: None,
+            children: vec![crate::callback::FollowChildSpec {
+                item_ref: child_item_ref.to_string(),
+                ref_bindings,
+                parameters: child_parameters,
+                facets: None,
+            }],
             launch_window_width: None,
             frontier_id,
         };
@@ -366,9 +370,7 @@ impl CallbackClient {
                 graph_run_id: graph_run_id.to_string(),
                 follow_node: follow_node.to_string(),
                 step_count,
-                child_item_ref: None,
-                child_parameters: Value::Null,
-                children: Some(children),
+                children,
                 launch_window_width,
                 frontier_id,
             })
@@ -1212,6 +1214,7 @@ mod tests {
             project_path: "/project".to_string(),
             action: ActionPayload {
                 item_id: "my/tool".to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
                 thread: "inline".to_string(),
                 call: None,

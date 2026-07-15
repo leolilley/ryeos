@@ -38,7 +38,8 @@ use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 use crate::kind_registry::KindRegistry;
 use crate::resolution::{
-    KindComposedView, ResolutionError, ResolutionStepName, ResolvedAncestor, TrustClass,
+    KindComposedView, ResolutionError, ResolutionFailureClass, ResolutionStepName,
+    ResolvedAncestor, TrustClass,
 };
 
 const COMPOSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -212,6 +213,7 @@ impl ComposerRegistry {
             .get(kind)
             .ok_or_else(|| ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "no composer bound for kind `{kind}` — production paths must \
                      bind every kind via ComposerRegistry::from_kinds"
@@ -221,6 +223,7 @@ impl ComposerRegistry {
         if ancestors.len() != ancestor_parsed.len() {
             return Err(ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "ancestors ({}) / ancestor_parsed ({}) length mismatch — \
                      caller must keep them parallel",
@@ -247,10 +250,12 @@ impl ComposerRegistry {
             HandlerResponse::ComposeOk(success) => Ok(success_to_view(success)),
             HandlerResponse::ComposeErr { step, reason } => Err(ResolutionError::StepFailed {
                 step: wire_step_to_engine(step),
+                class: ResolutionFailureClass::InvalidDefinition,
                 reason,
             }),
             other => Err(ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "composer handler `{}` returned unexpected response: {other:?}",
                     bound.handler.canonical_ref()
@@ -303,8 +308,16 @@ fn success_to_view(s: ComposeSuccess) -> KindComposedView {
 }
 
 fn engine_to_resolution_error(e: EngineError) -> ResolutionError {
+    let class = match &e {
+        EngineError::HandlerBinaryMissing { .. }
+        | EngineError::HandlerSpawnFailed { .. } => {
+            ResolutionFailureClass::DependencyUnavailable
+        }
+        _ => ResolutionFailureClass::InternalInvariant,
+    };
     ResolutionError::StepFailed {
         step: ResolutionStepName::PipelineInit,
+        class,
         reason: format!("composer handler subprocess failed: {e}"),
     }
 }
@@ -460,6 +473,7 @@ composer: {composer}
             requested_id: "directive:test".into(),
             resolved_ref: "directive:test".into(),
             source_path: root.join("directive/test.directive.md"),
+            source_space: crate::contracts::ItemSpace::Bundle,
             trust_class: TrustClass::TrustedBundle,
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,

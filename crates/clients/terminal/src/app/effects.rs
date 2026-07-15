@@ -99,7 +99,11 @@ async fn effect_data(
                     *slot = serde_json::Value::String(project.to_string());
                 }
             }
-            let body = serde_json::json!({ "item_ref": source_ref, "parameters": params });
+            let body = serde_json::json!({
+                "item_ref": source_ref,
+                "ref_bindings": {},
+                "parameters": params,
+            });
             let envelope = client.signed_post("/execute", &body).await?;
             Ok(envelope.get("result").cloned().unwrap_or(envelope))
         }
@@ -108,10 +112,15 @@ async fn effect_data(
         RyeOsEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/ryeos-ui/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         RyeOsEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/ryeos-ui/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
         RyeOsEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/ryeos-ui/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        RyeOsEffectKind::DispatchInvocation { item_ref, params } => client.signed_post(
+        RyeOsEffectKind::DispatchInvocation {
+            item_ref,
+            ref_bindings,
+            params,
+        } => client.signed_post(
             "/ui/api/invocations/dispatch",
             &serde_json::json!({
                 "target": { "kind": "ref", "ref": item_ref },
+                "ref_bindings": ref_bindings,
                 "params": params,
             }),
         ).await,
@@ -122,6 +131,7 @@ async fn effect_data(
             // project_path), so it receives only its declared params.
             let body = serde_json::json!({
                 "item_ref": "service:commands/submit",
+                "ref_bindings": {},
                 "parameters": { "thread_id": thread_id, "command_type": command_type },
             });
             let envelope = client.signed_post("/execute", &body).await?;
@@ -137,18 +147,12 @@ async fn effect_data(
                 // no project_path field) must not receive it, or the request is
                 // rejected. Top-level /execute project_path still rides as
                 // transport context below.
-                if let (Some(project), Some(slot)) = (
-                    project_path,
-                    params
-                        .as_object_mut()
-                        .and_then(|map| map.get_mut("project_path")),
-                ) {
-                    if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
-                        *slot = serde_json::Value::String(project.to_string());
-                    }
+                if let Some(project) = project_path {
+                    fill_project_path_slot(&mut params, project);
                 }
                 let mut body = serde_json::json!({
                     "item_ref": item_ref,
+                    "ref_bindings": {},
                     "parameters": params,
                 });
                 if let Some(project) = project_path {
@@ -164,6 +168,7 @@ async fn effect_data(
                 // One daemon path: tokens resolve + bind server-side.
                 let mut command = serde_json::json!({
                     "tokens": tokens,
+                    "ref_bindings": {},
                     "arguments": params,
                 });
                 if let Some(project) = project_path {
@@ -171,6 +176,7 @@ async fn effect_data(
                 }
                 let body = serde_json::json!({
                     "item_ref": "service:commands/dispatch",
+                    "ref_bindings": {},
                     "parameters": command,
                 });
                 let envelope = client.signed_post("/execute", &body).await?;
@@ -178,6 +184,20 @@ async fn effect_data(
             }
         },
         RyeOsEffectKind::SetLocationHash { .. } | RyeOsEffectKind::CopyToClipboard { .. } | RyeOsEffectKind::OpenUrl { .. } => Ok(serde_json::Value::Null),
+    }
+}
+
+fn fill_project_path_slot(params: &mut serde_json::Value, project: &str) {
+    if let Some(slot) = params.pointer_mut("/target/project_path") {
+        if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
+            *slot = serde_json::Value::String(project.to_string());
+        }
+        return;
+    }
+    if let Some(slot) = params.get_mut("project_path") {
+        if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
+            *slot = serde_json::Value::String(project.to_string());
+        }
     }
 }
 

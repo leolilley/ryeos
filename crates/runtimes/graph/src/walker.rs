@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -176,8 +177,13 @@ enum StepOutcome {
     },
     /// Follow node: suspend the graph and hand the action off to a detached child
     /// via `spawn_follow_child`. No result exists yet — it is consumed on resume.
-    /// Carries only the child item + params; the daemon derives the rest.
-    FollowSuspend { item_id: String, params: Value },
+    /// Carries only the child execution identity + params; the daemon derives
+    /// the trust-bearing context.
+    FollowSuspend {
+        item_id: String,
+        ref_bindings: BTreeMap<String, String>,
+        params: Value,
+    },
     FollowFanoutSuspend {
         children: Vec<ryeos_runtime::callback::FollowChildSpec>,
         width: Option<u32>,
@@ -1460,8 +1466,34 @@ impl Walker {
         // action off to a detached child and suspend (handled in commit_step). The
         // result is consumed on resume, so nothing is dispatched or cached here.
         if node.follow && resumed_follow_envelope.is_none() {
+            let ref_bindings = match stripped_action.get("ref_bindings") {
+                Some(value) => {
+                    match serde_json::from_value::<BTreeMap<String, String>>(value.clone()) {
+                        Ok(bindings) => bindings,
+                        Err(error) => {
+                            return StepOutcome::DispatchHardError {
+                                item_id: Some(dispatched_item_id),
+                                error: format!("follow action has invalid ref_bindings: {error}"),
+                                next_on_error: resolve_next_on_error(node, cfg),
+                                elapsed_ms: elapsed,
+                                cost: None,
+                            };
+                        }
+                    }
+                }
+                None => {
+                    return StepOutcome::DispatchHardError {
+                        item_id: Some(dispatched_item_id),
+                        error: "follow action is missing required ref_bindings".to_string(),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: elapsed,
+                        cost: None,
+                    };
+                }
+            };
             return StepOutcome::FollowSuspend {
                 item_id: dispatched_item_id,
+                ref_bindings,
                 params: stripped_action
                     .get("params")
                     .cloned()
@@ -1973,8 +2005,38 @@ impl Walker {
                     cost: None,
                 };
             }
+            let ref_bindings = match action.get("ref_bindings") {
+                Some(value) => match serde_json::from_value::<BTreeMap<String, String>>(
+                    value.clone(),
+                ) {
+                    Ok(bindings) => bindings,
+                    Err(error) => {
+                        return StepOutcome::DispatchHardError {
+                            item_id: Some(item_ref),
+                            error: format!(
+                                "follow fanout item {index} has invalid ref_bindings: {error}"
+                            ),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            cost: None,
+                        };
+                    }
+                },
+                None => {
+                    return StepOutcome::DispatchHardError {
+                        item_id: Some(item_ref),
+                        error: format!(
+                            "follow fanout item {index} is missing required ref_bindings"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
+                    };
+                }
+            };
             children.push(ryeos_runtime::callback::FollowChildSpec {
                 item_ref,
+                ref_bindings,
                 parameters: action.get("params").cloned().unwrap_or_else(|| json!({})),
                 facets,
             });
@@ -2024,6 +2086,7 @@ impl Walker {
         match outcome {
             StepOutcome::FollowSuspend {
                 ref item_id,
+                ref ref_bindings,
                 ref params,
             } => {
                 // Suspend lifecycle: started + a DISTINCT suspended event + the
@@ -2076,6 +2139,7 @@ impl Walker {
                         current,
                         step as i64,
                         item_id,
+                        ref_bindings.clone(),
                         params.clone(),
                         None,
                     )
@@ -2518,14 +2582,33 @@ impl Walker {
                         .collect::<Vec<_>>()
                         .join("; ")
                 });
+                let receipt_value = json!({"results": results, "statuses": statuses});
+                let result_hash = match hash_json_value(&receipt_value) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        let message = format!("failed to canonicalize follow result: {error}");
+                        return self
+                            .commit_terminal(CommitTerminalInput {
+                                graph_run_id,
+                                steps: step,
+                                state,
+                                suppressed_errors,
+                                base_status: "error",
+                                error: Some(&message),
+                                guard,
+                                current_node_id: current,
+                                inputs,
+                                execution,
+                            })
+                            .await;
+                    }
+                };
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
                     step,
                     definition_ref: self.graph.definition_ref.clone(),
                     definition_hash: self.graph.definition_hash.clone(),
-                    result_hash: Some(hash_json_value(
-                        &json!({"results": results, "statuses": statuses}),
-                    )),
+                    result_hash: Some(result_hash),
                     cache_hit: false,
                     elapsed_ms,
                     error: diagnostic.clone(),
@@ -2670,13 +2753,34 @@ impl Walker {
                         .record(current, step, item_id, c.clone());
                 }
 
+                let result_hash = match hash_json_value(result) {
+                    Ok(hash) => hash,
+                    Err(error) => {
+                        let message = format!("failed to canonicalize action result: {error}");
+                        return self
+                            .commit_terminal(CommitTerminalInput {
+                                graph_run_id,
+                                steps: step,
+                                state,
+                                suppressed_errors,
+                                base_status: "error",
+                                error: Some(&message),
+                                guard,
+                                current_node_id: current,
+                                inputs,
+                                execution,
+                            })
+                            .await;
+                    }
+                };
+
                 // Receipt
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
                     step,
                     definition_ref: self.graph.definition_ref.clone(),
                     definition_hash: self.graph.definition_hash.clone(),
-                    result_hash: Some(hash_json_value(result)),
+                    result_hash: Some(result_hash),
                     cache_hit,
                     elapsed_ms,
                     error: None,
@@ -3596,9 +3700,9 @@ fn graph_call_id(graph_run_id: &str, step: u32, node: &str) -> String {
     format!("{graph_run_id}:{step}:{node}")
 }
 
-fn hash_json_value(value: &Value) -> String {
-    let canonical = lillux::cas::canonical_json(value);
-    lillux::cas::sha256_hex(canonical.as_bytes())
+fn hash_json_value(value: &Value) -> Result<String, lillux::cas::CanonicalJsonError> {
+    let canonical = lillux::cas::canonical_json(value)?;
+    Ok(lillux::cas::sha256_hex(canonical.as_bytes()))
 }
 
 fn compute_cache_key(graph_id: &str, node_name: &str, action: &Value) -> String {
@@ -3797,7 +3901,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hello}}
       assign: {echo_result: "${result}"}
       next:
         type: unconditional
@@ -3825,7 +3929,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hello}}
       next:
         type: unconditional
         to: done
@@ -3880,7 +3984,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hello}}
       next:
         type: unconditional
         to: done
@@ -3934,7 +4038,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hello}}
       next:
         type: unconditional
         to: done
@@ -3980,7 +4084,7 @@ config:
   nodes:
     fetch:
       follow: true
-      action: {item_id: "directive:child", params: {}}
+      action: {item_id: "directive:child", ref_bindings: {}, params: {}}
       next:
         type: unconditional
         to: done
@@ -4022,7 +4126,7 @@ config:
   on_error: fail
   nodes:
     step1:
-      action: {item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail", ref_bindings: {}}
       assign: {captured: "${result.value}"}
       next:
         type: unconditional
@@ -4061,7 +4165,7 @@ config:
   on_error: continue
   nodes:
     step1:
-      action: {item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail", ref_bindings: {}}
       assign: {captured: "${result.value}"}
       next:
         type: unconditional
@@ -4103,7 +4207,7 @@ config:
   on_error: fail
   nodes:
     step1:
-      action: {item_id: "tool:test/lookup"}
+      action: {item_id: "tool:test/lookup", ref_bindings: {}}
       assign: {outcome: "${result.status}"}
       next:
         type: unconditional
@@ -4139,7 +4243,7 @@ config:
   on_error: fail
   nodes:
     step1:
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       assign: {captured: "${result.missing.deep}"}
       next:
         type: unconditional
@@ -4284,6 +4388,7 @@ config:
       node_type: action
       action:
         item_id: "directive:test/reason"
+        ref_bindings: {}
       assign:
         recommendations: "${result.outputs.recommendations}"
       next:
@@ -4331,6 +4436,7 @@ config:
       node_type: action
       action:
         item_id: "directive:test/a"
+        ref_bindings: {}
       next:
         type: unconditional
         to: second
@@ -4338,6 +4444,7 @@ config:
       node_type: action
       action:
         item_id: "directive:test/b"
+        ref_bindings: {}
       next:
         type: unconditional
         to: done
@@ -4380,6 +4487,7 @@ config:
       node_type: action
       action:
         item_id: "tool:test/echo"
+        ref_bindings: {}
       next:
         type: unconditional
         to: done
@@ -4430,7 +4538,7 @@ config:
   nodes:
     reason:
       node_type: action
-      action: {item_id: "directive:test/reason"}
+      action: {item_id: "directive:test/reason", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4458,7 +4566,7 @@ config:
   nodes:
     reason:
       node_type: action
-      action: {item_id: "directive:test/reason"}
+      action: {item_id: "directive:test/reason", ref_bindings: {}}
       assign: {x: "${result.outputs.missing}"}
       next: {type: unconditional, to: done}
     done:
@@ -4490,7 +4598,7 @@ config:
   nodes:
     reason:
       node_type: action
-      action: {item_id: "directive:test/reason"}
+      action: {item_id: "directive:test/reason", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4522,7 +4630,7 @@ config:
   nodes:
     reason:
       node_type: action
-      action: {item_id: "directive:test/reason"}
+      action: {item_id: "directive:test/reason", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4552,7 +4660,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: elem
-      action: {item_id: "directive:test/step"}
+      action: {item_id: "directive:test/step", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4594,7 +4702,7 @@ config:
       over: "${state.items}"
       as: elem
       parallel: true
-      action: {item_id: "directive:test/step"}
+      action: {item_id: "directive:test/step", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4624,7 +4732,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: elem
-      action: {item_id: "directive:test/step"}
+      action: {item_id: "directive:test/step", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4655,7 +4763,7 @@ config:
   nodes:
     reason:
       node_type: action
-      action: {item_id: "directive:test/reason"}
+      action: {item_id: "directive:test/reason", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -4694,7 +4802,7 @@ config:
     reason:
       node_type: action
       cache: true
-      action: {item_id: "directive:test/reason"}
+      action: {item_id: "directive:test/reason", ref_bindings: {}}
       assign: {got: "${result.outputs.recommendations}"}
       next: {type: unconditional, to: done}
     done:
@@ -4738,7 +4846,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: "elem"
-      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem}"}}
       collect: "results"
       next:
         type: unconditional
@@ -4822,7 +4930,7 @@ config:
   max_steps: 3
   nodes:
     loop:
-      action: {item_id: "tool:test/noop"}
+      action: {item_id: "tool:test/noop", ref_bindings: {}}
       next:
         type: unconditional
         to: loop
@@ -4850,7 +4958,7 @@ config:
   segment_steps: 1
   nodes:
     loop:
-      action: {item_id: "tool:test/noop"}
+      action: {item_id: "tool:test/noop", ref_bindings: {}}
       next:
         type: unconditional
         to: loop
@@ -4872,7 +4980,7 @@ config:
   start: nonexistent
   nodes:
     step1:
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let w = make_walker(graph, vec![]);
@@ -4892,7 +5000,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: "elem"
-      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem}"}}
       collect: "results"
       next:
         type: unconditional
@@ -4935,7 +5043,7 @@ config:
       over: "${{state.items}}"
       as: "elem"
       parallel: {parallel}
-      action: {{item_id: "tool:test/echo", params: {{value: "${{elem}}"}}}}
+      action: {{item_id: "tool:test/echo", ref_bindings: {{}}, params: {{value: "${{elem}}"}}}}
       collect: "results"
       next:
         type: unconditional
@@ -5026,7 +5134,7 @@ config:
       over: "${state.items}"
       as: "elem"
       parallel: true
-      action: {item_id: "tool:test/echo", params: {value: "${elem.missing.deep}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem.missing.deep}"}}
       collect: "results"
       next:
         type: unconditional
@@ -5060,7 +5168,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: "elem"
-      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem}"}}
       assign: {last_value: "${result.value}"}
       next:
         type: unconditional
@@ -5100,7 +5208,7 @@ config:
       over: "${{state.items}}"
       as: "elem"
       parallel: {parallel}
-      action: {{item_id: "tool:test/echo", params: {{value: "${{elem}}"}}}}
+      action: {{item_id: "tool:test/echo", ref_bindings: {{}}, params: {{value: "${{elem}}"}}}}
       assign: {{captured: "${{result.missing.deep}}"}}
       collect: "results"
       next:
@@ -5151,7 +5259,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: "elem"
-      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem}"}}
       on_error: handler
       next:
         type: unconditional
@@ -5187,7 +5295,7 @@ config:
   on_error: continue
   nodes:
     step1:
-      action: {item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail", ref_bindings: {}}
       next:
         type: unconditional
         to: step2
@@ -5213,7 +5321,7 @@ config:
         let cache = NodeCache {
             cache_dir: tmp.path().join("cache-test-unique-sequential"),
         };
-        let action = json!({"item_id": "tool:test/echo"});
+        let action = json!({"item_id": "tool:test/echo", "ref_bindings": {}});
         let key = compute_cache_key("cache-test-unique-sequential", "step1", &action);
 
         assert!(cache.lookup(&key).is_none());
@@ -5669,7 +5777,7 @@ config:
   start: flaky
   nodes:
     flaky:
-      action: {item_id: "tool:test/flaky"}
+      action: {item_id: "tool:test/flaky", ref_bindings: {}}
       retry: {attempts: 3, backoff_ms: 1}
       next:
         type: unconditional
@@ -5727,7 +5835,7 @@ config:
   start: flaky
   nodes:
     flaky:
-      action: {item_id: "tool:test/flaky"}
+      action: {item_id: "tool:test/flaky", ref_bindings: {}}
       retry: {attempts: 2, backoff_ms: 1}
       on_error: recover
     recover:
@@ -5792,7 +5900,7 @@ config:
   start: flaky
   nodes:
     flaky:
-      action: {item_id: "tool:test/flaky"}
+      action: {item_id: "tool:test/flaky", ref_bindings: {}}
       retry: {attempts: 2, backoff_ms: 1}
       on_error: recover
     recover:
@@ -5853,7 +5961,7 @@ config:
   hooks:
     - id: notify
       event: graph_completed
-      action: {item_id: "tool:test/notify", params: {}}
+      action: {item_id: "tool:test/notify", ref_bindings: {}, params: {}}
   nodes:
     done:
       node_type: return
@@ -5911,7 +6019,7 @@ config:
   nodes:
     fetch:
       follow: true
-      action: {item_id: "directive:child", params: {}}
+      action: {item_id: "directive:child", ref_bindings: {}, params: {}}
       next:
         type: unconditional
         to: done
@@ -5959,7 +6067,7 @@ config:
         assert_eq!(reqs[0].graph_run_id, "gr-follow");
         assert_eq!(reqs[0].follow_node, "fetch");
         assert_eq!(reqs[0].step_count, 0);
-        assert_eq!(reqs[0].child_item_ref.as_deref(), Some("directive:child"));
+        assert_eq!(reqs[0].children[0].item_ref, "directive:child");
     }
 
     #[tokio::test]
@@ -6086,7 +6194,7 @@ config:
   nodes:
     fetch:
       follow: true
-      action: {item_id: "directive:child", params: {}}
+      action: {item_id: "directive:child", ref_bindings: {}, params: {}}
       on_error: recover
       next: {type: unconditional, to: done}
     recover:
@@ -6104,7 +6212,7 @@ config:
   nodes:
     fetch:
       follow: true
-      action: {item_id: "directive:child", params: {}}
+      action: {item_id: "directive:child", ref_bindings: {}, params: {}}
       env_requires: ["RYEOS_FOLLOW_TEST_DEFINITELY_UNSET"]
       next: {type: unconditional, to: done}
     done:
@@ -6261,11 +6369,11 @@ config:
   nodes:
     fetch1:
       follow: true
-      action: {item_id: "directive:child1", params: {}}
+      action: {item_id: "directive:child1", ref_bindings: {}, params: {}}
       next: {type: unconditional, to: fetch2}
     fetch2:
       follow: true
-      action: {item_id: "directive:child2", params: {}}
+      action: {item_id: "directive:child2", ref_bindings: {}, params: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -6349,6 +6457,7 @@ config:
       facets: {lane: "${job.lane}"}
       action:
         item_id: "directive:${job.kind}"
+        ref_bindings: {}
         params: {value: "${job.value}", run: "${_run.graph_run_id}"}
       assign: {last_success: "${job.value}"}
       on_error: recover
@@ -6526,7 +6635,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hello}}
       assign: {echo_result: "${result}"}
       next:
         type: unconditional
@@ -6656,7 +6765,7 @@ config:
         assert_eq!(receipt["node"].as_str(), Some("step1"));
         assert_eq!(
             receipt["node_result_hash"].as_str(),
-            Some(hash_json_value(&json!({"msg": "hello"})).as_str())
+            Some(hash_json_value(&json!({"msg": "hello"})).unwrap().as_str())
         );
     }
 
@@ -6673,12 +6782,12 @@ config:
   max_steps: 10
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hello}}
       next:
         type: unconditional
         to: step2
     step2:
-      action: {item_id: "tool:test/echo", params: {msg: world}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: world}}
       next:
         type: unconditional
         to: done
@@ -6821,7 +6930,7 @@ config:
       node_type: foreach
       over: "${state.items}"
       as: "elem"
-      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {value: "${elem}"}}
       collect: "results"
       next:
         type: unconditional
@@ -6889,10 +6998,15 @@ config:
 
         let left = Value::Object(left);
         let right = Value::Object(right);
-        let expected = lillux::cas::sha256_hex(lillux::cas::canonical_json(&right).as_bytes());
+        let expected = lillux::cas::sha256_hex(
+            lillux::cas::canonical_json(&right).unwrap().as_bytes(),
+        );
 
-        assert_eq!(hash_json_value(&left), expected);
-        assert_eq!(hash_json_value(&left), hash_json_value(&right));
+        assert_eq!(hash_json_value(&left).unwrap(), expected);
+        assert_eq!(
+            hash_json_value(&left).unwrap(),
+            hash_json_value(&right).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -6905,7 +7019,7 @@ config:
   on_error: fail
   nodes:
     step1:
-      action: {item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let (w, recorder) = make_recording_walker(
@@ -6962,7 +7076,7 @@ config:
   nodes:
     step1:
       env_requires: [RYEOS_TEST_MISSING_FOR_HARD_ERROR_RECEIPT]
-      action: {item_id: "tool:test/env"}
+      action: {item_id: "tool:test/env", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let (w, recorder) = make_recording_walker(graph, vec![], None);
@@ -7013,7 +7127,7 @@ config:
   nodes:
     step1:
       on_error: handler
-      action: {item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail", ref_bindings: {}}
     handler:
       node_type: return
 "#;
@@ -7056,7 +7170,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {msg: hi}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {msg: hi}}
       next:
         type: unconditional
         to: done
@@ -7085,7 +7199,7 @@ config:
   on_error: fail
   nodes:
     step1:
-      action: {item_id: "tool:test/fail"}
+      action: {item_id: "tool:test/fail", ref_bindings: {}}
       next:
         type: unconditional
         to: done

@@ -248,6 +248,53 @@ impl StateDb {
         ))
     }
 
+    /// Create a root snapshot and its initial durable events in one head update
+    /// and one projection transaction.
+    pub fn create_chain_with_events(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        if events.iter().any(|event| !event.durability.is_cas_stored()) {
+            anyhow::bail!("StateDb::create_chain_with_events cannot persist ephemeral events");
+        }
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::create_chain_with_events(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            events,
+            signer,
+            &mut cache,
+        )?;
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot_with_events_in_transaction(
+                    &self.projection,
+                    &snapshot,
+                    chain_root_id,
+                    &result.events,
+                )
+                .context("projecting root thread and initial events")
+            },
+        );
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "create_chain_with_events",
+            projected,
+        ))
+    }
+
     /// Add a new thread to an existing chain.
     ///
     /// Delegates to [`chain::add_thread_to_chain`] then projects the snapshot.

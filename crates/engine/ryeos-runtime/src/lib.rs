@@ -15,10 +15,8 @@ pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod interpolation;
 pub mod method_wire;
-pub mod model_resolution;
 pub mod paths;
 pub mod progress;
-pub mod provider_snapshot;
 pub mod resolver;
 pub mod scalar_or_vec;
 pub mod template;
@@ -59,6 +57,5 @@ pub use paths::{
     safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,
 };
 pub use progress::{ProgressEvent, StatusEvent};
-pub use provider_snapshot::ResolvedProviderSnapshot;
 pub use resolver::{resolve_command, ResolveError, ResolvedCommand};
 pub use transcript::{KnowledgeRenderOptions, Transcript};

@@ -140,7 +140,7 @@ mod tests {
             .updated_at("2026-04-21T12:00:00Z".to_string())
             .thread(format!("T-root-{suffix}"), entry)
             .build();
-        let hash = crate::objects::chain_state::hash_chain_state(&state);
+        let hash = crate::objects::chain_state::hash_chain_state(&state).unwrap();
         CachedHead::new(hash, state)
     }
 

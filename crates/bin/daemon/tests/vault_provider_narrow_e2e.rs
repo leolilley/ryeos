@@ -1,6 +1,7 @@
 //! End-to-end: narrow provider-secret injection contract.
 //!
-//! Tests proving the v0.2.1 narrow preflight behaves correctly:
+//! Tests proving directive-owned launch preparation narrows provider-secret
+//! injection correctly:
 //!
 //! 1. `missing_selected_secret_fails_before_provider_request` —
 //!    directive routes to provider `zen` (auth.env_var: ZEN_API_KEY),
@@ -13,7 +14,7 @@
 //!    Daemon spawns the runtime; mock receives one request.
 //!
 //! 3. `resume_missing_selected_secret_fails_with_typed_error` —
-//!    Exercises the managed launch provider preflight via the `/execute`
+//!    Exercises directive launch preparation via the `/execute`
 //!    endpoint. The error surface (stable code, env_var, remediation) is
 //!    asserted.
 //!
@@ -155,7 +156,7 @@ fn plant_sealed_vault_secrets(
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_selected_secret_fails_before_provider_request() {
     // Provider `zen` declares `auth.env_var: ZEN_API_KEY`. Vault is
-    // empty (no ZEN_API_KEY). Runtime envelope preflight must fail BEFORE
+    // empty (no ZEN_API_KEY). Authoritative launch preparation must fail BEFORE
     // the runtime is spawned, so the mock provider receives zero HTTP
     // requests.
     //
@@ -209,7 +210,7 @@ async fn missing_selected_secret_fails_before_provider_request() {
         .expect("/execute timed out")
         .expect("/execute send failed");
 
-    // The preflight failure surfaces as 502 Bad Gateway via
+    // The launch-preparation failure surfaces as 502 Bad Gateway via
     // DispatchError::RequiredSecretMissing.
     assert_eq!(
         status,
@@ -248,11 +249,11 @@ async fn missing_selected_secret_fails_before_provider_request() {
     );
 
     // The mock provider MUST NOT have received any requests — the
-    // daemon's preflight blocked the launch before any HTTP was made.
+    // daemon's launch preparation blocked the launch before any HTTP was made.
     let captured = mock.captured_headers().await;
     assert!(
         captured.is_empty(),
-        "mock provider received {n} request(s) — narrow preflight should have blocked the launch \
+        "mock provider received {n} request(s) — launch preparation should have blocked the launch \
          before the runtime could contact the provider",
         n = captured.len(),
     );
@@ -263,7 +264,7 @@ async fn missing_selected_secret_fails_before_provider_request() {
 
 // ── Test 3: managed launch missing-secret typed surface ──────────
 //
-// Proves managed launch provider preflight propagates a structured
+// Proves directive launch preparation propagates a structured
 // RequiredSecretMissing surface with stable code, env_var, and remediation,
 // not a generic anyhow message.
 
@@ -291,7 +292,7 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
     .await
     .expect("daemon starts");
 
-    // Call /execute to trigger the preflight (which shares the same
+    // Call /execute to trigger launch preparation (which shares the same
     // helper as resume). The error is routed through
     // DispatchError::RequiredSecretMissing with stable code.
     let project = tempfile::tempdir().expect("project tempdir");
@@ -351,11 +352,11 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
         "remediation must contain the vault set command; got: {remediation}"
     );
 
-    // Mock provider must receive zero requests — preflight blocked.
+    // Mock provider must receive zero requests — launch preparation blocked.
     let captured = mock.captured_headers().await;
     assert!(
         captured.is_empty(),
-        "mock provider received {} request(s) — preflight should block before runtime spawn",
+        "mock provider received {} request(s) — launch preparation should block before runtime spawn",
         captured.len(),
     );
 
@@ -440,9 +441,8 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
 // Exercises `run_existing_detached` through a real spawn-kill-
 // respawn cycle. Uses a tool with `native_resume: true` so the
 // reconciler picks up the orphaned thread and calls
-// `run_existing_detached`. A generic tool does not have a runtime descriptor
-// requiring `provider_snapshot`, so resume must not resolve model routing or
-// require provider auth.
+// `run_existing_detached`. A generic tool has no managed launch contract, so
+// resume remains independent of directive-owned preparation and secrets.
 
 /// Plant a `native_resume: true` tool + runtime in the project space.
 fn plant_native_resume_tool(project_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
@@ -571,6 +571,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // ── Phase 1: Execute the tool (detached) ────────────────────
     let body = serde_json::json!({
         "item_ref": "tool:resume/resume_test",
+        "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
         "launch_mode": "detached",
@@ -673,7 +674,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
 
     // ── Phase 3: Poll for resumed running status ─────────────
     //
-    // Generic tool resume no longer runs provider preflight by hidden
+    // Generic tool resume has no directive launch contract or provider
     // coupling. The reconciler should restart the native subprocess and
     // leave the thread running, not fail with required_secret_missing.
     let outcome_deadline = std::time::Instant::now() + Duration::from_secs(15);
@@ -733,7 +734,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // The mock provider must have received zero requests: generic tool resume
-    // neither preflights provider auth nor calls a provider.
+    // neither prepares provider auth nor calls a provider.
     let captured = mock.captured_headers().await;
     assert!(
         captured.is_empty(),
@@ -749,7 +750,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
 //
 // F3: proves the `/execute/stream` endpoint surfaces a missing provider secret
 // as a `thread_failed` terminal whose payload carries the structured error
-// fields (env_var, source_kind, source_name, remediation). The secret preflight
+// fields (env_var, source_kind, source_name, remediation). Secret resolution
 // runs inside the spawned launch (after the thread is created), so the failure
 // is a persisted thread lifecycle terminal — not a pre-spawn `stream_error`,
 // which is reserved for synchronous gateway rejections before any thread exists.
@@ -760,7 +761,7 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     use lillux::crypto::Signer;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Set up a mock provider (won't be called — preflight blocks).
+    // Set up a mock provider (won't be called — launch preparation blocks).
     let mock = MockProvider::start(vec![MockResponse::Text("unused".into())]).await;
     let mock_url = mock.base_url.clone();
 
@@ -800,6 +801,7 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     // The route requires ryeos_signed auth.
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/sse_secret",
+        "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {"name": "World"},
     });
@@ -941,11 +943,11 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
          structured required_secret_missing error; raw SSE output:\n{text}"
     );
 
-    // Mock provider must receive zero requests — preflight blocked.
+    // Mock provider must receive zero requests — launch preparation blocked.
     let captured = mock.captured_headers().await;
     assert!(
         captured.is_empty(),
-        "mock provider received {} request(s) — preflight should block before runtime spawn",
+        "mock provider received {} request(s) — launch preparation should block before runtime spawn",
         captured.len(),
     );
 

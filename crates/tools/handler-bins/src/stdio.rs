@@ -10,7 +10,7 @@ where
         eprintln!("handler: failed to read stdin: {e}");
         return 2;
     }
-    let request: HandlerRequest = match serde_json::from_str(&input) {
+    let request: HandlerRequest = match ryeos_handler_protocol::from_json_str_strict(&input) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("handler: malformed stdin JSON: {e}");
