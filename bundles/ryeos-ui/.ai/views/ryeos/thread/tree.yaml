@@ -1,0 +1,89 @@
+name: thread-execution-tree
+title: Execution Tree
+version: "1.0.0"
+description: >-
+  Focused execution ancestry across continuations and spawned child chains.
+  Open it from a thread row; fold branches with left/right and enter any row to
+  inspect that thread's live transcript.
+
+widget: table
+source:
+  ref: service:ui/ryeos-ui/thread/tree
+  params:
+    thread_id: "@facet:input.route.thread"
+    max_depth: 32
+    max_nodes: 500
+  collection: threads
+projections:
+  hierarchy:
+    id: thread_id
+    parent: tree.parent_thread_id
+  columns:
+    - label: execution
+      field: item_ref
+      present: leaf
+    - label: kind
+      field: kind
+      present: words
+    - label: relation
+      field: tree.relation
+      present: words
+    - label: status
+      field: status
+      present: words
+    - label: current
+      field: current_node.node
+      present: leaf
+    - label: lineage
+      field: follow.display_state
+      present: words
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resume_queued: neutral
+          resumed: good
+    - label: created
+      field: created_at
+      present: time_date
+  expand:
+    fields: [thread_id, chain_root_id, tree.parent_thread_id, tree.relation, tree.depth, project.name, project.path, item_ref, requested_by, created_at, updated_at, current_node.node, current_node.step, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected]
+  tone:
+    field: status
+    map:
+      running: accent
+      created: neutral
+      accepted: neutral
+      failed: danger
+      killed: danger
+      timed_out: danger
+      cancelled: warn
+      completed: good
+      continued: good
+    default: neutral
+
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
+
+refresh:
+  on_hint: [thread, activity]
+

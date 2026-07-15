@@ -397,6 +397,32 @@ pub struct ThreadListView {
     pub current_node: Option<CurrentNode>,
 }
 
+/// A dashboard-decorated thread row plus its structural position in one
+/// execution closure. `tree` is deliberately separate from thread/follow data:
+/// it describes durable ancestry, while `follow` describes live/resume state.
+#[derive(Debug, Serialize)]
+pub struct ExecutionTreeView {
+    #[serde(flatten)]
+    pub thread: ThreadListView,
+    pub tree: ExecutionTreePosition,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExecutionTreePosition {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<String>,
+    pub relation: String,
+    pub depth: usize,
+    pub has_children: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExecutionTreeResult {
+    pub root_thread_id: Option<String>,
+    pub threads: Vec<ExecutionTreeView>,
+    pub truncated: bool,
+}
+
 /// A graph thread's current node/step (see [`ThreadListView::current_node`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrentNode {
@@ -2137,6 +2163,47 @@ impl ThreadLifecycleService {
             return Ok(self.decorate_list_items_with_enrichment(items, enrichment));
         }
         self.decorate_list_items(items)
+    }
+
+    /// Resolve any selected thread into its bounded execution tree, decorating
+    /// every structural row through the same batched follow/current-node path
+    /// as the history dashboard.
+    pub fn execution_tree(
+        &self,
+        selected_thread_id: &str,
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> Result<ExecutionTreeResult> {
+        let page = self
+            .state_store
+            .execution_tree(selected_thread_id, max_depth, max_nodes)?;
+        let positions = page
+            .items
+            .iter()
+            .map(|item| ExecutionTreePosition {
+                parent_thread_id: item.tree_parent_thread_id.clone(),
+                relation: item.relation.clone(),
+                depth: item.depth,
+                has_children: item.has_children,
+            })
+            .collect::<Vec<_>>();
+        let items = page
+            .items
+            .into_iter()
+            .map(|item| item.item)
+            .collect::<Vec<_>>();
+        let decorated = self.decorate_list_items(items)?;
+        let threads = decorated
+            .into_iter()
+            .zip(positions)
+            .map(|(thread, tree)| ExecutionTreeView { thread, tree })
+            .collect::<Vec<_>>();
+        let root_thread_id = threads.first().map(|row| row.thread.item.thread_id.clone());
+        Ok(ExecutionTreeResult {
+            root_thread_id,
+            threads,
+            truncated: page.truncated,
+        })
     }
 
     /// `threads.list` service envelope: the decorated rows plus a cursor.

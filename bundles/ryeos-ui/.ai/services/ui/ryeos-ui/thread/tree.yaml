@@ -1,0 +1,8 @@
+kind: service
+name: ryeos-ui/thread/tree
+version: "1.0.0"
+description: Bounded recursive execution ancestry for the focused RyeOS UI thread tree.
+endpoint: ui.ryeos.thread.tree
+ui_read_only: true
+record_thread: false
+availability: daemon_only

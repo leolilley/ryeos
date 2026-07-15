@@ -1652,6 +1652,8 @@ impl RyeOsCore {
         let input_can_accept_completion = slash_can_accept || mention_can_accept;
         let (focused_row_expandable, focused_row_expanded) =
             self.focused_row_expand_state().unwrap_or((false, false));
+        let (focused_tree_collapsible, focused_tree_collapsed) =
+            self.focused_tree_row_fold_state().unwrap_or((false, false));
 
         super::keymap::RyeOsKeyContext {
             overlay_open: self.ui.overlay.active.is_some(),
@@ -1684,6 +1686,8 @@ impl RyeOsCore {
                 .is_some_and(|head| self.head_thread_running(head)),
             focused_row_expandable,
             focused_row_expanded,
+            focused_tree_collapsible,
+            focused_tree_collapsed,
         }
     }
 
@@ -1811,6 +1815,57 @@ impl RyeOsCore {
         }
     }
 
+    pub(crate) fn focused_tree_row_fold_state(&self) -> Option<(bool, bool)> {
+        let tile_id = self.workspace.focused_tile;
+        let tile = self.workspace.tiles.get(&tile_id)?;
+        let binding = self.views.get(&tile.view.view_ref)?;
+        super::content::table_hierarchy(binding)?;
+        let response = self.data.sources.get(&tile_id.0.to_string())?;
+        let records = super::content::source_collection(binding, response);
+        let (cursor, collapsed_tree_rows) = match &tile.local {
+            ViewLocalState::GenericList {
+                cursor,
+                collapsed_tree_rows,
+                ..
+            } => (*cursor, collapsed_tree_rows),
+            ViewLocalState::None => return None,
+        };
+        let rows = super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows)?;
+        let row = rows.get(cursor.min(rows.len().saturating_sub(1)))?;
+        Some((row.has_children, row.collapsed))
+    }
+
+    pub(crate) fn set_focused_tree_row_collapsed(&mut self, collapsed: bool) -> bool {
+        let tile_id = self.workspace.focused_tile;
+        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+            return false;
+        };
+        let Some(binding) = self.views.get(&tile.view.view_ref) else {
+            return false;
+        };
+        if super::content::table_hierarchy(binding).is_none() {
+            return false;
+        }
+        let Some((key, _)) = self.focused_row_key_and_record(tile_id, binding) else {
+            return false;
+        };
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return false;
+        };
+        let ViewLocalState::GenericList {
+            collapsed_tree_rows,
+            ..
+        } = &mut tile.local
+        else {
+            return false;
+        };
+        if collapsed {
+            collapsed_tree_rows.insert(key)
+        } else {
+            collapsed_tree_rows.remove(&key)
+        }
+    }
+
     fn focused_row_key_and_record(
         &self,
         tile_id: crate::ids::TileId,
@@ -1823,9 +1878,32 @@ impl RyeOsCore {
         };
         let response = self.data.sources.get(&tile_id.0.to_string())?;
         match binding.widget.as_str() {
-            "rows" | "table" => super::content::source_collection(binding, response)
+            "rows" => super::content::source_collection(binding, response)
                 .get(cursor)
                 .map(|record| (row_key(record, cursor), record.clone())),
+            "table" => {
+                let records = super::content::source_collection(binding, response);
+                let collapsed_tree_rows = match &tile.local {
+                    ViewLocalState::GenericList {
+                        collapsed_tree_rows,
+                        ..
+                    } => collapsed_tree_rows,
+                    ViewLocalState::None => return None,
+                };
+                match super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows) {
+                    Some(rows) => {
+                        rows.get(cursor.min(rows.len().saturating_sub(1)))
+                            .and_then(|row| {
+                                records
+                                    .get(row.source_index)
+                                    .map(|record| (row.key.clone(), record.clone()))
+                            })
+                    }
+                    None => records
+                        .get(cursor)
+                        .map(|record| (row_key(record, cursor), record.clone())),
+                }
+            }
             "timeline" => {
                 let (mut entries, mut indents, mut sources) = self
                     .data

@@ -782,8 +782,7 @@ body {
 }
 .ryeos-table-col {
   color: var(--ryeos-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -800,7 +799,7 @@ body {
 }
 .ryeos-table-glyph { color: var(--ryeos-muted); text-align: center; }
 .ryeos-table-cell { color: var(--ryeos-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ryeos-table-cell.lead { color: var(--ryeos-fg-soft); }
+.ryeos-table-cell.lead { color: var(--ryeos-fg-soft); white-space: pre; }
 .ryeos-table-row.good .ryeos-table-glyph { color: var(--ryeos-good); }
 .ryeos-table-row.warn .ryeos-table-glyph { color: var(--ryeos-warn); }
 .ryeos-table-row.danger .ryeos-table-glyph { color: var(--ryeos-danger); }

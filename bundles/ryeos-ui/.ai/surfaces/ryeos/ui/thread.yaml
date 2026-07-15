@@ -29,6 +29,7 @@ library:
     views:
       - view:ryeos/threads/history
       - view:ryeos/node/threads/history
+      - view:ryeos/thread/tree
   - group: Project
     views:
       - view:ryeos/project/files

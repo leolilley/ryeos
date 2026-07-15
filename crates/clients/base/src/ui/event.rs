@@ -272,6 +272,11 @@ pub enum RyeOsUiEvent {
     ExpandSelectedRow {
         expand: bool,
     },
+    /// Fold/unfold the selected hierarchy row's descendants. The reducer
+    /// resolves the stable authored hierarchy id; renderers never send it.
+    SetTreeRowCollapsed {
+        collapsed: bool,
+    },
     ActivateFocused,
     /// Step back up the execution-drill stack: restore the view a step-in left
     /// and the facet context it read. The "return" half of the debugger drill;

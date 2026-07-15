@@ -24,28 +24,25 @@ projections:
       field: thread_id
     - label: kind
       field: kind
-    # Leaf-first: the segment that names the thing survives a narrow
-    # cell; the raw canonical ref rides beside it as `id`.
+      present: words
+    # The table carries the readable leaf; the full canonical ref remains in
+    # expanded detail.
     - label: item
       field: item_ref
-      present: tail_first
-    - label: id
-      field: item_ref
+      present: leaf
     - label: project
       field: project.name
+      fallback: node
     - label: status
       field: status
-    - label: source
-      field: requested_by
-    # Graph `follow:` lineage: `suspended_parent` (issued a follow, awaiting its
-    # child chain) or `resume_successor` (consumes the child result). Blank for
-    # non-follow rows (the `follow` fact is absent). The full child chain + child
-    # terminal status live in the thread detail lens; this column is the at-a-
-    # glance "waiting on child" marker the watch console reads. The per-column
-    # tone keys off the coarse display state so a waiting parent reads warm
-    # while the ROW keeps its status tone.
-    - label: follow
-      field: follow.role
+      present: words
+    # Sparse by design: ordinary threads stay blank. Graph-follow rows show the
+    # readable lineage state (`suspended`, `resume queued`, or `resumed`); role,
+    # child-chain status, and cohort progress remain in expanded detail. The
+    # cell tone calls out waiting work while the row keeps its status tone.
+    - label: lineage
+      field: follow.display_state
+      present: words
       tone:
         field: follow.display_state
         map:
@@ -54,8 +51,9 @@ projections:
           resumed: good
     - label: created
       field: created_at
+      present: time_date
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, requested_by, created_at, current_node.node, follow.role, follow.display_state, follow.phase, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.child_terminal_status, follow.parent_successor_thread_id, follow.cohort.done, follow.cohort.expected, error]
   tone:
     field: status
     map:
@@ -101,6 +99,16 @@ affordances:
       open_view: view:ryeos/thread/transcript
       # Step into the child chain — a return frame lets Backspace walk back to
       # the parent.
+      drill: true
+  - id: tree
+    label: Tree
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/tree
       drill: true
   # Inspect swaps the center lens to the thread's detail sections. Write the
   # selected thread FIRST (the detail sources read @facet:selection.thread),
