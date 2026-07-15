@@ -1034,9 +1034,9 @@ fn waiting_follow_action(
 /// `continued`, reconcile's native resume of the parent re-drives the idempotent
 /// `spawn_follow_child` and converges it — leave it. If the parent HAS continued
 /// (suspended past its follow node, so it will never re-drive), converge here: adopt
-/// its follow-resume successor if unrecorded, mark `waiting`, then apply the waiting
-/// recovery. A continued parent with no child row is unreconstructable corruption —
-/// clear the orphan.
+/// its follow-resume successor if unrecorded, commit the durable `waiting`/`ready`
+/// phase, then immediately emit the matching recovery action. A continued parent
+/// with no child row is unreconstructable corruption — clear the orphan.
 fn converge_reserved_follow(
     state: &AppState,
     w: &ryeos_app::runtime_db::FollowWaiter,
@@ -1077,9 +1077,18 @@ fn converge_reserved_follow(
             }
         }
     }
-    if let Err(e) = state.state_store.mark_follow_waiting(&w.follow_key) {
-        tracing::warn!(follow_key = %w.follow_key, error = %e, "reserved waiter: could not converge to waiting (missing child/successor) — leaving");
-        return Ok(Vec::new());
+    let phase = match state.state_store.mark_follow_waiting(&w.follow_key) {
+        Ok(phase) => phase,
+        Err(e) => {
+            tracing::warn!(follow_key = %w.follow_key, error = %e, "reserved waiter: could not converge after child/successor recovery — leaving");
+            return Ok(Vec::new());
+        }
+    };
+    if phase == ryeos_app::runtime_db::follow_phase::READY {
+        tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter directly to ready");
+        return Ok(vec![FollowReconcileAction::Resume {
+            follow_key: w.follow_key.clone(),
+        }]);
     }
     tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter to waiting");
     match state.state_store.get_follow_waiter_by_key(&w.follow_key)? {

@@ -245,10 +245,9 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
     }
 
-    // A duplicate drive must still prove truthful launch state. In particular,
-    // `waiting` may have committed immediately before a crash that prevented the
-    // child spawn handoff; do not acknowledge that row merely because the waiter
-    // advanced past `reserved`.
+    // The waiter phase says whether the parent suspension committed; it does not
+    // say which child roots committed before a crash. Reserve every stable slot
+    // first, then classify each slot from its own durable row.
     let re_drive = waiter.phase != follow_phase::RESERVED;
     let window_key = params
         .launch_window_width
@@ -258,61 +257,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         width,
     });
 
-    // A non-reserved duplicate classifies exclusively from durable state before
-    // doing any fallible resource/secret preparation. Running and terminal rows
-    // need no new launch attempt. Queued created rows remain an explicit queued
-    // acceptance. Only created, admitted rows need fresh authority + handoff.
-    let mut child_thread_ids = Vec::with_capacity(children.len());
-    let mut queued_child_thread_ids = Vec::new();
-    let mut re_drive_launchable_indices = std::collections::BTreeSet::new();
-    if re_drive {
-        for item_index in 0..children.len() {
-            let slot = state
-                .state_store
-                .get_follow_child(&follow_key, item_index as u32)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "follow: persisted cohort is missing child index {item_index}"
-                    )
-                })?;
-            let child_id = slot.child_thread_id;
-            let child = state.threads.get_thread(&child_id)?.ok_or_else(|| {
-                anyhow::anyhow!("follow: persisted child row is missing: {child_id}")
-            })?;
-            let metadata = state
-                .state_store
-                .get_launch_metadata(&child_id)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "follow: child {child_id} has no authoritative launch metadata"
-                    )
-                })?;
-            if metadata.follow_launch_window != expected_launch_window {
-                bail!("follow: child launch-window metadata conflicts at index {item_index}");
-            }
-            child_thread_ids.push(child_id.clone());
-            if child.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
-                continue;
-            }
-            if let Some(window) = metadata.follow_launch_window {
-                if !state.state_store.launch_window_is_member(&child_id)? {
-                    state.state_store.launch_window_insert_only(
-                        &child_id,
-                        &window.key,
-                        window.width,
-                        lillux::time::timestamp_millis(),
-                    )?;
-                    queued_child_thread_ids.push(child_id);
-                    continue;
-                }
-            }
-            if state.state_store.launch_window_is_queued(&child_id)? {
-                queued_child_thread_ids.push(child_id);
-            } else {
-                re_drive_launchable_indices.insert(item_index);
-            }
-        }
-    } else {
+    if !re_drive {
         // Follow-nesting depth is an admission limit, not a condition that can
         // retroactively invalidate an already-admitted duplicate drive.
         enforce_follow_nesting_depth(state, &parent.chain_root_id)?;
@@ -322,53 +267,128 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // Augmentations, checkpoint paths, audit, metadata, and the eventual root
     // commit must all name the same child ID.
     let mut reserved_child_ids = std::collections::BTreeMap::new();
-    if re_drive {
-        for item_index in re_drive_launchable_indices.iter().copied() {
-            reserved_child_ids.insert(item_index, child_thread_ids[item_index].clone());
-        }
-    } else {
-        for (item_index, child) in children.iter().enumerate() {
-            let spec_hash = &spec_hashes[item_index];
-            let child_thread_id = match state
-                .state_store
-                .get_follow_child(&follow_key, item_index as u32)?
-            {
-                Some(existing) => {
-                    if existing.item_ref != child.item_ref || existing.spec_hash != *spec_hash {
-                        bail!("follow: child spec conflict at index {item_index}");
-                    }
-                    existing.child_thread_id
+    for (item_index, child) in children.iter().enumerate() {
+        let spec_hash = &spec_hashes[item_index];
+        let child_thread_id = match state
+            .state_store
+            .get_follow_child(&follow_key, item_index as u32)?
+        {
+            Some(existing) => {
+                if existing.item_ref != child.item_ref || existing.spec_hash != *spec_hash {
+                    bail!("follow: child spec conflict at index {item_index}");
                 }
-                None => {
-                    let child_id = new_thread_id();
-                    state.state_store.set_follow_child(
-                        &follow_key,
-                        item_index as u32,
-                        &child.item_ref,
-                        spec_hash,
-                        &child_id,
-                        &child_id,
-                    )?;
-                    child_id
+                if existing.child_chain_root_id != existing.child_thread_id {
+                    bail!("follow: child slot at index {item_index} is not a root identity");
                 }
-            };
-            reserved_child_ids.insert(item_index, child_thread_id);
-        }
+                existing.child_thread_id
+            }
+            None if !re_drive => {
+                let child_id = new_thread_id();
+                state.state_store.set_follow_child(
+                    &follow_key,
+                    item_index as u32,
+                    &child.item_ref,
+                    spec_hash,
+                    &child_id,
+                    &child_id,
+                )?;
+                child_id
+            }
+            None => {
+                bail!("follow: persisted cohort is missing child index {item_index}");
+            }
+        };
+        reserved_child_ids.insert(item_index, child_thread_id);
     }
 
-    // Complete the generic authority pass needed by this drive before any fresh
-    // child row or slot becomes observable. Fresh reservations prepare the whole
-    // cohort; duplicate drives prepare only created children that need a handoff.
-    // The in-memory values own secret material and are consumed exactly once.
-    let requested_by = EffectivePrincipal::Local(Principal {
-        fingerprint: thread_auth.acting_principal.clone(),
-        scopes: thread_auth.caller_scopes.clone(),
-    });
-    let persisted_parent_context = PersistedParentExecutionContext {
+    let expected_parent_context = PersistedParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
     };
+    let mut child_thread_ids = Vec::with_capacity(children.len());
+    let mut queued_child_thread_ids = Vec::new();
+    let mut fresh_indices = std::collections::BTreeSet::new();
+    let mut existing_created_indices = std::collections::BTreeSet::new();
+    let mut existing_launchable_indices = std::collections::BTreeSet::new();
+    let mut persisted_launch_metadata = std::collections::BTreeMap::new();
+    for (item_index, child_spec) in children.iter().enumerate() {
+        let child_id = reserved_child_ids
+            .get(&item_index)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("follow: missing child ID at index {item_index}"))?;
+        child_thread_ids.push(child_id.clone());
+        let Some(child_row) = state.threads.get_thread(&child_id)? else {
+            if re_drive {
+                bail!("follow: persisted child row is missing: {child_id}");
+            }
+            fresh_indices.insert(item_index);
+            continue;
+        };
+        let metadata = state
+            .state_store
+            .get_launch_metadata(&child_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow: child {child_id} has no authoritative launch metadata")
+            })?;
+        let resume = metadata.resume_context.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("follow: child {child_id} has no persisted ResumeContext")
+        })?;
+        if child_row.kind != resume.kind
+            || child_row.item_ref != resume.item_ref
+            || resume.item_ref != child_spec.item_ref
+            || resume.ref_bindings != child_spec.ref_bindings
+            || resume.parameters != child_spec.parameters
+            || resume.launch_mode != "detached"
+            || metadata.follow_parent_context.as_ref() != Some(&expected_parent_context)
+            || metadata.follow_launch_window != expected_launch_window
+        {
+            bail!("follow: child metadata conflicts at index {item_index}");
+        }
+        persisted_launch_metadata.insert(item_index, metadata);
+        if child_row.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
+            continue;
+        }
+        existing_created_indices.insert(item_index);
+        if let Some(window) = expected_launch_window.as_ref() {
+            if !state.state_store.launch_window_is_member(&child_id)? {
+                state.state_store.launch_window_insert_only(
+                    &child_id,
+                    &window.key,
+                    window.width,
+                    lillux::time::timestamp_millis(),
+                )?;
+            }
+            if state.state_store.launch_window_is_queued(&child_id)? {
+                queued_child_thread_ids.push(child_id);
+                continue;
+            }
+        }
+        existing_launchable_indices.insert(item_index);
+    }
+
+    // A reserved partial crash may contain any mix of committed and missing
+    // roots. Every missing root needs fresh authority; every existing Created
+    // root uses its persisted birth identity. A later-phase duplicate prepares
+    // only rows that are already admitted and need a handoff now.
+    let authority_indices: std::collections::BTreeSet<usize> = if re_drive {
+        existing_launchable_indices.clone()
+    } else {
+        fresh_indices
+            .union(&existing_created_indices)
+            .copied()
+            .collect()
+    };
+
+    // Complete the generic authority pass before any missing child row becomes
+    // observable. Fresh rows use current generic authority; existing rows use
+    // their exact stored birth identity and never recapture a snapshot. The
+    // in-memory values own secret material and are consumed exactly once.
+    let requested_by = EffectivePrincipal::Local(Principal {
+        fingerprint: thread_auth.acting_principal.clone(),
+        scopes: thread_auth.caller_scopes.clone(),
+    });
+    let persisted_parent_context = expected_parent_context.clone();
     let launch_provenance = cap.provenance.clone_for_borrowed_child();
     let launch_parent_context = crate::dispatch::ParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
@@ -378,7 +398,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let child_engine = cap.provenance.request_engine();
     let mut resolved_children = std::collections::BTreeMap::new();
     for (item_index, child_ref) in child_refs.iter().enumerate() {
-        if re_drive && !re_drive_launchable_indices.contains(&item_index) {
+        if !fresh_indices.contains(&item_index) {
+            // Existing rows carry their immutable runtime/executor identity in
+            // persisted launch metadata. Do not replace it from today's kind
+            // registry merely because the waiter still says `reserved`.
             continue;
         }
         // Managed-runtime children only: a child kind served by a registered
@@ -424,50 +447,74 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let mut child_metadata = std::collections::BTreeMap::new();
     let mut prepared_children = std::collections::BTreeMap::new();
     for (item_index, child) in children.iter().enumerate() {
-        if re_drive && !re_drive_launchable_indices.contains(&item_index) {
+        if !authority_indices.contains(&item_index) {
             continue;
         }
-        let (child_thread_profile, child_executor_ref, child_runtime_ref) = resolved_children
-            .get(&item_index)
-            .ok_or_else(|| {
-                anyhow::anyhow!("follow: missing child resolution at index {item_index}")
-            })?;
-        let mut meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-            kind: child_thread_profile.clone(),
-            item_ref: child.item_ref.clone(),
-            ref_bindings: child.ref_bindings.clone(),
-            launch_mode: "detached".to_string(),
-            parameters: child.parameters.clone(),
-            project_context: ProjectContext::LocalPath {
-                path: cap.provenance.effective_path().to_path_buf(),
-            },
-            original_snapshot_hash: inherited_snapshot_hash.clone(),
-            original_pushed_head_ref: None,
-            state_root: cap
-                .provenance
-                .state_root_override()
-                .map(|p| p.to_path_buf()),
-            current_site_id: parent.current_site_id.clone(),
-            origin_site_id: parent.origin_site_id.clone(),
-            requested_by: requested_by.clone(),
-            execution_hints: ExecutionHints::default(),
-            effective_caps: cap.effective_caps.clone(),
-            executor_ref: Some(child_executor_ref.clone()),
-            runtime_ref: Some(child_runtime_ref.clone()),
-        });
-        meta.follow_parent_context = Some(persisted_parent_context.clone());
-        meta.follow_launch_window = expected_launch_window.clone();
+        let existing_row = existing_created_indices.contains(&item_index);
+        let meta = if existing_row {
+            persisted_launch_metadata
+                .get(&item_index)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: missing persisted launch metadata at index {item_index}"
+                    )
+                })?
+        } else {
+            let (child_thread_profile, child_executor_ref, child_runtime_ref) = resolved_children
+                .get(&item_index)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("follow: missing child resolution at index {item_index}")
+                })?;
+            let mut meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
+                kind: child_thread_profile.clone(),
+                item_ref: child.item_ref.clone(),
+                ref_bindings: child.ref_bindings.clone(),
+                launch_mode: "detached".to_string(),
+                parameters: child.parameters.clone(),
+                project_context: ProjectContext::LocalPath {
+                    path: cap.provenance.effective_path().to_path_buf(),
+                },
+                original_snapshot_hash: inherited_snapshot_hash.clone(),
+                original_pushed_head_ref: None,
+                state_root: cap
+                    .provenance
+                    .state_root_override()
+                    .map(|p| p.to_path_buf()),
+                current_site_id: parent.current_site_id.clone(),
+                origin_site_id: parent.origin_site_id.clone(),
+                requested_by: requested_by.clone(),
+                execution_hints: ExecutionHints::default(),
+                effective_caps: cap.effective_caps.clone(),
+                executor_ref: Some(child_executor_ref.clone()),
+                runtime_ref: Some(child_runtime_ref.clone()),
+            });
+            meta.follow_parent_context = Some(persisted_parent_context.clone());
+            meta.follow_launch_window = expected_launch_window.clone();
+            meta
+        };
         let child_thread_id = reserved_child_ids.get(&item_index).ok_or_else(|| {
             anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
         })?;
-        let prepared = crate::execution::launch::prepare_follow_child_launch(
-            state,
-            child_thread_id,
-            &meta,
-            launch_provenance.clone(),
-            launch_parent_context.clone(),
-        )
-        .await?;
+        let prepared = if existing_row {
+            crate::execution::launch::prepare_existing_follow_child_launch(
+                state,
+                child_thread_id,
+                &meta,
+                launch_provenance.clone(),
+                launch_parent_context.clone(),
+            )
+            .await?
+        } else {
+            crate::execution::launch::prepare_follow_child_launch(
+                state,
+                child_thread_id,
+                &meta,
+                launch_provenance.clone(),
+                launch_parent_context.clone(),
+            )
+            .await?
+        };
         child_metadata.insert(item_index, prepared.launch_metadata().clone());
         prepared_children.insert(item_index, prepared);
     }
@@ -476,22 +523,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     //    child is a FRESH ROOT: its own chain root, no upstream braid. The root
     //    snapshot and authoritative launch audit share one signed birth commit.
     let mut prepared_by_child = std::collections::BTreeMap::new();
-    if !re_drive {
-        for (item_index, child) in children.iter().enumerate() {
-        let meta = child_metadata.remove(&item_index).ok_or_else(|| {
-            anyhow::anyhow!("follow: missing prepared metadata for child index {item_index}")
-        })?;
-        let prepared = prepared_children.remove(&item_index).ok_or_else(|| {
-            anyhow::anyhow!("follow: missing prepared authority for child index {item_index}")
-        })?;
-        let child_thread_id = reserved_child_ids.remove(&item_index).ok_or_else(|| {
-            anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
-        })?;
-
-        // The slot is the stable identity authority. Every reserved re-drive repairs
-        // the row and all pre-launch materialization before proceeding.
-        let created_now = if state.threads.get_thread(&child_thread_id)?.is_none() {
-            let mut initial_events = prepared.initial_audit_events()?;
+    for (item_index, child) in children.iter().enumerate() {
+        let child_thread_id = reserved_child_ids
+            .get(&item_index)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
+            })?;
+        let mut prepared = prepared_children.remove(&item_index);
+        if fresh_indices.contains(&item_index) {
+            let meta = child_metadata.remove(&item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing prepared metadata for child index {item_index}")
+            })?;
+            let fresh_prepared = prepared.take().ok_or_else(|| {
+                anyhow::anyhow!("follow: missing prepared authority for child index {item_index}")
+            })?;
+            let mut initial_events = fresh_prepared.initial_audit_events()?;
             if let Some(Value::Object(facets)) = child.facets.as_ref() {
                 for (key, value) in facets {
                     if key.trim().is_empty() {
@@ -518,32 +565,43 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 .threads
                 .create_root_thread_with_events_and_launch_metadata(
                     &child_thread_id,
-                    prepared.resolved_request(),
+                    fresh_prepared.resolved_request(),
                     initial_events,
-                    Some(prepared.launch_metadata()),
+                    Some(fresh_prepared.launch_metadata()),
                 )?;
-            true
-        } else {
-            false
-        };
-        let prepared = if created_now {
-            prepared.with_persisted_birth_audit()
-        } else {
-            prepared
-        };
-        let persisted = state
-            .state_store
-            .get_launch_metadata(&child_thread_id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "follow: child {child_thread_id} has no authoritative launch metadata"
-                )
+            prepared = Some(fresh_prepared.with_persisted_birth_audit());
+            let persisted = state
+                .state_store
+                .get_launch_metadata(&child_thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: child {child_thread_id} has no authoritative launch metadata"
+                    )
+                })?;
+            if persisted.resume_context != meta.resume_context
+                || persisted.follow_parent_context != meta.follow_parent_context
+                || persisted.follow_launch_window != meta.follow_launch_window
+            {
+                bail!("follow: child metadata conflicts at index {item_index}");
+            }
+        } else if authority_indices.contains(&item_index) {
+            let expected = child_metadata.remove(&item_index).ok_or_else(|| {
+                anyhow::anyhow!("follow: missing persisted metadata at child index {item_index}")
             })?;
-        if persisted.resume_context != meta.resume_context
-            || persisted.follow_parent_context != meta.follow_parent_context
-            || persisted.follow_launch_window != meta.follow_launch_window
-        {
-            bail!("follow: child metadata conflicts at index {item_index}");
+            let persisted = state
+                .state_store
+                .get_launch_metadata(&child_thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "follow: child {child_thread_id} has no authoritative launch metadata"
+                    )
+                })?;
+            if persisted.resume_context != expected.resume_context
+                || persisted.follow_parent_context != expected.follow_parent_context
+                || persisted.follow_launch_window != expected.follow_launch_window
+            {
+                bail!("follow: child metadata changed during preparation at index {item_index}");
+            }
         }
         let inherited_stop = match state.state_store.record_child_link(
             &parent_thread_id,
@@ -599,32 +657,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             )?;
             bail!("follow: parent {parent_thread_id} was stop-requested during child admission");
         }
-        prepared_by_child.insert(child_thread_id.clone(), prepared);
-        child_thread_ids.push(child_thread_id);
-        }
-    } else {
-        for item_index in re_drive_launchable_indices.iter().copied() {
-            let child_thread_id = child_thread_ids[item_index].clone();
-            let meta = child_metadata.remove(&item_index).ok_or_else(|| {
-                anyhow::anyhow!("follow: missing re-drive metadata for child index {item_index}")
-            })?;
-            let prepared = prepared_children.remove(&item_index).ok_or_else(|| {
-                anyhow::anyhow!("follow: missing re-drive authority for child index {item_index}")
-            })?;
-            let persisted = state
-                .state_store
-                .get_launch_metadata(&child_thread_id)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "follow: child {child_thread_id} has no authoritative launch metadata"
-                    )
-                })?;
-            if persisted.resume_context != meta.resume_context
-                || persisted.follow_parent_context != meta.follow_parent_context
-                || persisted.follow_launch_window != meta.follow_launch_window
-            {
-                bail!("follow: child metadata conflicts at index {item_index}");
-            }
+        if let Some(prepared) = prepared {
             prepared_by_child.insert(child_thread_id, prepared);
         }
     }
@@ -633,14 +666,15 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     //    continuation commit. A membership failure now leaves the parent running
     //    and the reserved waiter safely re-drivable.
     let mut admitted = if re_drive {
-        re_drive_launchable_indices
+        existing_launchable_indices
             .iter()
             .map(|item_index| child_thread_ids[*item_index].clone())
             .collect()
     } else if let (Some(width), Some(window_key)) =
         (params.launch_window_width, window_key.as_deref())
     {
-        for child_id in &child_thread_ids {
+        for item_index in fresh_indices.iter().copied() {
+            let child_id = &child_thread_ids[item_index];
             state.state_store.launch_window_insert_only(
                 child_id,
                 window_key,
@@ -650,7 +684,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
         Vec::new()
     } else {
-        child_thread_ids.clone()
+        authority_indices
+            .iter()
+            .map(|item_index| child_thread_ids[*item_index].clone())
+            .collect()
     };
 
     // 4. Parent successor row (created, NOT launched). This atomically settles the
@@ -740,12 +777,14 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         }
     };
 
-    // 5. Mark a fresh waiter durably `waiting`: all IDs and window membership are
-    // recorded, and the parent is suspended.
+    // 5. Commit the fresh waiter's truthful post-suspension phase: all IDs and
+    // window membership are recorded, and the parent is suspended. A cohort
+    // that settled concurrently advances directly to `ready` and must resume;
+    // its terminal children must never be launched again.
     let mut response_phase = waiter.phase.clone();
     if !re_drive {
         match state.state_store.mark_follow_waiting(&follow_key) {
-            Ok(()) => response_phase = follow_phase::WAITING.to_string(),
+            Ok(phase) => response_phase = phase,
             Err(error) => {
                 // The parent continuation is already authoritative. Returning
                 // an error would invite a caller retry that cannot undo it;
@@ -757,7 +796,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     "follow suspension committed but waiter transition failed; accepted for reserved reconciliation"
                 );
                 admitted.clear();
-                queued_child_thread_ids.extend(child_thread_ids.iter().cloned());
+                queued_child_thread_ids.extend(
+                    authority_indices
+                        .iter()
+                        .map(|item_index| child_thread_ids[*item_index].clone()),
+                );
             }
         }
         if response_phase == follow_phase::WAITING {
@@ -781,14 +824,27 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     }
                 }
                 queued_child_thread_ids.extend(
-                    child_thread_ids
+                    authority_indices
                         .iter()
-                        .filter(|child_id| !admitted.contains(child_id))
-                        .cloned(),
+                        .map(|item_index| child_thread_ids[*item_index].clone())
+                        .filter(|child_id| !admitted.contains(child_id)),
                 );
             }
         }
     }
+    queued_child_thread_ids.retain(|child_id| !admitted.contains(child_id));
+    if response_phase == follow_phase::READY {
+        admitted.clear();
+        queued_child_thread_ids.clear();
+        for child_thread_id in &child_thread_ids {
+            crate::execution::launch::kick_launch_window_for_terminal(state, child_thread_id);
+        }
+        if let Some(child_thread_id) = child_thread_ids.first() {
+            crate::execution::launch::kick_follow_resume_if_ready(state, child_thread_id);
+        }
+    }
+    queued_child_thread_ids.sort();
+    queued_child_thread_ids.dedup();
 
     // 6. ONLY NOW launch admitted children. Each task consumes the exact
     // pre-birth authority and must cross the managed spawn handoff before this

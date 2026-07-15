@@ -2280,15 +2280,15 @@ impl RuntimeDb {
         Ok(())
     }
 
-    /// Transition → waiting. Only `reserved → waiting` (idempotent on
-    /// `waiting`); requires the child + successor recorded first. Never regresses
-    /// a later phase.
-    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<()> {
+    /// Transition a reserved waiter to its durable post-suspension phase. A
+    /// complete cohort advances directly to `ready`; otherwise it advances to
+    /// `waiting`. Idempotent only on `waiting` and never regresses a later phase.
+    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<String> {
         let tx = self.conn.unchecked_transaction()?;
         let w = self.require_follow_waiter(follow_key)?;
         if w.phase == follow_phase::WAITING {
             tx.commit()?;
-            return Ok(());
+            return Ok(follow_phase::WAITING.to_string());
         }
         if w.phase != follow_phase::RESERVED {
             bail!(
@@ -2322,7 +2322,7 @@ impl RuntimeDb {
             bail!("follow waiter {follow_key} reserved transition raced");
         }
         tx.commit()?;
-        Ok(())
+        Ok(target.to_string())
     }
 
     /// Transition → resuming. Only `ready → resuming` (idempotent on

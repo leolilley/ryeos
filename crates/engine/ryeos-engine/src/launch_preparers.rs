@@ -584,6 +584,7 @@ fn exact_runtime_library_mounts(
     validate_runtime_destination("ELF interpreter", &interpreter)?;
     let (pinned_interpreter, _) =
         pin_runtime_file("ELF interpreter", &interpreter, None, true)?;
+    validate_node_dynamic_loader(&pinned_interpreter.destination)?;
     let interpreter_fd = runtime_file_fd(&pinned_interpreter.file);
     let command_fd = runtime_file_fd(command_file);
     let output = lillux::run(lillux::SubprocessRequest {
@@ -691,6 +692,7 @@ fn exact_runtime_library_mounts(
         } else {
             pin_runtime_file("runtime library", &destination, None, false)?.0
         };
+        validate_node_owned_immutable_path("runtime library", &pinned.destination)?;
         pinned.destination = destination;
         mounts.push(pinned);
     }
@@ -711,6 +713,54 @@ fn valid_loader_address(value: &str) -> bool {
         .strip_prefix("(0x")
         .and_then(|value| value.strip_suffix(')'))
         .is_some_and(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_node_dynamic_loader(path: &Path) -> Result<(), EngineError> {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let recognized_loader_name = (name.starts_with("ld-linux") && name.contains(".so."))
+        || (name.starts_with("ld-musl-") && name.ends_with(".so.1"))
+        || matches!(name, "ld.so.1" | "ld64.so.1" | "ld64.so.2");
+    if !recognized_loader_name {
+        return Err(EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer ELF interpreter {} is not a recognized node dynamic loader",
+                path.display()
+            ),
+        });
+    }
+    validate_node_owned_immutable_path("ELF interpreter", path)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_node_owned_immutable_path(label: &str, path: &Path) -> Result<(), EngineError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    // The canonical runtime file and its entire path must be owned by the node
+    // administrator and immune to group/world replacement. This admits
+    // conventional system layouts and immutable stores without trusting any
+    // handler-selected writable directory.
+    let mut current = Some(path);
+    while let Some(component) = current {
+        let metadata = std::fs::symlink_metadata(component).map_err(|error| {
+            EngineError::SandboxPolicyRefused {
+                reason: format!(
+                    "launch-preparer {label} component {} cannot be inspected: {error}",
+                    component.display()
+                ),
+            }
+        })?;
+        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+            return Err(EngineError::SandboxPolicyRefused {
+                reason: format!(
+                    "launch-preparer {label} component {} is not node-owned and immutable",
+                    component.display()
+                ),
+            });
+        }
+        current = component.parent();
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]

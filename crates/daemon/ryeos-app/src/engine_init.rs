@@ -178,27 +178,9 @@ fn build_engine_for_roots_with_sandbox(
         composers,
         protocol_registry,
         runtimes,
-        handler_registry,
+        launch_preparers,
         sandbox,
     } = build_node_bundle_admission(&bundle_roots, &node_trust_store, sandbox.clone())?;
-
-    let launch_preparers = if runtimes.requires_launch_preparer() {
-        let runner = LaunchPreparerRunner::from_sandbox_runtime(sandbox.as_ref())
-            .context("failed to initialize fixed launch-preparer sandbox")?;
-        if let Err(issues) =
-            validate_runtime_launch_handlers(&runtimes, &handler_registry, &runner)
-        {
-            let mut message = String::from("runtime launch-preparer validation failed:\n");
-            for issue in &issues {
-                message.push_str(&format!("  - {issue:?}\n"));
-            }
-            anyhow::bail!("{message}");
-        }
-        LaunchPreparerRegistry::from_runtimes(&runtimes, &handler_registry, runner)
-            .context("failed to bind runtime launch preparers")?
-    } else {
-        LaunchPreparerRegistry::default()
-    };
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
@@ -283,7 +265,7 @@ struct NodeBundleAdmission {
     composers: ComposerRegistry,
     protocol_registry: ProtocolRegistry,
     runtimes: RuntimeRegistry,
-    handler_registry: Arc<HandlerRegistry>,
+    launch_preparers: LaunchPreparerRegistry,
     sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 }
 
@@ -340,15 +322,6 @@ fn build_node_bundle_admission(
         .collect();
     let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, node_trust_store, &kinds)
         .context("failed to build runtime registry")?;
-    let sandbox = if sandbox.is_enforced() || runtimes.requires_launch_preparer() {
-        Arc::new(
-            sandbox
-                .with_mandatory_bubblewrap_backend()
-                .context("failed to capture sandbox backend required by admitted runtimes")?,
-        )
-    } else {
-        sandbox
-    };
     let handler_registry =
         HandlerRegistry::load_base(&tagged_roots, node_trust_store, sandbox.clone())
             .context("failed to load handler descriptors from bundle roots")?;
@@ -381,6 +354,32 @@ fn build_node_bundle_admission(
         anyhow::bail!("{message}");
     }
 
+    // Validate the complete preparer registry against a detached exact backend
+    // capture before publishing it into the daemon snapshot. If another fully
+    // validated admission wins publication concurrently, validate and bind
+    // this graph again against that winner before activation can proceed.
+    let (sandbox, launch_preparers) = if runtimes.requires_launch_preparer() {
+        let tentative = sandbox
+            .tentative_mandatory_bubblewrap_backend()
+            .context("failed to tentatively capture sandbox backend required by runtimes")?;
+        let tentative_preparers = bind_launch_preparers(
+            &runtimes,
+            &handler_registry,
+            &tentative,
+        )?;
+        let (published, reconciled) = sandbox
+            .publish_mandatory_bubblewrap_backend(&tentative)
+            .context("failed to publish admitted launch-preparer sandbox backend")?;
+        let launch_preparers = if reconciled {
+            bind_launch_preparers(&runtimes, &handler_registry, &published)?
+        } else {
+            tentative_preparers
+        };
+        (Arc::new(published), launch_preparers)
+    } else {
+        (sandbox, LaunchPreparerRegistry::default())
+    };
+
     tracing::info!(
         runtimes = runtimes.all().count(),
         roots = tagged_roots.len(),
@@ -393,9 +392,27 @@ fn build_node_bundle_admission(
         composers,
         protocol_registry,
         runtimes,
-        handler_registry,
+        launch_preparers,
         sandbox,
     })
+}
+
+fn bind_launch_preparers(
+    runtimes: &RuntimeRegistry,
+    handlers: &HandlerRegistry,
+    sandbox: &ryeos_engine::sandbox::SandboxRuntime,
+) -> Result<LaunchPreparerRegistry> {
+    let runner = LaunchPreparerRunner::from_sandbox_runtime(sandbox)
+        .context("failed to initialize fixed launch-preparer sandbox")?;
+    if let Err(issues) = validate_runtime_launch_handlers(runtimes, handlers, &runner) {
+        let mut message = String::from("runtime launch-preparer validation failed:\n");
+        for issue in &issues {
+            message.push_str(&format!("  - {issue:?}\n"));
+        }
+        anyhow::bail!("{message}");
+    }
+    LaunchPreparerRegistry::from_runtimes(runtimes, handlers, runner)
+        .context("failed to bind runtime launch preparers")
 }
 
 /// Build `HostEnvBindings` from the resolved daemon config's

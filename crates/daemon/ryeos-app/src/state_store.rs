@@ -3504,7 +3504,7 @@ impl StateStore {
             .set_follow_parent_successor(follow_key, successor_thread_id)
     }
 
-    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<()> {
+    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<String> {
         let g = self.lock()?;
         g.runtime_db.mark_follow_waiting(follow_key)
     }

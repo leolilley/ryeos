@@ -1400,7 +1400,7 @@ async fn prepare_managed_launch_authority(
         executor_ref,
         checkpoint_dir,
         is_resume,
-        launch_metadata: _,
+        launch_metadata,
         pending_project_snapshot,
     })
 }
@@ -2401,15 +2401,19 @@ pub async fn launch_operator_successor(
     launch_successor_inner(state, successor_id, SuccessorMode::Operator, None, None).await
 }
 
-/// Consumable authoritative pass for a not-yet-created successor. It contains
-/// secret values and must never be persisted or cloned.
+/// Consumable authoritative pass for one exact successor ID. Fresh creation and
+/// existing-row retries share the carrier, but differ explicitly in whether the
+/// audit was committed at birth. It contains secret values and must never be
+/// persisted or cloned.
 struct PreparedSuccessorLaunch {
+    thread_id: String,
     mode: SuccessorMode,
     source_thread_id: Option<String>,
     resume_context: ryeos_app::launch_metadata::ResumeContext,
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     authority: PreparedManagedLaunchAuthority,
+    launch_audit_already_persisted: bool,
 }
 
 pub struct PreparedOperatorSuccessorLaunch {
@@ -2430,10 +2434,27 @@ impl PreparedOperatorSuccessorLaunch {
     pub fn launch_metadata(&self) -> &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
         &self.prepared.launch_metadata
     }
+
+    /// Mark that the authoritative audit committed with a newly-created
+    /// successor. Existing-row retry preparations deliberately remain false so
+    /// their recomputed attempt audit is appended before handoff.
+    pub fn with_persisted_birth_audit(mut self) -> Self {
+        self.prepared.launch_audit_already_persisted = true;
+        drop(self.prepared.authority.pending_project_snapshot.take());
+        self
+    }
 }
 
 pub struct PreparedMachineSuccessorLaunch {
     prepared: PreparedSuccessorLaunch,
+}
+
+impl PreparedMachineSuccessorLaunch {
+    pub fn with_persisted_birth_audit(mut self) -> Self {
+        self.prepared.launch_audit_already_persisted = true;
+        drop(self.prepared.authority.pending_project_snapshot.take());
+        self
+    }
 }
 
 /// Consumable authoritative launch pass for a fresh lineage-linked child.
@@ -2442,6 +2463,7 @@ pub struct PreparedMachineSuccessorLaunch {
 /// authority, and secret values. It can cross only the in-process spawn-task
 /// boundary; only its explicit `launch_metadata` projection is persisted.
 pub struct PreparedFollowChildLaunch {
+    thread_id: String,
     resume_context: ryeos_app::launch_metadata::ResumeContext,
     parent_context: crate::dispatch::ParentExecutionContext,
     execution: crate::execution::runner::ExecutionParams,
@@ -2487,6 +2509,58 @@ pub async fn prepare_follow_child_launch(
     launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     parent_context: crate::dispatch::ParentExecutionContext,
+) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
+    prepare_follow_child_launch_inner(
+        state,
+        thread_id,
+        launch_metadata,
+        provenance,
+        parent_context,
+        true,
+    )
+    .await
+}
+
+/// Recompute one launch attempt for an already-persisted child. The birth
+/// identity is immutable: preparation starts from and returns the exact stored
+/// metadata, and snapshot publication is disabled because the existing row is
+/// already the authoritative GC root.
+pub async fn prepare_existing_follow_child_launch(
+    state: &AppState,
+    thread_id: &str,
+    launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    parent_context: crate::dispatch::ParentExecutionContext,
+) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
+    let persisted_parent = launch_metadata.follow_parent_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("follow child {thread_id} has no persisted parent execution context")
+    })?;
+    if persisted_parent.parent_thread_id != parent_context.parent_thread_id
+        || persisted_parent.hard_limits != parent_context.hard_limits
+        || persisted_parent.depth != parent_context.depth
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow child {thread_id} re-drive parent context differs from its persisted birth identity"
+        )));
+    }
+    prepare_follow_child_launch_inner(
+        state,
+        thread_id,
+        launch_metadata,
+        provenance,
+        parent_context,
+        false,
+    )
+    .await
+}
+
+async fn prepare_follow_child_launch_inner(
+    state: &AppState,
+    thread_id: &str,
+    launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    parent_context: crate::dispatch::ParentExecutionContext,
+    capture_project_snapshot: bool,
 ) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
     let resume = launch_metadata.resume_context.as_ref().ok_or_else(|| {
         anyhow::anyhow!("follow-child launch metadata has no ResumeContext")
@@ -2609,12 +2683,16 @@ pub async fn prepare_follow_child_launch(
         },
         checkpoint_resume_mode: CheckpointResumeMode::None,
         launch_handoff: None,
-    }, thread_id, Some(launch_metadata), true).await?;
-    let launch_metadata = authority
-        .launch_metadata
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no launch metadata"))?;
+    }, thread_id, Some(launch_metadata), capture_project_snapshot).await?;
+    let launch_metadata = if capture_project_snapshot {
+        authority
+            .launch_metadata
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no launch metadata"))?
+    } else {
+        launch_metadata.clone()
+    };
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()
@@ -2622,6 +2700,7 @@ pub async fn prepare_follow_child_launch(
         .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no ResumeContext"))?;
 
     Ok(PreparedFollowChildLaunch {
+        thread_id: thread_id.to_string(),
         resume_context: prepared_resume,
         parent_context,
         execution,
@@ -2717,6 +2796,8 @@ async fn prepare_successor_launch(
     resume: &ryeos_app::launch_metadata::ResumeContext,
     mode: SuccessorMode,
     previous_thread_id: Option<&str>,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    capture_project_snapshot: bool,
 ) -> Result<PreparedSuccessorLaunch, BuildAndLaunchError> {
     let execution = crate::execution::runner::execution_params_from_resume_context(state, resume)?;
     let project_path = execution.provenance.effective_path().to_path_buf();
@@ -2753,24 +2834,30 @@ async fn prepare_successor_launch(
         capability_policy,
         checkpoint_resume_mode,
         launch_handoff: None,
-    }, successor_thread_id, None, true).await?;
-    let launch_metadata = authority
-        .launch_metadata
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?;
+    }, successor_thread_id, metadata_template, capture_project_snapshot).await?;
+    let launch_metadata = if let Some(persisted) = metadata_template {
+        persisted.clone()
+    } else {
+        authority
+            .launch_metadata
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?
+    };
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("successor authority produced no ResumeContext"))?;
     Ok(PreparedSuccessorLaunch {
+        thread_id: successor_thread_id.to_string(),
         mode,
         source_thread_id: previous_thread_id.map(str::to_owned),
         resume_context: prepared_resume,
         execution,
         launch_metadata,
         authority,
+        launch_audit_already_persisted: false,
     })
 }
 
@@ -2786,6 +2873,35 @@ pub async fn prepare_operator_successor_launch(
             resume,
             SuccessorMode::Operator,
             None,
+            None,
+            true,
+        )
+        .await?,
+    })
+}
+
+/// Reprepare a stranded operator successor against its actual durable ID and
+/// birth identity. This produces a fresh attempt audit but never captures or
+/// publishes a replacement snapshot.
+pub async fn prepare_existing_operator_successor_launch(
+    state: &AppState,
+    successor_thread_id: &str,
+    launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<PreparedOperatorSuccessorLaunch, BuildAndLaunchError> {
+    let resume = launch_metadata.resume_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "operator successor {successor_thread_id} has no persisted ResumeContext"
+        )
+    })?;
+    Ok(PreparedOperatorSuccessorLaunch {
+        prepared: prepare_successor_launch(
+            state,
+            successor_thread_id,
+            resume,
+            SuccessorMode::Operator,
+            None,
+            Some(launch_metadata),
+            false,
         )
         .await?,
     })
@@ -2804,6 +2920,8 @@ pub async fn prepare_machine_successor_launch(
             resume,
             SuccessorMode::Machine,
             Some(source_thread_id),
+            None,
+            true,
         )
         .await?,
     })
@@ -3094,6 +3212,12 @@ async fn launch_claimed_successor(
     // ref fails loudly before any resolution runs.
     let (params, prepared_authority) = match prepared_successor {
         Some(prepared) => {
+            if prepared.thread_id != successor_id {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed authority names successor {}, not persisted successor {successor_id}",
+                    prepared.thread_id
+                )));
+            }
             if mode != prepared.mode {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                     "precomputed successor authority supplied to the wrong launch mode"
@@ -3113,7 +3237,13 @@ async fn launch_claimed_successor(
                     "precomputed authority does not match persisted successor identity"
                 )));
             }
-            (prepared.execution, Some(prepared.authority))
+            (
+                prepared.execution,
+                Some((
+                    prepared.authority,
+                    prepared.launch_audit_already_persisted,
+                )),
+            )
         }
         None => (
             crate::execution::runner::execution_params_from_resume_context(state, &resume)?,
@@ -3167,8 +3297,14 @@ async fn launch_claimed_successor(
             launch_handoff,
         };
     match prepared_authority {
-        Some(authority) => {
-            run_claimed_thread_row_with_authority(launch_params, successor, authority, true).await
+        Some((authority, launch_audit_already_persisted)) => {
+            run_claimed_thread_row_with_authority(
+                launch_params,
+                successor,
+                authority,
+                launch_audit_already_persisted,
+            )
+            .await
         }
         None => run_claimed_thread_row(launch_params, successor).await,
     }
@@ -3412,6 +3548,12 @@ async fn launch_claimed_follow_child(
     let (params, parent_context, prepared_authority, launch_audit_already_persisted) =
         match prepared_child {
             Some(prepared) => {
+                if prepared.thread_id != thread_id {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "precomputed child authority names {}, not persisted child {thread_id}",
+                        prepared.thread_id
+                    )));
+                }
                 if prepared.resume_context != identity {
                     return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "precomputed child authority does not match persisted launch identity"

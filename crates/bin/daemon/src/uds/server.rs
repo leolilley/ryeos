@@ -758,7 +758,7 @@ async fn handle_request_continuation(
     )?;
     let encoded = serde_json::to_value(result)
         .context("failed to encode runtime.request_continuation result")?;
-    Ok((encoded, prepared))
+    Ok((encoded, prepared.with_persisted_birth_audit()))
 }
 
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {

@@ -786,6 +786,7 @@ pub async fn handle(
     match outcome {
         OperatorContinuation::Created(detail) => {
             let successor_id = detail.thread_id.clone();
+            let prepared = prepared.with_persisted_birth_audit();
             let task_id = successor_id.clone();
             let st = (*state).clone();
             let (handoff, ready) =
@@ -818,6 +819,26 @@ pub async fn handle(
             // same handoff proof as a newly created successor.
             if detail.status == ryeos_state::objects::ThreadStatus::Created.as_str() {
                 let successor_id = detail.thread_id.clone();
+                // The candidate authority named a speculative ID and its
+                // snapshot was never committed. Re-drive from the exact durable
+                // successor identity without recapturing its birth snapshot.
+                drop(prepared);
+                let launch_metadata = state
+                    .state_store
+                    .get_launch_metadata(&successor_id)
+                    .map_err(|error| HandlerError::Internal(error.to_string()))?
+                    .ok_or_else(|| {
+                        HandlerError::Internal(format!(
+                            "operator successor {successor_id} has no persisted launch metadata"
+                        ))
+                    })?;
+                let prepared = ryeos_executor::execution::launch::prepare_existing_operator_successor_launch(
+                    &state,
+                    &successor_id,
+                    &launch_metadata,
+                )
+                .await
+                .map_err(build_and_launch_error)?;
                 let task_id = successor_id.clone();
                 let st = (*state).clone();
                 let (handoff, ready) =

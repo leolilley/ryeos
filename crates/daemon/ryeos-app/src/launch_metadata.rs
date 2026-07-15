@@ -24,7 +24,7 @@ use crate::execution_provenance::ExecutionProvenance;
 
 /// Version tag for the JSON payload persisted into
 /// `runtime_db.thread_runtime.launch_metadata`. Bump when an
-/// incompatible shape change ships; readers MUST decode loudly so a
+/// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
 pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
@@ -70,8 +70,8 @@ pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLaunchMetadata {
-    /// Persisted schema version. Missing or incompatible metadata fails
-    /// decoding loudly; there is no compatibility/defaulting path.
+    /// Persisted schema version. Missing or mismatched metadata fails
+    /// decoding loudly; the field is always required.
     pub schema_version: u32,
 
     /// Cancellation policy resolved at decorate-spec time and snapshotted

@@ -70,7 +70,7 @@ pub struct RuntimeYaml {
     /// Complete, runtime-owned declaration of the inputs and preparation
     /// required to construct its launch envelope. This is intentionally
     /// required: adding a runtime without declaring its launch boundary is a
-    /// boot-time error rather than an implicit compatibility path.
+    /// boot-time error.
     pub launch_contract: LaunchContractDecl,
     #[serde(default)]
     pub description: Option<String>,
