@@ -359,6 +359,7 @@ struct Inner {
 
 pub struct StateStore {
     state_authority: ryeos_state::PinnedStateAuthority,
+    thread_runtime_authority: Option<ThreadRuntimeAuthority>,
     inner: Mutex<Inner>,
     projection_health: Arc<ThreadProjectionHealth>,
     read_only: bool,
@@ -911,6 +912,83 @@ struct ThreadRuntimeRemoval {
     name: std::ffi::OsString,
 }
 
+struct ThreadRuntimeAuthority {
+    app_root: lillux::PinnedDirectory,
+    threads_root: Option<lillux::PinnedDirectory>,
+}
+
+impl ThreadRuntimeAuthority {
+    fn capture(
+        app_root: &Path,
+        runtime_state: &lillux::PinnedDirectory,
+        create_threads_root: bool,
+    ) -> Result<Self> {
+        let app_root = lillux::PinnedDirectory::open(app_root)?.ok_or_else(|| {
+            anyhow!(
+                "app runtime root is absent while capturing cleanup authority: {}",
+                app_root.display()
+            )
+        })?;
+        let ai_root = app_root
+            .open_child_directory(std::ffi::OsStr::new(ryeos_engine::AI_DIR))?
+            .ok_or_else(|| anyhow!("app root has no .ai directory"))?;
+        let configured_runtime_state = ai_root
+            .open_child_directory(std::ffi::OsStr::new("state"))?
+            .ok_or_else(|| anyhow!("app root has no .ai/state directory"))?;
+        if !configured_runtime_state.is_same_directory(runtime_state)? {
+            bail!(
+                "runtime state directory does not belong to captured app root: app_root={}, runtime_state={}",
+                app_root.path().display(),
+                runtime_state.path().display()
+            );
+        }
+        let threads_name = std::ffi::OsStr::new("threads");
+        let threads_root = if create_threads_root {
+            Some(app_root.open_or_create_child(threads_name, 0o700)?)
+        } else {
+            app_root.open_child_directory(threads_name)?
+        };
+        if threads_root.is_none() && app_root.open_regular(threads_name, false)?.is_some() {
+            bail!("thread state root is not a directory");
+        }
+        Ok(Self {
+            app_root,
+            threads_root,
+        })
+    }
+
+    /// Confirm the public namespace still names the captured inodes. The
+    /// reopened path is diagnostic only; every destructive operation below is
+    /// rooted in the retained descriptors.
+    fn ensure_current_binding(&self) -> Result<()> {
+        let current_app =
+            lillux::PinnedDirectory::open(self.app_root.path())?.ok_or_else(|| {
+                anyhow!(
+                    "captured app runtime root disappeared: {}",
+                    self.app_root.path().display()
+                )
+            })?;
+        if !self.app_root.is_same_directory(&current_app)? {
+            bail!(
+                "app runtime root changed after cleanup authority was captured: {}",
+                self.app_root.path().display()
+            );
+        }
+
+        let current_threads = self
+            .app_root
+            .open_child_directory(std::ffi::OsStr::new("threads"))?;
+        match (&self.threads_root, current_threads) {
+            (Some(expected), Some(current)) if expected.is_same_directory(&current)? => Ok(()),
+            (None, None) => Ok(()),
+            _ => bail!(
+                "thread runtime root changed after cleanup authority was captured: {}",
+                self.app_root.path().join("threads").display()
+            ),
+        }
+    }
+}
+
 fn count_runtime_tree_entries(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut count = 1usize;
     for name in directory.entry_names()? {
@@ -931,23 +1009,15 @@ fn count_runtime_tree_entries(directory: &lillux::PinnedDirectory) -> Result<usi
 }
 
 /// Resolve exactly the per-thread daemon state directories named by signed
-/// chain truth. This never walks the global thread directory and rejects a
-/// symlinked root/target or any path that escapes the canonical root.
+/// chain truth beneath the startup-captured thread-root inode. This never
+/// reopens a pathname as authority, never walks the global thread directory,
+/// and rejects links or special entries.
 fn inspect_thread_runtime_files(
-    app_root: &Path,
+    authority: &ThreadRuntimeAuthority,
     thread_ids: &[String],
 ) -> Result<Vec<ThreadRuntimeRemoval>> {
-    let app_directory = lillux::PinnedDirectory::open(app_root)?
-        .ok_or_else(|| anyhow!("app runtime root is absent: {}", app_root.display()))?;
-    let Some(threads_root) = app_directory.open_child_directory(std::ffi::OsStr::new("threads"))?
-    else {
-        // Distinguish absence from a regular, special, or symlinked entry.
-        if app_directory
-            .open_regular(std::ffi::OsStr::new("threads"), false)?
-            .is_some()
-        {
-            bail!("thread state root is not a directory");
-        }
+    authority.ensure_current_binding()?;
+    let Some(threads_root) = authority.threads_root.as_ref() else {
         return Ok(Vec::new());
     };
 
@@ -1023,9 +1093,16 @@ fn delete_thread_runtime_files(paths: &[ThreadRuntimeRemoval]) -> Result<usize> 
 }
 
 impl StateStore {
+    fn thread_runtime_authority(&self) -> Result<&ThreadRuntimeAuthority> {
+        self.thread_runtime_authority
+            .as_ref()
+            .ok_or_else(|| anyhow!("this StateStore has no destructive thread-runtime authority"))
+    }
+
     /// Open production state with the trust authority used to verify every
     /// authoritative chain head during baseline rebuild and journal replay.
     pub fn new_with_head_trust(
+        app_root: PathBuf,
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
@@ -1033,6 +1110,7 @@ impl StateStore {
         head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<Self> {
         Self::open(
+            app_root,
             runtime_state_dir,
             runtime_db_path,
             signer,
@@ -1058,6 +1136,7 @@ impl StateStore {
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
             state_authority,
+            thread_runtime_authority: None,
             inner: Mutex::new(Inner {
                 state_db,
                 runtime_db,
@@ -1077,6 +1156,7 @@ impl StateStore {
     /// or build a baseline. The verified service invocation owns that one
     /// explicit rebuild; all unrelated mutation APIs remain fail-closed.
     pub fn new_for_projection_rebuild(
+        app_root: PathBuf,
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
@@ -1084,6 +1164,10 @@ impl StateStore {
         head_trust: Arc<ryeos_state::refs::TrustStore>,
     ) -> Result<Self> {
         let projection_health = Arc::new(ThreadProjectionHealth::default());
+        let runtime_state_authority = lillux::PinnedDirectory::open(&runtime_state_dir)?
+            .ok_or_else(|| anyhow!("runtime state directory is absent"))?;
+        let thread_runtime_authority =
+            ThreadRuntimeAuthority::capture(&app_root, &runtime_state_authority, false)?;
         let runtime_db = runtime_db::RuntimeDb::open_existing_current(&runtime_db_path)?;
         let cleared_launch_claims = runtime_db
             .clear_all_launch_claims()
@@ -1099,6 +1183,7 @@ impl StateStore {
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
             state_authority,
+            thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
                 state_db,
                 runtime_db,
@@ -1116,6 +1201,7 @@ impl StateStore {
     /// cancellable projection recovery. The observer is called from the
     /// blocking open task and must remain non-blocking.
     pub fn new_with_head_trust_and_recovery_observer(
+        app_root: PathBuf,
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
@@ -1124,6 +1210,7 @@ impl StateStore {
         recovery_observer: Arc<dyn ryeos_state::ProjectionRecoveryObserver>,
     ) -> Result<Self> {
         Self::open(
+            app_root,
             runtime_state_dir,
             runtime_db_path,
             signer,
@@ -1134,6 +1221,7 @@ impl StateStore {
     }
 
     fn open(
+        app_root: PathBuf,
         runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
@@ -1141,8 +1229,10 @@ impl StateStore {
         head_trust: Arc<ryeos_state::refs::TrustStore>,
         recovery_observer: Option<Arc<dyn ryeos_state::ProjectionRecoveryObserver>>,
     ) -> Result<Self> {
-        let _runtime_state_directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
+        let runtime_state_directory = lillux::PinnedDirectory::open_or_create(&runtime_state_dir)
             .context("failed to establish no-follow runtime_state_dir")?;
+        let thread_runtime_authority =
+            ThreadRuntimeAuthority::capture(&app_root, &runtime_state_directory, true)?;
         ryeos_state::CasMutationGuard::ensure_anchor(&runtime_state_dir)
             .context("initialize persistent CAS mutation lock anchor")?;
         ryeos_state::gc::GcLock::ensure_anchor(&runtime_state_dir)
@@ -1186,6 +1276,7 @@ impl StateStore {
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
             state_authority,
+            thread_runtime_authority: Some(thread_runtime_authority),
             inner: Mutex::new(Inner {
                 state_db,
                 runtime_db,
@@ -2913,7 +3004,6 @@ impl StateStore {
     fn recover_pending_terminal_chain_removals_with<F>(
         &self,
         now: &str,
-        app_root: &Path,
         dry_run: bool,
         scheduler_pin_count: &F,
     ) -> Result<TerminalChainRetirement>
@@ -2966,7 +3056,10 @@ impl StateStore {
                     // vetoes: new pin admission is already forbidden once the
                     // Remove publishes. Rechecking them here would strand the
                     // exact partial cleanup this replay owns forever.
-                    let runtime_paths = inspect_thread_runtime_files(app_root, &chain.thread_ids)?;
+                    let runtime_paths = inspect_thread_runtime_files(
+                        self.thread_runtime_authority()?,
+                        &chain.thread_ids,
+                    )?;
                     result.pending_retirements_recovered += 1;
                     if !dry_run {
                         Self::finish_terminal_chain_removal(
@@ -3027,7 +3120,8 @@ impl StateStore {
                 }
                 continue;
             }
-            let runtime_paths = inspect_thread_runtime_files(app_root, &chain.thread_ids)?;
+            let runtime_paths =
+                inspect_thread_runtime_files(self.thread_runtime_authority()?, &chain.thread_ids)?;
             result.pending_retirements_recovered += 1;
             result.retired_chains += 1;
             if !dry_run {
@@ -3050,19 +3144,14 @@ impl StateStore {
     pub fn recover_pending_terminal_chain_removals<F>(
         &self,
         now: &str,
-        app_root: &Path,
         dry_run: bool,
         scheduler_pin_count: F,
     ) -> Result<TerminalChainRetirement>
     where
         F: Fn(&[String]) -> Result<u64>,
     {
-        let result = self.recover_pending_terminal_chain_removals_with(
-            now,
-            app_root,
-            dry_run,
-            &scheduler_pin_count,
-        );
+        let result =
+            self.recover_pending_terminal_chain_removals_with(now, dry_run, &scheduler_pin_count);
         match self
             .lock()
             .and_then(|g| Ok(g.state_db.pending_chain_transitions()?.len()))
@@ -3082,7 +3171,6 @@ impl StateStore {
     pub fn retire_due_terminal_chains<F>(
         &self,
         now: &str,
-        app_root: &Path,
         dry_run: bool,
         scheduler_pin_count: F,
     ) -> Result<TerminalChainRetirement>
@@ -3090,12 +3178,8 @@ impl StateStore {
         F: Fn(&[String]) -> Result<u64>,
     {
         const CANDIDATE_BATCH: usize = 128;
-        let mut result = self.recover_pending_terminal_chain_removals_with(
-            now,
-            app_root,
-            dry_run,
-            &scheduler_pin_count,
-        )?;
+        let mut result =
+            self.recover_pending_terminal_chain_removals_with(now, dry_run, &scheduler_pin_count)?;
         let mut cursor: Option<ryeos_state::DueTerminalChainCursor> = None;
         loop {
             let candidates = {
@@ -3155,7 +3239,10 @@ impl StateStore {
                 if !pins.is_empty() {
                     continue;
                 }
-                let runtime_paths = inspect_thread_runtime_files(app_root, &chain.thread_ids)?;
+                let runtime_paths = inspect_thread_runtime_files(
+                    self.thread_runtime_authority()?,
+                    &chain.thread_ids,
+                )?;
                 result.retired_chains += 1;
                 if !dry_run {
                     Self::finish_terminal_chain_removal(
@@ -4863,7 +4950,8 @@ mod tests {
             identity.verifying_key().clone(),
         );
         StateStore::new_with_head_trust(
-            tmp.join("state"),
+            tmp.clone(),
+            tmp.join(".ai/state"),
             tmp.join("runtime.sqlite3"),
             signer,
             WriteBarrier::new(),

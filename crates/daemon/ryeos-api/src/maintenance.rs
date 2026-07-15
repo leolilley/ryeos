@@ -122,7 +122,6 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     if params.deep || params.prune_runtime_history {
         let retirement = state.state_store.retire_due_terminal_chains(
             &lillux::time::iso8601_now(),
-            &state.config.app_root,
             params.dry_run,
             |thread_ids| {
                 let mut pins = 0u64;

@@ -43,6 +43,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
         ryeos_app::state_store::StateStore::new_with_head_trust(
+            tmpdir.path().to_path_buf(),
             runtime_state_dir,
             runtime_db_path,
             signer,
@@ -127,6 +128,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
         ryeos_app::state_store::StateStore::new_with_head_trust(
+            tmpdir.path().to_path_buf(),
             runtime_state_dir,
             runtime_db_path,
             signer,

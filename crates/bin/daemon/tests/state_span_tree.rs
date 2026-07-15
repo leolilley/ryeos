@@ -51,6 +51,7 @@ fn setup_state_store() -> (TempDir, Arc<StateStore>) {
     let write_barrier = WriteBarrier::new();
 
     let store = StateStore::new_with_head_trust(
+        tmpdir.path().to_path_buf(),
         runtime_state_dir,
         runtime_db_path,
         signer,

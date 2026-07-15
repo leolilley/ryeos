@@ -576,6 +576,7 @@ fn sse_dispatch_launch_collision() {
     );
     let write_barrier = WriteBarrier::new();
     let state_store = StateStore::new_with_head_trust(
+        tmpdir.path().to_path_buf(),
         runtime_state_dir,
         runtime_db_path,
         signer,

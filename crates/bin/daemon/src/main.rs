@@ -480,6 +480,7 @@ async fn main() -> Result<()> {
             )));
             let runtime_state_dir = config.runtime_state_dir();
             let runtime_db_path = config.db_path.clone();
+            let state_app_root = config.app_root.clone();
             let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
             let mut head_trust = ryeos_state::refs::TrustStore::new();
             head_trust.insert(
@@ -506,6 +507,7 @@ async fn main() -> Result<()> {
                 Arc::new(startup.clone());
             let state_store = tokio::task::spawn_blocking(move || {
                 state_store::StateStore::new_with_head_trust_and_recovery_observer(
+                    state_app_root,
                     runtime_state_dir,
                     runtime_db_path,
                     signer,
@@ -705,11 +707,9 @@ async fn main() -> Result<()> {
                 app_state.scheduler_runtime_gate.clone().write_owned().await;
             let cleanup_store = app_state.state_store.clone();
             let cleanup_scheduler = app_state.scheduler_db.clone();
-            let cleanup_app_root = app_state.config.app_root.clone();
             let recovered_removals = tokio::task::spawn_blocking(move || {
                 cleanup_store.recover_pending_terminal_chain_removals(
                     &lillux::time::iso8601_now(),
-                    &cleanup_app_root,
                     false,
                     |thread_ids| {
                         let mut pins = 0_u64;
@@ -1948,6 +1948,7 @@ async fn run_service_standalone(
     let state_store = Arc::new(match standalone_state_access {
         ryeos_app::service_registry::StandaloneStateAccess::ReadWrite => {
             state_store::StateStore::new_with_head_trust(
+                config.app_root.clone(),
                 runtime_state_dir,
                 runtime_db_path,
                 signer,
@@ -1965,6 +1966,7 @@ async fn run_service_standalone(
         }
         ryeos_app::service_registry::StandaloneStateAccess::ProjectionRebuild => {
             state_store::StateStore::new_for_projection_rebuild(
+                config.app_root.clone(),
                 runtime_state_dir,
                 runtime_db_path,
                 signer,

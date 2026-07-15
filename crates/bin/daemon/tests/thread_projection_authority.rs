@@ -81,6 +81,7 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
     );
     let state_store = Arc::new(
         StateStore::new_with_head_trust(
+            tmp.path().to_path_buf(),
             tmp.path().join(".ai").join("state"),
             tmp.path().join("runtime.sqlite3"),
             signer,

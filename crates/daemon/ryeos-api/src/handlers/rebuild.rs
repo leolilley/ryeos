@@ -45,7 +45,6 @@ async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
     };
     let state_store = state.state_store.clone();
     let scheduler_db = state.scheduler_db.clone();
-    let app_root = state.config.app_root.clone();
 
     let report = tokio::task::spawn_blocking(move || -> Result<ProjectionMaintenanceReport> {
         let rebuilt = match operation {
@@ -58,7 +57,6 @@ async fn handle(operation: Operation, state: Arc<AppState>) -> Result<Value> {
                 state_store
                     .recover_pending_terminal_chain_removals(
                         &lillux::time::iso8601_now(),
-                        &app_root,
                         false,
                         |thread_ids| {
                             let mut pins = 0_u64;
