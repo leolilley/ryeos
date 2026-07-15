@@ -29,18 +29,18 @@ impl CompiledGraph {
             .as_ref()
             .and_then(|schema| schema.get("properties"))
             .and_then(|properties| properties.as_object())
-            .map(|properties| properties.keys().map(String::as_str).collect::<HashSet<_>>());
+            .map(|properties| {
+                properties
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>()
+            });
         let mut nodes = HashMap::with_capacity(config.nodes.len());
 
         for (name, node) in &config.nodes {
             validate_iteration_variable(name, node)?;
-            let compiled = CompiledNode::compile(
-                name,
-                node,
-                &limits,
-                input_properties.as_ref(),
-            )
-            .with_context(|| format!("compile expressions for graph node `{name}`"))?;
+            let compiled = CompiledNode::compile(name, node, &limits, input_properties.as_ref())
+                .with_context(|| format!("compile expressions for graph node `{name}`"))?;
             nodes.insert(name.clone(), compiled);
         }
 
@@ -75,11 +75,7 @@ impl CompiledGraph {
         self.nodes
             .values()
             .flat_map(|node| node.references.iter())
-            .chain(
-                self.hooks
-                    .iter()
-                    .flat_map(|hook| hook.references().iter()),
-            )
+            .chain(self.hooks.iter().flat_map(|hook| hook.references().iter()))
     }
 }
 
@@ -164,7 +160,7 @@ impl CompiledNode {
                     &action_roots,
                     input_properties,
                 )?;
-                Ok(compiled)
+                Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
 
@@ -180,7 +176,7 @@ impl CompiledNode {
                     &assign_roots,
                     input_properties,
                 )?;
-                Ok(compiled)
+                Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
 
@@ -196,7 +192,7 @@ impl CompiledNode {
                     &state_roots,
                     input_properties,
                 )?;
-                Ok(compiled)
+                Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
 
@@ -212,7 +208,7 @@ impl CompiledNode {
                     &state_roots,
                     input_properties,
                 )?;
-                Ok(compiled)
+                Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
 
@@ -231,7 +227,7 @@ impl CompiledNode {
                     &action_roots,
                     input_properties,
                 )?;
-                Ok(compiled)
+                Ok::<_, anyhow::Error>(compiled)
             })
             .transpose()?;
 
@@ -244,13 +240,7 @@ impl CompiledNode {
             .next
             .as_ref()
             .map(|source| {
-                CompiledEdgeSpec::compile(
-                    name,
-                    source,
-                    condition_roots,
-                    input_properties,
-                    limits,
-                )
+                CompiledEdgeSpec::compile(name, source, condition_roots, input_properties, limits)
             })
             .transpose()?;
 
@@ -283,7 +273,9 @@ impl CompiledNode {
 
 #[derive(Debug, Clone)]
 pub(crate) enum CompiledEdgeSpec {
-    Unconditional { to: String },
+    Unconditional {
+        to: String,
+    },
     Conditional {
         branches: Vec<CompiledConditionalEdge>,
         references: ReferenceSet,
@@ -314,9 +306,7 @@ impl CompiledEdgeSpec {
                             default_seen = true;
                             CompiledCondition::Default
                         }
-                        ExpressionCondition::Boolean(value) => {
-                            CompiledCondition::Constant(*value)
-                        }
+                        ExpressionCondition::Boolean(value) => CompiledCondition::Constant(*value),
                         ExpressionCondition::Expression(source) => {
                             let expression = compile_condition_for(source, field.clone(), limits)?;
                             validate_references(
@@ -393,10 +383,11 @@ fn validate_references(
                 sorted_roots(allowed_roots).join(", ")
             );
         }
-        if matches!(
-            reference.root(),
-            "state" | "inputs" | "_execution" | "_run"
-        ) && matches!(reference.segments().first(), Some(ReferenceSegment::Index(_)))
+        if matches!(reference.root(), "state" | "inputs" | "_execution" | "_run")
+            && matches!(
+                reference.segments().first(),
+                Some(ReferenceSegment::Index(_))
+            )
         {
             bail!(
                 "{field}: expression root `{}` is an object and cannot be indexed by number",
@@ -424,14 +415,12 @@ fn validate_input_reference(
         return Ok(());
     };
     if !properties.contains(key.as_str()) {
-        bail!(
-            "{field}: input `{key}` is not declared in config.config_schema.properties"
-        );
+        bail!("{field}: input `{key}` is not declared in config.config_schema.properties");
     }
     Ok(())
 }
 
-fn sorted_roots(roots: &HashSet<&str>) -> Vec<&str> {
+fn sorted_roots<'a>(roots: &HashSet<&'a str>) -> Vec<&'a str> {
     let mut roots = roots.iter().copied().collect::<Vec<_>>();
     roots.sort_unstable();
     roots
@@ -455,9 +444,7 @@ fn validate_iteration_variable(node_name: &str, node: &GraphNode) -> Result<()> 
         variable,
         "true" | "false" | "null" | "in" | "state" | "inputs" | "result" | "_execution" | "_run"
     ) {
-        bail!(
-            "node `{node_name}` iteration variable `{variable}` is reserved by rye-expr/1"
-        );
+        bail!("node `{node_name}` iteration variable `{variable}` is reserved by rye-expr/1");
     }
     Ok(())
 }

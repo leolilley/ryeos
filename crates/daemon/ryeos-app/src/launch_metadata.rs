@@ -366,7 +366,9 @@ impl ResumeContext {
                     }
                 }
                 let pinned = original.or(pushed).ok_or_else(|| {
-                    anyhow::anyhow!("project-ref continuation has no immutable resolved snapshot pin")
+                    anyhow::anyhow!(
+                        "project-ref continuation has no immutable resolved snapshot pin"
+                    )
                 })?;
                 Ok((None, Some(pinned.to_owned())))
             }
@@ -725,7 +727,10 @@ mod tests {
     #[test]
     fn authoritative_project_identity_none_is_explicitly_empty() {
         let context = resume_context(ProjectContext::None);
-        assert_eq!(context.authoritative_project_identity().unwrap(), (None, None));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, None)
+        );
 
         let mut contradictory = context;
         contradictory.original_snapshot_hash = Some("a".repeat(64));
@@ -740,10 +745,7 @@ mod tests {
         context.original_snapshot_hash = Some("b".repeat(64));
         assert_eq!(
             context.authoritative_project_identity().unwrap(),
-            (
-                Some(PathBuf::from("/work/project")),
-                Some("b".repeat(64))
-            )
+            (Some(PathBuf::from("/work/project")), Some("b".repeat(64)))
         );
     }
 

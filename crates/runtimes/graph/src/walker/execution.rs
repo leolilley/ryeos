@@ -1,17 +1,22 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde_json::{json, Map, Value};
 
 use crate::evaluation::{
-    validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value,
-    ExpressionScope,
+    validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value, ExpressionScope,
 };
 use crate::model::*;
 use crate::{dispatch, edges, env_preflight};
 use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::RuntimeJsonArrayBudget;
 
-use super::outcome::{add_runtime_cost, RunNodeBodyContext, StepOutcome};
+use super::outcome::{
+    add_runtime_cost, ActionOkOutcome, DispatchHardErrorOutcome, ExpressionFailedOutcome,
+    ExpressionFailureEffects, FollowFanoutDoneOutcome, FollowFanoutSuspendOutcome,
+    FollowSuspendOutcome, IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome,
+    RunNodeBodyContext, StepOutcome, TerminalOrigin, TerminalOutcome,
+};
 use super::transitions::{resolve_next_on_error, retry_attempts_remaining};
 use super::{compute_cache_key, merge_into, Walker};
 
@@ -112,28 +117,24 @@ impl Walker {
         // caps at the callback boundary (enforce_callback_caps in
         // runtime_dispatch.rs). The walker is the executor only.
 
-        let rendered_action = match ExpressionScope::new(
-            state,
-            inputs,
-            Some(&execution),
-            Some(graph_run_id),
-        )
-        .render_action(action)
-        {
-            Ok(value) => value,
-            Err(err) => {
-                return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
-                    item_id: Some(item_id),
-                    error: format!(
-                        "expression evaluation failed in action for node `{current}`: {err}"
-                    ),
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: elapsed,
-                    cost: None,
-                    effects: ExpressionFailureEffects::default(),
-                });
-            }
-        };
+        let rendered_action =
+            match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
+                .render_action(action)
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    return StepOutcome::ExpressionFailed(ExpressionFailedOutcome {
+                        item_id: Some(item_id),
+                        error: format!(
+                            "expression evaluation failed in action for node `{current}`: {err}"
+                        ),
+                        next_on_error: resolve_next_on_error(node, cfg),
+                        elapsed_ms: elapsed,
+                        cost: None,
+                        effects: ExpressionFailureEffects::default(),
+                    });
+                }
+            };
 
         // Missing paths fail or are handled explicitly by `??`; authored
         // `null` is data and must survive dispatch unchanged.
@@ -224,12 +225,15 @@ impl Walker {
         // success/failure path (receipt, cost, and assign land in commit_step).
         let mut cache_hit = false;
         let mut cache_write_key = None;
-        let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> =
-            if let Some(envelope) = resumed_follow_envelope {
-                match dispatch::classify_follow_envelope(envelope) {
-                    Ok(classified) => Ok(classified.outcome),
-                    Err(error) => {
-                        return StepOutcome::Terminal(TerminalOutcome {
+        let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> = if let Some(
+            envelope,
+        ) =
+            resumed_follow_envelope
+        {
+            match dispatch::classify_follow_envelope(envelope) {
+                Ok(classified) => Ok(classified.outcome),
+                Err(error) => {
+                    return StepOutcome::Terminal(TerminalOutcome {
                             status: GraphRunStatus::Error,
                             error: Some(format!(
                                 "follow node `{current}` resumed with invalid terminal envelope: {error}"
@@ -237,78 +241,57 @@ impl Walker {
                             origin: TerminalOrigin::RunControl,
                             output: None,
                         });
-                    }
                 }
-            } else if node.is_cacheable() {
-                let cache_key = match compute_cache_key(
-                    &self.graph.definition_hash,
-                    &self.graph.graph_id,
-                    current,
-                    &rendered_action,
-                ) {
-                    Ok(cache_key) => cache_key,
-                    Err(error) => {
-                        return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
-                            item_id: Some(dispatched_item_id),
-                            error: format!(
-                                "failed to canonicalize cache identity for node `{current}`: {error}"
-                            ),
-                            elapsed_ms: elapsed,
-                            cost: None,
-                            effects: ExpressionFailureEffects::default(),
-                        });
-                    }
-                };
-                if let Some(cached) = cache.lookup(&cache_key) {
-                    cache_hit = true;
-                    // A cache hit replays a result retained earlier in this execution
-                    // and must NOT re-bill cost — `bare` carries no cost. A cached value
-                    // carrying a top-level continuation_id is still rejected loudly,
-                    // exactly like a live inline-continuation dispatch (F10 — inline
-                    // continuation is retired; use a `follow: true` node).
-                    if cached
-                        .get("continuation_id")
-                        .and_then(|v| v.as_str())
-                        .is_some()
-                    {
-                        Ok(dispatch::ActionOutcome::Failure(dispatch::ActionFailure {
-                            diagnostic: format!(
-                                "cached result for node `{current}` carries a continuation_id; \
+            }
+        } else if node.is_cacheable() {
+            let cache_key = match compute_cache_key(
+                &self.graph.definition_hash,
+                &self.graph.graph_id,
+                current,
+                &rendered_action,
+            ) {
+                Ok(cache_key) => cache_key,
+                Err(error) => {
+                    return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
+                        item_id: Some(dispatched_item_id),
+                        error: format!(
+                            "failed to canonicalize cache identity for node `{current}`: {error}"
+                        ),
+                        elapsed_ms: elapsed,
+                        cost: None,
+                        effects: ExpressionFailureEffects::default(),
+                    });
+                }
+            };
+            if let Some(cached) = cache.lookup(&cache_key) {
+                cache_hit = true;
+                // A cache hit replays a result retained earlier in this execution
+                // and must NOT re-bill cost — `bare` carries no cost. A cached value
+                // carrying a top-level continuation_id is still rejected loudly,
+                // exactly like a live inline-continuation dispatch (F10 — inline
+                // continuation is retired; use a `follow: true` node).
+                if cached
+                    .get("continuation_id")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                {
+                    Ok(dispatch::ActionOutcome::Failure(dispatch::ActionFailure {
+                        diagnostic: format!(
+                            "cached result for node `{current}` carries a continuation_id; \
                              inline continuation is retired — use a `follow: true` node"
-                            ),
-                            cost: None,
-                            retryable: false,
-                            child_thread_id: None,
-                            integrity: true,
-                        }))
-                    } else {
-                        Ok(dispatch::ActionOutcome::Success(
-                            dispatch::ActionSuccess::bare(cached),
-                        ))
-                    }
+                        ),
+                        cost: None,
+                        retryable: false,
+                        child_thread_id: None,
+                        integrity: true,
+                    }))
                 } else {
-                    match dispatch::dispatch_action(
-                        &self.client,
-                        &rendered_action,
-                        &self.thread_id,
-                        &self.project_path,
-                        Some(exec_ctx),
-                    )
-                    .await
-                    {
-                        Ok(dispatch::ActionOutcome::Success(success)) => {
-                            // Reserve the key only. Commit persists the result
-                            // after its rye-expr bounds, complete assignment,
-                            // and normal-edge selection all succeed.
-                            cache_write_key = Some(cache_key);
-                            Ok(dispatch::ActionOutcome::Success(success))
-                        }
-                        Ok(failure) => Ok(failure),
-                        Err(e) => Err(e),
-                    }
+                    Ok(dispatch::ActionOutcome::Success(
+                        dispatch::ActionSuccess::bare(cached),
+                    ))
                 }
             } else {
-                dispatch::dispatch_action(
+                match dispatch::dispatch_action(
                     &self.client,
                     &rendered_action,
                     &self.thread_id,
@@ -316,7 +299,28 @@ impl Walker {
                     Some(exec_ctx),
                 )
                 .await
-            };
+                {
+                    Ok(dispatch::ActionOutcome::Success(success)) => {
+                        // Reserve the key only. Commit persists the result
+                        // after its rye-expr bounds, complete assignment,
+                        // and normal-edge selection all succeed.
+                        cache_write_key = Some(cache_key);
+                        Ok(dispatch::ActionOutcome::Success(success))
+                    }
+                    Ok(failure) => Ok(failure),
+                    Err(e) => Err(e),
+                }
+            }
+        } else {
+            dispatch::dispatch_action(
+                &self.client,
+                &rendered_action,
+                &self.thread_id,
+                &self.project_path,
+                Some(exec_ctx),
+            )
+            .await
+        };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -355,12 +359,10 @@ impl Walker {
                         error: failure.diagnostic,
                         elapsed_ms: elapsed,
                         cost: failure.cost,
-                        effects: ExpressionFailureEffects::action(
-                            DispatchObservation::child_only(
-                                dispatched_item_id,
-                                failure.child_thread_id,
-                            ),
-                        ),
+                        effects: ExpressionFailureEffects::action(DispatchObservation::child_only(
+                            dispatched_item_id,
+                            failure.child_thread_id,
+                        )),
                     });
                 }
                 // Authored retry is an attempt budget, not blanket permission.
@@ -399,10 +401,7 @@ impl Walker {
                     cost,
                     child_thread_id,
                 } = success;
-                if let Err(error) = validate_runtime_value(
-                    &val,
-                    "graph action result",
-                ) {
+                if let Err(error) = validate_runtime_value(&val, "graph action result") {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                         item_id: Some(dispatched_item_id.clone()),
                         error: format!(
@@ -410,12 +409,10 @@ impl Walker {
                         ),
                         elapsed_ms: elapsed,
                         cost,
-                        effects: ExpressionFailureEffects::action(
-                            DispatchObservation::child_only(
-                                dispatched_item_id,
-                                child_thread_id,
-                            ),
-                        ),
+                        effects: ExpressionFailureEffects::action(DispatchObservation::child_only(
+                            dispatched_item_id,
+                            child_thread_id,
+                        )),
                     });
                 }
                 let dispatch_observation = DispatchObservation::from_success(
@@ -459,10 +456,9 @@ impl Walker {
                 if let Some(assign) = assign.as_ref() {
                     merge_into(&mut candidate_state, assign);
                 }
-                if let Err(error) = validate_runtime_value(
-                    &candidate_state,
-                    "action candidate state",
-                ) {
+                if let Err(error) =
+                    validate_runtime_value(&candidate_state, "action candidate state")
+                {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                         item_id: Some(dispatched_item_id),
                         error: format!(
@@ -590,10 +586,7 @@ impl Walker {
             .to_string();
 
         if let Some(wrapper) = resumed {
-            if let Err(error) = validate_runtime_shape(
-                &wrapper,
-                "follow fanout resume envelope",
-            ) {
+            if let Err(error) = validate_runtime_shape(&wrapper, "follow fanout resume envelope") {
                 return StepOutcome::Terminal(TerminalOutcome {
                     status: GraphRunStatus::Error,
                     error: Some(format!(
@@ -661,10 +654,9 @@ impl Walker {
                     }
                 }
             }
-            if let Err(error) = validate_runtime_array_shape(
-                &results,
-                "follow fanout collected results",
-            ) {
+            if let Err(error) =
+                validate_runtime_array_shape(&results, "follow fanout collected results")
+            {
                 return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                     item_id: Some(raw_item_id),
                     error: format!(
@@ -676,8 +668,8 @@ impl Walker {
                 });
             }
             let route = resolve_next_on_error(node, cfg);
-            let evaluate_normal_branch = errors.is_empty()
-                || matches!(&route, super::outcome::NextOnError::PolicyContinue);
+            let evaluate_normal_branch =
+                errors.is_empty() || matches!(&route, super::outcome::NextOnError::PolicyContinue);
             let next = if evaluate_normal_branch {
                 match evaluate_fanout_next(
                     compiled,
@@ -809,13 +801,8 @@ impl Walker {
         let mut children = Vec::new();
         let mut launch_budget = RuntimeJsonArrayBudget::new("follow fanout launch cohort");
         for (index, item) in over.iter().enumerate() {
-            let scope = ExpressionScope::new(
-                state,
-                inputs,
-                Some(execution),
-                Some(graph_run_id),
-            )
-            .with_foreach(&var, item);
+            let scope = ExpressionScope::new(state, inputs, Some(execution), Some(graph_run_id))
+                .with_foreach(&var, item);
             let mut action = match scope.render_action(
                 compiled
                     .action
@@ -994,10 +981,10 @@ fn evaluate_fanout_next(
         if !candidate.is_object() {
             candidate = Value::Object(serde_json::Map::new());
         }
-        candidate.as_object_mut().unwrap().insert(
-            collect.clone(),
-            Value::Array(results.to_vec()),
-        );
+        candidate
+            .as_object_mut()
+            .unwrap()
+            .insert(collect.clone(), Value::Array(results.to_vec()));
     }
     validate_runtime_shape(&candidate, "follow fanout candidate state")
         .map_err(FanoutNextError::Integrity)?;

@@ -398,10 +398,14 @@ mod tests {
         let signed2 = unsigned().sign(&signer).unwrap();
         assert_eq!(signed1.to_value(), signed2.to_value());
         let hash1 = lillux::sha256_hex(
-            lillux::canonical_json(&signed1.to_value()).unwrap().as_bytes(),
+            lillux::canonical_json(&signed1.to_value())
+                .unwrap()
+                .as_bytes(),
         );
         let hash2 = lillux::sha256_hex(
-            lillux::canonical_json(&signed2.to_value()).unwrap().as_bytes(),
+            lillux::canonical_json(&signed2.to_value())
+                .unwrap()
+                .as_bytes(),
         );
         assert_eq!(hash1, hash2);
     }

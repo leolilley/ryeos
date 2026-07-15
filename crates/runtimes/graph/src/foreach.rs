@@ -6,9 +6,7 @@ use serde_json::{Map, Value};
 use crate::compiled_graph::CompiledNode;
 use crate::context::ExecutionContext;
 use crate::evaluation::{validate_runtime_value, ExpressionScope};
-use crate::model::{
-    DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig,
-};
+use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError};
 use ryeos_runtime::events::RuntimeEventType;
@@ -167,7 +165,10 @@ fn retain_retry_warnings(
     budget: &mut RuntimeJsonArrayBudget,
     incoming: Vec<String>,
 ) {
-    if warnings.last().is_some_and(|warning| warning == RETRY_WARNINGS_TRUNCATED) {
+    if warnings
+        .last()
+        .is_some_and(|warning| warning == RETRY_WARNINGS_TRUNCATED)
+    {
         return;
     }
     for warning in incoming {
@@ -181,8 +182,11 @@ fn retain_retry_warnings(
 
 fn bounded_retry_warning(error: impl std::fmt::Display) -> String {
     let warning = format!("graph_node_retry callback failed: {error}");
-    if validate_runtime_value(&Value::String(warning.clone()), "foreach retry callback warning")
-        .is_ok()
+    if validate_runtime_value(
+        &Value::String(warning.clone()),
+        "foreach retry callback warning",
+    )
+    .is_ok()
     {
         warning
     } else {
@@ -384,15 +388,12 @@ pub async fn run_foreach_sequential(
     let mut callback_warnings = Vec::new();
     let mut callback_warning_budget =
         RuntimeJsonArrayBudget::new(format!("node {current_node}.foreach retry warnings"));
-    let mut result_budget = RuntimeJsonArrayBudget::new(format!(
-        "node {current_node}.foreach results"
-    ));
-    let mut error_budget = RuntimeJsonArrayBudget::new(format!(
-        "node {current_node}.foreach errors"
-    ));
-    let mut observation_budget = RuntimeJsonArrayBudget::new(format!(
-        "node {current_node}.foreach observations"
-    ));
+    let mut result_budget =
+        RuntimeJsonArrayBudget::new(format!("node {current_node}.foreach results"));
+    let mut error_budget =
+        RuntimeJsonArrayBudget::new(format!("node {current_node}.foreach errors"));
+    let mut observation_budget =
+        RuntimeJsonArrayBudget::new(format!("node {current_node}.foreach observations"));
     // Accumulated assign deltas. Each iteration sees base state + the
     // deltas applied so far, so a later item can read an earlier item's
     // assign — but the mutations land in real state only via the caller.
@@ -484,9 +485,7 @@ pub async fn run_foreach_sequential(
                     ErrorRecord {
                         step,
                         node: current_node.to_string(),
-                        error: format!(
-                            "expression evaluation failed in foreach action: {error}"
-                        ),
+                        error: format!("expression evaluation failed in foreach action: {error}"),
                     },
                 ) {
                     limit_error = Some(format!(
@@ -494,11 +493,7 @@ pub async fn run_foreach_sequential(
                     ));
                     break;
                 }
-                if let Err(error) = append_result(
-                    &mut results,
-                    &mut result_budget,
-                    Value::Null,
-                ) {
+                if let Err(error) = append_result(&mut results, &mut result_budget, Value::Null) {
                     limit_error = Some(format!(
                         "foreach node `{current_node}` could not retain a null result placeholder: {error}"
                     ));
@@ -548,10 +543,7 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(
-                            item_dispatch_id.clone(),
-                            child_thread_id,
-                        ),
+                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -570,10 +562,7 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(
-                            item_dispatch_id.clone(),
-                            child_thread_id,
-                        ),
+                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
                     )
                     .err();
                     let history_error = retain_error(
@@ -588,11 +577,7 @@ pub async fn run_foreach_sequential(
                         },
                     )
                     .err();
-                    let placeholder = append_result(
-                        &mut results,
-                        &mut result_budget,
-                        Value::Null,
-                    );
+                    let placeholder = append_result(&mut results, &mut result_budget, Value::Null);
                     limit_error = Some(if let Some(observation_error) = observation_error {
                         format!(
                             "foreach node `{current_node}` observation history exceeded rye-expr/1 aggregate bounds: {observation_error}"
@@ -650,11 +635,8 @@ pub async fn run_foreach_sequential(
                             if let Err(error) = candidate_budget.apply(assign) {
                                 result_budget = result_budget_before;
                                 statuses.push(GraphToolCallStatus::IntegrityFailed);
-                                let placeholder = append_result(
-                                    &mut results,
-                                    &mut result_budget,
-                                    Value::Null,
-                                );
+                                let placeholder =
+                                    append_result(&mut results, &mut result_budget, Value::Null);
                                 limit_error = Some(match placeholder {
                                     Ok(()) => format!(
                                         "foreach candidate state exceeded rye-expr/1 bounds: {error}"
@@ -689,11 +671,9 @@ pub async fn run_foreach_sequential(
                                 ));
                                 break;
                             }
-                            if let Err(placeholder_error) = append_result(
-                                &mut results,
-                                &mut result_budget,
-                                Value::Null,
-                            ) {
+                            if let Err(placeholder_error) =
+                                append_result(&mut results, &mut result_budget, Value::Null)
+                            {
                                 limit_error = Some(format!(
                                     "foreach node `{current_node}` could not retain a null result placeholder: {placeholder_error}"
                                 ));
@@ -725,10 +705,7 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(
-                            item_dispatch_id.clone(),
-                            child_thread_id,
-                        ),
+                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -746,10 +723,7 @@ pub async fn run_foreach_sequential(
                     let observation_error = retain_observation(
                         &mut observations,
                         &mut observation_budget,
-                        DispatchObservation::child_only(
-                            item_dispatch_id.clone(),
-                            child_thread_id,
-                        ),
+                        DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
                     )
                     .err();
                     limit_error = Some(match observation_error {
@@ -766,10 +740,7 @@ pub async fn run_foreach_sequential(
                 if let Err(error) = retain_observation(
                     &mut observations,
                     &mut observation_budget,
-                    DispatchObservation::child_only(
-                        item_dispatch_id.clone(),
-                        child_thread_id,
-                    ),
+                    DispatchObservation::child_only(item_dispatch_id.clone(), child_thread_id),
                 ) {
                     limit_error = Some(format!(
                         "foreach node `{current_node}` observation history exceeded rye-expr/1 aggregate bounds: {error}"
@@ -782,10 +753,7 @@ pub async fn run_foreach_sequential(
                     ErrorRecord {
                         step,
                         node: current_node.to_string(),
-                        error: format!(
-                            "foreach sequential iteration failed: {}",
-                            diagnostic
-                        ),
+                        error: format!("foreach sequential iteration failed: {}", diagnostic),
                     },
                 ) {
                     limit_error = Some(format!(
@@ -793,11 +761,7 @@ pub async fn run_foreach_sequential(
                     ));
                     break;
                 }
-                if let Err(error) = append_result(
-                    &mut results,
-                    &mut result_budget,
-                    Value::Null,
-                ) {
+                if let Err(error) = append_result(&mut results, &mut result_budget, Value::Null) {
                     limit_error = Some(format!(
                         "foreach node `{current_node}` could not retain a null result placeholder: {error}"
                     ));
@@ -824,11 +788,7 @@ pub async fn run_foreach_sequential(
                     ));
                     break;
                 }
-                if let Err(error) = append_result(
-                    &mut results,
-                    &mut result_budget,
-                    Value::Null,
-                ) {
+                if let Err(error) = append_result(&mut results, &mut result_budget, Value::Null) {
                     limit_error = Some(format!(
                         "foreach node `{current_node}` could not retain a null result placeholder: {error}"
                     ));
@@ -921,15 +881,12 @@ pub async fn run_foreach_parallel(
     let mut callback_warning_budget = RuntimeJsonArrayBudget::new(format!(
         "node {current_node}.parallel foreach retry warnings"
     ));
-    let mut result_budget = RuntimeJsonArrayBudget::new(format!(
-        "node {current_node}.parallel foreach results"
-    ));
-    let mut error_budget = RuntimeJsonArrayBudget::new(format!(
-        "node {current_node}.parallel foreach errors"
-    ));
-    let mut observation_budget = RuntimeJsonArrayBudget::new(format!(
-        "node {current_node}.parallel foreach observations"
-    ));
+    let mut result_budget =
+        RuntimeJsonArrayBudget::new(format!("node {current_node}.parallel foreach results"));
+    let mut error_budget =
+        RuntimeJsonArrayBudget::new(format!("node {current_node}.parallel foreach errors"));
+    let mut observation_budget =
+        RuntimeJsonArrayBudget::new(format!("node {current_node}.parallel foreach observations"));
 
     // Process bounded batches in input order. The previous semaphore design
     // spawned every item immediately; completed tasks could then retain every
@@ -952,33 +909,29 @@ pub async fn run_foreach_parallel(
                 Some(action) => action,
                 None => continue,
             };
-            let mut rendered = match ExpressionScope::new(
-                state,
-                inputs,
-                Some(&execution),
-                Some(graph_run_id),
-            )
-            .with_foreach(var, item)
-            .render_action(action)
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    work.push(ParallelWork::Ready(ParallelItem::Failure {
-                        diagnostic: bounded_parallel_diagnostic(format!(
-                            "expression evaluation failed in foreach action: {error}"
-                        )),
-                        cost: None,
-                        status: GraphToolCallStatus::ExpressionFailed,
-                        item_id: None,
-                        child_thread_id: None,
-                        integrity: false,
-                    }));
-                    if !continue_on_error {
-                        break;
+            let mut rendered =
+                match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
+                    .with_foreach(var, item)
+                    .render_action(action)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        work.push(ParallelWork::Ready(ParallelItem::Failure {
+                            diagnostic: bounded_parallel_diagnostic(format!(
+                                "expression evaluation failed in foreach action: {error}"
+                            )),
+                            cost: None,
+                            status: GraphToolCallStatus::ExpressionFailed,
+                            item_id: None,
+                            child_thread_id: None,
+                            integrity: false,
+                        }));
+                        if !continue_on_error {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
             fold_launch_window(node, &mut rendered, graph_run_id, current_node);
             if let Err(error) = launch_budget.append(&rendered) {
                 work.push(ParallelWork::Ready(ParallelItem::Failure {
@@ -1319,6 +1272,7 @@ fn merge_object_into(delta: &mut Map<String, Value>, source: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MAX_RETRY_BACKOFF_MS;
     use serde_json::json;
 
     fn detach_node(max_concurrency: Option<usize>) -> GraphNode {

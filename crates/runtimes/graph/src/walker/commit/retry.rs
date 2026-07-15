@@ -14,7 +14,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let RetryScheduledOutcome {
@@ -63,8 +63,7 @@ impl Walker {
             cost: cost.clone(),
             fanout: None,
         };
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
 
         self.emit_graph_node_retry(
             graph_run_id,
@@ -111,7 +110,6 @@ impl Walker {
                 guard,
                 failed_attempt,
                 inputs,
-                execution,
             )
             .await;
         if let CommitResult::Advance { .. } = &advance {

@@ -674,13 +674,10 @@ fn strip_declared_control_flags(
                 }
                 Bind::StateRoot => flags.state_root = Some(value),
                 Bind::RefBinding => {
-                    let (binding_name, item_ref) = value.split_once('=').ok_or_else(|| {
-                        CliError::Local {
-                            detail: format!(
-                                "--{name} requires name=canonical-ref, got '{value}'"
-                            ),
-                        }
-                    })?;
+                    let (binding_name, item_ref) =
+                        value.split_once('=').ok_or_else(|| CliError::Local {
+                            detail: format!("--{name} requires name=canonical-ref, got '{value}'"),
+                        })?;
                     validate_ref_binding_name(binding_name)?;
                     if item_ref.is_empty() {
                         return Err(CliError::Local {
@@ -694,9 +691,7 @@ fn strip_declared_control_flags(
                     }
                     if flags.ref_bindings.contains_key(binding_name) {
                         return Err(CliError::Local {
-                            detail: format!(
-                                "duplicate --{name} binding name '{binding_name}'"
-                            ),
+                            detail: format!("duplicate --{name} binding name '{binding_name}'"),
                         });
                     }
                     if flags.ref_bindings.len() >= 32 {
@@ -762,8 +757,7 @@ fn validate_ref_binding_name(name: &str) -> Result<(), CliError> {
         && name.split('_').enumerate().all(|(index, segment)| {
             !segment.is_empty()
                 && segment.chars().enumerate().all(|(char_index, ch)| {
-                    ch.is_ascii_lowercase()
-                        || ch.is_ascii_digit() && (index > 0 || char_index > 0)
+                    ch.is_ascii_lowercase() || ch.is_ascii_digit() && (index > 0 || char_index > 0)
                 })
                 && (index > 0
                     || segment
@@ -1606,7 +1600,12 @@ mod tests {
         );
 
         for invalid in [
-            s(&["--ref-binding", "model=tool:a", "--ref-binding", "model=tool:a"]),
+            s(&[
+                "--ref-binding",
+                "model=tool:a",
+                "--ref-binding",
+                "model=tool:a",
+            ]),
             s(&["--ref-binding", "Model=tool:a"]),
             s(&["--ref-binding", "model"]),
             s(&["--ref-binding", "model=not-a-ref"]),

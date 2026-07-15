@@ -6,10 +6,7 @@ use ryeos_runtime::{
     EvaluationLimits, EvaluationSession, ExpressionError,
 };
 
-pub(crate) fn validate_runtime_value(
-    value: &Value,
-    field: &str,
-) -> Result<(), ExpressionError> {
+pub(crate) fn validate_runtime_value(value: &Value, field: &str) -> Result<(), ExpressionError> {
     let context = EvaluationContext::new();
     let limits = EvaluationLimits::default();
     EvaluationSession::with_context(&context, &limits).validate_value(value, field)
@@ -20,10 +17,7 @@ pub(crate) fn validate_runtime_value(
 /// execution. Checkpoints and history snapshots can legitimately approach the
 /// result-shape ceiling; provisioning inspection fuel from that ceiling keeps
 /// write and resume acceptance identical.
-pub(crate) fn validate_runtime_shape(
-    value: &Value,
-    field: &str,
-) -> Result<(), ExpressionError> {
+pub(crate) fn validate_runtime_shape(value: &Value, field: &str) -> Result<(), ExpressionError> {
     validate_checkpoint_shape(value, field)
 }
 

@@ -18,9 +18,9 @@ mod result_guard;
 mod resume;
 mod runner;
 
+use ryeos_directive_core::{ResolvedProviderSnapshot, PROVIDER_SNAPSHOT_KEY};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
 use ryeos_runtime::events::RuntimeEventType;
-use ryeos_directive_core::{ResolvedProviderSnapshot, PROVIDER_SNAPSHOT_KEY};
 
 /// Compile the directive-owned stimulus field and derive its exact input-key
 /// references from the AST. Inventory tests call this same boundary without
@@ -230,16 +230,13 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     callback.attach_current_process().await?;
 
     let mut runtime_data = std::mem::take(&mut envelope.runtime_data);
-    let provider_snapshot: ResolvedProviderSnapshot = serde_json::from_value(
-        runtime_data.remove(PROVIDER_SNAPSHOT_KEY).ok_or_else(|| {
-            anyhow::anyhow!(
-                "launch runtime_data missing required {PROVIDER_SNAPSHOT_KEY} value"
-            )
-        })?,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!("failed to deserialize {PROVIDER_SNAPSHOT_KEY} runtime data: {e}")
-    })?;
+    let provider_snapshot: ResolvedProviderSnapshot =
+        serde_json::from_value(runtime_data.remove(PROVIDER_SNAPSHOT_KEY).ok_or_else(|| {
+            anyhow::anyhow!("launch runtime_data missing required {PROVIDER_SNAPSHOT_KEY} value")
+        })?)
+        .map_err(|e| {
+            anyhow::anyhow!("failed to deserialize {PROVIDER_SNAPSHOT_KEY} runtime data: {e}")
+        })?;
     if !runtime_data.is_empty() {
         anyhow::bail!(
             "launch runtime_data contains undeclared leftovers after consuming \
@@ -309,7 +306,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     // launch, or operator follow-up). A MACHINE continuation suppresses it
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
-    let runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
+    let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
         let carry_turns = bootstrap_output
             .config
             .continuation_runtime

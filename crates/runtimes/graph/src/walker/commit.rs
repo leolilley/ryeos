@@ -67,13 +67,9 @@ impl Walker {
             StepOutcome::RetryScheduled(outcome) => {
                 self.commit_retry_scheduled(context, outcome).await
             }
-            StepOutcome::Terminal(outcome) => {
-                self.commit_terminal_outcome(context, outcome).await
-            }
+            StepOutcome::Terminal(outcome) => self.commit_terminal_outcome(context, outcome).await,
             StepOutcome::GateTaken(outcome) => self.commit_gate_taken(context, outcome).await,
-            StepOutcome::ForeachDone(outcome) => {
-                self.commit_foreach_done(context, outcome).await
-            }
+            StepOutcome::ForeachDone(outcome) => self.commit_foreach_done(context, outcome).await,
             StepOutcome::ForeachFailed(outcome) => {
                 self.commit_foreach_failed(context, outcome).await
             }
@@ -181,9 +177,7 @@ impl Walker {
             error,
             output,
             guard,
-            current_node_id: _,
             inputs,
-            execution: _,
         } = input;
         let resolve_status = |history_failed: bool| {
             let effective_status = if history_failed {
@@ -200,9 +194,7 @@ impl Walker {
                     };
                     (true, status)
                 }
-                GraphRunStatus::CompletedWithErrors => {
-                    (true, GraphRunStatus::CompletedWithErrors)
-                }
+                GraphRunStatus::CompletedWithErrors => (true, GraphRunStatus::CompletedWithErrors),
                 GraphRunStatus::MaxStepsExceeded => (false, GraphRunStatus::MaxStepsExceeded),
                 GraphRunStatus::Cancelled => (false, GraphRunStatus::Cancelled),
                 GraphRunStatus::Killed => (false, GraphRunStatus::Killed),
@@ -217,8 +209,7 @@ impl Walker {
         // finalization. Their child cost is part of this run; a cost-history
         // rejection must still be able to fail the terminal cleanly.
         let initial_history_failure = self.run_history_failure();
-        let (observed_success, observed_status) =
-            resolve_status(initial_history_failure.is_some());
+        let (observed_success, observed_status) = resolve_status(initial_history_failure.is_some());
         if initial_history_failure.is_none() {
             self.fire_graph_hooks(
                 self.graph_completed_hook_occurrence(graph_run_id, steps),
@@ -369,10 +360,9 @@ impl Walker {
         let r = self.client.finalize_thread(completion).await;
         match r {
             Ok(_) => guard.finalized = true,
-            Err(error) => self.record_callback_warning(
-                "finalize_thread",
-                Err(anyhow::anyhow!(error)),
-            ),
+            Err(error) => {
+                self.record_callback_warning("finalize_thread", Err(anyhow::anyhow!(error)))
+            }
         }
 
         CommitResult::Terminate(Box::new(graph_result))

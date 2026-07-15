@@ -14,7 +14,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let ForeachDoneOutcome {
@@ -42,14 +42,8 @@ impl Walker {
             self.record_node_cost(current, step, item_id, c.clone());
         }
 
-        self.emit_foreach_iteration_statuses(
-            graph_run_id,
-            current,
-            step,
-            statuses,
-            *total_items,
-        )
-        .await;
+        self.emit_foreach_iteration_statuses(graph_run_id, current, step, statuses, *total_items)
+            .await;
 
         for observation in observations {
             self.emit_dispatch_observation(current, step, observation)
@@ -77,14 +71,8 @@ impl Walker {
         };
         self.extend_suppressed_errors(suppressed_errors, errors.iter().cloned());
 
-        self.emit_graph_step_completed(
-            graph_run_id,
-            step,
-            current,
-            status,
-            diagnostic.as_deref(),
-        )
-        .await;
+        self.emit_graph_step_completed(graph_run_id, step, current, status, diagnostic.as_deref())
+            .await;
         self.fire_graph_hooks(
             self.graph_step_completed_hook_occurrence(graph_run_id, step, current),
             self.step_hook_context(
@@ -110,7 +98,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -124,9 +111,7 @@ impl Walker {
                     error: None,
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }

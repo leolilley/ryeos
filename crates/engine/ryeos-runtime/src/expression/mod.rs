@@ -462,7 +462,7 @@ impl<'a> EvaluationSession<'a> {
         field: impl Into<String>,
     ) -> Result<(), ExpressionError> {
         let source: Arc<str> = Arc::from("<assembled JSON>");
-        let mut evaluator = self.evaluator(source.clone(), Some(Arc::from(field.into())));
+        let evaluator = self.evaluator(source.clone(), Some(Arc::from(field.into())));
         let span = SourceSpan::new(0, source.len());
         if depth > evaluator.budget.limits.max_result_depth {
             return Err(evaluator.limit_error(span, "result exceeds JSON depth limit"));

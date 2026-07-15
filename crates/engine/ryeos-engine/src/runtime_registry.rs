@@ -577,9 +577,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
     if contract.ref_bindings.len() > MAX_LAUNCH_BINDINGS {
         return runtime_yaml_error(
             yaml_path,
-            format!(
-                "launch_contract.ref_bindings exceeds the limit of {MAX_LAUNCH_BINDINGS}"
-            ),
+            format!("launch_contract.ref_bindings exceeds the limit of {MAX_LAUNCH_BINDINGS}"),
         );
     }
     for (name, binding) in &contract.ref_bindings {
@@ -767,9 +765,7 @@ fn validate_launch_contract_kinds(
         if kind != &yaml.serves && !kinds.contains(kind) {
             return runtime_yaml_error(
                 yaml_path,
-                format!(
-                    "launch_contract.primary_allowed_kinds contains unknown kind `{kind}`"
-                ),
+                format!("launch_contract.primary_allowed_kinds contains unknown kind `{kind}`"),
             );
         }
     }
@@ -844,11 +840,7 @@ where
     values.iter().any(|value| !seen.insert(value))
 }
 
-fn validate_launch_name(
-    yaml_path: &Path,
-    field: &str,
-    name: &str,
-) -> Result<(), EngineError> {
+fn validate_launch_name(yaml_path: &Path, field: &str, name: &str) -> Result<(), EngineError> {
     let valid = !name.is_empty()
         && name.len() <= MAX_LAUNCH_NAME_BYTES
         && name
@@ -892,27 +884,19 @@ fn validate_config_identity(
                     .next()
                     .is_some_and(|byte| byte.is_ascii_alphanumeric())
                 && segment.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric()
-                        || byte == b'.'
-                        || byte == b'_'
-                        || byte == b'-'
+                    byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'_' || byte == b'-'
                 })
         });
     if !valid {
         return runtime_yaml_error(
             yaml_path,
-            format!(
-                "{field} `{identity}` is not a valid extensionless config identity"
-            ),
+            format!("{field} `{identity}` is not a valid extensionless config identity"),
         );
     }
     Ok(())
 }
 
-fn runtime_yaml_error<T>(
-    yaml_path: &Path,
-    reason: impl Into<String>,
-) -> Result<T, EngineError> {
+fn runtime_yaml_error<T>(yaml_path: &Path, reason: impl Into<String>) -> Result<T, EngineError> {
     Err(EngineError::RuntimeYamlInvalid {
         path: yaml_path.to_owned(),
         reason: reason.into(),

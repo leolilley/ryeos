@@ -1,4 +1,5 @@
 use super::*;
+use crate::walker::continued_terminal_completion;
 
 impl Walker {
     pub(super) async fn commit_follow_suspend(
@@ -14,7 +15,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let FollowSuspendOutcome {
@@ -37,14 +38,7 @@ impl Walker {
         // idempotently (by follow_key). A checkpoint failure is a hard error
         // like any other resume-correctness failure.
         if let Err(e) = self
-            .write_follow_checkpoint(
-                graph_run_id,
-                current,
-                step,
-                state,
-                suppressed_errors,
-                None,
-            )
+            .write_follow_checkpoint(graph_run_id, current, step, state, suppressed_errors, None)
             .await
         {
             let msg = format!("follow checkpoint write failed: {e}");
@@ -58,9 +52,7 @@ impl Walker {
                     error: Some(&msg),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await;
         }
@@ -134,9 +126,7 @@ impl Walker {
                     error: Some(&msg),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }
@@ -156,7 +146,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let FollowFanoutSuspendOutcome {
@@ -196,9 +186,7 @@ impl Walker {
                     error: Some(&msg),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await;
         }
@@ -216,8 +204,7 @@ impl Walker {
             steps: step,
             state: state.clone(),
             result: None,
-            errors_suppressed: (!suppressed_errors.is_empty())
-                .then_some(suppressed_errors.len()),
+            errors_suppressed: (!suppressed_errors.is_empty()).then_some(suppressed_errors.len()),
             errors: (!suppressed_errors.is_empty()).then_some(suppressed_errors.clone()),
             error: None,
             cost: agg_cost,
@@ -256,9 +243,7 @@ impl Walker {
                     error: Some(&msg),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }
@@ -278,7 +263,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let FollowFanoutDoneOutcome {
@@ -316,10 +301,7 @@ impl Walker {
             match next_on_error {
                 NextOnError::Redirect(target) => (Some(target), false, false),
                 NextOnError::PolicyContinue => {
-                    self.extend_suppressed_errors(
-                        suppressed_errors,
-                        errors.iter().cloned(),
-                    );
+                    self.extend_suppressed_errors(suppressed_errors, errors.iter().cloned());
                     (next, true, false)
                 }
                 NextOnError::PolicyFail => (None, false, true),
@@ -354,9 +336,7 @@ impl Walker {
                         error: Some(&message),
                         output: None,
                         guard,
-                        current_node_id: current,
                         inputs,
-                        execution,
                     })
                     .await;
             }
@@ -383,21 +363,14 @@ impl Walker {
                 results: None,
             }),
         };
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
         let status = if errors.is_empty() {
             GraphStepStatus::Ok
         } else {
             GraphStepStatus::Error
         };
-        self.emit_graph_step_completed(
-            graph_run_id,
-            step,
-            current,
-            status,
-            diagnostic.as_deref(),
-        )
-        .await;
+        self.emit_graph_step_completed(graph_run_id, step, current, status, diagnostic.as_deref())
+            .await;
         self.fire_graph_hooks(
             self.graph_step_completed_hook_occurrence(graph_run_id, step, current),
             self.step_hook_context(
@@ -422,9 +395,7 @@ impl Walker {
                     error: diagnostic.as_deref(),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await;
         }
@@ -441,7 +412,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -455,9 +425,7 @@ impl Walker {
                     error: None,
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }

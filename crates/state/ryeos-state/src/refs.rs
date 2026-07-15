@@ -22,12 +22,15 @@ use lillux::crypto::Verifier;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(test)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::objects::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
@@ -35,6 +38,7 @@ use crate::signer::Signer;
 
 const SIGNED_REF_SCHEMA: u32 = 1;
 const SIGNED_REF_KIND: &str = "signed_ref";
+#[cfg(test)]
 static REF_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
@@ -264,6 +268,7 @@ fn read_ref_directory_names(_directory: &File) -> anyhow::Result<Vec<std::ffi::O
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn atomic_write_ref_no_follow(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let (parent, file_name) = open_ref_parent_no_follow(path, true)?
         .ok_or_else(|| anyhow!("failed to create ref parent for {}", path.display()))?;
@@ -327,29 +332,6 @@ fn atomic_write_ref_no_follow(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         }
     }
     result
-}
-
-#[cfg(unix)]
-fn remove_regular_ref_no_follow(path: &Path) -> anyhow::Result<bool> {
-    let Some((parent, file_name)) = open_ref_parent_no_follow(path, false)? else {
-        return Ok(false);
-    };
-    let Some(held) = open_regular_ref_at(&parent, &file_name, path, false, false)? else {
-        return Ok(false);
-    };
-    let current = open_regular_ref_at(&parent, &file_name, path, false, false)?
-        .ok_or_else(|| anyhow!("ref disappeared before removal: {}", path.display()))?;
-    if !same_file(&held, &current)? {
-        anyhow::bail!("ref changed before removal: {}", path.display());
-    }
-    if unsafe { libc::unlinkat(parent.as_raw_fd(), file_name.as_ptr(), 0) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("remove ref descriptor-relative {}", path.display()));
-    }
-    parent
-        .sync_all()
-        .with_context(|| format!("sync ref parent after removing {}", path.display()))?;
-    Ok(true)
 }
 
 /// A signed reference — an authoritative mutable pointer to a CAS object.
@@ -433,6 +415,7 @@ impl SignedRef {
 ///
 /// The signature is computed over the canonical JSON representation
 /// of the ref WITHOUT the signature field.
+#[cfg(test)]
 pub(crate) fn write_signed_ref(
     path: &Path,
     signed_ref: SignedRef,
@@ -449,8 +432,8 @@ pub(crate) fn write_signed_ref(
 fn encode_signed_ref(mut signed_ref: SignedRef, signer: &dyn Signer) -> anyhow::Result<Vec<u8>> {
     // Compute signature over the ref without the signature field
     let unsigned = signed_ref.without_signature();
-    let canonical = lillux::canonical_json(&unsigned)
-        .context("failed to canonicalize unsigned ref")?;
+    let canonical =
+        lillux::canonical_json(&unsigned).context("failed to canonicalize unsigned ref")?;
     let sig_bytes = signer.sign(canonical.as_bytes());
     signed_ref.signature = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
 
@@ -607,8 +590,8 @@ pub fn verify_signed_ref(
 
     // Reconstruct the canonical JSON without the signature
     let unsigned = signed_ref.without_signature();
-    let canonical = lillux::canonical_json(&unsigned)
-        .context("failed to canonicalize unsigned ref")?;
+    let canonical =
+        lillux::canonical_json(&unsigned).context("failed to canonicalize unsigned ref")?;
 
     // Decode the signature from base64
     let sig_bytes = base64::engine::general_purpose::STANDARD
@@ -819,6 +802,7 @@ fn project_head_file_path(
     Ok(refs_root.join(project_head_ref_path(principal_key, project_hash)?))
 }
 
+#[cfg(test)]
 fn ensure_same_lock_inode(
     held_file: &File,
     expected_path: &Path,
@@ -851,6 +835,7 @@ fn ensure_same_lock_inode(
 /// [`principal_storage_key`]). The `project_hash` is derived from the
 /// project path. The `project_snapshot_hash` is the CAS hash of the
 /// `ProjectSnapshot` this HEAD points to.
+#[cfg(test)]
 pub(crate) fn write_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
@@ -885,6 +870,7 @@ pub(crate) fn write_verified_project_head_ref(
     )
 }
 
+#[cfg(test)]
 fn write_project_head_ref_unchecked(
     refs_root: &Path,
     principal_key: &str,
@@ -1368,6 +1354,7 @@ impl ProjectHeadLock {
         })
     }
 
+    #[cfg(test)]
     fn ensure_protects(
         &self,
         refs_root: &Path,
@@ -1389,16 +1376,6 @@ impl ProjectHeadLock {
             .join(project_hash)
             .join("lock");
         ensure_same_lock_inode(&self._lock_file, &expected_path, "project HEAD")
-    }
-
-    pub(crate) fn ensure_protects_in_refs_directory(
-        &self,
-        refs_directory: &lillux::PinnedDirectory,
-        principal_key: &str,
-        project_hash: &str,
-    ) -> anyhow::Result<()> {
-        self.protected_directory_in_refs(refs_directory, principal_key, project_hash)
-            .map(|_| ())
     }
 
     fn protected_directory_in_refs(
@@ -1439,47 +1416,11 @@ pub(crate) struct DeployedProjectHeadLock {
 }
 
 impl DeployedProjectHeadLock {
-    pub(crate) fn acquire(refs_root: &Path, project_hash: &str) -> anyhow::Result<Self> {
-        validate_single_ref_component("deployed project hash", project_hash)?;
-        let lock_path = refs_root
-            .join("deployed/projects")
-            .join(project_hash)
-            .join("lock");
-        #[cfg(unix)]
-        let lock_file = open_regular_ref_path_no_follow(&lock_path, true, true, true)?
-            .expect("create=true opens deployed-project HEAD lock");
-        #[cfg(not(unix))]
-        let lock_file: File =
-            anyhow::bail!("deployed-project HEAD locking is unavailable on this platform");
-        #[cfg(unix)]
-        {
-            let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
-            if ret != 0 {
-                anyhow::bail!(
-                    "deployed-project HEAD flock failed at {}: {}",
-                    lock_path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
-        Ok(Self {
-            _lock_file: lock_file,
-            project_hash: project_hash.to_string(),
-        })
-    }
-
     pub(crate) fn acquire_in_refs_directory(
         refs_directory: &lillux::PinnedDirectory,
         project_hash: &str,
     ) -> anyhow::Result<Self> {
         Self::acquire_inner_in_refs_directory(refs_directory, project_hash, true)
-    }
-
-    pub(crate) fn acquire_existing_in_refs_directory(
-        refs_directory: &lillux::PinnedDirectory,
-        project_hash: &str,
-    ) -> anyhow::Result<Self> {
-        Self::acquire_inner_in_refs_directory(refs_directory, project_hash, false)
     }
 
     fn acquire_inner_in_refs_directory(
@@ -1499,30 +1440,6 @@ impl DeployedProjectHeadLock {
             _lock_file: lock_file,
             project_hash: project_hash.to_string(),
         })
-    }
-
-    fn ensure_protects(&self, refs_root: &Path, project_hash: &str) -> anyhow::Result<()> {
-        if self.project_hash != project_hash {
-            anyhow::bail!(
-                "deployed-project HEAD lock protects {}, not {}",
-                self.project_hash,
-                project_hash
-            );
-        }
-        let expected_path = refs_root
-            .join("deployed/projects")
-            .join(project_hash)
-            .join("lock");
-        ensure_same_lock_inode(&self._lock_file, &expected_path, "deployed-project HEAD")
-    }
-
-    pub(crate) fn ensure_protects_in_refs_directory(
-        &self,
-        refs_directory: &lillux::PinnedDirectory,
-        project_hash: &str,
-    ) -> anyhow::Result<()> {
-        self.protected_directory_in_refs(refs_directory, project_hash)
-            .map(|_| ())
     }
 
     fn protected_directory_in_refs(
@@ -1563,6 +1480,7 @@ impl Drop for DeployedProjectHeadLock {
 /// This is the project equivalent of advancing a chain head. Use it in
 /// the fold-back path to prevent lost updates when multiple executions
 /// race on the same project.
+#[cfg(test)]
 pub(crate) fn advance_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
@@ -1721,6 +1639,7 @@ pub(crate) struct GenericHeadLock {
 }
 
 impl GenericHeadLock {
+    #[cfg(test)]
     pub(crate) fn acquire(refs_root: &Path, namespace: &str, name: &str) -> anyhow::Result<Self> {
         generic_head_ref_path(namespace, name)?;
         let lock_path = refs_root
@@ -1759,14 +1678,6 @@ impl GenericHeadLock {
         Self::acquire_inner_in_refs_directory(refs_directory, namespace, name, true)
     }
 
-    pub(crate) fn acquire_existing_in_refs_directory(
-        refs_directory: &lillux::PinnedDirectory,
-        namespace: &str,
-        name: &str,
-    ) -> anyhow::Result<Self> {
-        Self::acquire_inner_in_refs_directory(refs_directory, namespace, name, false)
-    }
-
     fn acquire_inner_in_refs_directory(
         refs_directory: &lillux::PinnedDirectory,
         namespace: &str,
@@ -1791,6 +1702,7 @@ impl GenericHeadLock {
         })
     }
 
+    #[cfg(test)]
     fn ensure_protects(&self, refs_root: &Path, namespace: &str, name: &str) -> anyhow::Result<()> {
         if self.namespace != namespace || self.name != name {
             anyhow::bail!(
@@ -1807,16 +1719,6 @@ impl GenericHeadLock {
             .join(name)
             .join("lock");
         ensure_same_lock_inode(&self._lock_file, &expected_path, "generic HEAD")
-    }
-
-    pub(crate) fn ensure_protects_in_refs_directory(
-        &self,
-        refs_directory: &lillux::PinnedDirectory,
-        namespace: &str,
-        name: &str,
-    ) -> anyhow::Result<()> {
-        self.protected_directory_in_refs(refs_directory, namespace, name)
-            .map(|_| ())
     }
 
     fn protected_directory_in_refs(
@@ -1857,6 +1759,7 @@ impl Drop for GenericHeadLock {
 
 /// Create a namespace-neutral signed head after proving the exact lock and
 /// signer belong to the caller's authority.
+#[cfg(test)]
 pub(crate) fn write_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,
@@ -1894,6 +1797,7 @@ pub(crate) fn write_verified_generic_head_ref(
 /// Publish a generic envelope without independently establishing writer or
 /// predecessor authority. Callers must already hold the protocol-specific
 /// lock and have completed those proofs.
+#[cfg(test)]
 pub(crate) fn write_generic_head_ref_unchecked(
     refs_root: &Path,
     namespace: &str,
@@ -2046,18 +1950,7 @@ pub(crate) fn read_verified_generic_head_ref_in_directory(
     Ok(Some(signed_ref))
 }
 
-pub(crate) fn remove_generic_head_ref_unchecked(
-    refs_root: &Path,
-    namespace: &str,
-    name: &str,
-) -> anyhow::Result<bool> {
-    let path = generic_head_file_path(refs_root, namespace, name)?;
-    #[cfg(unix)]
-    return remove_regular_ref_no_follow(&path);
-    #[cfg(not(unix))]
-    anyhow::bail!("secure signed-ref removal is unavailable on this platform")
-}
-
+#[cfg(test)]
 pub(crate) fn remove_generic_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     namespace: &str,
@@ -2073,6 +1966,7 @@ pub(crate) fn remove_generic_head_ref_in_directory(
 /// Advance a namespace-neutral signed head with compare-and-swap semantics.
 ///
 /// `expected_current_hash = None` means the head must not exist yet.
+#[cfg(test)]
 pub(crate) fn advance_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,
@@ -2424,49 +2318,6 @@ fn deployed_project_file_path(refs_root: &Path, project_hash: &str) -> anyhow::R
     Ok(refs_root.join(deployed_project_ref_path(project_hash)?))
 }
 
-/// Create the node-level deployed ref for a live project path.
-pub(crate) fn write_verified_deployed_project_ref(
-    refs_root: &Path,
-    project_hash: &str,
-    project_snapshot_hash: &str,
-    signer: &dyn Signer,
-    trust_store: &TrustStore,
-    project_lock: &DeployedProjectHeadLock,
-) -> anyhow::Result<()> {
-    project_lock.ensure_protects(refs_root, project_hash)?;
-    crate::signer::ensure_signer_trusted(signer, trust_store)?;
-    if !is_canonical_hash(project_snapshot_hash) {
-        anyhow::bail!("invalid deployed project snapshot hash: {project_snapshot_hash}");
-    }
-    if let Some(current) = read_verified_deployed_project_ref(refs_root, project_hash, trust_store)?
-    {
-        anyhow::bail!(
-            "deployed project conflict for project {}: expected no current head, got {}",
-            project_hash,
-            current.target_hash
-        );
-    }
-    project_lock.ensure_protects(refs_root, project_hash)?;
-    write_deployed_project_ref_unchecked(refs_root, project_hash, project_snapshot_hash, signer)
-}
-
-fn write_deployed_project_ref_unchecked(
-    refs_root: &Path,
-    project_hash: &str,
-    project_snapshot_hash: &str,
-    signer: &dyn Signer,
-) -> anyhow::Result<()> {
-    let ref_path = deployed_project_ref_path(project_hash)?;
-    let signed_ref = SignedRef::new(
-        ref_path.clone(),
-        project_snapshot_hash.to_string(),
-        lillux::time::iso8601_now(),
-        signer.fingerprint().to_string(),
-    );
-    let path = refs_root.join(&ref_path);
-    write_signed_ref(&path, signed_ref, signer)
-}
-
 fn write_deployed_project_ref_unchecked_in_head_directory(
     head_directory: &lillux::PinnedDirectory,
     project_hash: &str,
@@ -2705,34 +2556,6 @@ pub(crate) fn list_verified_deployed_project_refs_in_directory(
     }
     heads.sort_by(|left, right| left.project_hash.cmp(&right.project_hash));
     Ok(heads)
-}
-
-/// Advance the node-level deployed ref with compare-and-swap.
-pub(crate) fn advance_verified_deployed_project_ref(
-    refs_root: &Path,
-    project_hash: &str,
-    new_snapshot_hash: &str,
-    expected_current_hash: &str,
-    signer: &dyn Signer,
-    trust_store: &TrustStore,
-    project_lock: &DeployedProjectHeadLock,
-) -> anyhow::Result<()> {
-    project_lock.ensure_protects(refs_root, project_hash)?;
-    crate::signer::ensure_signer_trusted(signer, trust_store)?;
-    let current = read_verified_deployed_project_ref(refs_root, project_hash, trust_store)?
-        .ok_or_else(|| anyhow!("no deployed project ref for project {}", project_hash))?;
-
-    if current.target_hash != expected_current_hash {
-        anyhow::bail!(
-            "deployed project conflict for project {}: expected {}, got {}",
-            project_hash,
-            expected_current_hash,
-            current.target_hash
-        );
-    }
-
-    project_lock.ensure_protects(refs_root, project_hash)?;
-    write_deployed_project_ref_unchecked(refs_root, project_hash, new_snapshot_hash, signer)
 }
 
 pub(crate) fn advance_verified_deployed_project_ref_in_directory(

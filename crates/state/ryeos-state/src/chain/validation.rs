@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
 use std::path::Path;
 
 use anyhow::Context;
@@ -210,6 +211,7 @@ fn validate_authoritative_closure(
 /// each state boundary is a legal local transition. When `expected_ancestor`
 /// is present, the target must advance from that already-signed head rather
 /// than replace it with a fork.
+#[cfg(test)]
 pub(crate) fn validate_authoritative_history(
     cas_root: &Path,
     chain_root_id: &str,
@@ -226,6 +228,7 @@ pub(crate) fn validate_authoritative_history(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn validate_authoritative_history_with_check(
     cas_root: &Path,
     chain_root_id: &str,

@@ -944,8 +944,7 @@ impl SandboxRuntime {
             kind: self.inspection.backend.kind,
             executable: self.inspection.backend.configured_executable.clone(),
         };
-        let (resolved_executable, handle, digest, version) =
-            resolve_backend(&backend, artifacts)?;
+        let (resolved_executable, handle, digest, version) = resolve_backend(&backend, artifacts)?;
         let candidate = CapturedSandboxBackend {
             resolved_executable,
             handle,
@@ -962,8 +961,7 @@ impl SandboxRuntime {
             .backend_capture
             .get()
             .expect("tentative backend capture is initialized");
-        captured.inspection.backend.resolved_executable =
-            Some(backend.resolved_executable.clone());
+        captured.inspection.backend.resolved_executable = Some(backend.resolved_executable.clone());
         captured.inspection.backend.captured_digest = Some(backend.digest.clone());
         captured.inspection.backend.captured_version = Some(backend.version.clone());
         Ok(captured)
@@ -1011,8 +1009,7 @@ impl SandboxRuntime {
 
     fn with_backend_inspection(&self, backend: &CapturedSandboxBackend) -> Self {
         let mut captured = self.clone();
-        captured.inspection.backend.resolved_executable =
-            Some(backend.resolved_executable.clone());
+        captured.inspection.backend.resolved_executable = Some(backend.resolved_executable.clone());
         captured.inspection.backend.captured_digest = Some(backend.digest.clone());
         captured.inspection.backend.captured_version = Some(backend.version.clone());
         captured
@@ -1024,9 +1021,7 @@ impl SandboxRuntime {
     /// not disable mandatory profiles; runtime admission validates a tentative
     /// capture before atomically publishing it with the bound preparer registry.
     /// This accessor never reopens node policy or executable paths.
-    pub fn capture_mandatory_bubblewrap_backend(
-        &self,
-    ) -> Result<Arc<std::fs::File>, EngineError> {
+    pub fn capture_mandatory_bubblewrap_backend(&self) -> Result<Arc<std::fs::File>, EngineError> {
         self.backend_capture
             .get()
             .map(|backend| backend.handle.clone())

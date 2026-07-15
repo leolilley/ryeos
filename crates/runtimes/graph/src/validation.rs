@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::model::{
     EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType, MAX_GRAPH_SEGMENT_STEPS,
-    MAX_GRAPH_STEPS,
+    MAX_GRAPH_STEPS, MAX_RETRY_BACKOFF_MS,
 };
 
 const MAX_NODE_CONCURRENCY: usize = 256;
@@ -99,8 +99,7 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         .and_then(Value::as_object)
         .map(|assign| assign.keys().map(String::as_str).collect::<HashSet<_>>())
         .unwrap_or_default();
-    let follow_fanout =
-        node.node_type == NodeType::Action && node.follow && node.over.is_some();
+    let follow_fanout = node.node_type == NodeType::Action && node.follow && node.over.is_some();
 
     if node.parallel && node.assign.is_some() && !follow_fanout {
         result.errors.push(format!(
@@ -1852,14 +1851,19 @@ config:
 "#,
         );
         let result = validate_graph(&graph);
-        assert!(result.errors.iter().any(|error| {
-            error.contains("parallel: true") && error.contains("with 'assign'")
-        }));
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| { error.contains("parallel: true") && error.contains("with 'assign'") }));
     }
 
     #[test]
     fn foreach_state_keys_must_be_pairwise_disjoint() {
-        for (collect, assign) in [("item", "other"), ("results", "results"), ("results", "item")] {
+        for (collect, assign) in [
+            ("item", "other"),
+            ("results", "results"),
+            ("results", "item"),
+        ] {
             let graph = make_graph(&format!(
                 r#"
 version: "1"

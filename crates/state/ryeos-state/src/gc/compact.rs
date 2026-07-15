@@ -350,21 +350,6 @@ struct SnapshotInfo {
     snapshot: ProjectSnapshot,
 }
 
-/// Walk the project snapshot DAG from HEAD, BFS via parent_hashes.
-///
-/// Strict mode: returns an error if any snapshot in the DAG is missing
-/// or corrupt. This is essential for compaction, which must have a
-/// complete picture of the DAG before rewriting parent pointers.
-fn walk_dag(
-    cas_root: &Path,
-    head_hash: &str,
-    snapshots: &mut Vec<SnapshotInfo>,
-    visited: &mut HashSet<String>,
-) -> Result<()> {
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    walk_dag_with_cas(&cas, head_hash, snapshots, visited)
-}
-
 fn walk_dag_with_cas(
     cas: &lillux::CasStore,
     head_hash: &str,
@@ -405,6 +390,7 @@ fn walk_dag_with_cas(
 /// Load one exact current-schema project snapshot from CAS. Compaction is an
 /// authoritative writer, so it accepts neither a body stored under the wrong
 /// requested hash nor a semantically equivalent non-canonical encoding.
+#[cfg(test)]
 fn load_project_snapshot(cas_root: &Path, requested_hash: &str) -> Result<ProjectSnapshot> {
     let cas = lillux::CasStore::new(cas_root.to_path_buf());
     load_project_snapshot_with_cas(&cas, requested_hash)

@@ -11,14 +11,7 @@ pub(crate) fn evaluate_next(
     execution: Option<&Value>,
     graph_run_id: Option<&str>,
 ) -> Result<Option<String>, ExpressionError> {
-    evaluate_next_with_optional_result(
-        node,
-        state,
-        inputs,
-        None,
-        execution,
-        graph_run_id,
-    )
+    evaluate_next_with_optional_result(node, state, inputs, None, execution, graph_run_id)
 }
 pub(crate) fn evaluate_next_with_result(
     node: &CompiledNode,
@@ -28,14 +21,7 @@ pub(crate) fn evaluate_next_with_result(
     execution: Option<&Value>,
     graph_run_id: Option<&str>,
 ) -> Result<Option<String>, ExpressionError> {
-    evaluate_next_with_optional_result(
-        node,
-        state,
-        inputs,
-        Some(result),
-        execution,
-        graph_run_id,
-    )
+    evaluate_next_with_optional_result(node, state, inputs, Some(result), execution, graph_run_id)
 }
 
 fn evaluate_next_with_optional_result(

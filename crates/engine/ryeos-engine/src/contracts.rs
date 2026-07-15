@@ -3089,6 +3089,37 @@ pub struct FinalCost {
     pub metadata: Option<Value>,
 }
 
+#[cfg(test)]
+mod final_cost_tests {
+    use super::FinalCost;
+    use serde_json::json;
+
+    #[test]
+    fn final_cost_wire_rejects_negative_and_oversized_counters() {
+        let valid = json!({
+            "turns": 1,
+            "input_tokens": 2,
+            "output_tokens": 3,
+            "spend": 0.01,
+        });
+        assert!(serde_json::from_value::<FinalCost>(valid.clone()).is_ok());
+
+        for (field, value) in [
+            ("turns", json!(-1)),
+            ("input_tokens", json!(-1)),
+            ("output_tokens", json!(-1)),
+            ("turns", json!(u64::from(u32::MAX) + 1)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<FinalCost>(invalid).is_err(),
+                "invalid `{field}` must be rejected at the contract boundary"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinuationRequest {

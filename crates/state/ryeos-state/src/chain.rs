@@ -20,21 +20,6 @@ mod validation;
 
 pub(crate) use validation::{validate_chain_positions, validate_stored_snapshot};
 
-/// Validate every authoritative ChainState transition through an exact target.
-pub(crate) fn validate_authoritative_history(
-    cas_root: &Path,
-    chain_root_id: &str,
-    target_hash: &str,
-    expected_ancestor: Option<&str>,
-) -> anyhow::Result<()> {
-    validation::validate_authoritative_history(
-        cas_root,
-        chain_root_id,
-        target_hash,
-        expected_ancestor,
-    )
-}
-
 /// Validate through an already-pinned CAS root so every object in the closure
 /// is read from the same authority inode.
 pub(crate) fn validate_authoritative_history_with_cas(
@@ -60,24 +45,6 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
 ) -> anyhow::Result<()> {
     validation::validate_authoritative_history_with_cas_and_check(
         cas,
-        chain_root_id,
-        target_hash,
-        expected_ancestor,
-        check,
-    )
-}
-
-/// Cancellable form used by startup projection recovery. `check` is invoked
-/// between bounded object, state, snapshot, thread, and event validation units.
-pub(crate) fn validate_authoritative_history_with_check(
-    cas_root: &Path,
-    chain_root_id: &str,
-    target_hash: &str,
-    expected_ancestor: Option<&str>,
-    check: &mut dyn FnMut() -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    validation::validate_authoritative_history_with_check(
-        cas_root,
         chain_root_id,
         target_hash,
         expected_ancestor,
@@ -1018,11 +985,7 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
         last_thread_seq: event_count_u64,
         status: initial_snapshot.status,
     };
-    validation::stamp_snapshot_position(
-        &mut initial_snapshot,
-        &root_entry,
-        event_count_u64,
-    );
+    validation::stamp_snapshot_position(&mut initial_snapshot, &root_entry, event_count_u64);
     validation::normalize_and_validate_new_thread(
         &mut initial_snapshot,
         chain_root_id,
@@ -1066,8 +1029,7 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
     let chain_state_json = lillux::canonical_json(&chain_state.to_value())
         .context("failed to canonicalize initial root chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
-    let chain_state_path =
-        lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
+    let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
 
     write_cas_batch(cas_root, lock, &pending_writes)
@@ -1955,10 +1917,8 @@ pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
         &mut new_thread_events,
         &current_chain_state.updated_at,
     )?;
-    let append_timestamp = validation::normalize_event_timestamps(
-        &mut existing_thread_events,
-        &new_thread_timestamp,
-    )?;
+    let append_timestamp =
+        validation::normalize_event_timestamps(&mut existing_thread_events, &new_thread_timestamp)?;
     let new_event_count =
         u64::try_from(new_thread_events.len()).context("new-thread event batch is too large")?;
     let existing_event_count = u64::try_from(existing_thread_events.len())
@@ -2043,8 +2003,8 @@ pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
         chain_root_id,
         &append_timestamp,
     )?;
-    let new_thread_last_event_index = usize::try_from(new_event_count - 1)
-        .context("new-thread event batch is too large")?;
+    let new_thread_last_event_index =
+        usize::try_from(new_event_count - 1).context("new-thread event batch is too large")?;
     validation::validate_snapshot_last_event(
         &new_snapshot,
         new_snapshot
@@ -2086,11 +2046,14 @@ pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
             &append_timestamp,
         )?;
         if update.thread_id == existing_thread_id {
-            let expected_hash = update
-                .new_snapshot
-                .last_event_hash
-                .as_deref()
-                .ok_or_else(|| anyhow!("existing thread snapshot is missing its final event hash"))?;
+            let expected_hash =
+                update
+                    .new_snapshot
+                    .last_event_hash
+                    .as_deref()
+                    .ok_or_else(|| {
+                        anyhow!("existing thread snapshot is missing its final event hash")
+                    })?;
             validation::validate_snapshot_last_event(
                 &update.new_snapshot,
                 expected_hash,
@@ -2151,8 +2114,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
     let chain_state_json = lillux::canonical_json(&new_chain_state.to_value())
         .context("failed to canonicalize atomic add-and-append chain state")?;
     let chain_state_hash = lillux::sha256_hex(chain_state_json.as_bytes());
-    let chain_state_path =
-        lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
+    let chain_state_path = lillux::shard_path(cas_root, "objects", &chain_state_hash, ".json");
     pending_writes.push((chain_state_path, chain_state_json.into_bytes()));
 
     write_cas_batch(cas_root, lock, &pending_writes)

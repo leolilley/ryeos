@@ -84,14 +84,12 @@ pub async fn handle(
             HandlerError::Forbidden(format!("missing required capability: {required_cap}"))
         })?;
     for (name, item_ref) in &req.ref_bindings {
-        let bound = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|error| {
-            HandlerError::BadRequest(format!("invalid ref_bindings.{name}: {error}"))
-        })?;
-        let required = ryeos_runtime::authorizer::canonical_cap(
-            &bound.kind,
-            &bound.bare_id,
-            "execute",
-        );
+        let bound =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|error| {
+                HandlerError::BadRequest(format!("invalid ref_bindings.{name}: {error}"))
+            })?;
+        let required =
+            ryeos_runtime::authorizer::canonical_cap(&bound.kind, &bound.bare_id, "execute");
         let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(&required);
         state
             .authorizer
@@ -136,11 +134,9 @@ pub async fn handle(
         plan_ctx: plan_ctx.clone(),
         requested_call: None,
     };
-    let applicability = ryeos_executor::dispatch::launch_contract_applicability(
-        &req.item_ref,
-        &exec_ctx,
-    )
-    .map_err(map_dispatch_error)?;
+    let applicability =
+        ryeos_executor::dispatch::launch_contract_applicability(&req.item_ref, &exec_ctx)
+            .map_err(map_dispatch_error)?;
     let prepared = ryeos_executor::dispatch::prepare_launch_contract(
         &applicability,
         &verified.resolved,

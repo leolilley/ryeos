@@ -55,8 +55,8 @@ use ryeos_engine::kind_registry::{
     DelegationVia, ExecutionSchema, InProcessRegistryKind, MethodDecl,
     MethodRuntimeConfigRequirement, MethodScope, TerminatorDecl,
 };
-use ryeos_engine::runtime_registry::VerifiedRuntime;
 use ryeos_engine::protocol_vocabulary::CallbackChannel;
+use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
 use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
@@ -3174,7 +3174,9 @@ pub fn launch_contract_applicability(
                     .or_else(|| ctx.engine.runtimes.lookup_by_ref(&current).cloned())
                     .ok_or_else(|| DispatchError::SchemaMisconfigured {
                         kind: current.kind.clone(),
-                        detail: format!("managed envelope path `{current}` has no selected runtime"),
+                        detail: format!(
+                            "managed envelope path `{current}` has no selected runtime"
+                        ),
                     })?;
                 return Ok(LaunchContractApplicability::ManagedEnvelope { runtime });
             }
@@ -3197,17 +3199,18 @@ pub fn admit_launch_contract(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<(), DispatchError> {
-    let Some(prepared) = prepare_launch_contract(
-        applicability,
-        primary,
-        ref_bindings,
-        project_path,
-        ctx,
-    )? else {
+    let Some(prepared) =
+        prepare_launch_contract(applicability, primary, ref_bindings, project_path, ctx)?
+    else {
         return Ok(());
     };
     let mut names = primary.metadata.required_secrets.clone();
-    names.extend(prepared.required_secrets.into_iter().map(|secret| secret.name));
+    names.extend(
+        prepared
+            .required_secrets
+            .into_iter()
+            .map(|secret| secret.name),
+    );
     names.sort();
     names.dedup();
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
@@ -3220,7 +3223,10 @@ pub fn admit_launch_contract(
     .map(|_| ())
     .map_err(|error| match error {
         ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
-            let name = names.into_iter().next().unwrap_or_else(|| "unknown".to_owned());
+            let name = names
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "unknown".to_owned());
             DispatchError::RequiredSecretMissing {
                 item_ref: primary.canonical_ref.to_string(),
                 env_var: name.clone(),
@@ -3229,13 +3235,15 @@ pub fn admit_launch_contract(
                 remediation: crate::dispatch_error::required_secret_remediation(&name),
             }
         }
-        ryeos_app::vault::VaultReadError::Internal(error) => DispatchError::LaunchPreparationFailed {
-            code: "launch_secret_check_failed".to_owned(),
-            message: error.to_string(),
-            classification: "internal".to_owned(),
-            binding: None,
-            details: BTreeMap::new(),
-        },
+        ryeos_app::vault::VaultReadError::Internal(error) => {
+            DispatchError::LaunchPreparationFailed {
+                code: "launch_secret_check_failed".to_owned(),
+                message: error.to_string(),
+                classification: "internal".to_owned(),
+                binding: None,
+                details: BTreeMap::new(),
+            }
+        }
     })
 }
 
@@ -3260,7 +3268,9 @@ pub fn prepare_launch_contract(
         }
         LaunchContractApplicability::ManagedEnvelope { runtime } => runtime,
     };
-    let roots = ctx.engine.resolution_roots(Some(project_path.to_path_buf()));
+    let roots = ctx
+        .engine
+        .resolution_roots(Some(project_path.to_path_buf()));
     let parsers = ctx
         .engine
         .effective_parser_dispatcher(Some(project_path))
@@ -3693,13 +3703,12 @@ pub fn preflight_root_dispatch(
                                     "managed root did not resolve and verify".to_string(),
                                 )
                             })?;
-                            let class = if protocol.descriptor.callback_channel
-                                == CallbackChannel::None
-                            {
-                                RootDispatchClass::ManagedNonEnvelope
-                            } else {
-                                RootDispatchClass::ManagedSubprocess
-                            };
+                            let class =
+                                if protocol.descriptor.callback_channel == CallbackChannel::None {
+                                    RootDispatchClass::ManagedNonEnvelope
+                                } else {
+                                    RootDispatchClass::ManagedSubprocess
+                                };
                             return finish_root_dispatch_preflight(
                                 class,
                                 admitted_requested_subject,

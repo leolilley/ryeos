@@ -510,9 +510,13 @@ mod tests {
             hook_dispatch: Some(identity.clone()),
         };
 
-        let (params, inline) = UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();
+        let (params, inline) =
+            UdsRuntimeClient::serialize_dispatch_action_request(request).unwrap();
         assert!(inline);
-        assert_eq!(params["hook_dispatch"], serde_json::to_value(identity).unwrap());
+        assert_eq!(
+            params["hook_dispatch"],
+            serde_json::to_value(identity).unwrap()
+        );
     }
 
     #[test]

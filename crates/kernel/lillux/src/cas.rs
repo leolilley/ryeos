@@ -275,7 +275,8 @@ fn write_string(s: &str, out: &mut String) {
 fn write_number(number: &serde_json::Number, out: &mut String) -> Result<(), CanonicalJsonError> {
     let value = if let Some(value) = number.as_i64() {
         let binary64 = value as f64;
-        if binary64 < i64::MIN as f64 || binary64 >= -(i64::MIN as f64) || binary64 as i64 != value {
+        if binary64 < i64::MIN as f64 || binary64 >= -(i64::MIN as f64) || binary64 as i64 != value
+        {
             return Err(CanonicalJsonError);
         }
         binary64
@@ -302,16 +303,17 @@ fn write_number(number: &serde_json::Number, out: &mut String) -> Result<(), Can
     let (sign, magnitude) = shortest
         .strip_prefix('-')
         .map_or(("", shortest), |magnitude| ("-", magnitude));
-    let (mantissa, exponent) = magnitude
-        .split_once('e')
-        .map_or((magnitude, 0), |(mantissa, exponent)| {
-            (
-                mantissa,
-                exponent
-                    .parse::<i32>()
-                    .expect("ryu emits a valid decimal exponent"),
-            )
-        });
+    let (mantissa, exponent) =
+        magnitude
+            .split_once('e')
+            .map_or((magnitude, 0), |(mantissa, exponent)| {
+                (
+                    mantissa,
+                    exponent
+                        .parse::<i32>()
+                        .expect("ryu emits a valid decimal exponent"),
+                )
+            });
     let integer_digits = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
     let mut digits = mantissa.replace('.', "");
     while digits.len() > 1 && digits.ends_with('0') {

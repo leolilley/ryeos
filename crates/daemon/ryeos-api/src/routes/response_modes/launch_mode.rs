@@ -216,7 +216,9 @@ impl CompiledResponseMode for CompiledLaunchMode {
         // Parse body per declared shape.
         let body_value: Value = match self.body {
             RawRequestBody::Json => ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
-                .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?,
+                .map_err(|e| {
+                RouteDispatchError::BadRequest(format!("invalid JSON body: {e}"))
+            })?,
             RawRequestBody::Text => {
                 let s = std::str::from_utf8(&ctx.body_raw).map_err(|e| {
                     RouteDispatchError::BadRequest(format!("body is not valid UTF-8: {e}"))

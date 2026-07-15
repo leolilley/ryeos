@@ -36,8 +36,8 @@ pub mod verify;
 
 pub use admission::{admit_root, AdmissionRequest, AdmissionResult};
 pub use bundle_events::{
-    BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage, BundleEventRecord,
-    BundleEventCursor, BundleEventScanPage,
+    BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage, BundleEventCursor,
+    BundleEventRecord, BundleEventScanPage,
 };
 pub use bundle_outbox::{
     claim_bundle_outbox_messages, enqueue_bundle_outbox_message, ensure_bundle_outbox_schema,

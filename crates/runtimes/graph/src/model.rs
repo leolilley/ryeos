@@ -350,14 +350,12 @@ pub struct GraphDefinition {
 }
 
 impl GraphDefinition {
+    #[cfg(test)]
     pub fn from_yaml(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
-        Self::from_yaml_with_hook_sources(
-            raw,
-            file_path,
-            ryeos_runtime::HookSources::default(),
-        )
+        Self::from_yaml_with_hook_sources(raw, file_path, ryeos_runtime::HookSources::default())
     }
 
+    #[cfg(test)]
     pub fn from_yaml_with_hook_sources(
         raw: &str,
         file_path: Option<&str>,
@@ -424,7 +422,9 @@ impl GraphDefinition {
         let compiled = crate::compiled_graph::CompiledGraph::compile(&file.config, hook_sources)?;
         let (graph_id, definition_ref) = if let Some((resolved_ref, _)) = verified_identity {
             let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(resolved_ref)
-                .map_err(|error| anyhow::anyhow!("invalid resolved graph ref `{resolved_ref}`: {error}"))?;
+                .map_err(|error| {
+                    anyhow::anyhow!("invalid resolved graph ref `{resolved_ref}`: {error}")
+                })?;
             if canonical.kind != "graph" {
                 anyhow::bail!(
                     "resolved graph definition must have kind `graph`, got `{}`",
@@ -1222,7 +1222,10 @@ config:
             let error = GraphDefinition::from_yaml(&yaml, Some("test.yaml"))
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("iteration variable"), "unexpected error: {error}");
+            assert!(
+                error.contains("iteration variable"),
+                "unexpected error: {error}"
+            );
         }
     }
 
@@ -1246,6 +1249,9 @@ config:
         let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("more than one default"), "unexpected error: {error}");
+        assert!(
+            error.contains("more than one default"),
+            "unexpected error: {error}"
+        );
     }
 }

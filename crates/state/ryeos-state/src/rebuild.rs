@@ -210,6 +210,7 @@ pub fn rebuild_projection_with_observer(
     .map(|(report, _)| report)
 }
 
+#[cfg(test)]
 pub(crate) fn rebuild_projection_with_verified_baseline(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -519,6 +520,7 @@ fn verify_projection_with_authority(
 /// intentionally crate-private and requires the opaque capability returned by
 /// [`rebuild_projection_with_verified_baseline`]. Manual verification keeps
 /// using [`verify_projection_with_observer`] and never skips trust validation.
+#[cfg(test)]
 pub(crate) fn verify_preverified_projection(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -752,12 +754,6 @@ fn rederive_projection_from_verified_baseline(
     ensure_not_cancelled(observer)
 }
 
-pub(crate) fn projection_content_fingerprints(
-    projection: &ProjectionDb,
-) -> Result<Vec<ProjectionTableFingerprint>> {
-    projection_content_fingerprints_with_observer(projection, None)
-}
-
 pub(crate) fn projection_content_fingerprints_with_observer(
     projection: &ProjectionDb,
     observer: Option<&dyn ProjectionRecoveryObserver>,
@@ -768,13 +764,6 @@ pub(crate) fn projection_content_fingerprints_with_observer(
         ensure_not_cancelled(observer)?;
         projection_table_fingerprints(projection, HEAD_DERIVED_PROJECTION_TABLES, observer)
     })
-}
-
-pub(crate) fn verify_projection_matches_fingerprints(
-    projection: &ProjectionDb,
-    expected: &[ProjectionTableFingerprint],
-) -> Result<()> {
-    verify_projection_matches_fingerprints_with_observer(projection, expected, None)
 }
 
 pub(crate) fn verify_projection_matches_fingerprints_with_observer(
@@ -1016,32 +1005,6 @@ fn notify_observer(
     Ok(())
 }
 
-pub(crate) fn repair_one_chain_verified(
-    projection: &ProjectionDb,
-    cas_root: &Path,
-    chain_root_id: &str,
-    head_hash: &str,
-) -> Result<ChainRepairReport> {
-    repair_one_chain_verified_with_observer(projection, cas_root, chain_root_id, head_hash, None)
-}
-
-pub(crate) fn repair_one_chain_verified_with_observer(
-    projection: &ProjectionDb,
-    cas_root: &Path,
-    chain_root_id: &str,
-    head_hash: &str,
-    observer: Option<&dyn ProjectionRecoveryObserver>,
-) -> Result<ChainRepairReport> {
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    repair_one_chain_verified_with_cas_and_observer(
-        projection,
-        &cas,
-        chain_root_id,
-        head_hash,
-        observer,
-    )
-}
-
 pub(crate) fn repair_one_chain_verified_with_cas_and_observer(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,
@@ -1094,23 +1057,6 @@ pub(crate) fn repair_one_chain_verified_with_cas_and_observer(
     Ok(report)
 }
 
-fn verify_repair_closure_with_observer(
-    cas_root: &Path,
-    chain_root_id: &str,
-    head_hash: &str,
-    verify_all_hashes: bool,
-    observer: Option<&dyn ProjectionRecoveryObserver>,
-) -> Result<()> {
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    verify_repair_closure_with_cas_and_observer(
-        &cas,
-        chain_root_id,
-        head_hash,
-        verify_all_hashes,
-        observer,
-    )
-}
-
 fn verify_repair_closure_with_cas_and_observer(
     cas: &lillux::CasStore,
     chain_root_id: &str,
@@ -1132,25 +1078,6 @@ fn verify_repair_closure_with_cas_and_observer(
 /// Verify a complete target closure and require it to descend from the
 /// currently signed head. External publication uses this after its head CAS
 /// check and before preparing any durable Set transition.
-pub(crate) fn verify_repair_closure_anchored(
-    cas_root: &Path,
-    chain_root_id: &str,
-    head_hash: &str,
-    verify_all_hashes: bool,
-    expected_ancestor: Option<&str>,
-) -> Result<()> {
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    verified_repair_closure_inner(
-        &cas,
-        chain_root_id,
-        head_hash,
-        verify_all_hashes,
-        expected_ancestor,
-        None,
-    )
-    .map(|_| ())
-}
-
 pub(crate) fn verify_repair_closure_anchored_with_cas(
     cas: &lillux::CasStore,
     chain_root_id: &str,
@@ -1395,6 +1322,7 @@ struct ChainReport {
 /// from the given head hash toward earlier links via prev_chain_state_hash.
 ///
 /// Projects all thread snapshots and durable events found along the way.
+#[cfg(test)]
 fn rebuild_chain(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -1492,6 +1420,7 @@ fn rebuild_chain_with_observer(
 }
 
 /// Rebuild only the delta from `from_hash` to `to_hash` for a chain.
+#[cfg(test)]
 fn rebuild_chain_delta(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -1699,17 +1628,6 @@ struct ReplayThreadCursor {
     next_sequence: u64,
 }
 
-/// Walk the complete event chain represented by `head_state`, projecting all
-/// durable events only after the full typed/canonical traversal succeeds.
-fn walk_and_project_events(
-    projection: &ProjectionDb,
-    cas_root: &Path,
-    head_state: &ChainState,
-) -> Result<usize> {
-    let cas = lillux::CasStore::new(cas_root.to_path_buf());
-    walk_and_project_events_with_observer(projection, &cas, head_state, None)
-}
-
 fn walk_and_project_events_with_observer(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,
@@ -1726,6 +1644,7 @@ fn walk_and_project_events_with_observer(
 /// sequence/link, timestamp ordering, and the excluded cursor state must all
 /// agree before the first projection row is written. `None` means the stop
 /// cursor is not an ancestor and leaves projection rows untouched.
+#[cfg(test)]
 fn walk_and_project_events_from(
     projection: &ProjectionDb,
     cas_root: &Path,

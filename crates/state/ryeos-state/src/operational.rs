@@ -513,6 +513,7 @@ impl OperationalDb {
     ///
     /// The independent marker distinguishes a normal first initialization
     /// from loss of an already-established source-of-truth database.
+    #[cfg(test)]
     pub(crate) fn open_at_runtime_state_dir(runtime_state_dir: &Path) -> Result<Self> {
         let runtime_directory = lillux::PinnedDirectory::open_or_create(runtime_state_dir)
             .context("pin operational runtime-state directory")?;
@@ -586,6 +587,7 @@ impl OperationalDb {
     /// Existing files must already match the current exact schema. This is a
     /// clean-cut format: no projection-generation import or legacy migration
     /// is attempted.
+    #[cfg(test)]
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let (directory, name) = pin_operational_parent(path, true)?;
         let directory_lock = directory.lock_exclusive()?;
@@ -2374,10 +2376,13 @@ mod tests {
         let db = OperationalDb::open(&path).unwrap();
 
         let error = db
-            .immediate_transaction("operational rollback reporting", || -> anyhow::Result<()> {
-                db.conn.execute_batch("ROLLBACK")?;
-                anyhow::bail!("operational operation failed")
-            })
+            .immediate_transaction(
+                "operational rollback reporting",
+                || -> anyhow::Result<()> {
+                    db.conn.execute_batch("ROLLBACK")?;
+                    anyhow::bail!("operational operation failed")
+                },
+            )
             .unwrap_err();
         let message = format!("{error:#}");
 

@@ -20,11 +20,9 @@ fn main() {
         HandlerRequest::Parse(_)
         | HandlerRequest::ValidateParserConfig(_)
         | HandlerRequest::LaunchPrepare(_)
-        | HandlerRequest::ValidateLaunchPreparerConfig(_) => {
-            HandlerResponse::ComposeErr {
-                step: ResolutionStepNameWire::PipelineInit,
-                reason: "this is a composer binary; received parser request".into(),
-            }
-        }
+        | HandlerRequest::ValidateLaunchPreparerConfig(_) => HandlerResponse::ComposeErr {
+            step: ResolutionStepNameWire::PipelineInit,
+            reason: "this is a composer binary; received parser request".into(),
+        },
     }));
 }

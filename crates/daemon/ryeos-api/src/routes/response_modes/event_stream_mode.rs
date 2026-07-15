@@ -465,9 +465,10 @@ impl CompiledResponseMode for CompiledEventStreamMode {
         let (invoker, input): (&Arc<dyn CompiledRouteInvocation>, Value) = match &self.strategy {
             EventStreamStrategy::BodyJson { invoker } => {
                 // BodyJson: pass the raw body as input for the invoker to parse.
-                let input = ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw).map_err(|e| {
-                    RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
-                })?;
+                let input =
+                    ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw).map_err(|e| {
+                        RouteDispatchError::BadRequest(format!("invalid request body: {e}"))
+                    })?;
                 (invoker, input)
             }
             EventStreamStrategy::PathCaptureInput {

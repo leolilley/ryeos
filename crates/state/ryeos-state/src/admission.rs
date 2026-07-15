@@ -178,8 +178,8 @@ pub fn admit_root(
             .ok_or_else(|| anyhow::anyhow!("admitted object {hash} is missing"))?;
         let canonical = lillux::canonical_json(&object)
             .with_context(|| format!("failed to canonicalize admitted object {hash}"))?;
-        let bytes = u64::try_from(canonical.len())
-            .context("admitted object length does not fit u64")?;
+        let bytes =
+            u64::try_from(canonical.len()).context("admitted object length does not fit u64")?;
         db.record_cas_entry(&NewCasEntryAttribution {
             hash: hash.clone(),
             entry_kind: CasEntryKind::Object,

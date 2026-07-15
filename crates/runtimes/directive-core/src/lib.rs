@@ -347,9 +347,7 @@ impl ProviderConfig {
                     );
                 }
                 if system.mode == SystemMessageMode::BodyField && system.field.is_none() {
-                    bail!(
-                        "provider config{context}: body_field system messages require a field"
-                    );
+                    bail!("provider config{context}: body_field system messages require a field");
                 }
             }
         }
@@ -481,7 +479,9 @@ pub struct ResolvedProviderSnapshot {
     pub provider: ProviderConfig,
 }
 
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+fn deserialize_required_option<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -652,21 +652,18 @@ pub fn prepare_directive_launch(
         validate_digest("provider config content", &source.content_digest)?;
     }
 
-    let provider: ProviderConfig = serde_json::from_value(provider_entry.value.clone()).map_err(
-        |error| {
+    let provider: ProviderConfig =
+        serde_json::from_value(provider_entry.value.clone()).map_err(|error| {
             DirectivePreparationError::configuration(
                 "provider_config_invalid",
                 format!("invalid provider config {config_id}: {error}"),
             )
-        },
-    )?;
+        })?;
     let matched_profile = provider
         .matched_profile(&target.model_name)
         .map(|profile| profile.name.clone());
     if let Some(profile) = &matched_profile {
-        if profile.trim().is_empty()
-            || profile.len() > 128
-            || profile.chars().any(char::is_control)
+        if profile.trim().is_empty() || profile.len() > 128 || profile.chars().any(char::is_control)
         {
             return Err(DirectivePreparationError::configuration(
                 "provider_config_invalid",
@@ -681,28 +678,27 @@ pub fn prepare_directive_launch(
             target.model_name, target.provider_id
         ))
         .map_err(|error| {
-            DirectivePreparationError::configuration(
-                "provider_config_invalid",
-                error.to_string(),
+            DirectivePreparationError::configuration("provider_config_invalid", error.to_string())
+        })?;
+    let config_hash =
+        ResolvedProviderSnapshot::compute_hash(&resolved_provider).map_err(|error| {
+            DirectivePreparationError::internal(
+                "provider_config_hash_failed",
+                format!("could not hash resolved provider config: {error}"),
             )
         })?;
-    let config_hash = ResolvedProviderSnapshot::compute_hash(&resolved_provider).map_err(|error| {
-        DirectivePreparationError::internal(
-            "provider_config_hash_failed",
-            format!("could not hash resolved provider config: {error}"),
-        )
-    })?;
 
-    let required_secret = resolved_provider
-        .auth
-        .env_var
-        .as_ref()
-        .map(|name| PreparedSecretRequirement {
-            name: name.clone(),
-            config_input: MODEL_PROVIDERS_INPUT,
-            canonical_id: config_id.clone(),
-            value_digest: provider_entry.value_digest.clone(),
-        });
+    let required_secret =
+        resolved_provider
+            .auth
+            .env_var
+            .as_ref()
+            .map(|name| PreparedSecretRequirement {
+                name: name.clone(),
+                config_input: MODEL_PROVIDERS_INPUT,
+                canonical_id: config_id.clone(),
+                value_digest: provider_entry.value_digest.clone(),
+            });
 
     let snapshot = ResolvedProviderSnapshot {
         provider_id: target.provider_id,
@@ -770,14 +766,13 @@ fn resolve_target(
                 format!("model tier {tier} requires the model_routing config input"),
             )
         })?;
-        let routing: ModelRoutingConfig = serde_json::from_value(routing.value.clone()).map_err(
-            |error| {
+        let routing: ModelRoutingConfig =
+            serde_json::from_value(routing.value.clone()).map_err(|error| {
                 DirectivePreparationError::configuration(
                     "model_routing_invalid",
                     format!("invalid model_routing config: {error}"),
                 )
-            },
-        )?;
+            })?;
         let selected = routing.tiers.get(tier).ok_or_else(|| {
             DirectivePreparationError::configuration(
                 "model_tier_not_found",
@@ -812,14 +807,11 @@ fn resolve_target(
 fn validate_provider_id(value: &str) -> std::result::Result<(), DirectivePreparationError> {
     if value.is_empty()
         || value.len() > 128
-        || !value
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| match byte {
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => true,
-                b'.' | b'_' | b'-' => index != 0,
-                _ => false,
-            })
+        || !value.bytes().enumerate().all(|(index, byte)| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => true,
+            b'.' | b'_' | b'-' => index != 0,
+            _ => false,
+        })
     {
         return Err(DirectivePreparationError::configuration(
             "provider_id_invalid",
@@ -846,10 +838,7 @@ fn validate_model_name(
     field: &str,
     value: &str,
 ) -> std::result::Result<(), DirectivePreparationError> {
-    if value.trim().is_empty()
-        || value.len() > 256
-        || value.chars().any(char::is_control)
-    {
+    if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
         return Err(DirectivePreparationError::configuration(
             "model_target_invalid",
             format!("{field} must be 1-256 bytes without control characters"),
@@ -868,10 +857,7 @@ fn validate_context_window(value: u64) -> std::result::Result<(), DirectivePrepa
     Ok(())
 }
 
-fn validate_digest(
-    label: &str,
-    value: &str,
-) -> std::result::Result<(), DirectivePreparationError> {
+fn validate_digest(label: &str, value: &str) -> std::result::Result<(), DirectivePreparationError> {
     if value.len() != 64
         || !value
             .bytes()
@@ -911,7 +897,10 @@ fn runtime_facts(
         })?,
     );
     if let Some(profile) = &snapshot.matched_profile {
-        facts.insert("matched_profile".to_string(), Value::String(profile.clone()));
+        facts.insert(
+            "matched_profile".to_string(),
+            Value::String(profile.clone()),
+        );
     }
     facts.insert(
         "config_hash".to_string(),

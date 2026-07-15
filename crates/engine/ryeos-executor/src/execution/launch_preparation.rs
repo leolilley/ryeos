@@ -15,10 +15,9 @@ use ryeos_engine::runtime_registry::{
     LaunchItemSpace, LaunchPreparationDecl, RuntimeFactKind, VerifiedRuntime,
 };
 use ryeos_handler_protocol::{
-    ItemSpaceWire, LaunchComposedViewWire, LaunchConfigSnapshotWire,
-    LaunchDiagnosticScalarWire, LaunchPrepareError, LaunchPrepareErrorClass,
-    LaunchPrepareRequest, LaunchPrepareResponse, LaunchPreparedItemWire,
-    LaunchSecretOriginWire, TrustClassWire,
+    ItemSpaceWire, LaunchComposedViewWire, LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire,
+    LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse,
+    LaunchPreparedItemWire, LaunchSecretOriginWire, TrustClassWire,
 };
 use ryeos_runtime::authorizer::{canonical_cap, AuthorizationPolicy};
 use serde::{Deserialize, Serialize};
@@ -115,21 +114,25 @@ pub fn prepare_runtime_launch(
     let mut binding_records = BTreeMap::new();
     for (name, raw_ref) in request.ref_bindings {
         let declaration = &contract.ref_bindings[name];
-        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(raw_ref)
-            .map_err(|_| preparation_error_with_binding(
-                "invalid_ref_binding",
-                format!("ref binding `{name}` is not a canonical ref"),
-                LaunchPrepareErrorClass::Caller,
-                Some(name.clone()),
-            ))?;
+        let canonical =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(raw_ref).map_err(|_| {
+                preparation_error_with_binding(
+                    "invalid_ref_binding",
+                    format!("ref binding `{name}` is not a canonical ref"),
+                    LaunchPrepareErrorClass::Caller,
+                    Some(name.clone()),
+                )
+            })?;
         let required_cap = canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
         ryeos_runtime::authorizer::Authorizer::new()
             .authorize(&scopes, &AuthorizationPolicy::require(&required_cap))
-            .map_err(|_| launch_policy_forbidden(
-                "ref_binding_unauthorized",
-                format!("ref binding `{name}` is not authorized"),
-                Some(name.clone()),
-            ))?;
+            .map_err(|_| {
+                launch_policy_forbidden(
+                    "ref_binding_unauthorized",
+                    format!("ref binding `{name}` is not authorized"),
+                    Some(name.clone()),
+                )
+            })?;
         if !declaration.allowed_kinds.contains(&canonical.kind) {
             return Err(preparation_error_with_binding(
                 "ref_binding_kind_not_allowed",
@@ -156,12 +159,15 @@ pub fn prepare_runtime_launch(
             &declaration.allowed_spaces,
             &declaration.allowed_trust,
         )?;
-        binding_records.insert(name.clone(), RefBindingLaunchRecord {
-            canonical_ref: canonical.to_string(),
-            source_space: resolution.root.source_space,
-            effective_trust_class: resolution.effective_trust_class,
-            resolution: resolution.as_launched_digest(),
-        });
+        binding_records.insert(
+            name.clone(),
+            RefBindingLaunchRecord {
+                canonical_ref: canonical.to_string(),
+                source_space: resolution.root.source_space,
+                effective_trust_class: resolution.effective_trust_class,
+                resolution: resolution.as_launched_digest(),
+            },
+        );
         binding_wires.insert(name.clone(), prepared_item_wire(&resolution)?);
     }
 
@@ -204,10 +210,14 @@ pub fn prepare_runtime_launch(
     validate_result(contract, request.ref_bindings, &config_inputs, &mut result)?;
     Ok(PreparedRuntimeLaunch {
         runtime_data: result.runtime_data,
-        required_secrets: result.required_secrets.into_iter().map(|requirement| PreparedSecret {
-            name: requirement.name,
-            origin: requirement.origin,
-        }).collect(),
+        required_secrets: result
+            .required_secrets
+            .into_iter()
+            .map(|requirement| PreparedSecret {
+                name: requirement.name,
+                origin: requirement.origin,
+            })
+            .collect(),
         runtime_facts: result.runtime_facts,
         binding_records,
     })
@@ -215,9 +225,7 @@ pub fn prepare_runtime_launch(
 
 /// Validate daemon-wide syntax and size caps for a serialized secondary
 /// execution identity before authorization, forwarding, or preparation.
-pub fn validate_ref_bindings(
-    ref_bindings: &BTreeMap<String, String>,
-) -> Result<(), DispatchError> {
+pub fn validate_ref_bindings(ref_bindings: &BTreeMap<String, String>) -> Result<(), DispatchError> {
     if ref_bindings.len() > MAX_REF_BINDINGS {
         return Err(preparation_error(
             "invalid_ref_binding",
@@ -240,21 +248,20 @@ pub fn validate_ref_bindings(
         if raw_ref.len() > MAX_REF_BINDING_VALUE_BYTES {
             return Err(preparation_error_with_binding(
                 "invalid_ref_binding",
-                format!(
-                    "ref binding `{name}` exceeds {MAX_REF_BINDING_VALUE_BYTES} UTF-8 bytes"
-                ),
+                format!("ref binding `{name}` exceeds {MAX_REF_BINDING_VALUE_BYTES} UTF-8 bytes"),
                 LaunchPrepareErrorClass::Caller,
                 Some(name.clone()),
             ));
         }
-        let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(raw_ref).map_err(|_| {
-            preparation_error_with_binding(
-                "invalid_ref_binding",
-                format!("ref binding `{name}` is not a canonical ref"),
-                LaunchPrepareErrorClass::Caller,
-                Some(name.clone()),
-            )
-        })?;
+        let canonical =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(raw_ref).map_err(|_| {
+                preparation_error_with_binding(
+                    "invalid_ref_binding",
+                    format!("ref binding `{name}` is not a canonical ref"),
+                    LaunchPrepareErrorClass::Caller,
+                    Some(name.clone()),
+                )
+            })?;
         if canonical.to_string() != *raw_ref {
             return Err(preparation_error_with_binding(
                 "invalid_ref_binding",
@@ -275,10 +282,7 @@ fn valid_ref_binding_name(name: &str) -> bool {
     let Some(first) = segments.next() else {
         return false;
     };
-    first
-        .as_bytes()
-        .first()
-        .is_some_and(u8::is_ascii_lowercase)
+    first.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
         && first
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
@@ -345,9 +349,7 @@ fn validate_prepared_item(
     if !allowed_trust.contains(&trust) {
         let (code, binding) = match role {
             PreparedItemRole::Primary => ("primary_untrusted", None),
-            PreparedItemRole::Binding(name) => {
-                ("ref_binding_untrusted", Some(name.to_owned()))
-            }
+            PreparedItemRole::Binding(name) => ("ref_binding_untrusted", Some(name.to_owned())),
         };
         return Err(launch_policy_forbidden(
             code,
@@ -358,17 +360,30 @@ fn validate_prepared_item(
     Ok(())
 }
 
-fn prepared_item_wire(resolution: &ResolutionOutput) -> Result<LaunchPreparedItemWire, DispatchError> {
+fn prepared_item_wire(
+    resolution: &ResolutionOutput,
+) -> Result<LaunchPreparedItemWire, DispatchError> {
     Ok(LaunchPreparedItemWire {
         canonical_ref: resolution.root.resolved_ref.clone(),
         source_space: item_space_wire(resolution.root.source_space),
         effective_trust_class: trust_wire(resolution.effective_trust_class),
         composed: LaunchComposedViewWire {
             composed: resolution.composed.composed.clone(),
-            derived: resolution.composed.derived.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
-            policy_facts: resolution.composed.policy_facts.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+            derived: resolution
+                .composed
+                .derived
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            policy_facts: resolution
+                .composed
+                .policy_facts
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
         },
-        resolution_digest: serde_json::to_value(resolution.as_launched_digest()).map_err(|error| DispatchError::Internal(error.into()))?,
+        resolution_digest: serde_json::to_value(resolution.as_launched_digest())
+            .map_err(|error| DispatchError::Internal(error.into()))?,
     })
 }
 
@@ -392,18 +407,33 @@ fn validate_result(
         )?);
     }
     if aggregate > MAX_RUNTIME_DATA_BYTES {
-        return Err(preparation_error("launch_preparer_limit_exceeded", "aggregate runtime_data exceeds daemon limit", LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            "aggregate runtime_data exceeds daemon limit",
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
 
     if result.required_secrets.len() > MAX_SECRET_ORIGINS {
-        return Err(preparation_error("launch_preparer_limit_exceeded", "too many symbolic secret origins", LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            "too many symbolic secret origins",
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
     let allowed_secrets: BTreeSet<_> = contract.secret_policy.allowed_names.iter().collect();
     let mut unique_names = BTreeSet::new();
     let mut unique_origins = BTreeMap::new();
     for requirement in &result.required_secrets {
         if !allowed_secrets.contains(&requirement.name) {
-            return Err(preparation_error("launch_secret_not_allowed", format!("secret `{}` is not allowed by the signed contract", requirement.name), LaunchPrepareErrorClass::Internal));
+            return Err(preparation_error(
+                "launch_secret_not_allowed",
+                format!(
+                    "secret `{}` is not allowed by the signed contract",
+                    requirement.name
+                ),
+                LaunchPrepareErrorClass::Internal,
+            ));
         }
         validate_secret_origin(&requirement.origin, ref_bindings, config_inputs)?;
         let origin_value = serde_json::to_value(&requirement.origin)
@@ -422,20 +452,40 @@ fn validate_result(
     }
     result.required_secrets = unique_origins.into_values().collect();
     if result.required_secrets.len() > MAX_SECRET_ORIGINS {
-        return Err(preparation_error("launch_preparer_limit_exceeded", "too many deduplicated symbolic secret origins", LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            "too many deduplicated symbolic secret origins",
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
-    if unique_names.len() > MAX_SECRET_NAMES || unique_names.len() > usize::from(contract.secret_policy.max_requirements) {
-        return Err(preparation_error("launch_preparer_limit_exceeded", "symbolic secret requirement limit exceeded", LaunchPrepareErrorClass::Internal));
+    if unique_names.len() > MAX_SECRET_NAMES
+        || unique_names.len() > usize::from(contract.secret_policy.max_requirements)
+    {
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            "symbolic secret requirement limit exceeded",
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
 
     let mut facts_bytes = 0usize;
     for (name, declaration) in &contract.runtime_facts {
         if declaration.required && !result.runtime_facts.contains_key(name) {
-            return Err(preparation_error("runtime_fact_missing", format!("required runtime fact `{name}` is missing"), LaunchPrepareErrorClass::Internal));
+            return Err(preparation_error(
+                "runtime_fact_missing",
+                format!("required runtime fact `{name}` is missing"),
+                LaunchPrepareErrorClass::Internal,
+            ));
         }
     }
     for (name, value) in &result.runtime_facts {
-        let declaration = contract.runtime_facts.get(name).ok_or_else(|| preparation_error("runtime_fact_undeclared", format!("runtime fact `{name}` is undeclared"), LaunchPrepareErrorClass::Internal))?;
+        let declaration = contract.runtime_facts.get(name).ok_or_else(|| {
+            preparation_error(
+                "runtime_fact_undeclared",
+                format!("runtime fact `{name}` is undeclared"),
+                LaunchPrepareErrorClass::Internal,
+            )
+        })?;
         let kind_ok = match declaration.kind {
             RuntimeFactKind::Bool => value.is_boolean(),
             RuntimeFactKind::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
@@ -443,16 +493,28 @@ fn validate_result(
             RuntimeFactKind::Json => true,
         };
         if !kind_ok {
-            return Err(preparation_error("runtime_fact_type_invalid", format!("runtime fact `{name}` has the wrong type"), LaunchPrepareErrorClass::Internal));
+            return Err(preparation_error(
+                "runtime_fact_type_invalid",
+                format!("runtime fact `{name}` has the wrong type"),
+                LaunchPrepareErrorClass::Internal,
+            ));
         }
         let bytes = canonical_json_len(name, value)?;
         if bytes > declaration.max_bytes as usize {
-            return Err(preparation_error("runtime_fact_too_large", format!("runtime fact `{name}` exceeds its signed size"), LaunchPrepareErrorClass::Internal));
+            return Err(preparation_error(
+                "runtime_fact_too_large",
+                format!("runtime fact `{name}` exceeds its signed size"),
+                LaunchPrepareErrorClass::Internal,
+            ));
         }
         facts_bytes = facts_bytes.saturating_add(bytes);
     }
     if facts_bytes > MAX_RUNTIME_FACT_BYTES {
-        return Err(preparation_error("launch_preparer_limit_exceeded", "aggregate runtime facts exceed daemon limit", LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            "aggregate runtime facts exceed daemon limit",
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
     Ok(())
 }
@@ -464,14 +526,38 @@ fn validate_secret_origin(
 ) -> Result<(), DispatchError> {
     match origin {
         LaunchSecretOriginWire::Binding { name } if ref_bindings.contains_key(name) => Ok(()),
-        LaunchSecretOriginWire::Binding { name } => Err(preparation_error("launch_secret_origin_invalid", format!("unknown binding origin `{name}`"), LaunchPrepareErrorClass::Internal)),
-        LaunchSecretOriginWire::ConfigInput { name, canonical_id, value_digest } => {
+        LaunchSecretOriginWire::Binding { name } => Err(preparation_error(
+            "launch_secret_origin_invalid",
+            format!("unknown binding origin `{name}`"),
+            LaunchPrepareErrorClass::Internal,
+        )),
+        LaunchSecretOriginWire::ConfigInput {
+            name,
+            canonical_id,
+            value_digest,
+        } => {
             let valid = match config_inputs.get(name) {
-                Some(LaunchConfigSnapshotWire::Item { present: true, value_digest: Some(actual), contributors, .. }) => actual == value_digest && contributors.iter().any(|source| source.canonical_id == *canonical_id),
-                Some(LaunchConfigSnapshotWire::Catalog { entries }) => entries.get(canonical_id).is_some_and(|entry| entry.value_digest == *value_digest),
+                Some(LaunchConfigSnapshotWire::Item {
+                    present: true,
+                    value_digest: Some(actual),
+                    contributors,
+                    ..
+                }) => {
+                    actual == value_digest
+                        && contributors
+                            .iter()
+                            .any(|source| source.canonical_id == *canonical_id)
+                }
+                Some(LaunchConfigSnapshotWire::Catalog { entries }) => entries
+                    .get(canonical_id)
+                    .is_some_and(|entry| entry.value_digest == *value_digest),
                 _ => false,
             };
-            if valid { Ok(()) } else { Err(preparation_error("launch_secret_origin_invalid", format!("config origin `{name}/{canonical_id}` does not match its verified snapshot"), LaunchPrepareErrorClass::Internal)) }
+            if valid {
+                Ok(())
+            } else {
+                Err(preparation_error("launch_secret_origin_invalid", format!("config origin `{name}/{canonical_id}` does not match its verified snapshot"), LaunchPrepareErrorClass::Internal))
+            }
         }
     }
 }
@@ -482,11 +568,19 @@ fn validate_json_value(
     max_bytes: usize,
 ) -> Result<usize, DispatchError> {
     if json_depth(value) > MAX_JSON_DEPTH {
-        return Err(preparation_error("launch_preparer_limit_exceeded", format!("`{name}` exceeds JSON depth limit"), LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            format!("`{name}` exceeds JSON depth limit"),
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
     let bytes = canonical_json_len(name, value)?;
     if bytes > max_bytes {
-        return Err(preparation_error("launch_preparer_limit_exceeded", format!("`{name}` exceeds byte limit"), LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_limit_exceeded",
+            format!("`{name}` exceeds byte limit"),
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
     Ok(bytes)
 }
@@ -555,25 +649,23 @@ fn map_binding_resolution_error(
         | ResolutionError::IntegrityFailure { .. }
         | ResolutionError::MetadataAnchoringFailed { .. }
         | ResolutionError::KindNotExecutable { .. }
-        | ResolutionError::ComposedValueContractViolation { .. } => {
-            preparation_error_with_binding(
-                "ref_binding_resolution_failed",
-                format!("binding `{binding}` has an invalid definition: {detail}"),
-                LaunchPrepareErrorClass::Configuration,
-                Some(binding.to_owned()),
-            )
-        }
+        | ResolutionError::ComposedValueContractViolation { .. } => preparation_error_with_binding(
+            "ref_binding_resolution_failed",
+            format!("binding `{binding}` has an invalid definition: {detail}"),
+            LaunchPrepareErrorClass::Configuration,
+            Some(binding.to_owned()),
+        ),
         ResolutionError::StepFailed { class, .. } => {
             use ryeos_engine::resolution::ResolutionFailureClass;
 
             let classification = match class {
-                ResolutionFailureClass::InvalidDefinition => {
-                    LaunchPrepareErrorClass::Configuration
-                }
+                ResolutionFailureClass::InvalidDefinition => LaunchPrepareErrorClass::Configuration,
                 ResolutionFailureClass::DependencyUnavailable => {
                     return host_preparation_error_with_binding(
                         "ref_binding_resolution_failed",
-                        format!("binding `{binding}` resolution dependency is unavailable: {detail}"),
+                        format!(
+                            "binding `{binding}` resolution dependency is unavailable: {detail}"
+                        ),
                         "unavailable",
                         Some(binding.to_owned()),
                     );
@@ -592,21 +684,15 @@ fn map_binding_resolution_error(
 
 fn map_launch_preparer_host_error(error: EngineError) -> DispatchError {
     match error {
-        EngineError::LaunchPreparerUnavailable { detail, .. } => host_preparation_error(
-            "launch_preparer_unavailable",
-            detail,
-            "unavailable",
-        ),
-        EngineError::LaunchPreparerLimitExceeded { detail, .. } => host_preparation_error(
-            "launch_preparer_limit_exceeded",
-            detail,
-            "internal",
-        ),
-        EngineError::LaunchPreparerProtocolInvalid { detail, .. } => host_preparation_error(
-            "launch_preparer_protocol_invalid",
-            detail,
-            "internal",
-        ),
+        EngineError::LaunchPreparerUnavailable { detail, .. } => {
+            host_preparation_error("launch_preparer_unavailable", detail, "unavailable")
+        }
+        EngineError::LaunchPreparerLimitExceeded { detail, .. } => {
+            host_preparation_error("launch_preparer_limit_exceeded", detail, "internal")
+        }
+        EngineError::LaunchPreparerProtocolInvalid { detail, .. } => {
+            host_preparation_error("launch_preparer_protocol_invalid", detail, "internal")
+        }
         other => host_preparation_error(
             "launch_preparer_protocol_invalid",
             other.to_string(),
@@ -644,11 +730,7 @@ fn handler_preparation_error(
     ref_bindings: &BTreeMap<String, String>,
 ) -> DispatchError {
     if let Err(reason) = validate_handler_error(&error, ref_bindings) {
-        return host_preparation_error(
-            "launch_preparer_protocol_invalid",
-            reason,
-            "internal",
-        );
+        return host_preparation_error("launch_preparer_protocol_invalid", reason, "internal");
     }
     let classification = match error.classification {
         LaunchPrepareErrorClass::Caller => "caller",
@@ -679,7 +761,9 @@ fn validate_handler_error(
     }
     if let Some(binding) = &error.binding {
         if !ref_bindings.contains_key(binding) {
-            return Err(format!("launch-preparer error names unknown binding `{binding}`"));
+            return Err(format!(
+                "launch-preparer error names unknown binding `{binding}`"
+            ));
         }
     }
     if error.details.len() > MAX_HANDLER_ERROR_DETAILS {
@@ -687,11 +771,15 @@ fn validate_handler_error(
     }
     for (key, value) in &error.details {
         if !valid_launch_name(key, MAX_HANDLER_ERROR_CODE_BYTES) {
-            return Err(format!("launch-preparer error detail key `{key}` is invalid"));
+            return Err(format!(
+                "launch-preparer error detail key `{key}` is invalid"
+            ));
         }
         if let LaunchDiagnosticScalarWire::String(value) = value {
             if value.len() > MAX_HANDLER_ERROR_DETAIL_STRING_BYTES {
-                return Err(format!("launch-preparer error detail `{key}` exceeds the string limit"));
+                return Err(format!(
+                    "launch-preparer error detail `{key}` exceeds the string limit"
+                ));
             }
         }
     }
@@ -719,7 +807,11 @@ fn valid_launch_name(name: &str, max_bytes: usize) -> bool {
         && !name.contains("__")
 }
 
-fn preparation_error(code: impl Into<String>, message: impl Into<String>, classification: LaunchPrepareErrorClass) -> DispatchError {
+fn preparation_error(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    classification: LaunchPrepareErrorClass,
+) -> DispatchError {
     preparation_error_with_binding(code, message, classification, None)
 }
 

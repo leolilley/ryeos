@@ -231,9 +231,11 @@ fn authorize_execution_refs(
     ctx.require_verified()?;
     ryeos_executor::execution::launch_preparation::validate_ref_bindings(ref_bindings)
         .map_err(|error| HandlerError::BadRequest(format!("invalid ref_bindings: {error}")))?;
-    for (label, value) in std::iter::once(("item_ref", item_ref))
-        .chain(ref_bindings.iter().map(|(name, value)| (name.as_str(), value.as_str())))
-    {
+    for (label, value) in std::iter::once(("item_ref", item_ref)).chain(
+        ref_bindings
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    ) {
         let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(value)
             .map_err(|error| HandlerError::BadRequest(format!("invalid {label}: {error}")))?;
         let required = ryeos_runtime::authorizer::canonical_cap(
@@ -245,7 +247,9 @@ fn authorize_execution_refs(
         state
             .authorizer
             .authorize(&ctx.scopes, &policy)
-            .map_err(|_| HandlerError::Forbidden(format!("missing required capability: {required}")))?;
+            .map_err(|_| {
+                HandlerError::Forbidden(format!("missing required capability: {required}"))
+            })?;
     }
     Ok(())
 }

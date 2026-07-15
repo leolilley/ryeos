@@ -187,9 +187,11 @@ impl ChainState {
 
     /// Check if this chain state is in the yellow zone (warning metrics).
     pub fn is_yellow(&self) -> Result<bool, lillux::CanonicalJsonError> {
-        Ok(self.threads.len() >= ChainStateThresholds::MAX_GREEN_THREADS
-            && self.threads.len() < ChainStateThresholds::MAX_YELLOW_THREADS
-            && self.estimated_size_bytes()? < ChainStateThresholds::MAX_YELLOW_BYTES)
+        Ok(
+            self.threads.len() >= ChainStateThresholds::MAX_GREEN_THREADS
+                && self.threads.len() < ChainStateThresholds::MAX_YELLOW_THREADS
+                && self.estimated_size_bytes()? < ChainStateThresholds::MAX_YELLOW_BYTES,
+        )
     }
 
     /// Check if this chain state is in the red zone (needs Merkleization).

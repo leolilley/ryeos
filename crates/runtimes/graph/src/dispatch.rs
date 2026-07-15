@@ -476,10 +476,7 @@ pub(crate) fn classify_follow_fanout_envelope(
                 .to_string(),
         );
     }
-    if expected != items.len()
-        || items.len() != iteration_count
-        || statuses.len() != items.len()
-    {
+    if expected != items.len() || items.len() != iteration_count || statuses.len() != items.len() {
         return Err(
             "malformed follow fanout wrapper: inconsistent expected/items/statuses/snapshot cardinality"
                 .to_string(),
@@ -1353,7 +1350,9 @@ mod tests {
             }),
         ] {
             let failure = expect_action_failure(classify_envelope(malformed));
-            assert!(failure.diagnostic.contains("malformed native runtime envelope"));
+            assert!(failure
+                .diagnostic
+                .contains("malformed native runtime envelope"));
         }
     }
 
@@ -1581,7 +1580,10 @@ mod tests {
             }),
         ] {
             let error = classify_follow_envelope(malformed).unwrap_err();
-            assert!(error.contains("malformed follow result envelope"), "{error}");
+            assert!(
+                error.contains("malformed follow result envelope"),
+                "{error}"
+            );
         }
     }
 
@@ -1599,11 +1601,8 @@ mod tests {
             .unwrap_err()
             .contains("unknown variant"));
 
-        let mut unknown_field = canonical_follow_envelope(
-            true,
-            RuntimeResultStatus::Completed,
-            json!(42),
-        );
+        let mut unknown_field =
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, json!(42));
         unknown_field["legacy_outcome"] = json!("success");
         assert!(classify_follow_envelope(unknown_field)
             .unwrap_err()
@@ -1629,16 +1628,16 @@ mod tests {
             Value::Null,
         ))
         .unwrap_err();
-        assert!(error.contains("intermediate child-chain handoff"), "{error}");
+        assert!(
+            error.contains("intermediate child-chain handoff"),
+            "{error}"
+        );
     }
 
     #[test]
     fn classify_follow_envelope_rejects_invalid_cost() {
-        let mut envelope = canonical_follow_envelope(
-            true,
-            RuntimeResultStatus::Completed,
-            json!({"answer": 42}),
-        );
+        let mut envelope =
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, json!({"answer": 42}));
         envelope["cost"] = json!({
             "input_tokens": 1,
             "output_tokens": 2,

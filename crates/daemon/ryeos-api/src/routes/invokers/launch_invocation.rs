@@ -44,9 +44,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             .ok_or_else(|| {
                 RouteDispatchError::Internal("launch invoker: missing project_path in input".into())
             })?;
-        let ref_bindings = serde_json::from_value::<
-            std::collections::BTreeMap<String, String>,
-        >(
+        let ref_bindings = serde_json::from_value::<std::collections::BTreeMap<String, String>>(
             ctx.input
                 .get("ref_bindings")
                 .ok_or_else(|| {
@@ -120,15 +118,13 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "threaded dispatch preflight returned no root admission".to_string(),
             )
         })?;
-        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
-            root_admission,
-            ref_bindings,
-        )
-        .map_err(|error| {
-                RouteDispatchError::Internal(format!(
-                    "validated launch contract rejected at dispatch boundary: {error:#}"
-                ))
-            })?;
+        let launch_options =
+            crate::routes::launch::DispatchLaunchOptions::admitted(root_admission, ref_bindings)
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "validated launch contract rejected at dispatch boundary: {error:#}"
+                    ))
+                })?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 
@@ -145,8 +141,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             launch_options.project_path().to_path_buf(),
             ctx.state.engine.clone(),
         );
-        let (mut handle, ready) =
-            crate::routes::launch::spawn_dispatch_launch_with_handoff(
+        let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
             parameters,
@@ -223,10 +218,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
 }
 
 fn launch_task_error(
-    result: Result<
-        Result<(), crate::routes::launch::LaunchSpawnError>,
-        tokio::task::JoinError,
-    >,
+    result: Result<Result<(), crate::routes::launch::LaunchSpawnError>, tokio::task::JoinError>,
 ) -> RouteDispatchError {
     match result {
         Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {

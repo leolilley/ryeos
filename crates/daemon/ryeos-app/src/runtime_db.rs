@@ -1310,8 +1310,9 @@ fn decode_completed_hook_response(
     if response_json.len() > MAX_HOOK_DISPATCH_RESPONSE_BYTES {
         bail!("completed hook dispatch `{dispatch_key}` exceeds response size limit");
     }
-    let response_hash = response_hash
-        .with_context(|| format!("completed hook dispatch `{dispatch_key}` has no response hash"))?;
+    let response_hash = response_hash.with_context(|| {
+        format!("completed hook dispatch `{dispatch_key}` has no response hash")
+    })?;
     validate_sha256("response_hash", response_hash)?;
     let actual_hash = lillux::sha256_hex(response_json);
     if actual_hash != response_hash {
@@ -1353,10 +1354,7 @@ impl RuntimeDb {
     /// A durable pending row is deliberately never reclaimed: after a crash
     /// the daemon cannot prove whether the external action ran, so re-dispatch
     /// would violate the at-most-once contract.
-    pub fn reserve_hook_dispatch(
-        &self,
-        seed: &NewHookDispatch,
-    ) -> Result<HookDispatchReservation> {
+    pub fn reserve_hook_dispatch(&self, seed: &NewHookDispatch) -> Result<HookDispatchReservation> {
         validate_new_hook_dispatch(seed)?;
         let now = lillux::time::timestamp_millis() as i64;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
@@ -1409,13 +1407,13 @@ impl RuntimeDb {
                 }
                 HookDispatchReservation::PendingUnknown
             }
-            HookDispatchStatus::Completed => HookDispatchReservation::Replay(
-                decode_completed_hook_response(
+            HookDispatchStatus::Completed => {
+                HookDispatchReservation::Replay(decode_completed_hook_response(
                     &seed.dispatch_key,
                     response_json.as_deref(),
                     response_hash.as_deref(),
-                )?,
-            ),
+                )?)
+            }
         };
         tx.commit()?;
         Ok(reservation)
@@ -4099,8 +4097,7 @@ mod tests {
         let response = hook_response();
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
             .unwrap();
-        let HookDispatchReservation::Replay(replayed) =
-            db.reserve_hook_dispatch(&seed).unwrap()
+        let HookDispatchReservation::Replay(replayed) = db.reserve_hook_dispatch(&seed).unwrap()
         else {
             panic!("completed hook dispatch must replay");
         };
@@ -4189,9 +4186,8 @@ mod tests {
             &response,
         )
         .unwrap();
-        let HookDispatchReservation::Replay(replayed) = db
-            .reserve_hook_dispatch(&after_completion)
-            .unwrap()
+        let HookDispatchReservation::Replay(replayed) =
+            db.reserve_hook_dispatch(&after_completion).unwrap()
         else {
             panic!("completed dispatch must replay after response loss");
         };
@@ -4259,10 +4255,15 @@ mod tests {
         let seed = hook_seed();
         db.reserve_hook_dispatch(&seed).unwrap();
         assert!(!db.chain_has_live_state(&seed.chain_root_id).unwrap());
-        assert_eq!(db.delete_chain_runtime(&seed.chain_root_id).unwrap(), 1);
+        assert_eq!(
+            db.delete_chain_runtime(&seed.chain_root_id, &[]).unwrap(),
+            1
+        );
         let count: i64 = db
             .conn
-            .query_row("SELECT count(*) FROM hook_dispatch_ledger", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM hook_dispatch_ledger", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -5279,13 +5280,7 @@ mod tests {
             "fk-cohort",
             0,
             item_ref,
-            &follow_child_spec_hash(
-                item_ref,
-                &BTreeMap::new(),
-                &params_0,
-                None,
-            )
-            .unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &params_0, None).unwrap(),
             "child-0",
             "chain-0",
             &sealed,
@@ -5299,13 +5294,7 @@ mod tests {
             "fk-cohort",
             1,
             item_ref,
-            &follow_child_spec_hash(
-                item_ref,
-                &BTreeMap::new(),
-                &params_1,
-                None,
-            )
-            .unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &params_1, None).unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -5349,13 +5338,7 @@ mod tests {
             "fk1",
             0,
             item_ref,
-            &follow_child_spec_hash(
-                item_ref,
-                &BTreeMap::new(),
-                &first,
-                None,
-            )
-            .unwrap(),
+            &follow_child_spec_hash(item_ref, &BTreeMap::new(), &first, None).unwrap(),
             "child-1",
             "chain-1",
             &sealed,
@@ -5366,13 +5349,7 @@ mod tests {
                 "fk1",
                 0,
                 item_ref,
-                &follow_child_spec_hash(
-                    item_ref,
-                    &BTreeMap::new(),
-                    &changed,
-                    None,
-                )
-                .unwrap(),
+                &follow_child_spec_hash(item_ref, &BTreeMap::new(), &changed, None,).unwrap(),
                 "child-1",
                 "chain-1",
                 &sealed,

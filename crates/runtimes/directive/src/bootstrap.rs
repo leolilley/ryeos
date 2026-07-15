@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 
 use crate::directive::*;
-use ryeos_engine::resolution::KindComposedView;
 use ryeos_directive_core::ResolvedProviderSnapshot;
+use ryeos_engine::resolution::KindComposedView;
 use ryeos_runtime::verified_loader::VerifiedLoader;
 
 /// Conventional `derive_as` name on the directive kind's

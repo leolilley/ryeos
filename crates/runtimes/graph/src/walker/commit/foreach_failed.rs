@@ -14,7 +14,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let ForeachFailedOutcome {
@@ -31,14 +31,8 @@ impl Walker {
 
         self.emit_graph_step_started(graph_run_id, step, current)
             .await;
-        self.emit_foreach_iteration_statuses(
-            graph_run_id,
-            current,
-            step,
-            statuses,
-            *total_items,
-        )
-        .await;
+        self.emit_foreach_iteration_statuses(graph_run_id, current, step, statuses, *total_items)
+            .await;
         for observation in observations {
             self.emit_dispatch_observation(current, step, observation)
                 .await;
@@ -59,8 +53,7 @@ impl Walker {
             cost: cost.clone(),
             fanout: None,
         };
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
         self.emit_graph_step_completed(
             graph_run_id,
             step,
@@ -93,7 +86,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -108,9 +100,7 @@ impl Walker {
                     error: Some(&terminal_error),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }
@@ -128,9 +118,7 @@ impl Walker {
                     error: None,
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }

@@ -529,6 +529,7 @@ fn iso8601_seconds_ago(seconds: u64) -> String {
 /// Sweep a sharded directory, deleting files not in the reachable set.
 ///
 /// The shard layout is `namespace/ab/cd/hash{ext}` (two-level hex sharding).
+#[cfg(test)]
 fn sweep_sharded_dir(
     cas_root: &Path,
     namespace: &str,

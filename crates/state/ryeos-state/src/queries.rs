@@ -31,6 +31,8 @@ pub struct ThreadRow {
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<String>,
+    pub base_project_snapshot_hash: Option<String>,
+    pub result_project_snapshot_hash: Option<String>,
     pub captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     pub created_at: String,
     pub updated_at: String,
@@ -65,6 +67,8 @@ impl ThreadRow {
             upstream_thread_id: row.get("upstream_thread_id")?,
             requested_by: row.get("requested_by")?,
             project_root: row.get("project_root")?,
+            base_project_snapshot_hash: row.get("base_project_snapshot_hash")?,
+            result_project_snapshot_hash: row.get("result_project_snapshot_hash")?,
             captured_history_policy,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -380,6 +384,7 @@ const THREAD_COLUMNS: &str = r#"
     thread_id, chain_root_id, kind, status,
     item_ref, executor_ref, launch_mode,
     current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
+    base_project_snapshot_hash, result_project_snapshot_hash,
     captured_history_policy_json, created_at, updated_at, started_at, finished_at
 "#;
 

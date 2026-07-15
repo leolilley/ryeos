@@ -462,6 +462,7 @@ mod integration_tests {
             result_json: Some(serde_json::json!({"message": "done"})),
             error_json: None,
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
 
@@ -509,6 +510,7 @@ mod integration_tests {
             result_json: None,
             error_json: Some(err.clone()),
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
         store
@@ -620,6 +622,7 @@ mod integration_tests {
                 content_hash: Some("deadbeef".to_string()),
                 metadata: None,
             }],
+            managed_envelope: None,
             final_cost: None,
         };
 
@@ -716,6 +719,7 @@ mod integration_tests {
                     result_json: Some(serde_json::json!({"answer": 4})),
                     error_json: None,
                     artifacts: vec![],
+                    managed_envelope: None,
                     final_cost: None,
                 },
             )
@@ -781,6 +785,7 @@ mod integration_tests {
                     result_json: Some(serde_json::json!({"a": 1})),
                     error_json: None,
                     artifacts: vec![],
+                    managed_envelope: None,
                     final_cost: None,
                 },
             )
@@ -835,6 +840,7 @@ mod integration_tests {
                     result_json: Some(serde_json::json!({"a": 1})),
                     error_json: None,
                     artifacts: vec![],
+                    managed_envelope: None,
                     final_cost: None,
                 },
             )
@@ -928,6 +934,7 @@ mod integration_tests {
                     result_json: Some(serde_json::json!({"a": 1})),
                     error_json: None,
                     artifacts: vec![],
+                    managed_envelope: None,
                     final_cost: None,
                 },
             )
@@ -1475,6 +1482,7 @@ mod integration_tests {
                 content_hash: Some("hash123".to_string()),
                 metadata: Some(serde_json::json!({"lines": 10})),
             }],
+            managed_envelope: None,
             final_cost: None,
         };
 
@@ -1605,6 +1613,7 @@ mod integration_tests {
                 content_hash: None,
                 metadata: None,
             }],
+            managed_envelope: None,
             final_cost: Some(ryeos_engine::contracts::FinalCost {
                 turns: 3,
                 input_tokens: 1500,
@@ -1718,6 +1727,7 @@ mod integration_tests {
             result_json: None,
             error_json: None,
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
         store
@@ -1777,6 +1787,7 @@ mod integration_tests {
             result_json: None,
             error_json: Some(serde_json::json!({"reason": "test_cancel"})),
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
 
@@ -1821,6 +1832,7 @@ mod integration_tests {
             result_json: None,
             error_json: None,
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
         store
@@ -1834,6 +1846,7 @@ mod integration_tests {
             result_json: None,
             error_json: None,
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
         let err = store
@@ -1867,6 +1880,7 @@ mod integration_tests {
             result_json: None,
             error_json: None,
             artifacts: vec![],
+            managed_envelope: None,
             final_cost: None,
         };
 

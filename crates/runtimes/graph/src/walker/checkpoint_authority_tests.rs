@@ -122,10 +122,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         Ok(json!({}))
     }
 
-    async fn spawn_follow_child(
-        &self,
-        _: SpawnFollowChildRequest,
-    ) -> Result<Value, CallbackError> {
+    async fn spawn_follow_child(&self, _: SpawnFollowChildRequest) -> Result<Value, CallbackError> {
         self.follow_handoffs.fetch_add(1, Ordering::SeqCst);
         Ok(json!({"phase": "waiting"}))
     }
@@ -168,11 +165,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         Ok(json!({}))
     }
 
-    async fn bundle_events_read_chain(
-        &self,
-        _: &str,
-        _: Value,
-    ) -> Result<Value, CallbackError> {
+    async fn bundle_events_read_chain(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
         Ok(json!({"events": []}))
     }
 
@@ -515,10 +508,8 @@ config:
     }
 
     fn expected_dispatches_before_event(self, event: RuntimeEventType) -> usize {
-        if matches!(
-            self,
-            Self::SequentialForeach | Self::ParallelForeach
-        ) && event == RuntimeEventType::GraphForeachStarted
+        if matches!(self, Self::SequentialForeach | Self::ParallelForeach)
+            && event == RuntimeEventType::GraphForeachStarted
         {
             0
         } else {
@@ -536,7 +527,10 @@ config:
             }
             Self::FollowResume => assert_eq!(state["candidate_child"]["answer"], json!(42)),
             Self::FollowFanoutResume => {
-                assert_eq!(state["candidate_children"].as_array().map(Vec::len), Some(2));
+                assert_eq!(
+                    state["candidate_children"].as_array().map(Vec::len),
+                    Some(2)
+                );
                 assert!(state.get("job").is_none());
             }
         }
@@ -606,7 +600,10 @@ async fn assert_safe_redrive(
             None,
         )
         .await;
-    assert!(result.success, "authoritative checkpoint did not re-drive: {result:?}");
+    assert!(
+        result.success,
+        "authoritative checkpoint did not re-drive: {result:?}"
+    );
     assert_eq!(result.status, GraphRunStatus::Completed);
     let dispatched = callback.dispatched_items.lock().unwrap();
     let expected = if resumes_at_successor {
@@ -627,7 +624,10 @@ async fn expect_injected_crash(walker: Walker, params: Value) {
     let join_error = tokio::spawn(async move { walker.execute(params, None).await })
         .await
         .expect_err("the configured persistence boundary must crash the task");
-    assert!(join_error.is_panic(), "unexpected task failure: {join_error}");
+    assert!(
+        join_error.is_panic(),
+        "unexpected task failure: {join_error}"
+    );
 }
 
 async fn exercise_event_boundaries(kind: AuthorityScenario) {
@@ -664,11 +664,8 @@ async fn exercise_receipt_boundary(kind: AuthorityScenario) {
     assert!(scenario.has_receipt);
     let tmp = tempfile::tempdir().unwrap();
     let params = resume_params(&scenario.definition, &scenario.prior);
-    let (walker, callback, checkpoint) = walker_with_checkpoint(
-        &scenario,
-        tmp.path(),
-        Some(CallbackCrashBoundary::Receipt),
-    );
+    let (walker, callback, checkpoint) =
+        walker_with_checkpoint(&scenario, tmp.path(), Some(CallbackCrashBoundary::Receipt));
     expect_injected_crash(walker, params).await;
     assert!(
         callback
@@ -710,8 +707,8 @@ async fn exercise_rejected_checkpoint_boundary(kind: AuthorityScenario) {
 
 async fn exercise_persisted_checkpoint_boundary(kind: AuthorityScenario) {
     let scenario = kind.build();
-    let prior_resume = crate::resume::from_checkpoint_value(&scenario.prior, &scenario.definition)
-        .unwrap();
+    let prior_resume =
+        crate::resume::from_checkpoint_value(&scenario.prior, &scenario.definition).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let params = resume_params(&scenario.definition, &scenario.prior);
     let (walker, callback, checkpoint) = walker_with_checkpoint(&scenario, tmp.path(), None);

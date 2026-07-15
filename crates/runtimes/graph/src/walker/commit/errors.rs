@@ -15,12 +15,8 @@ impl Walker {
         input: CommitStepContext<'_>,
         outcome: IntegrityFailedOutcome,
     ) -> CommitResult {
-        self.commit_failed_with_status(
-            input,
-            outcome.into(),
-            GraphToolCallStatus::IntegrityFailed,
-        )
-        .await
+        self.commit_failed_with_status(input, outcome.into(), GraphToolCallStatus::IntegrityFailed)
+            .await
     }
 
     async fn commit_failed_with_status(
@@ -37,7 +33,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let ExpressionFailedOutcome {
@@ -57,14 +53,8 @@ impl Walker {
         if !item_id.is_empty() {
             self.emit_tool_call_start(graph_run_id, step, current, item_id)
                 .await;
-            self.emit_tool_call_result(
-                graph_run_id,
-                step,
-                current,
-                item_id,
-                tool_status,
-            )
-            .await;
+            self.emit_tool_call_result(graph_run_id, step, current, item_id, tool_status)
+                .await;
         }
         if let Some(foreach) = &effects.foreach {
             self.emit_foreach_iteration_statuses(
@@ -110,25 +100,25 @@ impl Walker {
                         error: Some(&message),
                         output: None,
                         guard,
-                        current_node_id: current,
                         inputs,
-                        execution,
                     })
                     .await;
             }
         };
-        let fanout_receipt = effects.fanout.as_ref().map(|fanout| {
-            crate::model::FanoutReceiptSummary {
-                statuses: fanout.statuses.clone(),
-                failed: fanout
-                    .statuses
-                    .iter()
-                    .filter(|status| **status == FanoutItemStatus::Failed)
-                    .count(),
-                expected: fanout.statuses.len(),
-                results: None,
-            }
-        });
+        let fanout_receipt =
+            effects
+                .fanout
+                .as_ref()
+                .map(|fanout| crate::model::FanoutReceiptSummary {
+                    statuses: fanout.statuses.clone(),
+                    failed: fanout
+                        .statuses
+                        .iter()
+                        .filter(|status| **status == FanoutItemStatus::Failed)
+                        .count(),
+                    expected: fanout.statuses.len(),
+                    results: None,
+                });
         let receipt = NodeReceipt {
             node: current.to_string(),
             step,
@@ -141,8 +131,7 @@ impl Walker {
             cost: cost.clone(),
             fanout: fanout_receipt,
         };
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
         self.emit_graph_step_completed(
             graph_run_id,
             step,
@@ -175,20 +164,20 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
             NextOnError::PolicyContinue => {
                 self.extend_suppressed_errors(
                     suppressed_errors,
-                    effects.suppressed_errors.into_iter().chain(std::iter::once(
-                        ErrorRecord {
+                    effects
+                        .suppressed_errors
+                        .into_iter()
+                        .chain(std::iter::once(ErrorRecord {
                             step,
                             node: current.to_string(),
                             error: error.clone(),
-                        },
-                    )),
+                        })),
                 );
                 // Expression `continue` terminates this graph path. It
                 // never retries or skips the failed normal edge.
@@ -201,9 +190,7 @@ impl Walker {
                     error: None,
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }
@@ -218,9 +205,7 @@ impl Walker {
                     error: Some(&diagnostic),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }
@@ -295,8 +280,7 @@ impl Walker {
             fanout: None,
         };
 
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
 
         self.emit_graph_step_completed(
             graph_run_id,
@@ -331,7 +315,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -363,7 +346,6 @@ impl Walker {
                             guard,
                             0,
                             inputs,
-                            execution,
                         )
                         .await
                     }
@@ -377,9 +359,7 @@ impl Walker {
                             error: None,
                             output: None,
                             guard,
-                            current_node_id: current,
                             inputs,
-                            execution,
                         })
                         .await
                     }
@@ -403,9 +383,7 @@ impl Walker {
                             error: None,
                             output: None,
                             guard,
-                            current_node_id: current,
                             inputs,
-                            execution,
                         })
                         .await
                     }
@@ -421,9 +399,7 @@ impl Walker {
                     error: Some(&format!("node '{}' failed: {}", current, error)),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }
@@ -494,8 +470,7 @@ impl Walker {
             fanout: None,
         };
 
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
 
         self.emit_graph_step_completed(
             graph_run_id,
@@ -530,7 +505,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -561,7 +535,6 @@ impl Walker {
                             guard,
                             0,
                             inputs,
-                            execution,
                         )
                         .await
                     }
@@ -575,9 +548,7 @@ impl Walker {
                             error: None,
                             output: None,
                             guard,
-                            current_node_id: current,
                             inputs,
-                            execution,
                         })
                         .await
                     }
@@ -601,9 +572,7 @@ impl Walker {
                             error: None,
                             output: None,
                             guard,
-                            current_node_id: current,
                             inputs,
-                            execution,
                         })
                         .await
                     }
@@ -619,9 +588,7 @@ impl Walker {
                     error: Some(&format!("node '{}' failed: {}", current, error)),
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }

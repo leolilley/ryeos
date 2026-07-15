@@ -137,9 +137,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let req: LaunchRequest = serde_json::from_value(ctx.input.clone())
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
         if let Err(error) =
-            ryeos_executor::execution::launch_preparation::validate_ref_bindings(
-                &req.ref_bindings,
-            )
+            ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
         {
             return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
         }
@@ -321,10 +319,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             req.ref_bindings,
         )
         .map_err(|error| {
-                RouteDispatchError::Internal(format!(
-                    "validated stream contract rejected at dispatch boundary: {error:#}"
-                ))
-            })?;
+            RouteDispatchError::Internal(format!(
+                "validated stream contract rejected at dispatch boundary: {error:#}"
+            ))
+        })?;
         options.launch_mode = req.launch_mode;
         options.target_site_id = req.target_site_id;
         options.validate_only = req.validate_only;
@@ -352,8 +350,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             options.project_path().to_path_buf(),
             ctx.state.engine.clone(),
         );
-        let (mut launch_handle, ready) =
-            crate::routes::launch::spawn_dispatch_launch_with_handoff(
+        let (mut launch_handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
             req.parameters,

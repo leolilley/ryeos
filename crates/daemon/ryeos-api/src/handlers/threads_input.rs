@@ -232,9 +232,7 @@ fn handoff_failure(
 
 async fn await_dispatch_handoff(
     mut task: tokio::task::JoinHandle<Result<(), crate::routes::launch::LaunchSpawnError>>,
-    ready: tokio::sync::oneshot::Receiver<
-        ryeos_executor::execution::launch::LaunchHandoffResult,
-    >,
+    ready: tokio::sync::oneshot::Receiver<ryeos_executor::execution::launch::LaunchHandoffResult>,
 ) -> Result<String, HandlerError> {
     tokio::select! {
         readiness = ready => match readiness {
@@ -265,9 +263,7 @@ async fn await_operator_handoff(
             ryeos_executor::execution::launch::BuildAndLaunchError,
         >,
     >,
-    ready: tokio::sync::oneshot::Receiver<
-        ryeos_executor::execution::launch::LaunchHandoffResult,
-    >,
+    ready: tokio::sync::oneshot::Receiver<ryeos_executor::execution::launch::LaunchHandoffResult>,
 ) -> Result<String, HandlerError> {
     tokio::select! {
         readiness = ready => match readiness {
@@ -326,13 +322,12 @@ fn admit_fresh_launch(
     let root_admission = preflight.root_admission.ok_or_else(|| {
         HandlerError::Internal("threaded dispatch preflight returned no root admission".to_string())
     })?;
-    crate::routes::launch::DispatchLaunchOptions::admitted(
-        root_admission,
-        ref_bindings.clone(),
-    )
-    .map_err(|error| HandlerError::Internal(format!(
-        "validated fresh-launch contract rejected at dispatch boundary: {error:#}"
-    )))
+    crate::routes::launch::DispatchLaunchOptions::admitted(root_admission, ref_bindings.clone())
+        .map_err(|error| {
+            HandlerError::Internal(format!(
+                "validated fresh-launch contract rejected at dispatch boundary: {error:#}"
+            ))
+        })
 }
 
 fn admit_resume_launch(
@@ -341,10 +336,9 @@ fn admit_resume_launch(
 ) -> Result<(), HandlerError> {
     use ryeos_engine::contracts::EffectivePrincipal;
 
-    let params = ryeos_executor::execution::runner::execution_params_from_resume_context(
-        state, resume,
-    )
-    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    let params =
+        ryeos_executor::execution::runner::execution_params_from_resume_context(state, resume)
+            .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let engine = params.provenance.request_engine().clone();
     let primary = engine
         .verify(
@@ -431,9 +425,7 @@ pub async fn handle(
             authorize_execution_refs(&item_ref, &ref_bindings, &ctx, &state)?;
             let project_path =
                 crate::routes::abs_path::AbsolutePathBuf::try_new(project_path.into())
-                    .map_err(|error| {
-                        HandlerError::BadRequest(format!("project_path: {error}"))
-                    })?;
+                    .map_err(|error| HandlerError::BadRequest(format!("project_path: {error}")))?;
             let parameters = json!({ "input": input });
             let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
                 .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
@@ -480,141 +472,141 @@ pub async fn handle(
     // live source or a non-continuable settled status is refused; an existing
     // successor is NOT a refusal (the create-or-get below dedups by fingerprint).
     let previous = {
-            let detail = state
-                .state_store
-                .get_thread(&thread_id)
-                .map_err(|e| HandlerError::Internal(e.to_string()))?
-                .ok_or(HandlerError::NotFound)?;
-            ctx.require_owner(detail.requested_by.as_deref())?;
+        let detail = state
+            .state_store
+            .get_thread(&thread_id)
+            .map_err(|e| HandlerError::Internal(e.to_string()))?
+            .ok_or(HandlerError::NotFound)?;
+        ctx.require_owner(detail.requested_by.as_deref())?;
 
-            // Kind eligibility, enforced at the API boundary, applies to BOTH
-            // live delivery and settled continuation: a kind that cannot
-            // chain-fold (e.g. graph), or that self-continues by machine only,
-            // has nowhere to put operator input. Refuse cleanly with
-            // authoritative execution facts rather than letting the lifecycle
-            // guard surface a 500. (Decided before status so a stale/third-party
-            // client that skipped the client-side gate gets a structured
-            // refusal regardless of whether the thread is live or settled.)
-            if !state.threads.supports_continuation_for_kind(&detail.kind) {
-                return Ok(json!({
-                    "thread_id": Value::Null,
-                    "delivery": "refused",
-                    "notice": format!(
-                        "thread {} is kind '{}', which does not support continuation",
-                        detail.thread_id, detail.kind
-                    ),
-                    "execution": exec_facts(&detail.kind),
-                }));
-            }
-            if !state
-                .threads
-                .supports_operator_followup_for_kind(&detail.kind)
-            {
-                return Ok(json!({
-                    "thread_id": Value::Null,
-                    "delivery": "refused",
-                    "notice": format!(
-                        "thread {} is kind '{}', which self-continues by machine only \
-                         and does not accept operator follow-up",
-                        detail.thread_id, detail.kind
-                    ),
-                    "execution": exec_facts(&detail.kind),
-                }));
-            }
+        // Kind eligibility, enforced at the API boundary, applies to BOTH
+        // live delivery and settled continuation: a kind that cannot
+        // chain-fold (e.g. graph), or that self-continues by machine only,
+        // has nowhere to put operator input. Refuse cleanly with
+        // authoritative execution facts rather than letting the lifecycle
+        // guard surface a 500. (Decided before status so a stale/third-party
+        // client that skipped the client-side gate gets a structured
+        // refusal regardless of whether the thread is live or settled.)
+        if !state.threads.supports_continuation_for_kind(&detail.kind) {
+            return Ok(json!({
+                "thread_id": Value::Null,
+                "delivery": "refused",
+                "notice": format!(
+                    "thread {} is kind '{}', which does not support continuation",
+                    detail.thread_id, detail.kind
+                ),
+                "execution": exec_facts(&detail.kind),
+            }));
+        }
+        if !state
+            .threads
+            .supports_operator_followup_for_kind(&detail.kind)
+        {
+            return Ok(json!({
+                "thread_id": Value::Null,
+                "delivery": "refused",
+                "notice": format!(
+                    "thread {} is kind '{}', which self-continues by machine only \
+                     and does not accept operator follow-up",
+                    detail.thread_id, detail.kind
+                ),
+                "execution": exec_facts(&detail.kind),
+            }));
+        }
 
-            match classify_follow_up(&detail.status, &detail.thread_id) {
-                // Running, eligible directive: fold operator input into the
-                // in-flight loop. Enqueue first (so the input is present when
-                // the runtime next polls), then — for an interrupt — nudge the
-                // runtime to cut its current cognition.
-                FollowUpDecision::Live => {
-                    let pending = match state
-                        .live_input
-                        .enqueue(&detail.thread_id, operator_input.clone())
-                    {
-                        EnqueueOutcome::Accepted { pending } => pending,
-                        EnqueueOutcome::Full { pending } => {
-                            return Ok(json!({
-                                "thread_id": Value::Null,
-                                "delivery": "refused",
-                                "notice": format!(
-                                    "thread {} already has {} operator input(s) pending; \
-                                     wait for them to fold",
-                                    detail.thread_id, pending
-                                ),
-                                "execution": exec_facts(&detail.kind),
-                            }));
-                        }
-                        EnqueueOutcome::Closed => {
-                            // Finalized between the status read and the enqueue.
-                            // The live window closed; resubmitting takes the
-                            // settled continuation path.
-                            return Ok(json!({
-                                "thread_id": Value::Null,
-                                "delivery": "refused",
-                                "notice": format!(
-                                    "thread {} finalized before the input could be delivered; \
-                                     resubmit to continue",
-                                    detail.thread_id
-                                ),
-                                "execution": exec_facts(&detail.kind),
-                            }));
-                        }
-                        EnqueueOutcome::TooLarge { bytes, max } => {
-                            return Err(HandlerError::BadRequest(format!(
-                                "operator input is {bytes} serialized bytes; maximum is {max}"
-                            )));
-                        }
-                    };
-
-                    // Default notice reports the staged depth so the operator can
-                    // see input piling up before the runtime folds it. An
-                    // interrupt that failed to signal overrides it with the
-                    // degrade message below.
-                    let mut notice = json!(staged_notice(pending));
-                    // Interrupt: cut the in-flight cognition. The input is
-                    // already enqueued, so on any signal failure we degrade to a
-                    // cooperative steer (it still folds at the next boundary).
-                    if is_interrupt {
-                        let outcome = match detail.runtime.process_identity.as_ref() {
-                            Some(identity) => ryeos_app::process::interrupt_process(identity),
-                            None if detail.runtime.pgid.is_some() => {
-                                ryeos_app::process::SignalResult::MissingIdentity
-                            }
-                            None => ryeos_app::process::SignalResult::MissingPgid,
-                        };
-                        if outcome != ryeos_app::process::SignalResult::Delivered {
-                            notice = json!(format!(
-                                "interrupt not delivered ({}); steering instead — \
-                                 input folds at the next turn boundary",
-                                outcome.as_str()
-                            ));
-                            tracing::warn!(
-                                thread_id = %detail.thread_id,
-                                signal = %outcome.as_str(),
-                                "live interrupt signal not delivered; degraded to steer"
-                            );
-                        }
+        match classify_follow_up(&detail.status, &detail.thread_id) {
+            // Running, eligible directive: fold operator input into the
+            // in-flight loop. Enqueue first (so the input is present when
+            // the runtime next polls), then — for an interrupt — nudge the
+            // runtime to cut its current cognition.
+            FollowUpDecision::Live => {
+                let pending = match state
+                    .live_input
+                    .enqueue(&detail.thread_id, operator_input.clone())
+                {
+                    EnqueueOutcome::Accepted { pending } => pending,
+                    EnqueueOutcome::Full { pending } => {
+                        return Ok(json!({
+                            "thread_id": Value::Null,
+                            "delivery": "refused",
+                            "notice": format!(
+                                "thread {} already has {} operator input(s) pending; \
+                                 wait for them to fold",
+                                detail.thread_id, pending
+                            ),
+                            "execution": exec_facts(&detail.kind),
+                        }));
                     }
+                    EnqueueOutcome::Closed => {
+                        // Finalized between the status read and the enqueue.
+                        // The live window closed; resubmitting takes the
+                        // settled continuation path.
+                        return Ok(json!({
+                            "thread_id": Value::Null,
+                            "delivery": "refused",
+                            "notice": format!(
+                                "thread {} finalized before the input could be delivered; \
+                                 resubmit to continue",
+                                detail.thread_id
+                            ),
+                            "execution": exec_facts(&detail.kind),
+                        }));
+                    }
+                    EnqueueOutcome::TooLarge { bytes, max } => {
+                        return Err(HandlerError::BadRequest(format!(
+                            "operator input is {bytes} serialized bytes; maximum is {max}"
+                        )));
+                    }
+                };
 
-                    return Ok(json!({
-                        "thread_id": detail.thread_id,
-                        "delivery": "submitted",
-                        "notice": notice,
-                        "pending": pending,
-                        "execution": exec_facts(&detail.kind),
-                    }));
+                // Default notice reports the staged depth so the operator can
+                // see input piling up before the runtime folds it. An
+                // interrupt that failed to signal overrides it with the
+                // degrade message below.
+                let mut notice = json!(staged_notice(pending));
+                // Interrupt: cut the in-flight cognition. The input is
+                // already enqueued, so on any signal failure we degrade to a
+                // cooperative steer (it still folds at the next boundary).
+                if is_interrupt {
+                    let outcome = match detail.runtime.process_identity.as_ref() {
+                        Some(identity) => ryeos_app::process::interrupt_process(identity),
+                        None if detail.runtime.pgid.is_some() => {
+                            ryeos_app::process::SignalResult::MissingIdentity
+                        }
+                        None => ryeos_app::process::SignalResult::MissingPgid,
+                    };
+                    if outcome != ryeos_app::process::SignalResult::Delivered {
+                        notice = json!(format!(
+                            "interrupt not delivered ({}); steering instead — \
+                                 input folds at the next turn boundary",
+                            outcome.as_str()
+                        ));
+                        tracing::warn!(
+                            thread_id = %detail.thread_id,
+                            signal = %outcome.as_str(),
+                            "live interrupt signal not delivered; degraded to steer"
+                        );
+                    }
                 }
-                FollowUpDecision::Refuse(notice) => {
-                    return Ok(json!({
-                        "thread_id": Value::Null,
-                        "delivery": "refused",
-                        "notice": notice,
-                        "execution": exec_facts(&detail.kind),
-                    }));
-                }
-                FollowUpDecision::Continue => detail,
+
+                return Ok(json!({
+                    "thread_id": detail.thread_id,
+                    "delivery": "submitted",
+                    "notice": notice,
+                    "pending": pending,
+                    "execution": exec_facts(&detail.kind),
+                }));
             }
+            FollowUpDecision::Refuse(notice) => {
+                return Ok(json!({
+                    "thread_id": Value::Null,
+                    "delivery": "refused",
+                    "notice": notice,
+                    "execution": exec_facts(&detail.kind),
+                }));
+            }
+            FollowUpDecision::Continue => detail,
+        }
     };
 
     // A settled continuation has no caller-supplied execution identity. Load the
@@ -675,14 +667,13 @@ pub async fn handle(
     // exists.
     admit_resume_launch(&resume_context, &state)?;
     let candidate_id = ryeos_app::thread_lifecycle::new_thread_id();
-    let prepared =
-        ryeos_executor::execution::launch::prepare_operator_successor_launch(
-            &state,
-            &candidate_id,
-            &resume_context,
-        )
-        .await
-        .map_err(build_and_launch_error)?;
+    let prepared = ryeos_executor::execution::launch::prepare_operator_successor_launch(
+        &state,
+        &candidate_id,
+        &resume_context,
+    )
+    .await
+    .map_err(build_and_launch_error)?;
     let initial_audit_events = prepared
         .initial_audit_events()
         .map_err(build_and_launch_error)?;
@@ -735,14 +726,10 @@ pub async fn handle(
             let prepared = prepared.with_persisted_birth_audit();
             let task_id = successor_id.clone();
             let st = (*state).clone();
-            let (handoff, ready) =
-                ryeos_executor::execution::launch::LaunchHandoff::channel();
+            let (handoff, ready) = ryeos_executor::execution::launch::LaunchHandoff::channel();
             let task = tokio::spawn(async move {
                 ryeos_executor::execution::launch::launch_prepared_operator_successor(
-                    st,
-                    &task_id,
-                    prepared,
-                    &handoff,
+                    st, &task_id, prepared, &handoff,
                 )
                 .await
             });
@@ -778,25 +765,22 @@ pub async fn handle(
                             "operator successor {successor_id} has no persisted launch metadata"
                         ))
                     })?;
-                let prepared = ryeos_executor::execution::launch::prepare_existing_operator_successor_launch(
-                    &state,
-                    &successor_id,
-                    &launch_metadata,
-                )
-                .await
-                .map_err(build_and_launch_error)?;
+                let prepared =
+                    ryeos_executor::execution::launch::prepare_existing_operator_successor_launch(
+                        &state,
+                        &successor_id,
+                        &launch_metadata,
+                    )
+                    .await
+                    .map_err(build_and_launch_error)?;
                 let task_id = successor_id.clone();
                 let st = (*state).clone();
-                let (handoff, ready) =
-                    ryeos_executor::execution::launch::LaunchHandoff::channel();
+                let (handoff, ready) = ryeos_executor::execution::launch::LaunchHandoff::channel();
                 let task = tokio::spawn(async move {
                     ryeos_executor::execution::launch::launch_prepared_operator_successor(
-                            st,
-                            &task_id,
-                            prepared,
-                            &handoff,
-                        )
-                        .await
+                        st, &task_id, prepared, &handoff,
+                    )
+                    .await
                 });
                 let ready_thread_id = await_operator_handoff(task, ready).await?;
                 if ready_thread_id != successor_id {

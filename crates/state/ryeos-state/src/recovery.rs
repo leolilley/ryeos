@@ -293,8 +293,8 @@ impl DurableCasUploadStage {
         value: &serde_json::Value,
     ) -> Result<String> {
         self.ensure_active()?;
-        let canonical = lillux::canonical_json(value)
-            .context("canonicalize durable staged CAS object")?;
+        let canonical =
+            lillux::canonical_json(value).context("canonicalize durable staged CAS object")?;
         let expected = lillux::sha256_hex(canonical.as_bytes());
         self.recovery.ensure_guard(cas_mutation_guard)?;
         self.protect_object_hash_admitted(&expected)?;
@@ -411,14 +411,6 @@ impl DurableCasUploadStage {
         }
         Ok(())
     }
-
-    fn runtime_state_dir(&self) -> Result<&Path> {
-        self.recovery
-            .root
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| anyhow::anyhow!("recovery root has no runtime-state parent"))
-    }
 }
 
 impl Drop for DurableCasUploadStage {
@@ -435,8 +427,7 @@ impl StagedCasRootLease {
         value: &serde_json::Value,
     ) -> Result<String> {
         self.recovery.ensure_guard(cas_mutation_guard)?;
-        let canonical =
-            lillux::canonical_json(value).context("canonicalize staged CAS object")?;
+        let canonical = lillux::canonical_json(value).context("canonicalize staged CAS object")?;
         let expected = lillux::sha256_hex(canonical.as_bytes());
         self.protect_object_hash_admitted(cas_mutation_guard, &expected)?;
         let stored = cas.store_object(value)?;
@@ -1500,8 +1491,7 @@ impl RecoveryStore {
     pub(crate) fn write_generation(&self, generation: &ProjectionRecoveryGeneration) -> Result<()> {
         generation.validate()?;
         let value = serde_json::to_value(generation)?;
-        let bytes = lillux::canonical_json(&value)
-            .context("canonicalize recovery generation")?;
+        let bytes = lillux::canonical_json(&value).context("canonicalize recovery generation")?;
         let name = std::ffi::OsStr::new("generation.json");
         let expected = self.directory.open_regular(name, false)?;
         self.directory
@@ -1817,8 +1807,8 @@ impl RecoveryStore {
     ) -> Result<()> {
         record.validate()?;
         let value = serde_json::to_value(record)?;
-        let bytes = lillux::canonical_json(&value)
-            .context("canonicalize pending chain-head transition")?;
+        let bytes =
+            lillux::canonical_json(&value).context("canonicalize pending chain-head transition")?;
         let parent = self.open_or_create_child_directory("pending")?;
         let name = format!("{}.json", record.chain_root_id);
         parent
@@ -1834,10 +1824,6 @@ impl RecoveryStore {
                     record.chain_root_id
                 )
             })
-    }
-
-    fn runtime_state_dir(&self) -> Result<&Path> {
-        Ok(self.runtime_directory.path())
     }
 
     fn collect_durable_upload_roots(
@@ -1898,8 +1884,7 @@ impl RecoveryStore {
             validate_hash("staged CAS blob root", hash)?;
         }
         let value = serde_json::to_value(record)?;
-        let bytes = lillux::canonical_json(&value)
-            .context("canonicalize staged CAS roots")?;
+        let bytes = lillux::canonical_json(&value).context("canonicalize staged CAS roots")?;
         let name = format!("{}.json", record.lease_id);
         let name = std::ffi::OsStr::new(&name);
         let expected = directory.open_regular(name, false)?;
@@ -1919,8 +1904,8 @@ impl RecoveryStore {
     ) -> Result<()> {
         validate_durable_upload_record(record)?;
         let value = serde_json::to_value(record)?;
-        let bytes = lillux::canonical_json(&value)
-            .context("canonicalize durable CAS upload stage")?;
+        let bytes =
+            lillux::canonical_json(&value).context("canonicalize durable CAS upload stage")?;
         let name = format!("{}.json", record.staging_id);
         let name = std::ffi::OsStr::new(&name);
         let expected = directory.open_regular(name, false)?;

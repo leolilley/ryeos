@@ -1943,9 +1943,9 @@ mod tests {
     use super::*;
     use crate::directive::PricingConfig;
     use crate::harness::Harness;
+    use ryeos_directive_core::ModelPricing;
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
-    use ryeos_directive_core::ModelPricing;
     use std::path::PathBuf;
 
     fn make_callback_env() -> EnvelopeCallback {

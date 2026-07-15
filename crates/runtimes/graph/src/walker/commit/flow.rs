@@ -14,7 +14,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let TerminalOutcome {
@@ -65,9 +65,7 @@ impl Walker {
             error: error.as_deref(),
             output,
             guard,
-            current_node_id: current,
             inputs,
-            execution,
         })
         .await
     }
@@ -85,7 +83,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache: _,
         } = input;
         let GateTakenOutcome { target } = outcome;
@@ -94,14 +92,8 @@ impl Walker {
             .await;
         self.emit_graph_branch_taken(graph_run_id, step, current, target.as_deref())
             .await;
-        self.emit_graph_step_completed(
-            graph_run_id,
-            step,
-            current,
-            GraphStepStatus::Ok,
-            None,
-        )
-        .await;
+        self.emit_graph_step_completed(graph_run_id, step, current, GraphStepStatus::Ok, None)
+            .await;
         self.fire_graph_hooks(
             self.graph_step_completed_hook_occurrence(graph_run_id, step, current),
             self.step_hook_context(
@@ -127,7 +119,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -141,9 +132,7 @@ impl Walker {
                     error: None,
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }

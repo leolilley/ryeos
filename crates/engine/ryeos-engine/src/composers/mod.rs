@@ -404,8 +404,7 @@ fn success_to_view(s: ComposeSuccess) -> KindComposedView {
 
 fn engine_to_resolution_error(e: EngineError) -> ResolutionError {
     let class = match &e {
-        EngineError::HandlerBinaryMissing { .. }
-        | EngineError::HandlerSpawnFailed { .. } => {
+        EngineError::HandlerBinaryMissing { .. } | EngineError::HandlerSpawnFailed { .. } => {
             ResolutionFailureClass::DependencyUnavailable
         }
         _ => ResolutionFailureClass::InternalInvariant,

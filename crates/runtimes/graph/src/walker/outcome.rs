@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -94,11 +96,7 @@ impl RunHistoryBudget {
         )
     }
 
-    fn with_limits(
-        field: &'static str,
-        max_entries: usize,
-        limits: EvaluationLimits,
-    ) -> Self {
+    fn with_limits(field: &'static str, max_entries: usize, limits: EvaluationLimits) -> Self {
         Self {
             field,
             max_entries,
@@ -221,9 +219,7 @@ impl RunHistoryBudgets {
             .map_err(anyhow::Error::new)
             .and_then(|()| {
                 serde_json::to_value(receipt)
-                    .map_err(|error| {
-                        anyhow::anyhow!("serialize graph node receipt: {error}")
-                    })
+                    .map_err(|error| anyhow::anyhow!("serialize graph node receipt: {error}"))
                     .and_then(|value| {
                         crate::evaluation::validate_runtime_shape(&value, "graph node receipt")
                             .map_err(|error| {
@@ -242,11 +238,7 @@ impl RunHistoryBudgets {
         }
     }
 
-    pub(super) fn push_suppressed(
-        &mut self,
-        history: &mut Vec<ErrorRecord>,
-        error: ErrorRecord,
-    ) {
+    pub(super) fn push_suppressed(&mut self, history: &mut Vec<ErrorRecord>, error: ErrorRecord) {
         self.extend_suppressed(history, std::iter::once(error));
     }
 
@@ -585,9 +577,7 @@ pub(super) struct CommitTerminalInput<'a> {
     pub(super) error: Option<&'a str>,
     pub(super) output: Option<Value>,
     pub(super) guard: &'a mut RunGuard,
-    pub(super) current_node_id: &'a str,
     pub(super) inputs: &'a Value,
-    pub(super) execution: &'a Value,
 }
 
 #[cfg(test)]
@@ -608,11 +598,8 @@ mod history_tests {
             RunHistoryBudget::new("production history").max_entries,
             crate::model::MAX_GRAPH_STEPS as usize
         );
-        let mut budget = RunHistoryBudget::with_limits(
-            "test history",
-            1,
-            EvaluationLimits::default(),
-        );
+        let mut budget =
+            RunHistoryBudget::with_limits("test history", 1, EvaluationLimits::default());
 
         budget.append(&error_record("first")).unwrap();
         let error = budget.append(&error_record("second")).unwrap_err();
@@ -625,9 +612,7 @@ mod history_tests {
     fn production_history_budget_matches_checkpoint_shape_fuel() {
         let record = error_record("x".repeat(250_000));
         let encoded = serde_json::to_value(&record).unwrap();
-        assert!(
-            crate::evaluation::validate_runtime_shape(&encoded, "test history record").is_ok()
-        );
+        assert!(crate::evaluation::validate_runtime_shape(&encoded, "test history record").is_ok());
 
         let mut budget = RunHistoryBudget::new("test history");
         assert!(budget.append(&record).is_ok());

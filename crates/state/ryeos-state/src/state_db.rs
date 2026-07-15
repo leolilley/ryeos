@@ -2619,14 +2619,7 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.create_chain_with_events_inner(
-            chain_root_id,
-            snapshot,
-            events,
-            signer,
-            None,
-            &guard,
-        )
+        self.create_chain_with_events_inner(chain_root_id, snapshot, events, signer, None, &guard)
     }
 
     pub fn create_chain_with_events_admitted(
@@ -2700,11 +2693,7 @@ impl StateDb {
             &result.chain_state_hash,
             &chain_lock,
         ) {
-            self.note_pending_transition_error(
-                chain_root_id,
-                "create_chain_with_events",
-                &error,
-            );
+            self.note_pending_transition_error(chain_root_id, "create_chain_with_events", &error);
             return Err(error);
         }
         let projected = project_committed_chain(

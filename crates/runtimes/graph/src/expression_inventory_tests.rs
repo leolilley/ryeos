@@ -11,9 +11,19 @@ use ryeos_engine::resolution::run_resolution_pipeline;
 
 fn visit_kind_files(base: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
     let mut entries = fs::read_dir(directory)
-        .unwrap_or_else(|error| panic!("read installable directory {}: {error}", directory.display()))
+        .unwrap_or_else(|error| {
+            panic!(
+                "read installable directory {}: {error}",
+                directory.display()
+            )
+        })
         .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|error| panic!("enumerate installable directory {}: {error}", directory.display()));
+        .unwrap_or_else(|error| {
+            panic!(
+                "enumerate installable directory {}: {error}",
+                directory.display()
+            )
+        });
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
@@ -53,9 +63,10 @@ fn installable_refs(
                 .to_str()
                 .unwrap_or_else(|| panic!("installable path is not UTF-8: {}", relative.display()))
                 .replace(std::path::MAIN_SEPARATOR, "/");
-            let Some(extension) = extensions.iter().copied().find_map(|extension| {
-                relative.ends_with(extension).then_some(extension)
-            })
+            let Some(extension) = extensions
+                .iter()
+                .copied()
+                .find_map(|extension| relative.ends_with(extension).then_some(extension))
             else {
                 continue;
             };
@@ -101,9 +112,8 @@ fn installable_graph_expression_fields_compile_through_live_loaders() {
     }
 
     let handlers = ryeos_engine::test_support::load_live_handler_registry();
-    let (parser_registry, duplicates) =
-        ParserRegistry::load_base(&bundle_roots, &trust, &kinds)
-            .expect("load signed live parser descriptors");
+    let (parser_registry, duplicates) = ParserRegistry::load_base(&bundle_roots, &trust, &kinds)
+        .expect("load signed live parser descriptors");
     assert!(
         duplicates.is_empty(),
         "live parser registry contains duplicate refs: {duplicates:?}"
@@ -113,29 +123,20 @@ fn installable_graph_expression_fields_compile_through_live_loaders() {
         ComposerRegistry::from_kinds(&kinds, &handlers).expect("derive live composer registry");
     let roots = ResolutionRoots::from_flat(
         None,
-        bundle_roots
-            .iter()
-            .map(|root| root.join(".ai"))
-            .collect(),
+        bundle_roots.iter().map(|root| root.join(".ai")).collect(),
     );
 
     for (item_ref, source_root) in items {
         let canonical = CanonicalRef::parse(&item_ref)
             .unwrap_or_else(|error| panic!("parse inventory ref {item_ref}: {error}"));
-        let resolved = run_resolution_pipeline(
-            &canonical,
-            &kinds,
-            &parsers,
-            &roots,
-            &trust,
-            &composers,
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "resolve signed installable graph {item_ref} from {}: {error}",
-                source_root.display()
-            )
-        });
+        let resolved =
+            run_resolution_pipeline(&canonical, &kinds, &parsers, &roots, &trust, &composers)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "resolve signed installable graph {item_ref} from {}: {error}",
+                        source_root.display()
+                    )
+                });
         let yaml = serde_yaml::to_string(&resolved.composed.composed)
             .unwrap_or_else(|error| panic!("serialize composed graph {item_ref}: {error}"));
         crate::model::GraphDefinition::from_yaml(&yaml, Some(&item_ref))

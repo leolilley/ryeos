@@ -87,14 +87,8 @@ pub fn build_engine_for_roots(
     trust_overlay: Option<&TrustStore>,
     sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<Engine> {
-    build_engine_for_roots_with_sandbox(
-        config,
-        bundle_roots,
-        project_root,
-        trust_overlay,
-        sandbox,
-    )
-    .map(|(engine, _sandbox)| engine)
+    build_engine_for_roots_with_sandbox(config, bundle_roots, project_root, trust_overlay, sandbox)
+        .map(|(engine, _sandbox)| engine)
 }
 
 fn build_engine_for_roots_with_sandbox(
@@ -362,11 +356,7 @@ fn build_node_bundle_admission(
         let tentative = sandbox
             .tentative_mandatory_bubblewrap_backend()
             .context("failed to tentatively capture sandbox backend required by runtimes")?;
-        let tentative_preparers = bind_launch_preparers(
-            &runtimes,
-            &handler_registry,
-            &tentative,
-        )?;
+        let tentative_preparers = bind_launch_preparers(&runtimes, &handler_registry, &tentative)?;
         let (published, reconciled) = sandbox
             .publish_mandatory_bubblewrap_backend(&tentative)
             .context("failed to publish admitted launch-preparer sandbox backend")?;

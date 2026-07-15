@@ -191,9 +191,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
 
         for (binding_name, binding_ref) in &child.ref_bindings {
             let canonical = CanonicalRef::parse(binding_ref).with_context(|| {
-                format!(
-                    "follow: invalid ref binding '{binding_name}' value '{binding_ref}'"
-                )
+                format!("follow: invalid ref binding '{binding_name}' value '{binding_ref}'")
             })?;
             let required = canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
             let policy = AuthorizationPolicy::require_all(&[&required]);
@@ -496,32 +494,31 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             let sealed_root_request = resolved_children.get(item_index).ok_or_else(|| {
                 anyhow::anyhow!("follow: missing sealed child authority at index {item_index}")
             })?;
-            let child_execution =
-                sealed_root_request.restore(cap.provenance.request_engine())?;
+            let child_execution = sealed_root_request.restore(cap.provenance.request_engine())?;
             let mut meta = RuntimeLaunchMetadata::default()
                 .with_resume_context(ResumeContext {
-                kind: child_execution.kind.clone(),
-                item_ref: child.item_ref.clone(),
-                ref_bindings: child.ref_bindings.clone(),
-                launch_mode: "detached".to_string(),
-                parameters: child.parameters.clone(),
-                project_context: ProjectContext::LocalPath {
-                    path: cap.provenance.effective_path().to_path_buf(),
-                },
-                original_snapshot_hash: inherited_snapshot_hash.clone(),
-                original_pushed_head_ref: None,
-                state_root: cap
-                    .provenance
-                    .state_root_override()
-                    .map(|p| p.to_path_buf()),
-                current_site_id: parent.current_site_id.clone(),
-                origin_site_id: parent.origin_site_id.clone(),
-                requested_by: requested_by.clone(),
-                execution_hints: ExecutionHints::default(),
-                effective_caps: cap.effective_caps.clone(),
-                executor_ref: Some(child_execution.executor_ref.clone()),
-                runtime_ref: Some(sealed_root_request.runtime_ref().to_string()),
-            })
+                    kind: child_execution.kind.clone(),
+                    item_ref: child.item_ref.clone(),
+                    ref_bindings: child.ref_bindings.clone(),
+                    launch_mode: "detached".to_string(),
+                    parameters: child.parameters.clone(),
+                    project_context: ProjectContext::LocalPath {
+                        path: cap.provenance.effective_path().to_path_buf(),
+                    },
+                    original_snapshot_hash: inherited_snapshot_hash.clone(),
+                    original_pushed_head_ref: None,
+                    state_root: cap
+                        .provenance
+                        .state_root_override()
+                        .map(|p| p.to_path_buf()),
+                    current_site_id: parent.current_site_id.clone(),
+                    origin_site_id: parent.origin_site_id.clone(),
+                    requested_by: requested_by.clone(),
+                    execution_hints: ExecutionHints::default(),
+                    effective_caps: cap.effective_caps.clone(),
+                    executor_ref: Some(child_execution.executor_ref.clone()),
+                    runtime_ref: Some(sealed_root_request.runtime_ref().to_string()),
+                })
                 .with_sealed_root_request(sealed_root_request.clone());
             meta.follow_parent_context = Some(persisted_parent_context.clone());
             meta.follow_launch_window = expected_launch_window.clone();
@@ -586,11 +583,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         event_type: ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
                             .as_str()
                             .to_string(),
-                        storage_class:
-                            ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
-                                .storage_class()
-                                .as_str()
-                                .to_string(),
+                        storage_class: ryeos_runtime::events::RuntimeEventType::ThreadFacetSet
+                            .storage_class()
+                            .as_str()
+                            .to_string(),
                         payload: json!({"key": key, "value": value}),
                     });
                 }
@@ -611,7 +607,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     anyhow::anyhow!(
                         "follow: child {child_thread_id} has no authoritative launch metadata"
                     )
-            })?;
+                })?;
             if persisted.resume_context != meta.resume_context
                 || serde_json::to_value(&persisted.sealed_root_request)?
                     != serde_json::to_value(&meta.sealed_root_request)?
@@ -631,7 +627,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     anyhow::anyhow!(
                         "follow: child {child_thread_id} has no authoritative launch metadata"
                     )
-            })?;
+                })?;
             if persisted.resume_context != expected.resume_context
                 || serde_json::to_value(&persisted.sealed_root_request)?
                     != serde_json::to_value(&expected.sealed_root_request)?
@@ -764,10 +760,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     //    follow-resume path — never here.
     let parent_successor_thread_id = if re_drive {
         waiter.parent_successor_thread_id.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "follow: {} waiter has no parent successor",
-                waiter.phase
-            )
+            anyhow::anyhow!("follow: {} waiter has no parent successor", waiter.phase)
         })?
     } else {
         match waiter.parent_successor_thread_id.clone() {
@@ -827,6 +820,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         },
                         &parent_thread_id,
                         &parent.chain_root_id,
+                        &params.completion,
                     )?;
                     if let Err(error) = state
                         .state_store
@@ -920,11 +914,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let mut launch_receivers = Vec::new();
     for launch_child_id in admitted {
         let launch_state = state.clone();
-        let prepared = prepared_by_child.remove(&launch_child_id).ok_or_else(|| {
-            anyhow::anyhow!("follow: admitted unknown child {launch_child_id}")
-        })?;
-        let (launch_handoff, launch_ready) =
-            crate::execution::launch::LaunchHandoff::channel();
+        let prepared = prepared_by_child
+            .remove(&launch_child_id)
+            .ok_or_else(|| anyhow::anyhow!("follow: admitted unknown child {launch_child_id}"))?;
+        let (launch_handoff, launch_ready) = crate::execution::launch::LaunchHandoff::channel();
         launch_receivers.push((launch_child_id.clone(), launch_ready));
         tokio::spawn(async move {
             if let Err(e) = crate::execution::launch::launch_prepared_follow_child(

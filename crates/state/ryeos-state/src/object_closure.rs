@@ -348,21 +348,6 @@ pub fn collect_object_closure(
     )
 }
 
-/// Collect an unbounded local-maintenance closure while allowing a caller to
-/// stop between individual object and blob inspection units.
-pub(crate) fn collect_object_closure_with_check(
-    cas_root: &Path,
-    roots: impl IntoIterator<Item = String>,
-    check: &mut dyn FnMut() -> anyhow::Result<()>,
-) -> anyhow::Result<ObjectClosureReport> {
-    collect_object_closure_with_limits_and_check(
-        cas_root,
-        roots,
-        ObjectClosureLimits::unbounded_for_local_maintenance(),
-        check,
-    )
-}
-
 pub(crate) fn collect_object_closure_with_cas_and_check(
     cas: &lillux::CasStore,
     roots: impl IntoIterator<Item = String>,

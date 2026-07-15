@@ -10,9 +10,9 @@ use ryeos_handler_protocol::{
     ConfigMergeModeWire, HandlerResponse, ItemSpaceWire, LaunchConfigContributorWire,
     LaunchConfigInputDeclWire, LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire,
     LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse,
-    LaunchPrepareSuccess, LaunchSecretOriginWire, LaunchSecretRequirement,
-    RuntimeFactKindWire, TrustClassWire, ValidateLaunchPreparerConfigRequest,
-    ValidateLaunchPreparerConfigResponse, ValidateLaunchPreparerConfigSuccess,
+    LaunchPrepareSuccess, LaunchSecretOriginWire, LaunchSecretRequirement, RuntimeFactKindWire,
+    TrustClassWire, ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    ValidateLaunchPreparerConfigSuccess,
 };
 
 const ALLOWED_SECRET_NAMES: &[&str] = &[
@@ -448,8 +448,20 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
     if request.runtime_facts.len() != 8 {
         return Err("runtime_facts must declare the eight directive fact fields".into());
     }
-    fact(request, "provider_id", true, RuntimeFactKindWire::String, 128)?;
-    fact(request, "model_name", true, RuntimeFactKindWire::String, 256)?;
+    fact(
+        request,
+        "provider_id",
+        true,
+        RuntimeFactKindWire::String,
+        128,
+    )?;
+    fact(
+        request,
+        "model_name",
+        true,
+        RuntimeFactKindWire::String,
+        256,
+    )?;
     fact(
         request,
         "context_window",
@@ -465,7 +477,13 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         RuntimeFactKindWire::String,
         128,
     )?;
-    fact(request, "config_hash", true, RuntimeFactKindWire::String, 64)?;
+    fact(
+        request,
+        "config_hash",
+        true,
+        RuntimeFactKindWire::String,
+        64,
+    )?;
     fact(
         request,
         "config_value_digest",
@@ -498,7 +516,9 @@ fn exact_strings(label: &str, actual: &[String], expected: &[&str]) -> Result<()
     {
         Ok(())
     } else {
-        Err(format!("{label} does not match the directive launch contract"))
+        Err(format!(
+            "{label} does not match the directive launch contract"
+        ))
     }
 }
 
@@ -516,7 +536,9 @@ fn exact_trust_values(
     {
         Ok(())
     } else {
-        Err(format!("{label} does not match the directive launch contract"))
+        Err(format!(
+            "{label} does not match the directive launch contract"
+        ))
     }
 }
 
@@ -537,7 +559,9 @@ fn exact_values<T: PartialEq>(label: &str, actual: &[T], expected: &[T]) -> Resu
     {
         Ok(())
     } else {
-        Err(format!("{label} does not match the directive launch contract"))
+        Err(format!(
+            "{label} does not match the directive launch contract"
+        ))
     }
 }
 

@@ -376,9 +376,15 @@ impl DispatchError {
                 StatusCode::BAD_REQUEST
             }
             Self::LaunchPreparationFailed { classification, .. }
-                if classification == "configuration" => StatusCode::UNPROCESSABLE_ENTITY,
+                if classification == "configuration" =>
+            {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             Self::LaunchPreparationFailed { classification, .. }
-                if classification == "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+                if classification == "unavailable" =>
+            {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::LaunchPreparationFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::TargetSiteForwardConflict { .. } => StatusCode::CONFLICT,
             Self::ProtocolNotRegistered(_) | Self::TargetSiteForwardBadGateway { .. } => {
@@ -387,9 +393,7 @@ impl DispatchError {
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
             Self::HookDispatchIntegrity { .. }
             | Self::Internal(_)
-            | Self::TargetSiteForwardInternal { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -451,9 +455,7 @@ impl DispatchError {
     pub fn retryable(&self) -> bool {
         match self {
             Self::ServiceUnavailable { .. } => true,
-            Self::LaunchPreparationFailed { classification, .. } => {
-                classification == "unavailable"
-            }
+            Self::LaunchPreparationFailed { classification, .. } => classification == "unavailable",
             _ => false,
         }
     }
@@ -587,10 +589,7 @@ mod tests {
             details: sample_details(),
         };
         let msg = e.to_string();
-        assert!(
-            msg.contains("work:foo/bar"),
-            "must include ref, got: {msg}"
-        );
+        assert!(msg.contains("work:foo/bar"), "must include ref, got: {msg}");
         assert!(
             msg.contains("2 errors"),
             "must include error count, got: {msg}"

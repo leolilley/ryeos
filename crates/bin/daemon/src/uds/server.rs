@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 
@@ -2088,11 +2089,7 @@ mod tests {
             .unwrap();
         state
             .state_store
-            .create_follow_resume_successor(
-                &new_successor_record("S", "P", Some("P")),
-                "P",
-                "P",
-            )
+            .create_follow_resume_successor(&new_successor_record("S", "P", Some("P")), "P", "P")
             .unwrap();
         state.threads.mark_running("S").unwrap();
     }
@@ -4440,12 +4437,11 @@ mod tests {
             .unwrap();
 
         let ctx = HandlerContext::new("user:test".to_string(), Vec::new(), true);
-        let req: ryeos_api::handlers::threads_input::Request =
-            serde_json::from_value(json!({
-                "input": "again",
-                "target": {"kind": "thread", "thread_id": "T-pred"},
-            }))
-            .unwrap();
+        let req: ryeos_api::handlers::threads_input::Request = serde_json::from_value(json!({
+            "input": "again",
+            "target": {"kind": "thread", "thread_id": "T-pred"},
+        }))
+        .unwrap();
         let resp = ryeos_api::handlers::threads_input::handle(req, ctx, state.clone())
             .await
             .expect("a non-continuable kind is a refusal, not an error");

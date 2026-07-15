@@ -604,8 +604,7 @@ fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
             kind: ParseErrKind::Syntax | ParseErrKind::Schema,
             ..
         } => ResolutionFailureClass::InvalidDefinition,
-        EngineError::HandlerBinaryMissing { .. }
-        | EngineError::HandlerSpawnFailed { .. } => {
+        EngineError::HandlerBinaryMissing { .. } | EngineError::HandlerSpawnFailed { .. } => {
             ResolutionFailureClass::DependencyUnavailable
         }
         EngineError::ParserFailed {

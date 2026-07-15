@@ -57,11 +57,12 @@ fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatch
             // Build the dispatch payload leniently, exactly as a node action does
             // (`thread` defaults to "inline", `call` is optional) — a hook action
             // rides the identical callback path, not a stricter contract.
-            let payload = parse_hook_action(action).map_err(|message| CallbackError::ActionFailed {
-                code: "invalid_hook_action".to_string(),
-                message,
-                retryable: false,
-            })?;
+            let payload =
+                parse_hook_action(action).map_err(|message| CallbackError::ActionFailed {
+                    code: "invalid_hook_action".to_string(),
+                    message,
+                    retryable: false,
+                })?;
             let response = cb
                 .dispatch_action(DispatchActionRequest {
                     thread_id: tid,
@@ -91,9 +92,14 @@ mod tests {
     #[test]
     fn normalize_passes_bare_tool_value() {
         let bare = json!({"msg": "hi"});
-        assert_eq!(normalize_hook_dispatch_result(bare.clone()).unwrap().value, bare);
         assert_eq!(
-            normalize_hook_dispatch_result(json!("scalar")).unwrap().value,
+            normalize_hook_dispatch_result(bare.clone()).unwrap().value,
+            bare
+        );
+        assert_eq!(
+            normalize_hook_dispatch_result(json!("scalar"))
+                .unwrap()
+                .value,
             json!("scalar")
         );
     }
@@ -217,22 +223,20 @@ mod tests {
         let ctx = json!({"event": "graph_started"});
         // Empty hook list → Ok, and the dispatcher (which would panic here) is
         // never built.
-        assert!(
-            run_graph_hooks(
-                &client,
-                "T-test",
-                "/tmp",
-                &[],
-                HookDispatchOccurrence::GraphStarted {
-                    graph_run_id: "run-1".to_string(),
-                    definition_ref: "graph:test/fixture".to_string(),
-                    definition_hash: "definition-hash".to_string(),
-                },
-                &ctx,
-            )
-                .await
-                .is_ok()
-        );
+        assert!(run_graph_hooks(
+            &client,
+            "T-test",
+            "/tmp",
+            &[],
+            HookDispatchOccurrence::GraphStarted {
+                graph_run_id: "run-1".to_string(),
+                definition_ref: "graph:test/fixture".to_string(),
+                definition_hash: "definition-hash".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .is_ok());
     }
 
     struct NoopClient;

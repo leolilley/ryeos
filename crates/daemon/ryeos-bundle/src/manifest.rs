@@ -115,22 +115,18 @@ pub fn validate_smoke_decls(decls: &[SmokeDecl]) -> Result<()> {
         }
         for (name, item_ref) in &decl.ref_bindings {
             let valid_name = name.len() <= 64
-                && name
-                    .as_bytes()
-                    .first()
-                    .is_some_and(u8::is_ascii_lowercase)
+                && name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
                 && name.split('_').all(|segment| {
                     !segment.is_empty()
-                        && segment.bytes().all(|byte| {
-                            byte.is_ascii_lowercase() || byte.is_ascii_digit()
-                        })
+                        && segment
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
                 });
             if !valid_name {
                 bail!("invalid smoke ref binding name '{name}'");
             }
-            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).with_context(|| {
-                format!("invalid smoke ref_bindings.{name}: {item_ref}")
-            })?;
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+                .with_context(|| format!("invalid smoke ref_bindings.{name}: {item_ref}"))?;
         }
         if !seen.insert(decl.label()) {
             bail!("duplicate smoke entry label '{}'", decl.label());

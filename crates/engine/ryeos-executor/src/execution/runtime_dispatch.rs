@@ -103,9 +103,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
 }
 
 fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(crate::dispatch_error::DispatchError::HookDispatchIntegrity {
-        detail: detail.into(),
-    })
+    anyhow::Error::new(
+        crate::dispatch_error::DispatchError::HookDispatchIntegrity {
+            detail: detail.into(),
+        },
+    )
 }
 
 fn validate_hook_dispatch_preflight(
@@ -205,7 +207,9 @@ fn validate_hook_identity_authority(
             turn,
         } => {
             if *turn == 0 {
-                return Err(hook_integrity("directive hook turn must be greater than zero"));
+                return Err(hook_integrity(
+                    "directive hook turn must be greater than zero",
+                ));
             }
             (
                 vec![
@@ -238,9 +242,8 @@ fn validate_hook_identity_authority(
         )));
     }
     let canonical_callback_root =
-        ryeos_engine::canonical_ref::CanonicalRef::parse(callback_root_item_ref).map_err(
-            |error| hook_integrity(format!("invalid callback root item ref: {error}")),
-        )?;
+        ryeos_engine::canonical_ref::CanonicalRef::parse(callback_root_item_ref)
+            .map_err(|error| hook_integrity(format!("invalid callback root item ref: {error}")))?;
     if canonical_callback_root != canonical_definition {
         return Err(hook_integrity(format!(
             "hook definition_ref `{definition_ref}` does not match callback root `{callback_root_item_ref}`"
@@ -253,16 +256,14 @@ fn validate_hook_identity_authority(
     }
     let occurrence_definition_hash = match &hook.occurrence {
         ryeos_runtime::callback::HookDispatchOccurrence::GraphStarted {
-            definition_hash,
-            ..
+            definition_hash, ..
         }
         | ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
             definition_hash,
             ..
         }
         | ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted {
-            definition_hash,
-            ..
+            definition_hash, ..
         }
         | ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
             definition_hash,
@@ -575,11 +576,12 @@ fn hook_dispatch_ledger_seed(
         "occurrence": &identity.occurrence,
         "hook_id": &identity.hook_id,
     });
-    let canonical_dispatch_identity = lillux::canonical_json(&dispatch_identity).map_err(|error| {
-        hook_integrity(format!(
-            "hook dispatch identity cannot be represented as canonical JSON: {error}"
-        ))
-    })?;
+    let canonical_dispatch_identity =
+        lillux::canonical_json(&dispatch_identity).map_err(|error| {
+            hook_integrity(format!(
+                "hook dispatch identity cannot be represented as canonical JSON: {error}"
+            ))
+        })?;
     let dispatch_key = lillux::sha256_hex(canonical_dispatch_identity.as_bytes());
     let request_identity = serde_json::json!({
         "hook_dispatch": identity,
@@ -592,11 +594,12 @@ fn hook_dispatch_ledger_seed(
         "depth": depth,
         "callback_root_item_ref": callback_root_item_ref,
     });
-    let canonical_request_identity = lillux::canonical_json(&request_identity).map_err(|error| {
-        hook_integrity(format!(
-            "hook dispatch request cannot be represented as canonical JSON: {error}"
-        ))
-    })?;
+    let canonical_request_identity =
+        lillux::canonical_json(&request_identity).map_err(|error| {
+            hook_integrity(format!(
+                "hook dispatch request cannot be represented as canonical JSON: {error}"
+            ))
+        })?;
     let request_hash = lillux::sha256_hex(canonical_request_identity.as_bytes());
     let seed = ryeos_app::state_store::NewHookDispatch {
         dispatch_key,
@@ -707,14 +710,13 @@ mod tests {
     #[test]
     fn hook_ledger_key_is_chain_occurrence_scoped_and_request_hash_binds_action() {
         let identity = ryeos_runtime::callback::HookDispatchIdentity {
-            occurrence:
-                ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                    graph_run_id: "run-1".to_string(),
-                    definition_ref: "graph:test/fixture".to_string(),
-                    definition_hash: "d".repeat(64),
-                    step: 3,
-                    node: "audit".to_string(),
-                },
+            occurrence: ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
+                graph_run_id: "run-1".to_string(),
+                definition_ref: "graph:test/fixture".to_string(),
+                definition_hash: "d".repeat(64),
+                step: 3,
+                node: "audit".to_string(),
+            },
             hook_id: "audit-hook".to_string(),
             layer: ryeos_runtime::hooks_loader::HookLayer::Operator,
             context_hash: "c".repeat(64),

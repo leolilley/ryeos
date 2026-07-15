@@ -65,14 +65,15 @@ impl LaunchPreparerRegistry {
                 LaunchPreparationDecl::None => continue,
                 LaunchPreparationDecl::Handler { handler, config } => (handler, config),
             };
-            let handler = handlers.get(handler_ref).ok_or_else(|| {
-                EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "runtime `{}` launch preparer `{handler_ref}` is not registered",
-                        runtime.canonical_ref
-                    ),
-                }
-            })?;
+            let handler =
+                handlers
+                    .get(handler_ref)
+                    .ok_or_else(|| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "runtime `{}` launch preparer `{handler_ref}` is not registered",
+                            runtime.canonical_ref
+                        ),
+                    })?;
             if handler.descriptor().serves != HandlerServes::LaunchPreparer {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
@@ -207,11 +208,12 @@ impl LaunchPreparerRunner {
             }
         };
 
-        let request_value = serde_json::to_value(request)
-            .map_err(|error| EngineError::LaunchPreparerProtocolInvalid {
+        let request_value = serde_json::to_value(request).map_err(|error| {
+            EngineError::LaunchPreparerProtocolInvalid {
                 handler: canonical_ref.clone(),
                 detail: format!("encode handler request: {error}"),
-            })?;
+            }
+        })?;
         let request_json = lillux::canonical_json(&request_value)
             .map(String::into_bytes)
             .map_err(|error| EngineError::LaunchPreparerProtocolInvalid {
@@ -289,12 +291,13 @@ impl LaunchPreparerRunner {
         }
 
         let started_at = Instant::now();
-        let mut child = command
-            .spawn()
-            .map_err(|error| EngineError::LaunchPreparerUnavailable {
-                handler: canonical_ref.clone(),
-                detail: format!("spawn fixed Bubblewrap profile: {error}"),
-            })?;
+        let mut child =
+            command
+                .spawn()
+                .map_err(|error| EngineError::LaunchPreparerUnavailable {
+                    handler: canonical_ref.clone(),
+                    detail: format!("spawn fixed Bubblewrap profile: {error}"),
+                })?;
         let process_group = child.id() as i32;
         let Some(stdin) = child.stdin.take() else {
             kill_process_group(process_group, &mut child);
@@ -377,17 +380,21 @@ impl LaunchPreparerRunner {
             thread::sleep(Duration::from_millis(2));
         };
 
-        let stdin_result = stdin_thread.join().map_err(|_| {
-            EngineError::LaunchPreparerProtocolInvalid {
-                handler: canonical_ref.clone(),
-                detail: "launch-preparer stdin writer panicked".to_owned(),
-            }
-        })?;
+        let stdin_result =
+            stdin_thread
+                .join()
+                .map_err(|_| EngineError::LaunchPreparerProtocolInvalid {
+                    handler: canonical_ref.clone(),
+                    detail: "launch-preparer stdin writer panicked".to_owned(),
+                })?;
         let stdout_capture = join_bounded_reader(stdout_thread, &canonical_ref, "stdout")?;
         let stderr_capture = join_bounded_reader(stderr_thread, &canonical_ref, "stderr")?;
 
         if violation.is_none() {
-            violation = stdout_capture.violation.clone().or(stderr_capture.violation.clone());
+            violation = stdout_capture
+                .violation
+                .clone()
+                .or(stderr_capture.violation.clone());
         }
         if let Some(violation) = violation {
             return Err(stream_violation_error(&canonical_ref, violation));
@@ -404,20 +411,16 @@ impl LaunchPreparerRunner {
             detail: "launch-preparer exit status unavailable".to_owned(),
         })?;
         if !status.success() {
-            return Err(nonzero_error(
-                canonical_ref,
-                status,
-                stderr_capture.bytes,
-            ));
+            return Err(nonzero_error(canonical_ref, status, stderr_capture.bytes));
         }
 
-        let response: HandlerResponse =
-            ryeos_handler_protocol::from_json_slice_strict(&stdout_capture.bytes).map_err(
-                |error| EngineError::LaunchPreparerProtocolInvalid {
-                    handler: canonical_ref.clone(),
-                    detail: error.to_string(),
-                },
-            )?;
+        let response: HandlerResponse = ryeos_handler_protocol::from_json_slice_strict(
+            &stdout_capture.bytes,
+        )
+        .map_err(|error| EngineError::LaunchPreparerProtocolInvalid {
+            handler: canonical_ref.clone(),
+            detail: error.to_string(),
+        })?;
         let response_value = serde_json::to_value(&response).map_err(|error| {
             EngineError::LaunchPreparerProtocolInvalid {
                 handler: canonical_ref.clone(),
@@ -582,8 +585,7 @@ fn exact_runtime_library_mounts(
         return Ok(Vec::new());
     };
     validate_runtime_destination("ELF interpreter", &interpreter)?;
-    let (pinned_interpreter, _) =
-        pin_runtime_file("ELF interpreter", &interpreter, None, true)?;
+    let (pinned_interpreter, _) = pin_runtime_file("ELF interpreter", &interpreter, None, true)?;
     validate_node_dynamic_loader(&pinned_interpreter.destination)?;
     let interpreter_fd = runtime_file_fd(&pinned_interpreter.file);
     let command_fd = runtime_file_fd(command_file);
@@ -615,7 +617,11 @@ fn exact_runtime_library_mounts(
     let listing = output.stdout;
     let mut destinations = BTreeSet::new();
     destinations.insert(interpreter.clone());
-    for line in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         if let Some((dependency, resolved)) = line.split_once("=>") {
             if resolved.contains("=>") || !valid_loader_name(dependency.trim()) {
                 return Err(EngineError::SandboxPolicyRefused {
@@ -629,22 +635,21 @@ fn exact_runtime_library_mounts(
                 });
             }
             let mut fields = resolved.split_whitespace();
-            let path = fields.next().ok_or_else(|| {
-                EngineError::SandboxPolicyRefused {
+            let path = fields
+                .next()
+                .ok_or_else(|| EngineError::SandboxPolicyRefused {
                     reason: format!("launch-preparer dependency listing is malformed: {line}"),
-                }
-            })?;
-            let address = fields.next().ok_or_else(|| {
-                EngineError::SandboxPolicyRefused {
+                })?;
+            let address = fields
+                .next()
+                .ok_or_else(|| EngineError::SandboxPolicyRefused {
                     reason: format!("launch-preparer dependency listing is malformed: {line}"),
-                }
-            })?;
-            if fields.next().is_some()
-                || !valid_loader_address(address)
-                || !path.starts_with('/')
-            {
+                })?;
+            if fields.next().is_some() || !valid_loader_address(address) || !path.starts_with('/') {
                 return Err(EngineError::SandboxPolicyRefused {
-                    reason: format!("launch-preparer dependency did not resolve absolutely: {line}"),
+                    reason: format!(
+                        "launch-preparer dependency did not resolve absolutely: {line}"
+                    ),
                 });
             }
             destinations.insert(PathBuf::from(path));
@@ -702,9 +707,9 @@ fn exact_runtime_library_mounts(
 #[cfg(target_os = "linux")]
 fn valid_loader_name(value: &str) -> bool {
     !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
 }
 
 #[cfg(target_os = "linux")]
@@ -712,12 +717,17 @@ fn valid_loader_address(value: &str) -> bool {
     value
         .strip_prefix("(0x")
         .and_then(|value| value.strip_suffix(')'))
-        .is_some_and(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 #[cfg(target_os = "linux")]
 fn validate_node_dynamic_loader(path: &Path) -> Result<(), EngineError> {
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
     let recognized_loader_name = (name.starts_with("ld-linux") && name.contains(".so."))
         || (name.starts_with("ld-musl-") && name.ends_with(".so.1"))
         || matches!(name, "ld.so.1" | "ld64.so.1" | "ld64.so.2");
@@ -783,11 +793,13 @@ fn pin_runtime_file(
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
-    let canonical = std::fs::canonicalize(path).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
-            reason: format!("launch-preparer {label} {} cannot be resolved: {error}", path.display()),
-        }
-    })?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|error| EngineError::SandboxPolicyRefused {
+            reason: format!(
+                "launch-preparer {label} {} cannot be resolved: {error}",
+                path.display()
+            ),
+        })?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -820,14 +832,14 @@ fn pin_runtime_file(
             ),
         });
     }
-    let metadata = file.metadata().map_err(|error| {
-        EngineError::SandboxPolicyRefused {
+    let metadata = file
+        .metadata()
+        .map_err(|error| EngineError::SandboxPolicyRefused {
             reason: format!(
                 "launch-preparer {label} {} cannot be inspected: {error}",
                 canonical.display()
             ),
-        }
-    })?;
+        })?;
     if !metadata.is_file() {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!(
@@ -854,14 +866,15 @@ fn pin_runtime_file(
     }
     reject_pinned_file_capabilities(label, file.as_raw_fd(), &canonical)?;
     let mut magic = [0_u8; 4];
-    if file.read_at(&mut magic, 0).map_err(|error| {
-        EngineError::SandboxPolicyRefused {
+    if file
+        .read_at(&mut magic, 0)
+        .map_err(|error| EngineError::SandboxPolicyRefused {
             reason: format!(
                 "launch-preparer {label} {} cannot be inspected as ELF: {error}",
                 canonical.display()
             ),
-        }
-    })? != magic.len()
+        })?
+        != magic.len()
         || magic != *b"\x7fELF"
     {
         return Err(EngineError::SandboxPolicyRefused {
@@ -873,14 +886,13 @@ fn pin_runtime_file(
     }
     let mut image = Vec::new();
     if let Some(expected_hash) = expected_hash {
-        file.read_to_end(&mut image).map_err(|error| {
-            EngineError::SandboxPolicyRefused {
+        file.read_to_end(&mut image)
+            .map_err(|error| EngineError::SandboxPolicyRefused {
                 reason: format!(
                     "launch-preparer {label} {} cannot be read from its pinned descriptor: {error}",
                     canonical.display()
                 ),
-            }
-        })?;
+            })?;
         let actual_hash = lillux::sha256_hex(&image);
         if actual_hash != expected_hash {
             return Err(EngineError::SandboxPolicyRefused {
@@ -913,19 +925,9 @@ fn pin_runtime_file(
 }
 
 #[cfg(target_os = "linux")]
-fn reject_pinned_file_capabilities(
-    label: &str,
-    fd: i32,
-    path: &Path,
-) -> Result<(), EngineError> {
-    let result = unsafe {
-        libc::fgetxattr(
-            fd,
-            c"security.capability".as_ptr(),
-            std::ptr::null_mut(),
-            0,
-        )
-    };
+fn reject_pinned_file_capabilities(label: &str, fd: i32, path: &Path) -> Result<(), EngineError> {
+    let result =
+        unsafe { libc::fgetxattr(fd, c"security.capability".as_ptr(), std::ptr::null_mut(), 0) };
     if result >= 0 {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!(
@@ -936,9 +938,7 @@ fn reject_pinned_file_capabilities(
     }
     let error = std::io::Error::last_os_error();
     let code = error.raw_os_error();
-    if code != Some(libc::ENODATA)
-        && code != Some(libc::ENOTSUP)
-        && code != Some(libc::EOPNOTSUPP)
+    if code != Some(libc::ENODATA) && code != Some(libc::ENOTSUP) && code != Some(libc::EOPNOTSUPP)
     {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!(
@@ -965,9 +965,9 @@ fn validate_runtime_destination(label: &str, path: &Path) -> Result<(), EngineEr
     use std::path::Component;
 
     if !path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(component, Component::RootDir | Component::Normal(_))
-        })
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
     {
         return Err(EngineError::SandboxPolicyRefused {
             reason: format!(
@@ -999,27 +999,28 @@ fn elf_interpreter(image: &[u8]) -> Result<Option<PathBuf>, EngineError> {
     if image.get(6).copied() != Some(1) {
         return Err(invalid_elf());
     }
-    let (phoff, phentsize, phnum, offset_field, size_field, expected_ehsize, expected_phentsize) = match class {
-        1 => (
-            elf_integer(image, 28, 4, little_endian)?,
-            elf_integer(image, 42, 2, little_endian)?,
-            elf_integer(image, 44, 2, little_endian)?,
-            4,
-            16,
-            52,
-            32,
-        ),
-        2 => (
-            elf_integer(image, 32, 8, little_endian)?,
-            elf_integer(image, 54, 2, little_endian)?,
-            elf_integer(image, 56, 2, little_endian)?,
-            8,
-            32,
-            64,
-            56,
-        ),
-        _ => return Err(invalid_elf()),
-    };
+    let (phoff, phentsize, phnum, offset_field, size_field, expected_ehsize, expected_phentsize) =
+        match class {
+            1 => (
+                elf_integer(image, 28, 4, little_endian)?,
+                elf_integer(image, 42, 2, little_endian)?,
+                elf_integer(image, 44, 2, little_endian)?,
+                4,
+                16,
+                52,
+                32,
+            ),
+            2 => (
+                elf_integer(image, 32, 8, little_endian)?,
+                elf_integer(image, 54, 2, little_endian)?,
+                elf_integer(image, 56, 2, little_endian)?,
+                8,
+                32,
+                64,
+                56,
+            ),
+            _ => return Err(invalid_elf()),
+        };
     if !matches!(elf_integer(image, 16, 2, little_endian)?, 2 | 3) {
         return Err(invalid_elf());
     }
@@ -1186,8 +1187,14 @@ fn invalid_elf() -> EngineError {
 
 #[derive(Debug, Clone)]
 enum StreamEvent {
-    LimitExceeded { stream: &'static str, cap: usize },
-    IoFailure { stream: &'static str, detail: String },
+    LimitExceeded {
+        stream: &'static str,
+        cap: usize,
+    },
+    IoFailure {
+        stream: &'static str,
+        detail: String,
+    },
     Timeout,
 }
 
@@ -1252,10 +1259,12 @@ fn join_bounded_reader(
     handler: &str,
     stream: &'static str,
 ) -> Result<BoundedCapture, EngineError> {
-    thread.join().map_err(|_| EngineError::LaunchPreparerProtocolInvalid {
-        handler: handler.to_owned(),
-        detail: format!("launch-preparer {stream} reader panicked"),
-    })
+    thread
+        .join()
+        .map_err(|_| EngineError::LaunchPreparerProtocolInvalid {
+            handler: handler.to_owned(),
+            detail: format!("launch-preparer {stream} reader panicked"),
+        })
 }
 
 fn stream_violation_error(handler: &str, violation: StreamEvent) -> EngineError {

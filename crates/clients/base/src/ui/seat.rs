@@ -303,7 +303,10 @@ mod tests {
             })
         );
         assert_eq!(
-            route.params.pointer("/target/item_ref").and_then(Value::as_str),
+            route
+                .params
+                .pointer("/target/item_ref")
+                .and_then(Value::as_str),
             Some("directive:ryeos/ops/base")
         );
         assert!(route.thread.is_none());

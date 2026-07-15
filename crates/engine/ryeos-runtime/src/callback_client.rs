@@ -807,12 +807,7 @@ impl CallbackClient {
         let payload = serde_json::to_value(usage)
             .map_err(|e| anyhow::anyhow!("serialize ThreadUsage: {e}"))?;
         client
-            .append_event(
-                &self.thread_id,
-                event_type.as_str(),
-                payload,
-                storage_class,
-            )
+            .append_event(&self.thread_id, event_type.as_str(), payload, storage_class)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())

@@ -1,5 +1,5 @@
-use std::fs;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
@@ -20,8 +20,7 @@ pub struct ThreadMeta {
     #[serde(default)]
     pub limits: Value,
     pub ref_bindings: BTreeMap<String, String>,
-    pub binding_launch_records:
-        BTreeMap<String, super::launch_preparation::RefBindingLaunchRecord>,
+    pub binding_launch_records: BTreeMap<String, super::launch_preparation::RefBindingLaunchRecord>,
     pub runtime_facts: BTreeMap<String, Value>,
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,9 +90,6 @@ mod tests {
         let parsed: ThreadMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.thread_id, "T-test");
         assert_eq!(parsed.status, "running");
-        assert_eq!(
-            parsed.effective_trust_class,
-            TrustClass::TrustedBundle
-        );
+        assert_eq!(parsed.effective_trust_class, TrustClass::TrustedBundle);
     }
 }

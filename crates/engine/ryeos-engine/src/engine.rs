@@ -382,12 +382,10 @@ impl Engine {
             // error variants so consumers can branch on error code.
             use crate::resolution::ResolutionError;
             match &e {
-                ResolutionError::StepFailed { .. } => {
-                    EngineError::EffectiveItemCompositionFailed {
-                        canonical_ref: ref_str.clone(),
-                        reason: e.to_string(),
-                    }
-                }
+                ResolutionError::StepFailed { .. } => EngineError::EffectiveItemCompositionFailed {
+                    canonical_ref: ref_str.clone(),
+                    reason: e.to_string(),
+                },
                 ResolutionError::CycleDetected { .. }
                 | ResolutionError::MaxDepthExceeded { .. } => {
                     EngineError::EffectiveItemCompositionFailed {

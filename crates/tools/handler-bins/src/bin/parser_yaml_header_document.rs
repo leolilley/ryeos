@@ -21,11 +21,9 @@ fn main() {
         HandlerRequest::Compose(_)
         | HandlerRequest::ValidateComposerConfig(_)
         | HandlerRequest::LaunchPrepare(_)
-        | HandlerRequest::ValidateLaunchPreparerConfig(_) => {
-            HandlerResponse::ParseErr {
-                kind: ryeos_handler_protocol::ParseErrKind::Internal,
-                message: "this is a parser binary; received composer request".into(),
-            }
-        }
+        | HandlerRequest::ValidateLaunchPreparerConfig(_) => HandlerResponse::ParseErr {
+            kind: ryeos_handler_protocol::ParseErrKind::Internal,
+            message: "this is a parser binary; received composer request".into(),
+        },
     }));
 }

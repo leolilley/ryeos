@@ -157,10 +157,7 @@ pub(super) fn reconcile_terminal_finalization(
         success: status.is_success(),
         status,
         thread_id: runtime_result.thread_id.clone(),
-        result: authority
-            .result
-            .clone()
-            .or_else(|| authority.error.clone()),
+        result: authority.result.clone().or_else(|| authority.error.clone()),
         outputs: Value::Null,
         cost,
         warnings: Vec::new(),

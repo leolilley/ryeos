@@ -15,10 +15,8 @@
 //! Timeout enforced by the engine; binaries do not need to set their
 //! own.
 
+use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use serde::de::{
-    DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor,
-};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

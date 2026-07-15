@@ -3,8 +3,8 @@ mod compiled_graph;
 mod context;
 mod dispatch;
 mod edges;
-mod evaluation;
 mod env_preflight;
+mod evaluation;
 #[cfg(test)]
 mod expression_inventory_tests;
 mod foreach;
@@ -223,30 +223,28 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let resume_state: Option<resume::ResumeState> = match resume::decide_resume_source(
-        resume_requested,
-        local_checkpoint.is_some(),
-    ) {
-        resume::ResumeSource::ColdStart => None,
-        resume::ResumeSource::LocalCheckpoint => {
-            tracing::info!("resuming from local checkpoint");
-            Some(resume::from_checkpoint_value(
-                local_checkpoint
-                    .as_ref()
-                    .expect("LocalCheckpoint variant requires payload"),
-                &graph,
-            )?)
-        }
-        resume::ResumeSource::NoSourceAvailable => {
-            anyhow::bail!(
-                "{}: RYEOS_RESUME=1 but thread '{}' has no identity-bearing local \
+    let resume_state: Option<resume::ResumeState> =
+        match resume::decide_resume_source(resume_requested, local_checkpoint.is_some()) {
+            resume::ResumeSource::ColdStart => None,
+            resume::ResumeSource::LocalCheckpoint => {
+                tracing::info!("resuming from local checkpoint");
+                Some(resume::from_checkpoint_value(
+                    local_checkpoint
+                        .as_ref()
+                        .expect("LocalCheckpoint variant requires payload"),
+                    &graph,
+                )?)
+            }
+            resume::ResumeSource::NoSourceAvailable => {
+                anyhow::bail!(
+                    "{}: RYEOS_RESUME=1 but thread '{}' has no identity-bearing local \
                  checkpoint; event replay cannot reconstruct rye-expr/1 state or \
                  verify its signed definition; start a new graph run",
-                resume::RESTART_REQUIRED,
-                resolved.thread_id
-            );
-        }
-    };
+                    resume::RESTART_REQUIRED,
+                    resolved.thread_id
+                );
+            }
+        };
 
     // If we got a resume state, inject it so the walker picks up where it left off.
     if let Some(ref rs) = resume_state {

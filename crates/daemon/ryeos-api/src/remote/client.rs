@@ -2481,7 +2481,9 @@ mod tests {
             "signature": signature,
         });
         let attestation = lillux::sha256_hex(
-            lillux::canonical_json(&attestation_value).unwrap().as_bytes(),
+            lillux::canonical_json(&attestation_value)
+                .unwrap()
+                .as_bytes(),
         );
         let response: AdmissionAttestationsForSubjectResponse =
             serde_json::from_value(serde_json::json!({

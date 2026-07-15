@@ -339,8 +339,8 @@ mod tests {
             "/tmp",
             &dispatcher,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert!(result.control.is_none());
     }
 
@@ -367,15 +367,9 @@ mod tests {
         let occurrence = occurrence("graph_step_completed");
         let context = json!({"state": {"answer": 42}});
 
-        run_hooks(
-            occurrence.clone(),
-            &context,
-            &hooks,
-            "/tmp",
-            &dispatcher,
-        )
-        .await
-        .unwrap();
+        run_hooks(occurrence.clone(), &context, &hooks, "/tmp", &dispatcher)
+            .await
+            .unwrap();
 
         let identity = captured.lock().unwrap().clone().unwrap();
         assert_eq!(identity.occurrence, occurrence);
@@ -409,8 +403,8 @@ mod tests {
             "/tmp",
             &dispatcher,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert!(result.control.is_none());
     }
 
@@ -756,7 +750,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind, HookRunErrorKind::Accounting);
-        assert_eq!(error.cost.unwrap().input_tokens, i64::MAX as u64);
+        assert_eq!(error.cost.as_ref().unwrap().input_tokens, i64::MAX as u64);
         assert!(error.contains("cost accumulation failed"));
     }
 }

@@ -1,6 +1,6 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,8 +26,8 @@ use ryeos_engine::contracts::{
     DelegatedPrincipal, EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion,
     ExecutionHints, ExecutionPlan, FinalCost, ItemMetadata, ItemSpace, LaunchMode, PinnedVersion,
     PlanContext, Principal, ProjectContext, ResolvedItem, ResolvedSourceFormat, RuntimeEnvSource,
-    ShadowedCandidate, SignatureEnvelope, SignatureHeader, SignerFingerprint,
-    ThreadTerminalStatus, TrustClass, VerifiedItem,
+    ShadowedCandidate, SignatureEnvelope, SignatureHeader, SignerFingerprint, ThreadTerminalStatus,
+    TrustClass, VerifiedItem,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::history_policy::{
@@ -35,6 +35,7 @@ use ryeos_engine::history_policy::{
     ResolvedThreadHistoryPolicy,
 };
 use ryeos_engine::resolution::TrustClass as ResolutionTrustClass;
+use ryeos_state::objects::ThreadStatus;
 use ryeos_state::UsageSubject;
 
 /// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
@@ -2117,7 +2118,8 @@ impl ThreadLifecycleService {
                 initial_events,
                 launch_metadata,
             )?;
-        let detail = self.get_thread(thread_id)?
+        let detail = self
+            .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("created root thread missing from database: {thread_id}"))?;
         self.publish_records(&persisted);
         Ok(detail)
@@ -3518,7 +3520,8 @@ impl ThreadLifecycleService {
         )?;
 
         let successor = self
-            .get_thread(successor_thread_id)?
+            .state_store
+            .get_created_thread_authoritatively(&source.chain_root_id, successor_thread_id)?
             .ok_or_else(|| {
                 anyhow!("successor thread missing after creation: {successor_thread_id}")
             })?;

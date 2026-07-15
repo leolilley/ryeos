@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS threads (
     upstream_thread_id TEXT,
     requested_by TEXT,
     project_root TEXT,
+    base_project_snapshot_hash TEXT,
+    result_project_snapshot_hash TEXT,
     captured_history_policy_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -403,6 +405,18 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "project_root",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "base_project_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "result_project_snapshot_hash",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,

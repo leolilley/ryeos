@@ -100,11 +100,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for MockClient {
     async fn bundle_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
-    async fn bundle_events_read_chain(
-        &self,
-        _: &str,
-        _: Value,
-    ) -> Result<Value, CallbackError> {
+    async fn bundle_events_read_chain(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
         Ok(json!({"events": []}))
     }
     async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
@@ -475,12 +471,8 @@ config:
         vec![json!({"msg": "hello"})],
         vec![json!({"command_id": 7, "command_type": "cancel"})],
     ));
-    let client = CallbackClient::from_inner(
-        mock.clone(),
-        "thread-test",
-        "/tmp/test-project",
-        "tat-test",
-    );
+    let client =
+        CallbackClient::from_inner(mock.clone(), "thread-test", "/tmp/test-project", "tat-test");
     let w = Walker::new(
         graph,
         "/tmp/test-project".to_string(),
@@ -533,12 +525,8 @@ config:
             json!({"command_id": 2, "command_type": "kill"}),
         ],
     ));
-    let client = CallbackClient::from_inner(
-        mock.clone(),
-        "thread-test",
-        "/tmp/test-project",
-        "tat-test",
-    );
+    let client =
+        CallbackClient::from_inner(mock.clone(), "thread-test", "/tmp/test-project", "tat-test");
     let w = Walker::new(
         graph,
         "/tmp/test-project".to_string(),
@@ -581,12 +569,8 @@ config:
 "#;
     let graph = make_graph(yaml);
     let mock = Arc::new(MockClient::new(vec![json!({"msg": "hello"})]));
-    let client = CallbackClient::from_inner(
-        mock.clone(),
-        "thread-test",
-        "/tmp/test-project",
-        "tat-test",
-    );
+    let client =
+        CallbackClient::from_inner(mock.clone(), "thread-test", "/tmp/test-project", "tat-test");
     // Flag pre-set, as if SIGTERM already arrived before the first node.
     let flag = Arc::new(AtomicBool::new(true));
     let w = Walker::new(
@@ -1353,11 +1337,12 @@ config:
     let events = recorder.recorded_events();
     let (_, _, payload, _) = events
         .iter()
-        .find(|(_, event_type, _, _)| {
-            event_type == RuntimeEventType::ToolCallResult.as_str()
-        })
+        .find(|(_, event_type, _, _)| event_type == RuntimeEventType::ToolCallResult.as_str())
         .expect("invalid native cost emits a terminal tool result");
-    assert_eq!(payload["status"], GraphToolCallStatus::IntegrityFailed.as_str());
+    assert_eq!(
+        payload["status"],
+        GraphToolCallStatus::IntegrityFailed.as_str()
+    );
 }
 
 #[tokio::test]
@@ -1478,7 +1463,11 @@ config:
     );
     let w2 = make_walker(make_graph(yaml), vec![second]);
     let r2 = w2.execute(json!({}), None).await;
-    assert!(r2.success, "second dispatch should run; got: {:?}", r2.error);
+    assert!(
+        r2.success,
+        "second dispatch should run; got: {:?}",
+        r2.error
+    );
     assert_eq!(r2.result, Some(json!(["c", "d"])));
     assert_eq!(r2.cost.expect("second run bills").input_tokens, 100);
 }
@@ -1841,7 +1830,8 @@ async fn foreach_item_failure_on_error_continue_records_errors() {
             .await;
         assert!(result.success, "parallel={parallel}");
         assert_eq!(
-            result.status, GraphRunStatus::CompletedWithErrors,
+            result.status,
+            GraphRunStatus::CompletedWithErrors,
             "parallel={parallel}"
         );
         assert_eq!(result.errors_suppressed, Some(1), "parallel={parallel}");
@@ -1962,12 +1952,9 @@ config:
       assign: {wrong_path: true}
 "#,
     );
-    let result = make_walker(
-        graph,
-        vec![json!({"value": 1}), json!({"value": 2})],
-    )
-    .execute(json!({}), None)
-    .await;
+    let result = make_walker(graph, vec![json!({"value": 1}), json!({"value": 2})])
+        .execute(json!({}), None)
+        .await;
 
     assert!(result.success);
     assert_eq!(result.state["count"], json!(3));
@@ -2185,12 +2172,9 @@ config:
       assign: {wrong_path: true}
 "#,
     );
-    let result = make_walker(
-        graph,
-        vec![json!({"value": 1}), json!({"value": 2})],
-    )
-    .execute(json!({"inputs": {"zero": 0}}), None)
-    .await;
+    let result = make_walker(graph, vec![json!({"value": 1}), json!({"value": 2})])
+        .execute(json!({"inputs": {"zero": 0}}), None)
+        .await;
 
     assert!(result.success);
     assert_eq!(result.state["count"], json!(0));
@@ -2280,8 +2264,7 @@ config:
     let drained = w.take_warnings();
     assert_eq!(drained.len(), 1);
     assert!(
-        drained[0].contains("graph_step_started")
-            && drained[0].contains("event-store rejected"),
+        drained[0].contains("graph_step_started") && drained[0].contains("event-store rejected"),
         "warning must carry both the event label and the underlying error; got: {:?}",
         drained
     );
@@ -2498,9 +2481,7 @@ impl RecordingMockClient {
         *self.dispatch_count.lock().unwrap()
     }
 
-    fn recorded_follow_requests(
-        &self,
-    ) -> Vec<ryeos_runtime::callback::SpawnFollowChildRequest> {
+    fn recorded_follow_requests(&self) -> Vec<ryeos_runtime::callback::SpawnFollowChildRequest> {
         self.follow_requests.lock().unwrap().clone()
     }
 
@@ -2588,11 +2569,7 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for RecordingMockClient {
     async fn bundle_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
         Ok(json!({}))
     }
-    async fn bundle_events_read_chain(
-        &self,
-        _: &str,
-        _: Value,
-    ) -> Result<Value, CallbackError> {
+    async fn bundle_events_read_chain(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
         Ok(json!({"events": []}))
     }
     async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
@@ -2857,21 +2834,15 @@ config:
       node_type: return
 "#;
     let graph = make_graph(yaml);
-    let params = strict_resume_params(
-        &graph,
-        "flaky",
-        5,
-        json!({}),
-        "gr-resumed",
-        None,
-        None,
-        1,
-    );
-    let (w, rec) =
-        make_recording_walker(graph, vec![retryable_dispatch_failure()], None);
+    let params = strict_resume_params(&graph, "flaky", 5, json!({}), "gr-resumed", None, None, 1);
+    let (w, rec) = make_recording_walker(graph, vec![retryable_dispatch_failure()], None);
     // Resume after attempt 1 already failed in the prior segment.
     let result = w.execute(params, None).await;
-    assert_eq!(result.status, GraphRunStatus::Completed, "recover is terminal");
+    assert_eq!(
+        result.status,
+        GraphRunStatus::Completed,
+        "recover is terminal"
+    );
     let events = rec.recorded_events();
     let retries = events
         .iter()
@@ -2914,8 +2885,7 @@ config:
         .as_object_mut()
         .unwrap()
         .remove("definition_hash");
-    let (walker, recorder) =
-        make_recording_walker(graph, vec![subprocess_success()], None);
+    let (walker, recorder) = make_recording_walker(graph, vec![subprocess_success()], None);
 
     let result = walker.execute(params, Some("gr-outer".to_string())).await;
 
@@ -3001,19 +2971,14 @@ async fn graph_completed_hook_cost_is_accounted_and_attributed() {
         }
     });
     let (w, _rec) = make_recording_walker(graph, vec![hook_result], None);
-    let result = w
-        .execute(json!({}), Some("gr-hook-cost".to_string()))
-        .await;
+    let result = w.execute(json!({}), Some("gr-hook-cost".to_string())).await;
 
     assert!(result.success, "graph completes: {result:?}");
     let cost = result.cost.expect("hook cost contributes to graph rollup");
     assert_eq!(cost.input_tokens, 4);
     assert_eq!(cost.output_tokens, 6);
     assert_eq!(result.hook_costs.len(), 1);
-    assert_eq!(
-        result.hook_costs[0].event,
-        RuntimeEventType::GraphCompleted
-    );
+    assert_eq!(result.hook_costs[0].event, RuntimeEventType::GraphCompleted);
     assert_eq!(result.hook_costs[0].step, Some(1));
     assert!(result.node_costs.is_empty());
 }
@@ -3044,7 +3009,6 @@ async fn failing_hook_warns_but_does_not_fail_graph() {
     );
 }
 
-
 #[tokio::test]
 async fn failed_hook_cost_is_retained_while_failure_remains_a_warning() {
     let graph = make_graph(HOOK_YAML);
@@ -3065,7 +3029,10 @@ async fn failed_hook_cost_is_retained_while_failure_remains_a_warning() {
         .execute(json!({}), Some("gr-hook-failed-cost".to_string()))
         .await;
 
-    assert!(result.success, "observer failure does not steer graph: {result:?}");
+    assert!(
+        result.success,
+        "observer failure does not steer graph: {result:?}"
+    );
     assert_eq!(result.cost.unwrap().input_tokens, 7);
     assert_eq!(result.hook_costs.len(), 1);
     assert!(w
@@ -3250,7 +3217,11 @@ config:
         .await;
 
     assert!(result.success, "resumed graph completes: {result:?}");
-    assert_eq!(recorder.dispatch_count(), 0, "graph_started must be cold-start only");
+    assert_eq!(
+        recorder.dispatch_count(),
+        0,
+        "graph_started must be cold-start only"
+    );
     assert_eq!(result.cost.unwrap().input_tokens, 2);
     assert_eq!(result.hook_costs.len(), 1);
     assert_eq!(result.hook_costs[0].event, RuntimeEventType::GraphStarted);
@@ -3312,7 +3283,8 @@ async fn follow_suspend_emits_events_and_no_receipt() {
     assert_eq!(reqs[0].graph_run_id, "gr-follow");
     assert_eq!(reqs[0].follow_node, "fetch");
     assert_eq!(reqs[0].step_count, 0);
-    assert_eq!(reqs[0].child_item_ref.as_deref(), Some("directive:child"));
+    assert_eq!(reqs[0].children.len(), 1);
+    assert_eq!(reqs[0].children[0].item_ref, "directive:child");
 }
 
 #[tokio::test]
@@ -3331,16 +3303,7 @@ async fn follow_reentry_preserves_graph_run_id() {
     // ORIGINAL run id so the follow_key is unchanged — otherwise it would spawn
     // a second, distinct follow child.
     let graph = make_graph(FOLLOW_YAML);
-    let resume = strict_resume_params(
-        &graph,
-        "fetch",
-        0,
-        json!({}),
-        "gr-original",
-        None,
-        None,
-        0,
-    );
+    let resume = strict_resume_params(&graph, "fetch", 0, json!({}), "gr-original", None, None, 0);
     let (w2, rec2) = make_recording_walker(graph, vec![], None);
     let r2 = w2
         .execute(resume, Some("gr-different-outer".to_string()))
@@ -3473,10 +3436,7 @@ config:
 
 /// Build a resume_state params object for the `fetch` follow node with an
 /// optional child envelope.
-fn follow_resume_params(
-    graph: &GraphDefinition,
-    follow_result: Option<Value>,
-) -> Value {
+fn follow_resume_params(graph: &GraphDefinition, follow_result: Option<Value>) -> Value {
     strict_resume_params(
         graph,
         "fetch",
@@ -3511,13 +3471,10 @@ async fn follow_resume_success_accounts_cost() {
     let graph = make_graph(FOLLOW_YAML);
     let mut envelope = follow_terminal_envelope(RuntimeResultStatus::Completed, json!("child_ok"));
     envelope["outputs"] = json!({"x": 1});
-    envelope["cost"] =
-        json!({"input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012});
+    envelope["cost"] = json!({"input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012});
     let params = follow_resume_params(&graph, Some(envelope));
     let (w, rec) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-resume".to_string()))
-        .await;
+    let result = w.execute(params, Some("gr-resume".to_string())).await;
 
     assert!(result.success);
     assert_eq!(result.status, GraphRunStatus::Completed);
@@ -3541,13 +3498,10 @@ async fn follow_resume_failure_routes_on_error() {
         RuntimeResultStatus::Failed,
         json!({"error": "model refused"}),
     );
-    envelope["cost"] =
-        json!({"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008});
+    envelope["cost"] = json!({"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008});
     let params = follow_resume_params(&graph, Some(envelope));
     let (w, rec) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-resume".to_string()))
-        .await;
+    let result = w.execute(params, Some("gr-resume".to_string())).await;
 
     // on_error: recover redirects to the recover return node → the run
     // completes rather than hard-failing.
@@ -3616,9 +3570,7 @@ async fn follow_resume_rejects_noncanonical_terminal_envelopes() {
             0,
         );
         let (walker, recorder) = make_recording_walker(graph, vec![], None);
-        let result = walker
-            .execute(params, Some("gr-resume".to_string()))
-            .await;
+        let result = walker.execute(params, Some("gr-resume".to_string())).await;
         assert_eq!(result.status, GraphRunStatus::Error, "{result:?}");
         assert!(
             result
@@ -3641,9 +3593,7 @@ async fn follow_bare_marker_resuspends() {
     let graph = make_graph(FOLLOW_YAML);
     let params = follow_resume_params(&graph, None);
     let (w, rec) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-resume".to_string()))
-        .await;
+    let result = w.execute(params, Some("gr-resume".to_string())).await;
 
     assert_eq!(result.status, GraphRunStatus::Continued);
     assert_eq!(rec.dispatch_count(), 0);
@@ -3664,15 +3614,10 @@ async fn follow_resume_ignores_failing_env_preflight() {
     // stored child result — the child already ran; a parent-side env gap must
     // not turn its result into a dispatch error.
     let graph = make_graph(FOLLOW_ENV_YAML);
-    let envelope = follow_terminal_envelope(
-        RuntimeResultStatus::Completed,
-        json!({"ok": true}),
-    );
+    let envelope = follow_terminal_envelope(RuntimeResultStatus::Completed, json!({"ok": true}));
     let params = follow_resume_params(&graph, Some(envelope));
     let (w, rec) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-resume".to_string()))
-        .await;
+    let result = w.execute(params, Some("gr-resume".to_string())).await;
 
     assert!(result.success);
     assert_eq!(result.status, GraphRunStatus::Completed);
@@ -3732,7 +3677,8 @@ async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
     let (w2, rec2) = make_recording_walker(graph2, vec![], None);
     let r2 = w2.execute(resume1, Some("gr-seq".to_string())).await;
     assert_eq!(
-        r2.status, GraphRunStatus::Continued,
+        r2.status,
+        GraphRunStatus::Continued,
         "must suspend again at the second follow node"
     );
     let req2 = rec2.recorded_follow_requests();
@@ -3752,7 +3698,7 @@ async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
     let resume2 = strict_resume_params(
         &graph3,
         "fetch2",
-        fetch2_step,
+        u32::try_from(fetch2_step).expect("follow step count fits checkpoint schema"),
         json!({}),
         "gr-seq",
         Some(json!({
@@ -3769,7 +3715,8 @@ async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
     let (w3, _rec3) = make_recording_walker(graph3, vec![], None);
     let r3 = w3.execute(resume2, Some("gr-seq".to_string())).await;
     assert_eq!(
-        r3.status, GraphRunStatus::Completed,
+        r3.status,
+        GraphRunStatus::Completed,
         "after both follow nodes resume, the graph completes"
     );
     assert!(r3.success);
@@ -3805,11 +3752,7 @@ config:
       node_type: return
 "#;
 
-fn fanout_resume(
-    graph: &GraphDefinition,
-    items: Value,
-    wrapper: Option<Value>,
-) -> Value {
+fn fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Option<Value>) -> Value {
     strict_resume_params(
         graph,
         "fan",
@@ -3827,11 +3770,7 @@ fn fanout_resume(
     )
 }
 
-fn unchecked_fanout_resume(
-    graph: &GraphDefinition,
-    items: Value,
-    wrapper: Value,
-) -> Value {
+fn unchecked_fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Value) -> Value {
     unchecked_resume_params(
         graph,
         "fan",
@@ -3852,8 +3791,7 @@ fn unchecked_fanout_resume(
 #[tokio::test]
 async fn follow_fanout_spawns_one_ordered_rendered_cohort() {
     let tmp = tempfile::tempdir().unwrap();
-    let (w, rec) =
-        make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], Some(tmp.path()));
+    let (w, rec) = make_recording_walker(make_graph(FOLLOW_FANOUT_YAML), vec![], Some(tmp.path()));
     let jobs = json!([
         {"kind":"alpha","value":1,"lane":"red"},
         {"kind":"beta","value":2,"lane":"blue"}
@@ -3893,7 +3831,8 @@ async fn follow_fanout_binds_item_before_rendering_action() {
         )
         .await;
     assert_eq!(
-        result.status, GraphRunStatus::Continued,
+        result.status,
+        GraphRunStatus::Continued,
         "per-item templates must not fail before binding: {result:?}"
     );
     assert_eq!(
@@ -3967,17 +3906,12 @@ async fn follow_fanout_bare_marker_redrives_same_key_from_snapshot() {
     let graph = make_graph(FOLLOW_FANOUT_YAML);
     let params = fanout_resume(&graph, snapshot, None);
     let (w, rec) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("outer-other".into()))
-        .await;
+    let result = w.execute(params, Some("outer-other".into())).await;
     assert_eq!(result.status, GraphRunStatus::Continued);
     let request = &rec.recorded_follow_requests()[0];
     assert_eq!(request.graph_run_id, "gr-fan");
     assert_eq!(request.follow_node, "fan");
-    assert_eq!(
-        request.children[0].item_ref,
-        "directive:original"
-    );
+    assert_eq!(request.children[0].item_ref, "directive:original");
 }
 
 #[tokio::test]
@@ -4013,9 +3947,7 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
     let graph = make_graph(FOLLOW_FANOUT_YAML);
     let params = fanout_resume(&graph, snapshot, Some(wrapper));
     let (w, rec) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-fan".into()))
-        .await;
+    let result = w.execute(params, Some("gr-fan".into())).await;
     assert_eq!(result.status, GraphRunStatus::Completed);
     assert!(result.state.get("gathered").is_none());
     assert_eq!(result.cost.unwrap().input_tokens, 7);
@@ -4051,9 +3983,7 @@ async fn follow_fanout_continue_commits_ordered_results() {
     let graph = make_graph(&yaml);
     let params = fanout_resume(&graph, snapshot, Some(wrapper));
     let (w, _) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-fan".into()))
-        .await;
+    let result = w.execute(params, Some("gr-fan".into())).await;
 
     assert_eq!(result.status, GraphRunStatus::CompletedWithErrors);
     assert_eq!(result.state["gathered"], json!([{"ok": 1}, null]));
@@ -4062,10 +3992,7 @@ async fn follow_fanout_continue_commits_ordered_results() {
 
 #[tokio::test]
 async fn follow_fanout_branch_error_rolls_back_collected_candidate() {
-    let yaml = FOLLOW_FANOUT_YAML.replace(
-        "length(state.gathered) >= 0",
-        "1 / inputs.zero > 0",
-    );
+    let yaml = FOLLOW_FANOUT_YAML.replace("length(state.gathered) >= 0", "1 / inputs.zero > 0");
     let snapshot = json!([{"kind":"a","value":1,"lane":"a"}]);
     let wrapper = json!({
         "fanout": true,
@@ -4100,9 +4027,7 @@ async fn follow_fanout_malformed_wrapper_fails_loudly() {
     let graph = make_graph(FOLLOW_FANOUT_YAML);
     let params = unchecked_fanout_resume(&graph, snapshot, bad);
     let (w, _) = make_recording_walker(graph, vec![], None);
-    let result = w
-        .execute(params, Some("gr-fan".into()))
-        .await;
+    let result = w.execute(params, Some("gr-fan".into())).await;
     assert!(result
         .error
         .as_deref()
@@ -4112,10 +4037,8 @@ async fn follow_fanout_malformed_wrapper_fails_loudly() {
 
 #[tokio::test]
 async fn follow_fanout_rejects_status_contract_drift() {
-    let failed_item = follow_terminal_envelope(
-        RuntimeResultStatus::Failed,
-        json!({"error": "boom"}),
-    );
+    let failed_item =
+        follow_terminal_envelope(RuntimeResultStatus::Failed, json!({"error": "boom"}));
     let cases = [
         (
             json!({
@@ -4163,9 +4086,7 @@ async fn follow_fanout_rejects_status_contract_drift() {
         let graph = make_graph(FOLLOW_FANOUT_YAML);
         let params = unchecked_fanout_resume(&graph, snapshot, wrapper);
         let (walker, recorder) = make_recording_walker(graph, vec![], None);
-        let result = walker
-            .execute(params, Some("gr-fan".into()))
-            .await;
+        let result = walker.execute(params, Some("gr-fan".into())).await;
         assert!(
             result
                 .error
@@ -4334,11 +4255,7 @@ config:
     assert_eq!(receipt["node"].as_str(), Some("step1"));
     assert_eq!(
         receipt["node_result_hash"].as_str(),
-        Some(
-            hash_json_value(&json!({"msg": "hello"}))
-                .unwrap()
-                .as_str()
-        )
+        Some(hash_json_value(&json!({"msg": "hello"})).unwrap().as_str())
     );
 }
 
@@ -4547,10 +4464,7 @@ config:
         .iter()
         .filter(|&&t| t == "graph_step_completed")
         .count();
-    assert_eq!(
-        step_started, 2,
-        "foreach and return both emit step_started"
-    );
+    assert_eq!(step_started, 2, "foreach and return both emit step_started");
     assert_eq!(
         step_completed, 2,
         "foreach and return both emit step_completed"
@@ -4569,9 +4483,7 @@ fn node_result_hash_uses_canonical_json() {
 
     let left = Value::Object(left);
     let right = Value::Object(right);
-    let expected = lillux::cas::sha256_hex(
-        lillux::cas::canonical_json(&right).unwrap().as_bytes(),
-    );
+    let expected = lillux::cas::sha256_hex(lillux::cas::canonical_json(&right).unwrap().as_bytes());
 
     assert_eq!(hash_json_value(&left).unwrap(), expected);
     assert_eq!(
@@ -4609,9 +4521,7 @@ config:
     let artifacts = recorder.artifacts.lock().unwrap();
     let receipt_artifact = artifacts
         .iter()
-        .find(|a| {
-            a["artifact_type"] == "graph_node_receipt" && a["metadata"]["node"] == "step1"
-        })
+        .find(|a| a["artifact_type"] == "graph_node_receipt" && a["metadata"]["node"] == "step1")
         .expect("error node receipt should be published");
     assert_eq!(
         receipt_artifact["uri"].as_str(),
@@ -4660,9 +4570,7 @@ config:
     let artifacts = recorder.artifacts.lock().unwrap();
     let receipt_artifact = artifacts
         .iter()
-        .find(|a| {
-            a["artifact_type"] == "graph_node_receipt" && a["metadata"]["node"] == "step1"
-        })
+        .find(|a| a["artifact_type"] == "graph_node_receipt" && a["metadata"]["node"] == "step1")
         .expect("hard-error node receipt should be published");
     assert_eq!(
         receipt_artifact["uri"].as_str(),
@@ -4817,10 +4725,7 @@ fn warning_buffer_bounds_oversized_diagnostics_and_resets_after_take() {
         vec![GRAPH_WARNINGS_TRUNCATED.to_string()]
     );
 
-    assert_eq!(
-        warnings.take(),
-        vec![GRAPH_WARNINGS_TRUNCATED.to_string()]
-    );
+    assert_eq!(warnings.take(), vec![GRAPH_WARNINGS_TRUNCATED.to_string()]);
     warnings.push("next run".to_string());
     assert_eq!(warnings.take(), vec!["next run".to_string()]);
 }

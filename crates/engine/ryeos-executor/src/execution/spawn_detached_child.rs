@@ -189,36 +189,37 @@ pub async fn spawn_detached_child(
     // launch authority before minting any observable row. `effective_caps`
     // carries the PARENT's caps — the bounding authority handed to
     // `CapabilityPolicy::FollowChildHybrid`.
-    let mut meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-        kind: child_thread_profile.clone(),
-        item_ref: child_item_ref.to_string(),
-        ref_bindings: child_ref_bindings.clone(),
-        launch_mode: "detached".to_string(),
-        parameters: child_parameters.clone(),
-        // Resume identity derives from validated server-side provenance, never
-        // the request body — same rule as follow.
-        project_context: ProjectContext::LocalPath {
-            path: cap.provenance.effective_path().to_path_buf(),
-        },
-        original_snapshot_hash: inherited_snapshot_hash,
-        // A detached child borrows the parent's workspace; it never owns snapshot
-        // lineage, so no pushed-head identity is seeded.
-        original_pushed_head_ref: None,
-        // The parent's state-root override carries to the child so its
-        // state/callback anchor stays isolated with the parent's.
-        state_root: cap
-            .provenance
-            .state_root_override()
-            .map(|p| p.to_path_buf()),
-        current_site_id: parent.current_site_id.clone(),
-        origin_site_id: parent.origin_site_id.clone(),
-        requested_by: requested_by.clone(),
-        execution_hints: ExecutionHints::default(),
-        effective_caps: cap.effective_caps.clone(),
-        executor_ref: Some(child_executor_ref.clone()),
-        runtime_ref: Some(child_runtime_ref.clone()),
-    })
-    .with_sealed_root_request(sealed_root_request);
+    let mut meta = RuntimeLaunchMetadata::default()
+        .with_resume_context(ResumeContext {
+            kind: child_thread_profile.clone(),
+            item_ref: child_item_ref.to_string(),
+            ref_bindings: child_ref_bindings.clone(),
+            launch_mode: "detached".to_string(),
+            parameters: child_parameters.clone(),
+            // Resume identity derives from validated server-side provenance, never
+            // the request body — same rule as follow.
+            project_context: ProjectContext::LocalPath {
+                path: cap.provenance.effective_path().to_path_buf(),
+            },
+            original_snapshot_hash: inherited_snapshot_hash,
+            // A detached child borrows the parent's workspace; it never owns snapshot
+            // lineage, so no pushed-head identity is seeded.
+            original_pushed_head_ref: None,
+            // The parent's state-root override carries to the child so its
+            // state/callback anchor stays isolated with the parent's.
+            state_root: cap
+                .provenance
+                .state_root_override()
+                .map(|p| p.to_path_buf()),
+            current_site_id: parent.current_site_id.clone(),
+            origin_site_id: parent.origin_site_id.clone(),
+            requested_by: requested_by.clone(),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: cap.effective_caps.clone(),
+            executor_ref: Some(child_executor_ref.clone()),
+            runtime_ref: Some(child_runtime_ref.clone()),
+        })
+        .with_sealed_root_request(sealed_root_request);
     let launch_parent_context = crate::dispatch::ParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
@@ -366,8 +367,7 @@ pub async fn spawn_detached_child(
     if !queued {
         let launch_state = state.clone();
         let launch_child_id = child_thread_id.clone();
-        let (launch_handoff, launch_ready) =
-            crate::execution::launch::LaunchHandoff::channel();
+        let (launch_handoff, launch_ready) = crate::execution::launch::LaunchHandoff::channel();
         tokio::spawn(async move {
             if let Err(e) = crate::execution::launch::launch_prepared_follow_child(
                 launch_state,

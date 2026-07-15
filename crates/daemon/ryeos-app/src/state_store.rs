@@ -341,6 +341,24 @@ fn follow_envelope_limit_reservation() -> Value {
     follow_envelope_limit_failure(Some(&maximum_cost))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ValidatedFinalCost {
+    completed_turns: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    spend_usd: f64,
+}
+
+fn validate_final_cost(cost: &ryeos_engine::contracts::FinalCost) -> Result<ValidatedFinalCost> {
+    validate_final_cost_for_settlement(cost)?;
+    Ok(ValidatedFinalCost {
+        completed_turns: cost.turns,
+        input_tokens: cost.input_tokens,
+        output_tokens: cost.output_tokens,
+        spend_usd: cost.spend,
+    })
+}
+
 fn validated_follow_candidate_cost(candidate: &Value) -> Result<Option<Value>> {
     let Some(raw_cost) = candidate.get("cost") else {
         return Ok(None);
@@ -530,35 +548,6 @@ fn admit_follow_terminal_envelope(
             Ok((degraded, true))
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ValidatedFinalCost {
-    completed_turns: u32,
-    input_tokens: u64,
-    output_tokens: u64,
-    spend_usd: f64,
-}
-
-/// Validate the signed runtime cost domain before any write is admitted.
-/// `FinalCost` uses signed counters at the external contract boundary; direct
-/// `as` casts would wrap negative or oversized values into authoritative usage.
-fn validate_final_cost(cost: &ryeos_engine::contracts::FinalCost) -> Result<ValidatedFinalCost> {
-    let completed_turns =
-        u32::try_from(cost.turns).context("final cost turns must be within 0..=u32::MAX")?;
-    let input_tokens =
-        u64::try_from(cost.input_tokens).context("final cost input_tokens must be non-negative")?;
-    let output_tokens = u64::try_from(cost.output_tokens)
-        .context("final cost output_tokens must be non-negative")?;
-    if !cost.spend.is_finite() || cost.spend < 0.0 {
-        bail!("final cost spend must be finite and non-negative");
-    }
-    Ok(ValidatedFinalCost {
-        completed_turns,
-        input_tokens,
-        output_tokens,
-        spend_usd: cost.spend,
-    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2108,8 +2097,8 @@ impl StateStore {
         });
         if let Some(usage_subject) = &thread.usage_subject {
             usage_subject.validate()?;
-            payload["usage_subject"] = serde_json::to_value(usage_subject)
-                .context("failed to encode usage_subject")?;
+            payload["usage_subject"] =
+                serde_json::to_value(usage_subject).context("failed to encode usage_subject")?;
             if let Some(asserted_by) = &thread.usage_subject_asserted_by {
                 payload["usage_subject_asserted_by"] = json!(asserted_by);
             }
@@ -2229,10 +2218,7 @@ impl StateStore {
                 .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
         }
 
-        persisted_from_add_thread_with_events(
-            &result,
-            &events_to_append,
-        )
+        persisted_from_add_thread_with_events(&result, &events_to_append)
     }
 
     #[tracing::instrument(
@@ -2284,8 +2270,13 @@ impl StateStore {
             }
         }
 
+        let mut updated_snapshot = authoritative_snapshot_for_transition(
+            &g,
+            &thread_row.chain_root_id,
+            &thread_row.thread_id,
+        )?;
         if let (Some(authoritative), Some(requested)) = (
-            thread_row.base_project_snapshot_hash.as_deref(),
+            updated_snapshot.base_project_snapshot_hash.as_deref(),
             base_project_snapshot_hash,
         ) {
             if authoritative != requested {
@@ -2296,14 +2287,9 @@ impl StateStore {
         }
         let base_project_snapshot_hash = base_project_snapshot_hash
             .map(String::from)
-            .or_else(|| thread_row.base_project_snapshot_hash.clone());
+            .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
         let now = lillux::time::iso8601_now();
-        let mut updated_snapshot = authoritative_snapshot_for_transition(
-            &g,
-            &thread_row.chain_root_id,
-            &thread_row.thread_id,
-        )?;
         updated_snapshot.status = ThreadStatus::Running;
         updated_snapshot.updated_at.clone_from(&now);
         updated_snapshot.started_at = Some(now.clone());
@@ -2827,11 +2813,8 @@ impl StateStore {
         let mut successor_events = Vec::with_capacity(initial_events.len() + 1);
         successor_events.push(successor_event);
         successor_events.extend(initial_events);
-        let successor_thread_events = convert_events(
-            &successor_events,
-            chain_root_id,
-            &successor.thread_id,
-        );
+        let successor_thread_events =
+            convert_events(&successor_events, chain_root_id, &successor.thread_id);
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
             storage_class: "indexed".to_string(),
@@ -2859,7 +2842,8 @@ impl StateStore {
         let successor_result = match successor_commit {
             Ok(committed) => committed_value(committed),
             Err(error) => {
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
+                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                {
                     tracing::error!(
                         thread_id = %successor.thread_id,
                         error = %cleanup_error,
@@ -3078,9 +3062,7 @@ impl StateStore {
                      cannot create a launchable continuation successor"
                 )
             })?;
-        if expected_resume_context
-            .is_some_and(|expected| expected != &source_resume_context)
-        {
+        if expected_resume_context.is_some_and(|expected| expected != &source_resume_context) {
             bail!(
                 "source thread {source_thread_id} ResumeContext changed during authoritative preparation"
             );
@@ -3161,11 +3143,8 @@ impl StateStore {
         let mut successor_events = Vec::with_capacity(initial_events.len() + 1);
         successor_events.push(successor_event);
         successor_events.extend(initial_events);
-        let successor_thread_events = convert_events(
-            &successor_events,
-            chain_root_id,
-            &successor.thread_id,
-        );
+        let successor_thread_events =
+            convert_events(&successor_events, chain_root_id, &successor.thread_id);
         // Settle the source to `continued` in the same signed head that creates
         // the successor and records its authoritative birth events.
         let now = lillux::time::iso8601_now();
@@ -3206,7 +3185,8 @@ impl StateStore {
         let successor_result = match successor_commit {
             Ok(committed) => committed_value(committed),
             Err(error) => {
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
+                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                {
                     tracing::error!(
                         thread_id = %successor.thread_id,
                         error = %cleanup_error,
@@ -3356,11 +3336,8 @@ impl StateStore {
         let mut successor_events = Vec::with_capacity(initial_events.len() + 1);
         successor_events.push(successor_event);
         successor_events.extend(initial_events);
-        let successor_thread_events = convert_events(
-            &successor_events,
-            chain_root_id,
-            &successor.thread_id,
-        );
+        let successor_thread_events =
+            convert_events(&successor_events, chain_root_id, &successor.thread_id);
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
             storage_class: "indexed".to_string(),
@@ -3375,7 +3352,8 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let successor_snapshot = match launch_metadata.and_then(|meta| meta.resume_context.as_ref()) {
+        let successor_snapshot = match launch_metadata.and_then(|meta| meta.resume_context.as_ref())
+        {
             Some(resume) => build_continuation_snapshot(&successor_with_upstream, resume)?,
             None => build_snapshot(&successor_with_upstream),
         };
@@ -3393,7 +3371,8 @@ impl StateStore {
         let successor_result = match successor_commit {
             Ok(committed) => committed_value(committed),
             Err(error) => {
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
+                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                {
                     tracing::error!(
                         thread_id = %successor.thread_id,
                         error = %cleanup_error,
@@ -3514,8 +3493,7 @@ impl StateStore {
         let g = self.lock()?;
         let Some(snapshot) = g
             .state_db
-            .read_thread_authoritatively(chain_root_id, thread_id)?
-            .snapshot
+            .read_authoritative_thread_snapshot(chain_root_id, thread_id)?
         else {
             return Ok(None);
         };
@@ -3525,10 +3503,9 @@ impl StateStore {
                 snapshot.status
             );
         }
-        let runtime = g
-            .runtime_db
-            .get_runtime_info(thread_id)?
-            .ok_or_else(|| anyhow!("continuation successor {thread_id} is missing runtime state"))?;
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow!("continuation successor {thread_id} is missing runtime state")
+        })?;
         Ok(Some(ThreadDetail {
             thread_id: snapshot.thread_id,
             chain_root_id: snapshot.chain_root_id,
@@ -4006,12 +3983,8 @@ impl StateStore {
 
         let snapshot = g
             .state_db
-            .read_thread_authoritatively(
-            &thread.chain_root_id,
-            thread_id,
-        )?
-        .snapshot
-        .ok_or_else(|| anyhow!("terminal thread {thread_id} is missing its CAS snapshot"))?;
+            .read_authoritative_thread_snapshot(&thread.chain_root_id, thread_id)?
+            .ok_or_else(|| anyhow!("terminal thread {thread_id} is missing its CAS snapshot"))?;
         let ThreadSnapshot {
             status: snapshot_status,
             result,
@@ -5006,6 +4979,7 @@ impl StateStore {
         &self,
         seed: &runtime_db::NewFollowWaiter,
     ) -> Result<runtime_db::FollowWaiter> {
+        validate_follow_reservation_shape(seed)?;
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let _admission = g
@@ -5170,11 +5144,7 @@ impl StateStore {
         child_thread_id: &str,
         payload: Value,
     ) -> Result<ChildLineageAppend> {
-        if payload
-            .get("child_thread_id")
-            .and_then(Value::as_str)
-            != Some(child_thread_id)
-        {
+        if payload.get("child_thread_id").and_then(Value::as_str) != Some(child_thread_id) {
             bail!("child lineage payload does not name child {child_thread_id}");
         }
         let permit = self.acquire_write_permit()?;
@@ -5197,11 +5167,8 @@ impl StateStore {
         if g.state_db.get_thread(child_thread_id)?.is_none() {
             bail!("child thread not found while recording lineage: {child_thread_id}");
         }
-        if queries::thread_edge_exists(
-            g.state_db.projection(),
-            parent_thread_id,
-            child_thread_id,
-        )? {
+        if queries::thread_edge_exists(g.state_db.projection(), parent_thread_id, child_thread_id)?
+        {
             return Ok(ChildLineageAppend {
                 outcome: ChildLineageAppendOutcome::AlreadyPresent,
                 persisted: Vec::new(),
@@ -5839,40 +5806,8 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use tempfile::tempdir;
-
-    fn final_cost(
-        turns: i64,
-        input_tokens: i64,
-        output_tokens: i64,
-        spend: f64,
-    ) -> ryeos_engine::contracts::FinalCost {
-        ryeos_engine::contracts::FinalCost {
-            turns,
-            input_tokens,
-            output_tokens,
-            spend,
-            provider: None,
-            basis: None,
-            metadata: None,
-        }
-    }
-
-    #[test]
-    fn final_cost_is_checked_before_unsigned_usage_conversion() {
-        let maximum =
-            validate_final_cost(&final_cost(i64::from(u32::MAX), i64::MAX, i64::MAX, 0.0)).unwrap();
-        assert_eq!(maximum.completed_turns, u32::MAX);
-        assert_eq!(maximum.input_tokens, u64::try_from(i64::MAX).unwrap());
-
-        assert!(validate_final_cost(&final_cost(-1, 0, 0, 0.0)).is_err());
-        assert!(validate_final_cost(&final_cost(0, -1, 0, 0.0)).is_err());
-        assert!(validate_final_cost(&final_cost(0, 0, -1, 0.0)).is_err());
-        assert!(validate_final_cost(&final_cost(i64::from(u32::MAX) + 1, 0, 0, 0.0)).is_err());
-        assert!(validate_final_cost(&final_cost(0, 0, 0, -0.01)).is_err());
-        assert!(validate_final_cost(&final_cost(0, 0, 0, f64::NAN)).is_err());
-        assert!(validate_final_cost(&final_cost(0, 0, 0, f64::INFINITY)).is_err());
-    }
 
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
@@ -5970,6 +5905,8 @@ mod tests {
                 spec_hash: "spec".to_string(),
                 child_thread_id: "T-child".to_string(),
                 child_chain_root_id: "T-child".to_string(),
+                sealed_root_request:
+                    crate::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture(),
                 terminal_thread_id: None,
                 terminal_status: None,
                 terminal_envelope: None,
@@ -6074,7 +6011,9 @@ mod tests {
         }
     }
 
-    fn continuation_resume_context(project_context: ProjectContext) -> crate::launch_metadata::ResumeContext {
+    fn continuation_resume_context(
+        project_context: ProjectContext,
+    ) -> crate::launch_metadata::ResumeContext {
         crate::launch_metadata::ResumeContext {
             kind: "directive".to_string(),
             item_ref: "directive:test".to_string(),

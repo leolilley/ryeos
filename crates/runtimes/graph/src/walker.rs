@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -18,9 +17,9 @@ use ryeos_runtime::checkpoint::CheckpointWriter;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
 
-mod checkpointing;
 #[cfg(test)]
 mod checkpoint_authority_tests;
+mod checkpointing;
 mod commit;
 mod events;
 mod execution;
@@ -329,10 +328,7 @@ impl Walker {
     }
 
     fn accept_node_receipt(&self, receipt: &NodeReceipt) -> bool {
-        self.run_history
-            .lock()
-            .unwrap()
-            .accept_receipt(receipt)
+        self.run_history.lock().unwrap().accept_receipt(receipt)
     }
 
     fn push_suppressed_error(&self, history: &mut Vec<ErrorRecord>, error: ErrorRecord) {
@@ -406,10 +402,9 @@ impl Walker {
         let finalized = self.client.finalize_thread(completion).await;
         match finalized {
             Ok(_) => guard.finalized = true,
-            Err(error) => self.record_callback_warning(
-                "finalize_thread",
-                Err(anyhow::anyhow!(error)),
-            ),
+            Err(error) => {
+                self.record_callback_warning("finalize_thread", Err(anyhow::anyhow!(error)))
+            }
         }
         result
     }
@@ -547,10 +542,9 @@ impl Walker {
             let r = self.client.finalize_thread(completion).await;
             match r {
                 Ok(_) => guard.finalized = true,
-                Err(error) => self.record_callback_warning(
-                    "finalize_thread",
-                    Err(anyhow::anyhow!(error)),
-                ),
+                Err(error) => {
+                    self.record_callback_warning("finalize_thread", Err(anyhow::anyhow!(error)))
+                }
             }
             return result;
         }
@@ -591,9 +585,7 @@ impl Walker {
                     return self
                         .fail_runtime_preflight(
                             graph_run_id,
-                            format!(
-                                "graph inputs exceeded rye-expr/1 bounds: {error}"
-                            ),
+                            format!("graph inputs exceeded rye-expr/1 bounds: {error}"),
                             &mut guard,
                         )
                         .await;
@@ -622,9 +614,7 @@ impl Walker {
                 return self
                     .fail_runtime_preflight(
                         graph_run_id,
-                        format!(
-                            "graph inject_state exceeded rye-expr/1 bounds: {error}"
-                        ),
+                        format!("graph inject_state exceeded rye-expr/1 bounds: {error}"),
                         &mut guard,
                     )
                     .await;
@@ -635,9 +625,7 @@ impl Walker {
             return self
                 .fail_runtime_preflight(
                     graph_run_id,
-                    format!(
-                        "initial graph state exceeded rye-expr/1 bounds: {error}"
-                    ),
+                    format!("initial graph state exceeded rye-expr/1 bounds: {error}"),
                     &mut guard,
                 )
                 .await;
@@ -678,31 +666,26 @@ impl Walker {
                         return self
                             .fail_runtime_preflight(
                                 graph_run_id,
-                                format!(
-                                    "invalid graph resume_state accounting: {error}"
-                                ),
+                                format!("invalid graph resume_state accounting: {error}"),
                                 &mut guard,
                             )
                             .await;
                     }
                 };
-            let restored_errors =
-                match serde_json::from_value::<Vec<ErrorRecord>>(
-                    resume.suppressed_errors.clone(),
-                ) {
-                    Ok(errors) => errors,
-                    Err(error) => {
-                        return self
-                            .fail_runtime_preflight(
-                                graph_run_id,
-                                format!(
-                                    "invalid graph resume_state suppressed_errors: {error}"
-                                ),
-                                &mut guard,
-                            )
-                            .await;
-                    }
-                };
+            let restored_errors = match serde_json::from_value::<Vec<ErrorRecord>>(
+                resume.suppressed_errors.clone(),
+            ) {
+                Ok(errors) => errors,
+                Err(error) => {
+                    return self
+                        .fail_runtime_preflight(
+                            graph_run_id,
+                            format!("invalid graph resume_state suppressed_errors: {error}"),
+                            &mut guard,
+                        )
+                        .await;
+                }
+            };
 
             current = resume.current_node;
             step = resume.step_count;
@@ -1486,10 +1469,9 @@ impl Walker {
                         .unwrap()
                         .insert(collect.clone(), Value::Array(results.clone()));
                 }
-                if let Err(error) = validate_runtime_value(
-                    &candidate_state,
-                    "foreach candidate state",
-                ) {
+                if let Err(error) =
+                    validate_runtime_value(&candidate_state, "foreach candidate state")
+                {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                         item_id: Some(foreach_item_id),
                         error: format!(
@@ -1582,7 +1564,6 @@ impl Walker {
         guard: &mut RunGuard,
         next_retry_attempt: u32,
         inputs: &Value,
-        execution: &Value,
     ) -> CommitResult {
         if let Err(e) = self
             .write_checkpoint(
@@ -1612,9 +1593,7 @@ impl Walker {
                     error: Some(&diagnostic),
                     output: None,
                     guard,
-                    current_node_id: next_node,
                     inputs,
-                    execution,
                 })
                 .await;
         }
@@ -1644,8 +1623,7 @@ impl Walker {
                 (RuntimeEventType::GraphStarted, None)
             }
             ryeos_runtime::callback::HookDispatchOccurrence::GraphStepCompleted {
-                step,
-                ..
+                step, ..
             } => (RuntimeEventType::GraphStepCompleted, Some(*step)),
             ryeos_runtime::callback::HookDispatchOccurrence::GraphCompleted { steps, .. } => {
                 (RuntimeEventType::GraphCompleted, Some(*steps))
@@ -1689,10 +1667,7 @@ impl Walker {
                         event.as_str(),
                     ));
                 }
-                self.record_warning(format!(
-                    "graph hook `{}` failed: {error}",
-                    event.as_str()
-                ));
+                self.record_warning(format!("graph hook `{}` failed: {error}", event.as_str()));
             }
         }
     }

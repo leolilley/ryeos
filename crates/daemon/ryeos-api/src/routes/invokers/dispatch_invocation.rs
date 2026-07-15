@@ -115,18 +115,14 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             } => (fingerprint.clone(), scopes.clone()),
         };
 
-        ryeos_executor::execution::launch_preparation::validate_ref_bindings(
-            &config.ref_bindings,
-        )
-        .map_err(|error| {
-            RouteDispatchError::BadRequest(format!("invalid ref_bindings: {error}"))
-        })?;
+        ryeos_executor::execution::launch_preparation::validate_ref_bindings(&config.ref_bindings)
+            .map_err(|error| {
+                RouteDispatchError::BadRequest(format!("invalid ref_bindings: {error}"))
+            })?;
         for (name, bound_ref) in &config.ref_bindings {
-            let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref)
-                .map_err(|error| {
-                    RouteDispatchError::BadRequest(format!(
-                        "invalid ref_bindings.{name}: {error}"
-                    ))
+            let canonical =
+                ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref).map_err(|error| {
+                    RouteDispatchError::BadRequest(format!("invalid ref_bindings.{name}: {error}"))
                 })?;
             let required = ryeos_runtime::authorizer::canonical_cap(
                 &canonical.kind,

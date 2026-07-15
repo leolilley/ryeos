@@ -109,9 +109,7 @@ impl BundleEventObject {
     }
 }
 
-pub fn hash_bundle_event(
-    event: &BundleEventObject,
-) -> Result<String, lillux::CanonicalJsonError> {
+pub fn hash_bundle_event(event: &BundleEventObject) -> Result<String, lillux::CanonicalJsonError> {
     let canonical = lillux::canonical_json(&event.to_value())?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }

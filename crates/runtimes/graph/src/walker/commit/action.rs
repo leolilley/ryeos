@@ -14,7 +14,7 @@ impl Walker {
             suppressed_errors,
             guard,
             inputs,
-            execution,
+            execution: _,
             cache,
         } = input;
         let ActionOkOutcome {
@@ -50,11 +50,9 @@ impl Walker {
         // happened, but are deliberately deferred until assignment and
         // branch evaluation have both succeeded. They therefore cannot
         // make an expression-failed transition look committed.
-        if let Some(observation) = DispatchObservation::from_success(
-            item_id.to_string(),
-            child_thread_id.clone(),
-            result,
-        ) {
+        if let Some(observation) =
+            DispatchObservation::from_success(item_id.to_string(), child_thread_id.clone(), result)
+        {
             self.emit_dispatch_observation(current, step, &observation)
                 .await;
         }
@@ -88,9 +86,7 @@ impl Walker {
                         error: Some(&message),
                         output: None,
                         guard,
-                        current_node_id: current,
                         inputs,
-                        execution,
                     })
                     .await;
             }
@@ -109,17 +105,10 @@ impl Walker {
             cost: cost.clone(),
             fanout: None,
         };
-        self.write_node_receipt_or_warn(graph_run_id, receipt)
-            .await;
+        self.write_node_receipt_or_warn(graph_run_id, receipt).await;
 
-        self.emit_graph_step_completed(
-            graph_run_id,
-            step,
-            current,
-            GraphStepStatus::Ok,
-            None,
-        )
-        .await;
+        self.emit_graph_step_completed(graph_run_id, step, current, GraphStepStatus::Ok, None)
+            .await;
         self.fire_graph_hooks(
             self.graph_step_completed_hook_occurrence(graph_run_id, step, current),
             self.step_hook_context(
@@ -145,7 +134,6 @@ impl Walker {
                     guard,
                     0,
                     inputs,
-                    execution,
                 )
                 .await
             }
@@ -159,9 +147,7 @@ impl Walker {
                     error: None,
                     output: None,
                     guard,
-                    current_node_id: current,
                     inputs,
-                    execution,
                 })
                 .await
             }

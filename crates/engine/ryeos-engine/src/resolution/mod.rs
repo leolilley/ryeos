@@ -18,9 +18,9 @@ pub use corpus::{resolve_item_for_corpus, CorpusItemProjection, CorpusReferenceE
 pub use decl::ResolutionStepDecl;
 pub use types::{
     effective_trust, AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode,
-    ResolutionEdge, ResolutionError, ResolutionOutput, ResolutionProvenance,
-    ResolutionFailureClass, ResolutionProvenanceEdge, ResolutionProvenanceNode,
-    ResolutionStepName, ResolvedAncestor, TrustClass,
+    ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput,
+    ResolutionProvenance, ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName,
+    ResolvedAncestor, TrustClass,
 };
 
 use crate::canonical_ref::CanonicalRef;

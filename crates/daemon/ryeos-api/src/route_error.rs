@@ -100,8 +100,8 @@ impl axum::response::IntoResponse for RouteDispatchError {
         use axum::http::StatusCode;
         match self {
             Self::Structured { status, body, .. } => {
-                let status = StatusCode::from_u16(status)
-                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let status =
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 (status, axum::Json(body)).into_response()
             }
             Self::NotFound => (

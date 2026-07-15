@@ -428,9 +428,7 @@ pub fn load_configured_hook_sources(
     loader: &crate::verified_loader::VerifiedLoader,
 ) -> anyhow::Result<HookSources> {
     let conditions = loader
-        .load_bundle_config_strict_signed::<HookConditionsConfig>(
-            "ryeos-runtime/hook_conditions",
-        )
+        .load_bundle_config_strict_signed::<HookConditionsConfig>("ryeos-runtime/hook_conditions")
         .map_err(|error| anyhow::anyhow!("loading configured runtime hook conditions: {error}"))?
         .unwrap_or_default();
 

@@ -400,38 +400,6 @@ fn open_projection_entry_at(
     Ok(file)
 }
 
-fn remove_projection_path_durable_no_follow(path: &Path, held: &fs::File) -> anyhow::Result<()> {
-    #[cfg(not(unix))]
-    {
-        let _ = (path, held);
-        anyhow::bail!("secure projection removal is unavailable on this platform");
-    }
-
-    #[cfg(unix)]
-    {
-        // The cleanup lease excludes every cooperating projection opener. Pin
-        // the parent directory, re-open the final name with O_NOFOLLOW, and
-        // unlink relative to that same descriptor so parent substitution can
-        // never redirect cleanup into another namespace.
-        let (parent, file_name) = open_projection_parent_no_follow(path)?;
-        let current = open_projection_entry_at(&parent, &file_name, path)?;
-        if !projection_files_are_same(held, &current)? {
-            anyhow::bail!("projection path changed before removal: {}", path.display());
-        }
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), file_name.as_ptr(), 0) } != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!(
-                    "unlink projection entry descriptor-relative {}",
-                    path.display()
-                )
-            });
-        }
-        parent
-            .sync_all()
-            .with_context(|| format!("sync projection parent after removing {}", path.display()))
-    }
-}
-
 fn rename_open_projection_file_no_follow(
     source: &Path,
     destination: &Path,
@@ -497,23 +465,6 @@ fn rename_open_projection_file_no_follow(
             )
         })
     }
-}
-
-pub(crate) fn remove_open_projection_regular_file_durable_no_follow(
-    path: &Path,
-    held: &fs::File,
-) -> anyhow::Result<()> {
-    remove_projection_path_durable_no_follow(path, held)
-}
-
-pub(crate) fn remove_projection_regular_file_durable_no_follow(
-    path: &Path,
-) -> anyhow::Result<bool> {
-    let Some(file) = open_projection_regular_file_no_follow(path, false, false)? else {
-        return Ok(false);
-    };
-    remove_open_projection_regular_file_durable_no_follow(path, &file)?;
-    Ok(true)
 }
 
 fn open_existing_projection_connection(

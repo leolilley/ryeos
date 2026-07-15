@@ -11,8 +11,7 @@ use serde_json::Value;
 
 use crate::model::GraphDefinition;
 
-pub const RESTART_REQUIRED: &str =
-    "restart_required_after_expression_language_cutover";
+pub const RESTART_REQUIRED: &str = "restart_required_after_expression_language_cutover";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -331,10 +330,7 @@ fn reject_checkpoint_nulls(value: &Value) -> Result<()> {
 /// Parse and verify a schema-v3 checkpoint against the exact graph definition
 /// resolved for this launch. No older shape or alternate expression marker is
 /// accepted.
-pub fn from_checkpoint_value(
-    value: &Value,
-    definition: &GraphDefinition,
-) -> Result<ResumeState> {
+pub fn from_checkpoint_value(value: &Value, definition: &GraphDefinition) -> Result<ResumeState> {
     crate::evaluation::validate_runtime_shape(value, "graph checkpoint")
         .map_err(restart_required)?;
     reject_checkpoint_nulls(value)?;
@@ -445,10 +441,8 @@ config:
     }
 
     fn injected(definition: &GraphDefinition) -> Value {
-        serde_json::to_value(
-            from_checkpoint_value(&checkpoint(definition), definition).unwrap(),
-        )
-        .unwrap()
+        serde_json::to_value(from_checkpoint_value(&checkpoint(definition), definition).unwrap())
+            .unwrap()
     }
 
     fn follow_terminal(status: ryeos_runtime::envelope::RuntimeResultStatus) -> Value {
@@ -694,7 +688,10 @@ config:
             .unwrap_err()
             .to_string();
         assert!(error.contains(RESTART_REQUIRED), "{error}");
-        assert!(error.contains("without a valid `pending_follow`"), "{error}");
+        assert!(
+            error.contains("without a valid `pending_follow`"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -718,7 +715,10 @@ config:
             .unwrap_err()
             .to_string();
         assert!(error.contains(RESTART_REQUIRED), "{error}");
-        assert!(error.contains("malformed follow result envelope"), "{error}");
+        assert!(
+            error.contains("malformed follow result envelope"),
+            "{error}"
+        );
 
         let fanout = definition();
         let mut malformed_cohort = checkpoint(&fanout);
@@ -750,15 +750,13 @@ config:
             "graph_run_id": "run-1",
             "iteration_snapshot": ["a", "b"],
         });
-        let mut first =
-            follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Completed);
+        let mut first = follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Completed);
         first["cost"] = json!({
             "input_tokens": i64::MAX as u64,
             "output_tokens": 0,
             "total_usd": 0.0,
         });
-        let mut second =
-            follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Completed);
+        let mut second = follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Completed);
         second["cost"] = json!({
             "input_tokens": 1,
             "output_tokens": 0,
@@ -805,7 +803,10 @@ config:
         let error = from_checkpoint_value(&unexpected_snapshot, &single)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("must not contain `iteration_snapshot`"), "{error}");
+        assert!(
+            error.contains("must not contain `iteration_snapshot`"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -863,7 +864,10 @@ config:
                 "accounting",
                 json!({"total": null, "nodes": [], "hooks": [], "extra": true}),
             ),
-            ("suppressed_errors", json!([{"step": -1, "node": "x", "error": "bad"}])),
+            (
+                "suppressed_errors",
+                json!([{"step": -1, "node": "x", "error": "bad"}]),
+            ),
         ] {
             let mut value = valid.clone();
             value[path] = replacement;
@@ -925,7 +929,10 @@ config:
         let error = from_checkpoint_value(&value, &definition)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("must be below configured attempts 2"), "{error}");
+        assert!(
+            error.contains("must be below configured attempts 2"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -979,8 +986,7 @@ config:
         });
 
         let mut valid = checkpoint(&definition);
-        valid["accounting"] =
-            json!({"total": total, "nodes": [node.clone()], "hooks": []});
+        valid["accounting"] = json!({"total": total, "nodes": [node.clone()], "hooks": []});
         from_checkpoint_value(&valid, &definition).unwrap();
 
         let mut missing_total = checkpoint(&definition);
@@ -1008,8 +1014,7 @@ config:
         negative_cost["accounting"]["nodes"][0]["cost"]["total_usd"] = json!(-0.25);
 
         let mut future_error = checkpoint(&definition);
-        future_error["suppressed_errors"] =
-            json!([{"step": 4, "node": "wait", "error": "future"}]);
+        future_error["suppressed_errors"] = json!([{"step": 4, "node": "wait", "error": "future"}]);
 
         let mut reversed_errors = checkpoint(&definition);
         reversed_errors["suppressed_errors"] = json!([

@@ -23,6 +23,7 @@ const MAX_BUNDLE_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// gain an indexed ordering structure.
 pub const MAX_BUNDLE_EVENT_SCAN_INSPECTED_ENTRIES: usize = 4_096;
 
+#[cfg(test)]
 fn pin_bundle_event_authority(
     cas_root: &Path,
     refs_root: &Path,
@@ -148,8 +149,8 @@ impl BundleEventCursor {
         };
         cursor.validate_structure(false)?;
         let canonical = cursor.canonical_unsigned()?;
-        cursor.signature = base64::engine::general_purpose::STANDARD
-            .encode(signer.sign(canonical.as_bytes()));
+        cursor.signature =
+            base64::engine::general_purpose::STANDARD.encode(signer.sign(canonical.as_bytes()));
         cursor.verify(bundle_id, event_kind, trust_store)?;
         Ok(cursor)
     }
@@ -176,9 +177,10 @@ impl BundleEventCursor {
         let signature_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature)
             .context("failed to decode bundle event cursor signature")?;
-        let signature = lillux::crypto::Signature::from_slice(&signature_bytes).map_err(|error| {
-            anyhow::anyhow!("failed to parse bundle event cursor signature: {error}")
-        })?;
+        let signature =
+            lillux::crypto::Signature::from_slice(&signature_bytes).map_err(|error| {
+                anyhow::anyhow!("failed to parse bundle event cursor signature: {error}")
+            })?;
         let canonical = self.canonical_unsigned()?;
         verifying_key
             .verify(canonical.as_bytes(), &signature)
@@ -393,6 +395,7 @@ pub(crate) fn append_bundle_event_pinned(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn read_bundle_event_chain(
     cas_root: &Path,
     refs_root: &Path,
@@ -461,6 +464,7 @@ fn read_bundle_event_chain_from_head(
     Ok(records)
 }
 
+#[cfg(test)]
 pub(crate) fn scan_bundle_events(
     cas_root: &Path,
     refs_root: &Path,
@@ -637,7 +641,9 @@ pub fn scan_bundle_events_page(
                 &chain_ref_name(bundle_id, event_kind, &cursor.chain_id),
                 trust_store,
             )?
-            .ok_or_else(|| anyhow::anyhow!("bundle event cursor names a chain with no current head"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("bundle event cursor names a chain with no current head")
+            })?;
             if cursor.head_hash != current_head.target_hash {
                 anyhow::bail!(
                     "stale bundle event cursor for chain {}: anchored at {}, current head {}",
@@ -788,10 +794,7 @@ fn read_bundle_event_chain_page_from_hash(
         records.push(record);
     }
 
-    Ok(BundleEventHashPage {
-        records,
-        next_hash,
-    })
+    Ok(BundleEventHashPage { records, next_hash })
 }
 
 fn next_bundle_event_chain_head(
@@ -1486,9 +1489,7 @@ mod tests {
         )
         .unwrap();
 
-        cursor
-            .verify("ryeos-email", "email_event", &trust)
-            .unwrap();
+        cursor.verify("ryeos-email", "email_event", &trust).unwrap();
         assert!(cursor
             .verify("other-bundle", "email_event", &trust)
             .is_err());
@@ -1516,14 +1517,8 @@ mod tests {
         .unwrap();
         let mut second_request = append_request("email_1", "email_approved");
         second_request.expected_chain_head_hash = Some(first.event_hash);
-        let second = append_bundle_event(
-            &cas_root,
-            &refs_root,
-            second_request,
-            &signer,
-            &trust,
-        )
-        .unwrap();
+        let second =
+            append_bundle_event(&cas_root, &refs_root, second_request, &signer, &trust).unwrap();
         let (_runtime, cas, refs_directory) =
             pin_bundle_event_authority(&cas_root, &refs_root).unwrap();
         let cursor = read_bundle_event_chain_page(
@@ -1544,14 +1539,7 @@ mod tests {
 
         let mut third_request = append_request("email_1", "email_sent");
         third_request.expected_chain_head_hash = Some(second.event_hash);
-        append_bundle_event(
-            &cas_root,
-            &refs_root,
-            third_request,
-            &signer,
-            &trust,
-        )
-        .unwrap();
+        append_bundle_event(&cas_root, &refs_root, third_request, &signer, &trust).unwrap();
 
         let error = read_bundle_event_chain_page(
             &cas,

@@ -31,16 +31,15 @@ pub(crate) fn validate_checkpoint_snapshots(
     }
     for required in ["total", "nodes", "hooks"] {
         if !accounting_object.contains_key(required) {
-            anyhow::bail!(
-                "invalid checkpoint accounting: missing required field `{required}`"
-            );
+            anyhow::bail!("invalid checkpoint accounting: missing required field `{required}`");
         }
     }
 
     let accounting = serde_json::from_value::<GraphAccounting>(accounting.clone())
         .map_err(|error| anyhow::anyhow!("invalid checkpoint accounting: {error}"))?;
-    let suppressed_errors = serde_json::from_value::<Vec<ErrorRecord>>(suppressed_errors.clone())
-        .map_err(|error| anyhow::anyhow!("invalid checkpoint suppressed_errors: {error}"))?;
+    let suppressed_errors =
+        serde_json::from_value::<Vec<ErrorRecord>>(suppressed_errors.clone())
+            .map_err(|error| anyhow::anyhow!("invalid checkpoint suppressed_errors: {error}"))?;
     let limit = MAX_GRAPH_STEPS as usize;
     if accounting.nodes.len() > limit {
         anyhow::bail!(
@@ -93,9 +92,7 @@ pub(crate) fn validate_checkpoint_snapshots(
         })?;
         expected_total
             .checked_accumulate(&record.cost)
-            .map_err(|error| {
-                anyhow::anyhow!("invalid checkpoint accounting rollup: {error}")
-            })?;
+            .map_err(|error| anyhow::anyhow!("invalid checkpoint accounting rollup: {error}"))?;
         previous_accounting_step = Some(record.step);
     }
 
@@ -248,7 +245,11 @@ impl WarningBuffer {
         if self.truncated {
             return;
         }
-        if self.aggregate.append(&Value::String(warning.clone())).is_err() {
+        if self
+            .aggregate
+            .append(&Value::String(warning.clone()))
+            .is_err()
+        {
             self.truncated = true;
             return;
         }

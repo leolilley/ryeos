@@ -204,11 +204,14 @@ fn parse_runtime_yaml_success() {
 
 #[test]
 fn parse_runtime_yaml_missing_serves_rejected() {
-    let body = with_empty_launch_contract("\
+    let body = with_empty_launch_contract(
+        "\
 kind: runtime
 binary_ref: bin/x
 abi_version: v1
-", "directive");
+",
+        "directive",
+    );
     let err = parse_via_registry(&body).unwrap_err();
     assert!(
         matches!(err, EngineError::RuntimeYamlInvalid { .. }),
@@ -218,11 +221,14 @@ abi_version: v1
 
 #[test]
 fn parse_runtime_yaml_missing_binary_ref_rejected() {
-    let body = with_empty_launch_contract("\
+    let body = with_empty_launch_contract(
+        "\
 kind: runtime
 serves: directive
 abi_version: v1
-", "directive");
+",
+        "directive",
+    );
     let err = parse_via_registry(&body).unwrap_err();
     assert!(
         matches!(err, EngineError::RuntimeYamlInvalid { .. }),
@@ -232,11 +238,14 @@ abi_version: v1
 
 #[test]
 fn parse_runtime_yaml_missing_abi_version_rejected() {
-    let body = with_empty_launch_contract("\
+    let body = with_empty_launch_contract(
+        "\
 kind: runtime
 serves: directive
 binary_ref: bin/x
-", "directive");
+",
+        "directive",
+    );
     let err = parse_via_registry(&body).unwrap_err();
     assert!(
         matches!(err, EngineError::RuntimeYamlInvalid { .. }),
@@ -246,12 +255,15 @@ binary_ref: bin/x
 
 #[test]
 fn parse_runtime_yaml_wrong_kind_rejected() {
-    let body = with_empty_launch_contract("\
+    let body = with_empty_launch_contract(
+        "\
 kind: tool
 serves: directive
 binary_ref: bin/x
 abi_version: v1
-", "directive");
+",
+        "directive",
+    );
     let err = parse_via_registry(&body).unwrap_err();
     match err {
         EngineError::RuntimeYamlInvalid { reason, .. } => {
@@ -302,23 +314,29 @@ fn registry_two_runtimes_one_default_returns_default() {
     write_signed_runtime(
         &bundle,
         "fast",
-        &with_empty_launch_contract("\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 default: true
 binary_ref: bin/fast
 abi_version: v1
-", "directive"),
+",
+            "directive",
+        ),
     );
     write_signed_runtime(
         &bundle,
         "slow",
-        &with_empty_launch_contract("\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 binary_ref: bin/slow
 abi_version: v1
-", "directive"),
+",
+            "directive",
+        ),
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
@@ -338,24 +356,30 @@ fn registry_two_runtimes_both_default_fails_build() {
     write_signed_runtime(
         &bundle,
         "a",
-        &with_empty_launch_contract("\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 default: true
 binary_ref: bin/a
 abi_version: v1
-", "directive"),
+",
+            "directive",
+        ),
     );
     write_signed_runtime(
         &bundle,
         "b",
-        &with_empty_launch_contract("\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 default: true
 binary_ref: bin/b
 abi_version: v1
-", "directive"),
+",
+            "directive",
+        ),
     );
 
     let err = RuntimeRegistry::build_from_bundles(
@@ -379,22 +403,28 @@ fn registry_two_runtimes_neither_default_lookup_fails() {
     write_signed_runtime(
         &bundle,
         "a",
-        &with_empty_launch_contract("\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 binary_ref: bin/a
 abi_version: v1
-", "directive"),
+",
+            "directive",
+        ),
     );
     write_signed_runtime(
         &bundle,
         "b",
-        &with_empty_launch_contract("\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 binary_ref: bin/b
 abi_version: v1
-", "directive"),
+",
+            "directive",
+        ),
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
@@ -518,11 +548,14 @@ metadata:
     write_signed_runtime(
         &bundle,
         "wrong-protocol-rt",
-        &with_empty_launch_contract(r#"kind: runtime
+        &with_empty_launch_contract(
+            r#"kind: runtime
 serves: fake_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
 abi_version: "v1"
-"#, "fake_kind"),
+"#,
+            "fake_kind",
+        ),
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
@@ -583,11 +616,14 @@ metadata:
     write_signed_runtime(
         &bundle,
         "no-exec-rt",
-        &with_empty_launch_contract(r#"kind: runtime
+        &with_empty_launch_contract(
+            r#"kind: runtime
 serves: no_exec_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
 abi_version: "v1"
-"#, "no_exec_kind"),
+"#,
+            "no_exec_kind",
+        ),
     );
 
     let err = RuntimeRegistry::build_from_bundles(

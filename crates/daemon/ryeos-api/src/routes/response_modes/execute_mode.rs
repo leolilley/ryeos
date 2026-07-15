@@ -197,17 +197,15 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // Parse body.
         let mut request: ExecuteRequest =
             ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
-            .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+                .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
         if ctx.request_parts.uri.path() == "/execute/launch" && request.launch_mode == "inline" {
             request.launch_mode = "accepted".to_string();
         }
 
         let item_ref = &request.item_ref;
-        if let Err(error) =
-            ryeos_executor::execution::launch_preparation::validate_ref_bindings(
-                &request.ref_bindings,
-            )
-        {
+        if let Err(error) = ryeos_executor::execution::launch_preparation::validate_ref_bindings(
+            &request.ref_bindings,
+        ) {
             return Ok(dispatch_error_response(error));
         }
         let no_project_requested = request.project_path.is_none();
@@ -236,11 +234,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 })?;
         }
         for (name, bound_ref) in &request.ref_bindings {
-            let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref)
-                .map_err(|error| {
-                    RouteDispatchError::BadRequest(format!(
-                        "invalid ref_bindings.{name}: {error}"
-                    ))
+            let canonical =
+                ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref).map_err(|error| {
+                    RouteDispatchError::BadRequest(format!("invalid ref_bindings.{name}: {error}"))
                 })?;
             let required_cap = ryeos_runtime::authorizer::canonical_cap(
                 &canonical.kind,
@@ -849,18 +845,17 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 request.ref_bindings.clone(),
             )
             .map_err(|error| {
-                        RouteDispatchError::Internal(format!(
+                RouteDispatchError::Internal(format!(
                     "validated accepted-launch policy rejected at dispatch boundary: {error:#}"
                 ))
-                    })?;
+            })?;
             launch_options.usage_subject = usage_subject.clone();
             launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
             launch_options.call = request.call().cloned();
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             let response_thread_id = thread_id.clone();
 
-            let (mut handle, ready) =
-                crate::routes::launch::spawn_dispatch_launch_with_handoff(
+            let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_item_ref,
                 request.parameters.clone(),
@@ -1046,12 +1041,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     ));
                 }
             };
-            let applicability =
-                match ryeos_executor::dispatch::launch_contract_applicability(item_ref, &exec_ctx)
-                {
-                    Ok(applicability) => applicability,
-                    Err(error) => return Ok(dispatch_error_response(error)),
-                };
+            let applicability = match ryeos_executor::dispatch::launch_contract_applicability(
+                item_ref, &exec_ctx,
+            ) {
+                Ok(applicability) => applicability,
+                Err(error) => return Ok(dispatch_error_response(error)),
+            };
             if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
                 &applicability,
                 &primary,
@@ -1126,16 +1121,12 @@ fn dispatch_error_response(
 fn launch_handoff_failure_response(
     failure: ryeos_executor::execution::launch::LaunchHandoffFailure,
 ) -> axum::response::Response {
-    let status = StatusCode::from_u16(failure.status)
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(failure.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, axum::Json(failure.body)).into_response()
 }
 
 fn launch_task_result_response(
-    result: Result<
-        Result<(), crate::routes::launch::LaunchSpawnError>,
-        tokio::task::JoinError,
-    >,
+    result: Result<Result<(), crate::routes::launch::LaunchSpawnError>, tokio::task::JoinError>,
 ) -> axum::response::Response {
     match result {
         Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
