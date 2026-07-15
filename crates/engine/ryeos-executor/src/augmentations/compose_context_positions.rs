@@ -34,7 +34,7 @@ const AUGMENTATION_RUNTIME_TIMEOUT_SECS: u64 = 60;
 pub async fn run(
     decl: &LaunchAugmentationDecl,
     resolution: &mut ResolutionOutput,
-    parent_thread_id: &str,
+    _prospective_thread_id: &str,
     project_path: &Path,
     engine: &ryeos_engine::engine::Engine,
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
@@ -145,18 +145,12 @@ pub async fn run(
             .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?
     );
 
-    // 6. Mint child thread record under parent. The parent may itself be a
-    // continuation/child, so carry its durable chain root rather than treating
-    // the immediate parent id as the chain root.
-    let parent_thread = state
-        .threads
-        .get_thread(parent_thread_id)
-        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?
-        .ok_or_else(|| {
-            LaunchAugmentationError::Threads(format!(
-                "augmentation parent thread not found: {parent_thread_id}"
-            ))
-        })?;
+    // 6. Mint the augmentation worker as an independent internal root. Launch
+    // augmentations are part of the authoritative pre-birth pass, so the
+    // prospective parent thread deliberately does not exist yet. The worker's
+    // lifecycle guard owns cancellation until it settles; the final parent
+    // audit records only the validated augmented resolution, never this
+    // transient execution as a continuation/child relation.
     let child_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     // Derive the child thread's kind from the target kind's schema-declared
     // thread_profile. This keeps thread kinds in sync with kind schemas
@@ -176,14 +170,14 @@ pub async fn run(
         .threads
         .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
             thread_id: child_thread_id.clone(),
-            chain_root_id: parent_thread.chain_root_id,
+            chain_root_id: child_thread_id.clone(),
             kind: child_thread_kind.to_string(),
             item_ref: runtime_item_ref_string.clone(),
             executor_ref: executor_ref.clone(),
             launch_mode: "inline".to_string(),
             current_site_id: plan_ctx.current_site_id.clone(),
             origin_site_id: plan_ctx.origin_site_id.clone(),
-            upstream_thread_id: Some(parent_thread_id.to_string()),
+            upstream_thread_id: None,
             requested_by: Some(principal_fingerprint.to_string()),
             project_root: match &plan_ctx.project_context {
                 ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
@@ -197,64 +191,6 @@ pub async fn run(
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);
-
-    // Projection ancestry alone is not sufficient for live cancellation: the
-    // runtime DB's operational edge drives exact descendant stop traversal.
-    // Link before minting authority or spawning, and atomically inherit a stop
-    // that raced child creation.
-    let inherited_stop = match state.state_store.record_child_link(
-        parent_thread_id,
-        &child_thread_id,
-        "dispatch",
-    ) {
-        Ok(inherited_stop) => inherited_stop,
-        Err(link_error) => {
-            let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
-                state,
-                &child_thread_id,
-                json!({
-                    "code": "child_link_failed",
-                    "reason": link_error.to_string(),
-                }),
-            );
-            match cleanup {
-                Ok(outcome) => {
-                    lifecycle_owner.disarm();
-                    if !outcome.is_settled() {
-                        tracing::warn!(
-                            child_thread_id,
-                            parent_thread_id,
-                            "augmentation child advanced while failed lineage cleanup was attempted"
-                        );
-                    }
-                }
-                Err(cleanup_error) => {
-                    return Err(LaunchAugmentationError::Threads(format!(
-                        "record augmentation child lineage for {parent_thread_id} failed: {link_error}; conditional cleanup also failed: {cleanup_error:#}"
-                    )));
-                }
-            }
-            return Err(LaunchAugmentationError::Threads(format!(
-                "record augmentation child lineage for {parent_thread_id}: {link_error}"
-            )));
-        }
-    };
-    if inherited_stop.is_some() {
-        let settled = crate::execution::process_attachment::finalize_requested_stop_if_present(
-            state,
-            &child_thread_id,
-        )
-        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
-        if !settled {
-            return Err(LaunchAugmentationError::Threads(format!(
-                "parent {parent_thread_id} propagated a stop to augmentation child {child_thread_id}, but the child had no durable stop"
-            )));
-        }
-        lifecycle_owner.disarm();
-        return Err(LaunchAugmentationError::Threads(format!(
-            "parent {parent_thread_id} was stop-requested before augmentation child launch"
-        )));
-    }
 
     // 7. Generate callback token.
     let ttl = ryeos_app::callback_token::launch_token_ttl(Some(AUGMENTATION_RUNTIME_TIMEOUT_SECS));

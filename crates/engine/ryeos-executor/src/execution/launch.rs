@@ -211,7 +211,7 @@ pub enum BuildAndLaunchError {
     #[error("{reason}")]
     CapabilityRejected { reason: String },
     #[error("{0}")]
-    LaunchPreparation(DispatchError),
+    LaunchPreparation(#[source] DispatchError),
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -829,6 +829,7 @@ impl CheckpointResumeMode {
 /// distinct sources — caller-delegated `declared` grants and daemon-minted
 /// manifest `runtime_manifest` authority — because the follow-child policy treats
 /// them differently; every other policy reasons over their union.
+#[derive(Clone, Copy)]
 pub enum CapabilityPolicy<'a> {
     /// Fresh launch: run with exactly the live composed caps.
     Fresh,
@@ -1093,6 +1094,13 @@ struct PreparedManagedLaunchAuthority {
     resolution: ryeos_engine::resolution::ResolutionOutput,
     prepared_launch: super::launch_preparation::PreparedRuntimeLaunch,
     effective_vault: HashMap<String, String>,
+    effective_caps: Vec<String>,
+    selected_runtime: ryeos_engine::runtime_registry::VerifiedRuntime,
+    executor_ref: String,
+    checkpoint_dir: Option<PathBuf>,
+    is_resume: bool,
+    launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    pending_project_snapshot: Option<super::PendingProjectSnapshot>,
 }
 
 fn launch_audit_records(
@@ -1126,8 +1134,11 @@ fn launch_audit_records(
     .collect())
 }
 
-fn prepare_managed_launch_authority(
+async fn prepare_managed_launch_authority(
     params: &BuildAndLaunchParams<'_>,
+    thread_id: &str,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    capture_project_snapshot: bool,
 ) -> Result<PreparedManagedLaunchAuthority, BuildAndLaunchError> {
     let engine = params.provenance.request_engine();
     let engine_roots = engine.resolution_roots(Some(params.project_path.to_path_buf()));
@@ -1135,11 +1146,10 @@ fn prepare_managed_launch_authority(
         .effective_parser_dispatcher(Some(params.project_path))
         .map_err(|error| anyhow::anyhow!("effective parser dispatcher: {error}"))?;
 
-    // Resolve the primary exactly once for this authoritative pass. The same
-    // output is consumed by launch preparation and later moved into the
-    // LaunchEnvelope; the post-persistence augmentation phase may add its
-    // existing derived data without re-resolving the primary.
-    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+    // Resolve the primary exactly once for this authoritative pass. Launch
+    // augmentations complete that resolution before the same exact output is
+    // prepared, audited, persisted, and moved into the LaunchEnvelope.
+    let mut resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &params.resolved.resolved_item.canonical_ref,
         &engine.kinds,
         &effective_parsers,
@@ -1154,6 +1164,38 @@ fn prepare_managed_launch_authority(
         &params.resolved.resolved_item.kind,
     )?;
 
+    // Augmentation is part of the authoritative resolution, not a mutation of
+    // already-audited launch state. Its internal worker is an independent,
+    // lifecycle-guarded root, so the prospective managed thread need not exist.
+    let launching_kind_schema = engine
+        .kinds
+        .get(&params.resolved.resolved_item.kind)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "build_and_launch: launching kind `{}` is not registered",
+                params.resolved.resolved_item.kind
+            )
+        })?;
+    if let Some(exec) = launching_kind_schema.execution() {
+        if !exec.launch_augmentations.is_empty() {
+            crate::augmentations::run_augmentations(
+                exec,
+                &mut resolution,
+                thread_id,
+                params.project_path,
+                engine,
+                params.provenance,
+                &params.resolved.plan_context,
+                params.acting_principal,
+                params.state,
+            )
+            .await
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "launch augmentation failed: {error}"
+            )))?;
+        }
+    }
+
     let selected_runtime = engine
         .runtimes
         .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
@@ -1165,11 +1207,12 @@ fn prepare_managed_launch_authority(
                 binding: None,
                 details: BTreeMap::new(),
             })
-        })?;
+        })?
+        .clone();
     let prepared_launch = super::launch_preparation::prepare_runtime_launch(
         super::launch_preparation::PrepareRuntimeLaunchRequest {
             engine,
-            runtime: selected_runtime,
+            runtime: &selected_runtime,
             primary: &resolution,
             ref_bindings: &params.resolved.ref_bindings,
             roots: &engine_roots,
@@ -1178,9 +1221,6 @@ fn prepare_managed_launch_authority(
         },
     )
     .map_err(BuildAndLaunchError::LaunchPreparation)?;
-
-    // Secret values are part of the frozen per-attempt authority. Resolve them
-    // after validating preparer output and before any fresh row is persisted.
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(params.project_path));
     let mut secret_requirements =
         build_secret_requirements(params.metadata_required_secrets);
@@ -1199,21 +1239,169 @@ fn prepare_managed_launch_authority(
         &dotenv_dirs,
     )
     .map_err(|error| match error {
-        VaultReadError::MissingSecrets { names, .. } => {
-            BuildAndLaunchError::MissingSecrets {
-                item_ref: params.resolved.item_ref.clone(),
-                secrets: missing_secrets_from_requirements(&names, &secret_requirements),
-            }
-        }
+        VaultReadError::MissingSecrets { names, .. } => BuildAndLaunchError::MissingSecrets {
+            item_ref: params.resolved.item_ref.clone(),
+            secrets: missing_secrets_from_requirements(&names, &secret_requirements),
+        },
         VaultReadError::Internal(error) => {
             BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
         }
     })?;
-
+    let composed_effective_caps = derive_effective_caps(&resolution.composed);
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
+        .map_err(|error| BuildAndLaunchError::CapabilityRejected {
+            reason: error.to_string(),
+        })?;
+    let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
+        resolution.composed.composed.get("requires"),
+        &params.resolved.resolved_item,
+        resolution.effective_trust_class,
+        &engine.bundle_roots,
+        &engine.node_trust_store,
+    )
+    .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
+    let child_execute_cap = ryeos_runtime::authorizer::canonical_cap(
+        &params.resolved.resolved_item.canonical_ref.kind,
+        &params.resolved.resolved_item.canonical_ref.bare_id,
+        "execute",
+    );
+    let effective_caps = apply_capability_policy(
+        composed_effective_caps,
+        runtime_capability_caps,
+        params.capability_policy,
+        &params.resolved.item_ref,
+        &child_execute_cap,
+    )?;
+    let runtime_binary =
+        crate::dispatch::strip_binary_ref_prefix(&selected_runtime.yaml.binary_ref)
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
+    let executor_ref = format!("native:{runtime_binary}");
+    let native_resume = selected_runtime.yaml.native_resume.clone();
+    let checkpoint_dir = if native_resume.is_some() {
+        let dir = ryeos_app::launch_metadata::daemon_checkpoint_dir(
+            &params.state.config.app_root,
+            thread_id,
+        );
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "failed to allocate checkpoint dir for replay-aware runtime `{}`: {error}",
+                params.resolved.item_ref
+            ))
+        })?;
+        Some(dir)
+    } else {
+        None
+    };
+    let is_resume = params.checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
+    if params.checkpoint_resume_mode.copies_predecessor_checkpoint() && native_resume.is_some() {
+        let previous = params.previous_thread_id.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no predecessor thread",
+                params.resolved.item_ref
+            ))
+        })?;
+        let successor_dir = checkpoint_dir.as_deref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no checkpoint dir",
+                params.resolved.item_ref
+            ))
+        })?;
+        let previous_dir = ryeos_app::launch_metadata::daemon_checkpoint_dir(
+            &params.state.config.app_root,
+            previous,
+        );
+        if !ryeos_runtime::CheckpointWriter::copy_latest(&previous_dir, successor_dir)
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "copy-forward checkpoint: {error}"
+            )))?
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}`: predecessor `{previous}` has no checkpoint to resume from",
+                params.resolved.item_ref
+            )));
+        }
+    }
+    let supports_continuation = params
+        .state
+        .threads
+        .kind_profiles()
+        .get(&params.resolved.kind)
+        .is_some_and(|profile| profile.supports_continuation);
+    let force_resume_context = metadata_template
+        .and_then(|metadata| metadata.resume_context.as_ref())
+        .is_some();
+    let should_capture_resume_context =
+        supports_continuation || native_resume.is_some() || force_resume_context;
+    let mut pending_project_snapshot = None;
+    let launch_metadata = if should_capture_resume_context {
+        let original_pushed_head_ref =
+            ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(params.provenance);
+        let has_local_project_context = matches!(
+            &params.resolved.plan_context.project_context,
+            ryeos_engine::contracts::ProjectContext::LocalPath { .. }
+        );
+        let must_pin_local_snapshot = original_pushed_head_ref.is_none()
+            && has_local_project_context
+            && (native_resume.is_some() || params.provenance.workspace_lifeline().is_some())
+            && capture_project_snapshot;
+        if must_pin_local_snapshot {
+            pending_project_snapshot = Some(super::capture_live_project_snapshot(
+                params.state,
+                params.project_path,
+                "managed_runtime_resume_pin",
+            )
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "failed to pin project snapshot for durable runtime `{}`: {error:#}",
+                params.resolved.item_ref
+            )))?);
+        }
+        let mut metadata = metadata_template.cloned().unwrap_or_default();
+        metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
+            kind: params.resolved.kind.clone(),
+            item_ref: params.resolved.item_ref.clone(),
+            ref_bindings: params.resolved.ref_bindings.clone(),
+            launch_mode: params.resolved.launch_mode.clone(),
+            parameters: params.parameters.clone(),
+            project_context: params.resolved.plan_context.project_context.clone(),
+            original_snapshot_hash: pending_project_snapshot
+                .as_ref()
+                .map(|publication| publication.hash.clone())
+                .or_else(|| {
+                    metadata_template
+                        .and_then(|template| template.resume_context.as_ref())
+                        .and_then(|resume| resume.original_snapshot_hash.clone())
+                }),
+            original_pushed_head_ref,
+            state_root: params.provenance.state_root_override().map(Path::to_path_buf),
+            current_site_id: params.resolved.current_site_id.clone(),
+            origin_site_id: params.resolved.origin_site_id.clone(),
+            requested_by: params.resolved.plan_context.requested_by.clone(),
+            execution_hints: params.resolved.plan_context.execution_hints.clone(),
+            effective_caps: effective_caps.clone(),
+            executor_ref: Some(executor_ref.clone()),
+            runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
+        });
+        if let Some(native_resume) = native_resume {
+            metadata = metadata.with_native_resume(native_resume);
+        }
+        if let Some(checkpoint_dir) = checkpoint_dir.clone() {
+            metadata = metadata.with_checkpoint_dir(checkpoint_dir);
+        }
+        Some(metadata)
+    } else {
+        None
+    };
     Ok(PreparedManagedLaunchAuthority {
         resolution,
         prepared_launch,
         effective_vault,
+        effective_caps,
+        selected_runtime,
+        executor_ref,
+        checkpoint_dir,
+        is_resume,
+        launch_metadata: _,
+        pending_project_snapshot,
     })
 }
 
@@ -1289,7 +1477,7 @@ pub async fn build_and_launch(
         .pre_minted_thread_id
         .map(str::to_owned)
         .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
-    let authority = prepare_managed_launch_authority(&params)?;
+    let mut authority = prepare_managed_launch_authority(&params, &thread_id, None, true).await?;
 
     let initial_events = launch_audit_records(
         params.resolved,
@@ -1297,19 +1485,28 @@ pub async fn build_and_launch(
         &authority.prepared_launch,
     )?;
     let thread = match params.previous_thread_id {
-        Some(source) => params.state.threads.create_continuation_with_id(
+        Some(source) => params
+            .state
+            .threads
+            .create_continuation_with_id_and_launch_metadata(
             &thread_id,
             source,
             params.resolved,
             Some("chained_resume"),
             initial_events,
+            authority.launch_metadata.as_ref(),
         )?,
-        None => params.state.threads.create_root_thread_with_events(
-            &thread_id,
-            params.resolved,
-            initial_events,
-        )?,
+        None => params
+            .state
+            .threads
+            .create_root_thread_with_events_and_launch_metadata(
+                &thread_id,
+                params.resolved,
+                initial_events,
+                authority.launch_metadata.as_ref(),
+            )?,
     };
+    drop(authority.pending_project_snapshot.take());
     run_claimed_thread_row_with_authority(
         params,
         thread,
@@ -1336,18 +1533,37 @@ async fn run_claimed_thread_row(
     // Existing-row paths (native resume/reconcile and rows created by their
     // dedicated lifecycle) must recompute launch authority for every attempt.
     // No persisted runtime data or admission output is accepted here.
-    let authority = match prepare_managed_launch_authority(&params) {
+    let authority = match prepare_managed_launch_authority(
+        &params,
+        &thread.thread_id,
+        None,
+        false,
+    )
+    .await
+    {
         Ok(authority) => authority,
         Err(error) => {
-            crate::dispatch::finalize_method_thread_if_needed(
+            let terminal_error = match &error {
+                BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
+                    crate::structured_error::StructuredErrorPayload::from(dispatch_error)
+                        .to_value()
+                }
+                other => json!({
+                    "code": "launch_preparation_failed",
+                    "message": format!("{other:#}"),
+                    "retryable": other.retryable_launch_interruption(),
+                }),
+            };
+            if let Err(cleanup_error) = crate::dispatch::finalize_method_thread_if_needed(
                 params.state,
                 &thread.thread_id,
                 "failed",
-                Some(json!({
-                    "code": "launch_preparation_failed",
-                    "message": format!("{error:#}"),
-                })),
-            );
+                Some(terminal_error),
+            ) {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "authoritative launch preparation failed: {error}; terminal cleanup also failed: {cleanup_error:#}"
+                )));
+            }
             return Err(error);
         }
     };
@@ -1402,7 +1618,7 @@ async fn run_claimed_thread_row_inner(
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
         state,
-        runtime_ref,
+        runtime_ref: _,
         acting_principal,
         resolved,
         project_path,
@@ -1413,14 +1629,21 @@ async fn run_claimed_thread_row_inner(
         previous_thread_id,
         parent_execution_context,
         suppress_stimulus,
-        capability_policy,
-        checkpoint_resume_mode,
+        capability_policy: _,
+        checkpoint_resume_mode: _,
         launch_handoff,
     } = params;
     let PreparedManagedLaunchAuthority {
-        mut resolution,
+        resolution,
         prepared_launch,
         effective_vault,
+        effective_caps,
+        selected_runtime,
+        executor_ref,
+        checkpoint_dir,
+        is_resume,
+        launch_metadata,
+        pending_project_snapshot,
     } = authority;
     let engine = provenance.request_engine();
     // Runtime-state root: the deliberate `state_root` override when one was
@@ -1442,6 +1665,11 @@ async fn run_claimed_thread_row_inner(
     // inherits its source's root; a fresh launch is its own root). Used to set
     // the callback cap's chain root.
     let chain_root_id = thread.chain_root_id.clone();
+    // Recovery identity is a birth invariant. Fresh roots and continuations
+    // seed it atomically before becoming visible; existing-row attempts may
+    // recompute launch authority and append a new audit, but never rewrite the
+    // persisted identity that selected this row.
+    drop(pending_project_snapshot);
 
     // Record operational lineage the instant we commit to launching a child, so a
     // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
@@ -1616,65 +1844,6 @@ async fn run_claimed_thread_row_inner(
         "native launch execution policy resolved"
     );
 
-    // ── Launch augmentations ──────────────────────────────────────
-    // Walk any launch_augmentations declared on the kind's schema.
-    // Augmentations run between resolution and parent spawn, mutating
-    // resolution.composed.derived in place. On failure, abort the
-    // parent launch with a structured error.
-    {
-        let launching_kind_schema =
-            engine
-                .kinds
-                .get(&resolved.resolved_item.kind)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "build_and_launch: launching kind `{}` is not registered",
-                        resolved.resolved_item.kind
-                    )
-                })?;
-        if let Some(exec) = launching_kind_schema.execution() {
-            if !exec.launch_augmentations.is_empty() {
-                if let Err(e) = crate::augmentations::run_augmentations(
-                    exec,
-                    &mut resolution,
-                    &thread.thread_id,
-                    project_path,
-                    engine,
-                    provenance,
-                    &resolved.plan_context,
-                    acting_principal,
-                    state,
-                )
-                .await
-                {
-                    // The thread was created (status `created`) above. An
-                    // augmentation failure (e.g. an unresolved context ref)
-                    // must finalize it `failed` rather than orphan it at
-                    // `created` with no `thread_failed` event — otherwise the
-                    // async launch path leaves the thread stuck and silent.
-                    // Mirrors the pre-runtime spawn-failure finalize below;
-                    // best-effort so a finalize error never masks the cause.
-                    let reason = format!("launch augmentation failed: {e}");
-                    // Put the reason in `error` (not `result`) + a stable
-                    // outcome_code so the `thread_failed` event payload carries
-                    // it (state_store surfaces error_json), and the timeline can
-                    // show *why* it failed, not just that it did.
-                    let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
-                        thread_id: thread_id.clone(),
-                        status: "failed".to_string(),
-                        outcome_code: Some("launch_augmentation_failed".to_string()),
-                        result: None,
-                        error: Some(json!({ "message": reason })),
-                        metadata: None,
-                        artifacts: Vec::new(),
-                        final_cost: None,
-                        summary_json: None,
-                    });
-                    return Err(anyhow::anyhow!(reason).into());
-                }
-            }
-        }
-    }
 
     // Active trust enforcement: hard-fail before spawn if the daemon
     // resolved an `Unsigned` effective item for ANY kind. The trust posture is
@@ -1685,236 +1854,6 @@ async fn run_claimed_thread_row_inner(
     let effective_trust_class = resolution.effective_trust_class;
     let kind = resolved.resolved_item.kind.as_str();
     enforce_effective_trust(effective_trust_class, &resolved.item_ref, kind)?;
-
-    // Composed effective caps are the daemon-side single source of
-    // truth, exposed via `policy_facts` on the composed view. Kinds
-    // without a permission model surface no `effective_caps` fact →
-    // empty caps (deny-all). Runtimes consume `resolution.composed`
-    // directly and never re-derive.
-    // Composed permissions are caller-declared input; the runtime callback caps
-    // minted below are daemon-derived from the signed manifest. A composed grant
-    // must not overlap the manifest runtime-authority namespace (bundle events /
-    // vault): that authority is minted only from a signed manifest, never
-    // self-granted via `permissions:`. Reject while the two sources are still
-    // distinguishable, before they are unioned.
-    let composed_effective_caps = derive_effective_caps(&resolution.composed);
-    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
-        .map_err(|err| BuildAndLaunchError::CapabilityRejected {
-            reason: err.to_string(),
-        })?;
-
-    // Manifest-backed runtime callback caps (bundle-events / runtime-vault) are
-    // minted from the *composed* `requires` block: for directives the
-    // extends-chain composer has already narrowed a child against its parent, so
-    // a child can never request more than the parent template. The signed
-    // node-trusted installed bundle manifest remains the final upper bound
-    // (checked inside the minter).
-    let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
-        resolution.composed.composed.get("requires"),
-        &resolved.resolved_item,
-        resolution.effective_trust_class,
-        &engine.bundle_roots,
-        &engine.node_trust_store,
-    )
-    .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
-
-    // Spell the child's execute cap exactly as the authorizer would
-    // (`ryeos.execute.<kind>.<bare_id>`), so the follow-child admission gate
-    // matches live dispatch.
-    let child_execute_cap = ryeos_runtime::authorizer::canonical_cap(
-        &resolved.resolved_item.canonical_ref.kind,
-        &resolved.resolved_item.canonical_ref.bare_id,
-        "execute",
-    );
-
-    // Reconcile the freshly-resolved caps against any captured/bounding authority
-    // per the launch's policy: fresh unions them as-is; a continuation/native-
-    // resume pins them to EXACTLY the predecessor's captured set (no silent
-    // drift); a follow child bounds caller-delegated grants against the parent
-    // while preserving the child's own manifest runtime authority. The two cap
-    // sources stay distinct here because the follow-child policy treats them
-    // differently.
-    let effective_caps = apply_capability_policy(
-        composed_effective_caps,
-        runtime_capability_caps,
-        capability_policy,
-        &resolved.item_ref,
-        &child_execute_cap,
-    )?;
-
-    // The serving runtime (captured ref, else the kind's default). A runtime that
-    // declares `native_resume` is replay-aware: allocate its per-thread checkpoint
-    // dir so the spawn can inject `RYEOS_CHECKPOINT_DIR` and reconcile can reason
-    // about restart-safe state.
-    // Resolve via the REQUEST engine (a malformed/unregistered captured
-    // runtime_ref is an error, never silently the kind default — that could
-    // switch binary / envelope / native_resume policy).
-    let selected_runtime = engine
-        .runtimes
-        // ITEM kind (`graph`), not the thread-profile kind (`graph_run`):
-        // runtimes are registered by the kind they serve and resolve_for_launch
-        // verifies serves == kind.
-        .resolve_for_launch(runtime_ref, &resolved.resolved_item.kind)
-        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?;
-    let runtime_binary =
-        crate::dispatch::strip_binary_ref_prefix(&selected_runtime.yaml.binary_ref)
-            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
-    let executor_ref = format!("native:{runtime_binary}");
-    let native_resume = selected_runtime.yaml.native_resume.clone();
-    // Replay-aware runtimes get a per-thread checkpoint dir. If allocation fails,
-    // FAIL the launch rather than spawn a replay-aware process with no checkpoint
-    // env (the finalize-on-drop guard records a failed thread).
-    let checkpoint_dir: Option<std::path::PathBuf> = if native_resume.is_some() {
-        let dir =
-            ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, &thread_id);
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "failed to allocate checkpoint dir for replay-aware runtime `{}`: {e}",
-                resolved.item_ref
-            ))
-        })?;
-        Some(dir)
-    } else {
-        None
-    };
-
-    // A machine continuation of a replay-aware kind resumes from the
-    // predecessor's checkpoint: copy it into this successor's dir and flag the
-    // spawn so `RYEOS_RESUME=1` is injected and the runtime resumes mid-run.
-    // A machine continuation with no predecessor checkpoint cannot resume — fail
-    // rather than cold-start (which would re-run the graph from the beginning).
-    // Both a machine-continuation successor and a same-thread crash recovery
-    // resume from a checkpoint (RYEOS_RESUME=1 — `injects_resume_env`). They
-    // differ on WHICH checkpoint: a machine successor copies the PREDECESSOR's
-    // forward into its own dir (`copies_predecessor_checkpoint`); a same-thread
-    // resume reads its OWN dir (already populated) — so copy-forward is gated on
-    // the mode, not on `is_resume`.
-    let is_resume = checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
-    if checkpoint_resume_mode.copies_predecessor_checkpoint() && native_resume.is_some() {
-        let prev = previous_thread_id.ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "machine continuation of `{}` has no predecessor thread",
-                resolved.item_ref
-            ))
-        })?;
-        let succ_dir = checkpoint_dir.as_deref().ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "machine continuation of `{}` has no checkpoint dir",
-                resolved.item_ref
-            ))
-        })?;
-        let prev_dir =
-            ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, prev);
-        let copied =
-            ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir).map_err(|e| {
-                BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
-            })?;
-        if !copied {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "machine continuation of `{}`: predecessor `{prev}` has no checkpoint to resume from",
-                resolved.item_ref
-            )));
-        }
-    }
-
-    // Seed launch metadata for continuation-capable kinds (the launch identity a
-    // successor relaunches from — REAL composed `effective_caps`, unlike
-    // `spawn_item`) AND for replay-aware runtimes (the `native_resume` +
-    // `checkpoint_dir` reconcile reads on restart). These are independent: a graph
-    // is replay-aware before its continuation flag is set. This identity is required
-    // launch state: failure is fatal before audit, handoff, or spawn.
-    let supports_continuation = state
-        .threads
-        .kind_profiles()
-        .get(&resolved.kind)
-        .is_some_and(|p| p.supports_continuation);
-    // Capture the launch identity whenever a successor or a native resume could
-    // later need to reconstruct how to relaunch: continuation-capable kinds fold
-    // a chain into a successor, and native-resume kinds recover from a checkpoint
-    // (reconcile returns `MissingResumeContext` without it) and hand a copy of
-    // this identity to a follow-resume successor. `ResumeContext` is a
-    // reconstruct-launch-identity record, not a continuation-only one.
-    let should_capture_resume_context = supports_continuation || native_resume.is_some();
-    if should_capture_resume_context {
-        let original_pushed_head_ref =
-            ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(provenance);
-        // Native resume must never drift to a changed live tree. An ephemeral
-        // daemon workspace also cannot be named durably after its guard drops,
-        // even for a continuation-only runtime. Pin either case before spawn so
-        // reconstruction materializes a fresh, shared-lifeline checkout.
-        let has_local_project_context = matches!(
-            &resolved.plan_context.project_context,
-            ryeos_engine::contracts::ProjectContext::LocalPath { .. }
-        );
-        let has_ephemeral_workspace = provenance.workspace_lifeline().is_some();
-        let must_pin_local_snapshot = original_pushed_head_ref.is_none()
-            && has_local_project_context
-            && (native_resume.is_some() || has_ephemeral_workspace);
-        let snapshot_publication = if must_pin_local_snapshot {
-            Some(
-                super::capture_live_project_snapshot(
-                    state,
-                    project_path,
-                    "managed_runtime_resume_pin",
-                )
-                .map_err(|error| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "failed to pin project snapshot for durable runtime `{}`: {error:#}",
-                        resolved.item_ref
-                    ))
-                })?,
-            )
-        } else {
-            None
-        };
-        let original_snapshot_hash = snapshot_publication
-            .as_ref()
-            .map(|publication| publication.hash.clone());
-        let mut metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default();
-        metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
-            kind: resolved.kind.clone(),
-            item_ref: resolved.item_ref.clone(),
-            ref_bindings: resolved.ref_bindings.clone(),
-            launch_mode: resolved.launch_mode.clone(),
-            parameters: parameters.clone(),
-            project_context: resolved.plan_context.project_context.clone(),
-            original_snapshot_hash,
-            // Pushed-head spawns record their snapshot identity so a resume
-            // can rebuild the pinned overlay engine + checkout; `None` for
-            // live-fs spawns and borrowed children.
-            original_pushed_head_ref,
-            state_root: provenance
-                .state_root_override()
-                .map(std::path::Path::to_path_buf),
-            current_site_id: resolved.current_site_id.clone(),
-            origin_site_id: resolved.origin_site_id.clone(),
-            requested_by: resolved.plan_context.requested_by.clone(),
-            execution_hints: resolved.plan_context.execution_hints.clone(),
-            effective_caps: effective_caps.clone(),
-            // Capture the actual launch identity so a continuation successor of
-            // a delegate kind (directive / graph) can reconstruct how to launch
-            // without a per-item `executor_id`.
-            executor_ref: Some(executor_ref.clone()),
-            runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
-        });
-        if let Some(nr) = native_resume.clone() {
-            metadata = metadata.with_native_resume(nr);
-        }
-        if let Some(ckpt) = checkpoint_dir.clone() {
-            metadata = metadata.with_checkpoint_dir(ckpt);
-        }
-        state
-            .state_store
-            .seed_launch_metadata(&thread_id, &metadata)
-            .map_err(|error| {
-                BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "required launch metadata seed failed for `{thread_id}`: {error}"
-                ))
-            })?;
-        // The snapshot is now discoverable through launch metadata. Releasing
-        // the permit lets GC quiesce and include it as an active transient root.
-        drop(snapshot_publication);
-    }
 
     // The launching kind schema (e.g. `directive`, `graph`) drives
     // inventory build below; it does NOT carry the subprocess
@@ -1934,7 +1873,7 @@ async fn run_claimed_thread_row_inner(
     // Its canonical kind selects the schema and signed subprocess protocol;
     // managed runtimes must expose the exact callback/runtime wire contract.
     let verified_protocol =
-        crate::dispatch::require_callback_runtime_protocol(engine, selected_runtime, "managed")
+        crate::dispatch::require_callback_runtime_protocol(engine, &selected_runtime, "managed")
             .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
 
     tracing::info!(
@@ -2019,9 +1958,9 @@ async fn run_claimed_thread_row_inner(
         ryeos_engine::resolution::TrustClass::TrustedBundle, // executor binaries ship in system bundles
     )?;
 
-    // Fresh roots committed this audit with `thread_created` in their birth
-    // transaction. Existing-row and continuation paths still append the trio
-    // atomically before handoff.
+    // Fresh roots and continuations committed this audit with `thread_created`
+    // in their birth transaction. Existing-row retry/recovery paths append the
+    // recomputed trio atomically before handoff.
     if !launch_audit_already_persisted {
         let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?
             .into_iter()
@@ -2469,6 +2408,7 @@ struct PreparedSuccessorLaunch {
     source_thread_id: Option<String>,
     resume_context: ryeos_app::launch_metadata::ResumeContext,
     execution: crate::execution::runner::ExecutionParams,
+    launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     authority: PreparedManagedLaunchAuthority,
 }
 
@@ -2486,10 +2426,273 @@ impl PreparedOperatorSuccessorLaunch {
             &self.prepared.authority.prepared_launch,
         )
     }
+
+    pub fn launch_metadata(&self) -> &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+        &self.prepared.launch_metadata
+    }
 }
 
 pub struct PreparedMachineSuccessorLaunch {
     prepared: PreparedSuccessorLaunch,
+}
+
+/// Consumable authoritative launch pass for a fresh lineage-linked child.
+///
+/// The value deliberately owns the borrowed-child provenance, resolved launch
+/// authority, and secret values. It can cross only the in-process spawn-task
+/// boundary; only its explicit `launch_metadata` projection is persisted.
+pub struct PreparedFollowChildLaunch {
+    resume_context: ryeos_app::launch_metadata::ResumeContext,
+    parent_context: crate::dispatch::ParentExecutionContext,
+    execution: crate::execution::runner::ExecutionParams,
+    launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    authority: PreparedManagedLaunchAuthority,
+    launch_audit_already_persisted: bool,
+}
+
+impl PreparedFollowChildLaunch {
+    pub fn resolved_request(&self) -> &ResolvedExecutionRequest {
+        &self.execution.resolved
+    }
+
+    pub fn initial_audit_events(
+        &self,
+    ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
+        launch_audit_records(
+            &self.execution.resolved,
+            &self.authority.resolution,
+            &self.authority.prepared_launch,
+        )
+    }
+
+    pub fn launch_metadata(&self) -> &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+        &self.launch_metadata
+    }
+
+    /// Mark that `initial_audit_events` committed atomically with this fresh
+    /// root. Re-driven pre-existing rows leave this false so the recomputed
+    /// attempt audit is appended before their spawn handoff.
+    pub fn with_persisted_birth_audit(mut self) -> Self {
+        self.launch_audit_already_persisted = true;
+        drop(self.authority.pending_project_snapshot.take());
+        self
+    }
+}
+
+/// Perform the complete generic authority pass for a fresh follow/detached
+/// child before its row becomes observable.
+pub async fn prepare_follow_child_launch(
+    state: &AppState,
+    thread_id: &str,
+    launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    parent_context: crate::dispatch::ParentExecutionContext,
+) -> Result<PreparedFollowChildLaunch, BuildAndLaunchError> {
+    let resume = launch_metadata.resume_context.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("follow-child launch metadata has no ResumeContext")
+    })?;
+    // Resolve directly through the borrowed provenance. Going through resume
+    // reconstruction first could consult the daemon's current engine or create
+    // a second snapshot checkout, neither of which is the admitted child source.
+    let engine = provenance.request_engine();
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&resume.item_ref)
+        .map_err(|error| anyhow::anyhow!("child launch: invalid item ref {}: {error}", resume.item_ref))?;
+    let plan_context = ryeos_engine::contracts::PlanContext {
+        requested_by: resume.requested_by.clone(),
+        project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: provenance.effective_path().to_path_buf(),
+        },
+        current_site_id: resume.current_site_id.clone(),
+        origin_site_id: resume.origin_site_id.clone(),
+        execution_hints: resume.execution_hints.clone(),
+        validate_only: false,
+    };
+    let admission_primary = engine
+        .resolve(&plan_context, &canonical)
+        .map_err(|error| {
+            BuildAndLaunchError::LaunchPreparation(map_follow_child_resolution_error(
+                "admission",
+                &resume.item_ref,
+                error,
+            ))
+        })?;
+    let executor_ref = resume.executor_ref.clone().ok_or_else(|| {
+        anyhow::anyhow!("child launch: {} has no captured executor identity", resume.item_ref)
+    })?;
+    let acting_principal = resume
+        .requested_by_name()
+        .unwrap_or_else(|| "fp:follow-child".to_string());
+    let caller_scopes = match &resume.requested_by {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+            principal.scopes.clone()
+        }
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+            principal.delegated_scopes.clone()
+        }
+    };
+    let admission_context = crate::executor::ExecutionContext {
+        principal_fingerprint: acting_principal.clone(),
+        caller_scopes,
+        engine: engine.clone(),
+        plan_ctx: plan_context.clone(),
+        requested_call: None,
+    };
+    let applicability = crate::dispatch::launch_contract_applicability(
+        &resume.item_ref,
+        &admission_context,
+    )
+    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+    crate::dispatch::admit_launch_contract(
+        &applicability,
+        &admission_primary,
+        &resume.ref_bindings,
+        provenance.effective_path(),
+        &admission_context,
+        state,
+    )
+    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+
+    // The authoritative pass begins from a fresh primary resolution against the
+    // exact borrowed-provenance engine. No admission output crosses this seam.
+    let resolved_item = engine
+        .resolve(&plan_context, &canonical)
+        .map_err(|error| {
+            BuildAndLaunchError::LaunchPreparation(map_follow_child_resolution_error(
+                "authority",
+                &resume.item_ref,
+                error,
+            ))
+        })?;
+    let execution = crate::execution::runner::ExecutionParams {
+        resolved: ResolvedExecutionRequest {
+            kind: resume.kind.clone(),
+            item_ref: resume.item_ref.clone(),
+            executor_ref,
+            launch_mode: resume.launch_mode.clone(),
+            current_site_id: resume.current_site_id.clone(),
+            origin_site_id: resume.origin_site_id.clone(),
+            target_site_id: None,
+            requested_by: resume.requested_by_name(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            parameters: resume.parameters.clone(),
+            ref_bindings: resume.ref_bindings.clone(),
+            resolved_item,
+            plan_context,
+        },
+        acting_principal,
+        vault_bindings: HashMap::new(),
+        parameters: resume.parameters.clone(),
+        pre_minted_thread_id: None,
+        effective_caps: resume.effective_caps.clone(),
+        provenance,
+        runtime_ref: resume.runtime_ref.clone(),
+        parent_thread_id: None,
+    };
+
+    let project_path = execution.provenance.effective_path().to_path_buf();
+    let authority = prepare_managed_launch_authority(&BuildAndLaunchParams {
+        state,
+        runtime_ref: resume.runtime_ref.as_deref(),
+        acting_principal: &execution.acting_principal,
+        resolved: &execution.resolved,
+        project_path: &project_path,
+        provenance: &execution.provenance,
+        parameters: &execution.parameters,
+        metadata_required_secrets: &execution.resolved.resolved_item.metadata.required_secrets,
+        pre_minted_thread_id: None,
+        previous_thread_id: None,
+        parent_execution_context: Some(&parent_context),
+        suppress_stimulus: false,
+        capability_policy: CapabilityPolicy::FollowChildHybrid {
+            parent_effective_caps: resume.effective_caps.as_slice(),
+        },
+        checkpoint_resume_mode: CheckpointResumeMode::None,
+        launch_handoff: None,
+    }, thread_id, Some(launch_metadata), true).await?;
+    let launch_metadata = authority
+        .launch_metadata
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no launch metadata"))?;
+    let prepared_resume = launch_metadata
+        .resume_context
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no ResumeContext"))?;
+
+    Ok(PreparedFollowChildLaunch {
+        resume_context: prepared_resume,
+        parent_context,
+        execution,
+        launch_metadata,
+        authority,
+        launch_audit_already_persisted: false,
+    })
+}
+
+fn map_follow_child_resolution_error(
+    phase: &'static str,
+    item_ref: &str,
+    error: ryeos_engine::resolution::ResolutionError,
+) -> DispatchError {
+    use ryeos_engine::resolution::{ResolutionError, ResolutionFailureClass};
+
+    let detail = error.to_string();
+    match error {
+        ResolutionError::MissingItem { .. } => DispatchError::LaunchResourceNotFound {
+            code: "follow_child_item_not_found".to_owned(),
+            message: format!("follow-child {phase} item `{item_ref}` was not found"),
+            binding: None,
+        },
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::DependencyUnavailable,
+            ..
+        } => DispatchError::LaunchPreparationFailed {
+            code: "follow_child_resolution_failed".to_owned(),
+            message: format!(
+                "follow-child {phase} resolution dependency is unavailable for `{item_ref}`: {detail}"
+            ),
+            classification: "unavailable".to_owned(),
+            binding: None,
+            details: BTreeMap::new(),
+        },
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::InternalInvariant,
+            ..
+        } => DispatchError::LaunchPreparationFailed {
+            code: "follow_child_resolution_failed".to_owned(),
+            message: format!(
+                "follow-child {phase} resolution invariant failed for `{item_ref}`: {detail}"
+            ),
+            classification: "internal".to_owned(),
+            binding: None,
+            details: BTreeMap::new(),
+        },
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::InvalidDefinition,
+            ..
+        }
+        | ResolutionError::CycleDetected { .. }
+        | ResolutionError::MaxDepthExceeded { .. }
+        | ResolutionError::AliasMaxDepthExceeded { .. }
+        | ResolutionError::AliasCycle { .. }
+        | ResolutionError::UnknownAlias { .. }
+        | ResolutionError::IntegrityFailure { .. }
+        | ResolutionError::MetadataAnchoringFailed { .. }
+        | ResolutionError::KindNotExecutable { .. }
+        | ResolutionError::ComposedValueContractViolation { .. } => {
+            DispatchError::LaunchPreparationFailed {
+                code: "follow_child_resolution_failed".to_owned(),
+                message: format!(
+                    "follow-child {phase} item `{item_ref}` has an invalid definition: {detail}"
+                ),
+                classification: "configuration".to_owned(),
+                binding: None,
+                details: BTreeMap::new(),
+            }
+        }
+    }
 }
 
 impl PreparedMachineSuccessorLaunch {
@@ -2502,10 +2705,15 @@ impl PreparedMachineSuccessorLaunch {
             &self.prepared.authority.prepared_launch,
         )
     }
+
+    pub fn launch_metadata(&self) -> &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+        &self.prepared.launch_metadata
+    }
 }
 
-fn prepare_successor_launch(
+async fn prepare_successor_launch(
     state: &AppState,
+    successor_thread_id: &str,
     resume: &ryeos_app::launch_metadata::ResumeContext,
     mode: SuccessorMode,
     previous_thread_id: Option<&str>,
@@ -2545,37 +2753,59 @@ fn prepare_successor_launch(
         capability_policy,
         checkpoint_resume_mode,
         launch_handoff: None,
-    })?;
+    }, successor_thread_id, None, true).await?;
+    let launch_metadata = authority
+        .launch_metadata
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?;
+    let prepared_resume = launch_metadata
+        .resume_context
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("successor authority produced no ResumeContext"))?;
     Ok(PreparedSuccessorLaunch {
         mode,
         source_thread_id: previous_thread_id.map(str::to_owned),
-        resume_context: resume.clone(),
+        resume_context: prepared_resume,
         execution,
+        launch_metadata,
         authority,
     })
 }
 
-pub fn prepare_operator_successor_launch(
+pub async fn prepare_operator_successor_launch(
     state: &AppState,
+    successor_thread_id: &str,
     resume: &ryeos_app::launch_metadata::ResumeContext,
 ) -> Result<PreparedOperatorSuccessorLaunch, BuildAndLaunchError> {
     Ok(PreparedOperatorSuccessorLaunch {
-        prepared: prepare_successor_launch(state, resume, SuccessorMode::Operator, None)?,
+        prepared: prepare_successor_launch(
+            state,
+            successor_thread_id,
+            resume,
+            SuccessorMode::Operator,
+            None,
+        )
+        .await?,
     })
 }
 
-pub fn prepare_machine_successor_launch(
+pub async fn prepare_machine_successor_launch(
     state: &AppState,
+    successor_thread_id: &str,
     resume: &ryeos_app::launch_metadata::ResumeContext,
     source_thread_id: &str,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
     Ok(PreparedMachineSuccessorLaunch {
         prepared: prepare_successor_launch(
             state,
+            successor_thread_id,
             resume,
             SuccessorMode::Machine,
             Some(source_thread_id),
-        )?,
+        )
+        .await?,
     })
 }
 
@@ -2603,14 +2833,27 @@ pub async fn launch_prepared_operator_successor(
             "operator_successor_launch_failed",
             error.to_string(),
             500,
-            false,
+            error.retryable_launch_interruption(),
         ),
+        // Another task owns the exact successor. Do not claim launch success
+        // and do not manufacture an internal error: report truthful transient
+        // contention so the caller may retry after the owner crosses handoff.
+        Ok(SuccessorLaunchOutcome::Skipped("already_claimed"))
+            if launch_handoff.is_pending() =>
+        {
+            launch_handoff.publish_failure(
+                "operator_successor_launch_in_progress",
+                format!("operator successor {successor_id} launch is already in progress"),
+                409,
+                true,
+            );
+        }
         Ok(SuccessorLaunchOutcome::Skipped(reason)) if launch_handoff.is_pending() => {
             launch_handoff.publish_failure(
                 "operator_successor_not_handed_off",
                 format!("operator successor launch skipped: {reason}"),
-                500,
-                false,
+                409,
+                true,
             );
         }
         Ok(_) => {}
@@ -3131,6 +3374,8 @@ async fn launch_claimed_follow_child(
     thread: ryeos_app::state_store::ThreadDetail,
     provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
+    launch_handoff: Option<&LaunchHandoff>,
+    prepared_child: Option<PreparedFollowChildLaunch>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let thread_id = thread.thread_id.clone();
     // A follow child is a FRESH ROOT: no upstream braid, its own chain root.
@@ -3164,20 +3409,42 @@ async fn launch_claimed_follow_child(
     let identity = metadata.resume_context.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
     })?;
-    let parent_context = parent_context.or(persisted_parent_context);
+    let (params, parent_context, prepared_authority, launch_audit_already_persisted) =
+        match prepared_child {
+            Some(prepared) => {
+                if prepared.resume_context != identity {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "precomputed child authority does not match persisted launch identity"
+                    )));
+                }
+                let audit_persisted = prepared.launch_audit_already_persisted;
+                (
+                    prepared.execution,
+                    prepared.parent_context,
+                    Some(prepared.authority),
+                    audit_persisted,
+                )
+            }
+            None => {
+                let parent_context =
+                    parent_context.or(persisted_parent_context).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "follow child: {thread_id} has no persisted parent context"
+                        )
+                    })?;
+                let mut params = crate::execution::runner::execution_params_from_resume_context(
+                    state, &identity,
+                )?;
 
-    let mut params =
-        crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
-
-    // Hot-path follow launch: override the resume-context's root-live-fs
-    // provenance with the parent's borrowed-child provenance (pushed-head /
-    // effective workspace / request engine preserved), so the child resolves and
-    // runs against the parent's workspace, not the daemon live tree. The reconcile
-    // path passes `None` and falls back to the resume-context provenance —
-    // non-serializable provenance is not yet restored across a daemon restart.
-    if let Some(provenance) = provenance_override {
-        params.provenance = provenance;
-    }
+                // Recovery rebuilds from the durable identity. A live caller may
+                // still supply its borrowed-child provenance when no precomputed
+                // authority was available.
+                if let Some(provenance) = provenance_override {
+                    params.provenance = provenance;
+                }
+                (params, parent_context, None, false)
+            }
+        };
     // Working dir + runtime registry follow the FINAL provenance (post-
     // override), so the hot path runs in the parent's workspace with the
     // parent's request engine.
@@ -3188,8 +3455,7 @@ async fn launch_claimed_follow_child(
     // the overload is explicit and F5 seeds parent caps, never child-bounded ones.
     let parent_effective_caps = identity.effective_caps.as_slice();
 
-    run_claimed_thread_row(
-        BuildAndLaunchParams {
+    let launch_params = BuildAndLaunchParams {
             state,
             runtime_ref: identity.runtime_ref.as_deref(),
             acting_principal: &params.acting_principal,
@@ -3214,17 +3480,27 @@ async fn launch_claimed_follow_child(
             // Clamp the child to the parent's hard limits + launch at parent depth
             // + 1 on the hot path; reconcile reconstructs the persisted parent
             // execution context below rather than silently granting root limits.
-            parent_execution_context: parent_context.as_ref(),
-            launch_handoff: None,
-        },
-        thread,
-    )
-    .await
+            parent_execution_context: Some(&parent_context),
+            launch_handoff,
+        };
+    match prepared_authority {
+        Some(authority) => {
+            run_claimed_thread_row_with_authority(
+                launch_params,
+                thread,
+                authority,
+                launch_audit_already_persisted,
+            )
+            .await
+        }
+        None => run_claimed_thread_row(launch_params, thread).await,
+    }
 }
 
 /// Claim-guarded entry to launch a pre-created, pre-seeded follow CHILD row
-/// through the managed runtime path. Fire-and-forget from the daemon: the follow
-/// path `tokio::spawn`s this so the child runs detached while the parent suspends.
+/// through the managed runtime path. Reconcile uses this unacknowledged form;
+/// live child creation uses [`launch_prepared_follow_child`] and waits for its
+/// explicit spawn-task handoff while the runtime continues detached.
 /// Idempotent + crash-safe like `launch_existing_native_resume`: claims the lease
 /// (a dead launcher's claim is reclaimable), skips a terminal or live-process row,
 /// and finalizes on a pre-run defect.
@@ -3239,6 +3515,66 @@ pub async fn launch_follow_child(
     // follow child recovers through the general native-resume sweep as a root, the
     // documented reconcile limit shared with every native-resume child.
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    launch_follow_child_inner(
+        state,
+        child_id,
+        provenance_override,
+        parent_context,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Launch a just-created child with the exact authority prepared before birth.
+/// The handoff is published only after the runtime spawn task owns that
+/// authority and its secret values.
+pub async fn launch_prepared_follow_child(
+    state: AppState,
+    child_id: &str,
+    prepared: PreparedFollowChildLaunch,
+    launch_handoff: &LaunchHandoff,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let result = launch_follow_child_inner(
+        state,
+        child_id,
+        None,
+        None,
+        Some(launch_handoff),
+        Some(prepared),
+    )
+    .await;
+    match &result {
+        Err(BuildAndLaunchError::LaunchPreparation(error)) => {
+            launch_handoff.publish_dispatch_failure(error)
+        }
+        Err(error) => launch_handoff.publish_failure(
+            "child_launch_failed",
+            error.to_string(),
+            500,
+            false,
+        ),
+        Ok(SuccessorLaunchOutcome::Skipped(reason)) if launch_handoff.is_pending() => {
+            launch_handoff.publish_failure(
+                "child_launch_not_handed_off",
+                format!("child launch skipped: {reason}"),
+                409,
+                true,
+            );
+        }
+        Ok(_) => {}
+    }
+    result
+}
+
+async fn launch_follow_child_inner(
+    state: AppState,
+    child_id: &str,
+    provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
+    parent_context: Option<crate::dispatch::ParentExecutionContext>,
+    launch_handoff: Option<&LaunchHandoff>,
+    prepared_child: Option<PreparedFollowChildLaunch>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
     let claimed_by = format!("daemon:{}", std::process::id());
@@ -3321,8 +3657,15 @@ pub async fn launch_follow_child(
         return Ok(SuccessorLaunchOutcome::Skipped(reason));
     }
 
-    let result =
-        launch_claimed_follow_child(&state, thread, provenance_override, parent_context).await;
+    let result = launch_claimed_follow_child(
+        &state,
+        thread,
+        provenance_override,
+        parent_context,
+        launch_handoff,
+        prepared_child,
+    )
+    .await;
     let _ = state
         .state_store
         .release_thread_launch_claim(child_id, &claim_id);

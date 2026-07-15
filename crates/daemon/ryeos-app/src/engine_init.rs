@@ -40,8 +40,8 @@ pub fn build_engine(
     config: &Config,
     bundle_roots: &[PathBuf],
     sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
-) -> Result<Engine> {
-    build_engine_for_roots(
+) -> Result<(Engine, Arc<ryeos_engine::sandbox::SandboxRuntime>)> {
+    build_engine_for_roots_with_sandbox(
         config,
         bundle_roots,
         None, // no project root at startup — resolved per-request
@@ -87,6 +87,23 @@ pub fn build_engine_for_roots(
     trust_overlay: Option<&TrustStore>,
     sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<Engine> {
+    build_engine_for_roots_with_sandbox(
+        config,
+        bundle_roots,
+        project_root,
+        trust_overlay,
+        sandbox,
+    )
+    .map(|(engine, _sandbox)| engine)
+}
+
+fn build_engine_for_roots_with_sandbox(
+    config: &Config,
+    bundle_roots: &[PathBuf],
+    project_root: Option<&std::path::Path>,
+    trust_overlay: Option<&TrustStore>,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+) -> Result<(Engine, Arc<ryeos_engine::sandbox::SandboxRuntime>)> {
     // 1. Validate bundle roots exist and are readable
     if bundle_roots.is_empty() {
         anyhow::bail!(
@@ -162,10 +179,11 @@ pub fn build_engine_for_roots(
         protocol_registry,
         runtimes,
         handler_registry,
-    } = build_node_bundle_admission(&bundle_roots, &node_trust_store, sandbox)?;
+        sandbox,
+    } = build_node_bundle_admission(&bundle_roots, &node_trust_store, sandbox.clone())?;
 
     let launch_preparers = if runtimes.requires_launch_preparer() {
-        let runner = LaunchPreparerRunner::from_sandbox_runtime(&sandbox)
+        let runner = LaunchPreparerRunner::from_sandbox_runtime(sandbox.as_ref())
             .context("failed to initialize fixed launch-preparer sandbox")?;
         if let Err(issues) =
             validate_runtime_launch_handlers(&runtimes, &handler_registry, &runner)
@@ -193,7 +211,7 @@ pub fn build_engine_for_roots(
             &config.tool_env_passthrough,
         )?);
 
-    Ok(engine)
+    Ok((engine, sandbox))
 }
 
 /// Admit a prospective node bundle-root set without constructing an Engine.
@@ -266,6 +284,7 @@ struct NodeBundleAdmission {
     protocol_registry: ProtocolRegistry,
     runtimes: RuntimeRegistry,
     handler_registry: Arc<HandlerRegistry>,
+    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 }
 
 fn build_node_bundle_admission(
@@ -319,8 +338,20 @@ fn build_node_bundle_admission(
         .iter()
         .map(|root| (root.clone(), TrustClass::TrustedBundle))
         .collect();
-    let handler_registry = HandlerRegistry::load_base(&tagged_roots, node_trust_store, sandbox)
-        .context("failed to load handler descriptors from bundle roots")?;
+    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, node_trust_store, &kinds)
+        .context("failed to build runtime registry")?;
+    let sandbox = if sandbox.is_enforced() || runtimes.requires_launch_preparer() {
+        Arc::new(
+            sandbox
+                .with_mandatory_bubblewrap_backend()
+                .context("failed to capture sandbox backend required by admitted runtimes")?,
+        )
+    } else {
+        sandbox
+    };
+    let handler_registry =
+        HandlerRegistry::load_base(&tagged_roots, node_trust_store, sandbox.clone())
+            .context("failed to load handler descriptors from bundle roots")?;
     let handler_registry = std::sync::Arc::new(handler_registry);
     let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, node_trust_store)
         .context("failed to load protocol descriptors from bundle roots")?;
@@ -350,8 +381,6 @@ fn build_node_bundle_admission(
         anyhow::bail!("{message}");
     }
 
-    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, node_trust_store, &kinds)
-        .context("failed to build runtime registry")?;
     tracing::info!(
         runtimes = runtimes.all().count(),
         roots = tagged_roots.len(),
@@ -365,6 +394,7 @@ fn build_node_bundle_admission(
         protocol_registry,
         runtimes,
         handler_registry,
+        sandbox,
     })
 }
 

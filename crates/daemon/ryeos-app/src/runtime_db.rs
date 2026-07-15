@@ -2782,6 +2782,27 @@ impl RuntimeDb {
         global_live_limit: Option<u32>,
         now_ms: i64,
     ) -> Result<Vec<String>> {
+        // Follow cohorts stage their complete membership before the parent is
+        // irreversibly continued. Keep those rows ineligible until the waiter
+        // durably reaches `waiting`; this gate is inside the primitive so direct
+        // admission, terminal-release admission, and maintenance sweeps all obey
+        // the same ordering. `ready`/`resuming` are not launchable phases: they
+        // prove the complete child cohort is already terminal. A missing waiter
+        // also fails closed. Detached windows do not use the `follow:` namespace.
+        if let Some(follow_key) = window_key.strip_prefix("follow:") {
+            let phase = self
+                .conn
+                .query_row(
+                    "SELECT phase FROM follow_waiter WHERE follow_key = ?1",
+                    params![follow_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if phase.as_deref() != Some(follow_phase::WAITING) {
+                return Ok(Vec::new());
+            }
+        }
+
         let mut admitted = Vec::new();
         loop {
             let candidate: Option<(String, u32)> = self

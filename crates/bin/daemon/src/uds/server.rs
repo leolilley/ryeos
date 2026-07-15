@@ -291,7 +291,7 @@ pub(crate) async fn dispatch_runtime_method(
         }
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => {
-            let (result, prepared) = handle_request_continuation(&clean_params, state)?;
+            let (result, prepared) = handle_request_continuation(&clean_params, state).await?;
             spawn_machine_continuation_launch(state, &result, prepared);
             Ok(result)
         }
@@ -721,7 +721,7 @@ fn spawn_machine_continuation_launch(
     });
 }
 
-fn handle_request_continuation(
+async fn handle_request_continuation(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<(
@@ -740,15 +740,20 @@ fn handle_request_continuation(
                 params.thread_id
             )
         })?;
+    let successor_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
     let prepared = ryeos_executor::execution::launch::prepare_machine_successor_launch(
         state,
+        &successor_thread_id,
         &resume_context,
         &params.thread_id,
-    )?;
+    )
+    .await?;
     let initial_events = prepared.initial_audit_events()?;
     let result = state.threads.request_continuation_with_events(
         &params,
+        &successor_thread_id,
         &resume_context,
+        prepared.launch_metadata(),
         initial_events,
     )?;
     let encoded = serde_json::to_value(result)

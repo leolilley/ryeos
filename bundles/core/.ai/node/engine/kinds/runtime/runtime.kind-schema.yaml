@@ -1,4 +1,4 @@
-# rye:unsigned
+# ryeos:signed:2026-07-15T01:10:25Z:4eed14766d3ad6504a55be4686c448b0db4632f1c849e419edcf267537da54b7:t7FLduFRHwMhopnPIajHf4ciXEruhyHNCJ+PUWIPQDSqxSdV368GfiNvQJpXXTuA1qdzH4bxn+Zyde2wgXzKDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
 version: "1.0.0"
 location:

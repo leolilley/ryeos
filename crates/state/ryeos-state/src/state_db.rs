@@ -459,6 +459,82 @@ impl StateDb {
         ))
     }
 
+    /// Add a thread and append events to an existing thread under one signed
+    /// chain head, then project the entire cross-thread transition in one
+    /// projection transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_thread_with_events_and_append(
+        &self,
+        chain_root_id: &str,
+        snapshot: ThreadSnapshot,
+        new_thread_events: Vec<ThreadEvent>,
+        existing_thread_id: &str,
+        existing_thread_events: Vec<ThreadEvent>,
+        snapshot_updates: Vec<SnapshotUpdate>,
+        signer: &dyn Signer,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        if new_thread_events
+            .iter()
+            .chain(existing_thread_events.iter())
+            .any(|event| !event.durability.is_cas_stored())
+        {
+            anyhow::bail!(
+                "StateDb::add_thread_with_events_and_append cannot persist ephemeral events"
+            );
+        }
+
+        let mut cache = self.head_cache.lock().expect("head_cache lock");
+        let result = chain::add_thread_to_chain_with_events_and_append(
+            &self.cas_root,
+            &self.refs_root,
+            chain_root_id,
+            snapshot.clone(),
+            new_thread_events,
+            existing_thread_id,
+            existing_thread_events,
+            snapshot_updates.clone(),
+            signer,
+            &mut cache,
+        )?;
+        let projected = project_committed_chain(
+            &self.projection,
+            &cache,
+            chain_root_id,
+            &result.chain_state_hash,
+            || {
+                projection::project_thread_snapshot_with_events_in_transaction(
+                    &self.projection,
+                    &snapshot,
+                    chain_root_id,
+                    &result.events,
+                )
+                .context("projecting atomic new-thread and existing-thread events")?;
+                for update in &snapshot_updates {
+                    projection::project_thread_snapshot(
+                        &self.projection,
+                        &update.new_snapshot,
+                        chain_root_id,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "projecting atomic snapshot update for thread {}",
+                            update.thread_id
+                        )
+                    })?;
+                }
+                Ok(())
+            },
+        );
+        let committed_hash = result.chain_state_hash.clone();
+        Ok(self.committed_write(
+            result,
+            chain_root_id,
+            &committed_hash,
+            "add_thread_with_events_and_append",
+            projected,
+        ))
+    }
+
     // ── Project head refs (principal-scoped) ──────────────────────
 
     /// Read a principal-scoped project head ref. Returns the project

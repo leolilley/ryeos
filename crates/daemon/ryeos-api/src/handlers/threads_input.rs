@@ -726,19 +726,22 @@ pub async fn handle(
     });
 
     // Admission and the consumable authoritative pass both use the exact
-    // persisted identity before a successor ID or row exists.
+    // persisted identity and the exact pre-minted successor ID before its row
+    // exists.
     admit_resume_launch(&resume_context, &state)?;
+    let candidate_id = ryeos_app::thread_lifecycle::new_thread_id();
     let prepared =
         ryeos_executor::execution::launch::prepare_operator_successor_launch(
             &state,
+            &candidate_id,
             &resume_context,
         )
+        .await
         .map_err(build_and_launch_error)?;
     let initial_audit_events = prepared
         .initial_audit_events()
         .map_err(build_and_launch_error)?;
 
-    let candidate_id = ryeos_app::thread_lifecycle::new_thread_id();
     let successor_record = ryeos_app::state_store::NewThreadRecord {
         thread_id: candidate_id.clone(),
         chain_root_id: previous.chain_root_id.clone(),
@@ -774,7 +777,7 @@ pub async fn handle(
             &previous.thread_id,
             Some(ryeos_state::queries::ContinuationReasonMarker::OperatorFollowUp.as_str()),
             &fingerprint,
-            &resume_context,
+            prepared.launch_metadata(),
             initial_audit_events,
         )
         .map_err(|e| HandlerError::Internal(e.to_string()))?;

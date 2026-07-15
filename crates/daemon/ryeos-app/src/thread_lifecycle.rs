@@ -758,6 +758,23 @@ impl ThreadLifecycleService {
         request: &ResolvedExecutionRequest,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<ThreadDetail> {
+        self.create_root_thread_with_events_and_launch_metadata(
+            thread_id,
+            request,
+            initial_events,
+            None,
+        )
+    }
+
+    /// Managed-launch root creation with its durable resume identity prepared
+    /// before the authoritative root commit is published.
+    pub fn create_root_thread_with_events_and_launch_metadata(
+        &self,
+        thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+    ) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         validate_thread_id_format(thread_id)?;
         let thread_record = NewThreadRecord {
@@ -777,7 +794,11 @@ impl ThreadLifecycleService {
         };
         let persisted = self
             .state_store
-            .create_root_thread_with_events(&thread_record, initial_events)?;
+            .create_root_thread_with_events_and_launch_metadata(
+                &thread_record,
+                initial_events,
+                launch_metadata,
+            )?;
         let detail = self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("created root thread missing from database: {thread_id}"))?;
         self.publish_records(&persisted);
@@ -810,6 +831,25 @@ impl ThreadLifecycleService {
         reason: Option<&str>,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<ThreadDetail> {
+        self.create_continuation_with_id_and_launch_metadata(
+            successor_thread_id,
+            source_thread_id,
+            request,
+            reason,
+            initial_events,
+            None,
+        )
+    }
+
+    pub fn create_continuation_with_id_and_launch_metadata(
+        &self,
+        successor_thread_id: &str,
+        source_thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        reason: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+    ) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         validate_thread_id_format(successor_thread_id)?;
 
@@ -838,12 +878,15 @@ impl ThreadLifecycleService {
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         };
 
-        let persisted = self.state_store.create_continuation_with_events(
+        let persisted = self
+            .state_store
+            .create_continuation_with_events_and_launch_metadata(
             &successor_record,
             &source.thread_id,
             &source.chain_root_id,
             reason,
             initial_events,
+            launch_metadata,
         )?;
         self.publish_records(&persisted);
 
@@ -867,7 +910,7 @@ impl ThreadLifecycleService {
         source_thread_id: &str,
         reason: Option<&str>,
         request_fingerprint: &str,
-        resume_context: &crate::launch_metadata::ResumeContext,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<OperatorContinuation> {
         validate_kind(&successor.kind, self.kind_profiles())?;
@@ -912,7 +955,7 @@ impl ThreadLifecycleService {
             &source.chain_root_id,
             reason,
             request_fingerprint,
-            Some(resume_context),
+            Some(launch_metadata),
             initial_events,
         )?;
 
@@ -1958,9 +2001,12 @@ impl ThreadLifecycleService {
     pub fn request_continuation_with_events(
         &self,
         params: &ThreadContinuationParams,
+        successor_thread_id: &str,
         expected_resume_context: &crate::launch_metadata::ResumeContext,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<ThreadContinuationResult> {
+        validate_thread_id_format(successor_thread_id)?;
         let source = self
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("source thread not found: {}", params.thread_id))?;
@@ -1975,9 +2021,8 @@ impl ThreadLifecycleService {
         }
 
         // Create successor thread in the same chain
-        let successor_id = new_thread_id();
         let successor_record = NewThreadRecord {
-            thread_id: successor_id.clone(),
+            thread_id: successor_thread_id.to_string(),
             chain_root_id: source.chain_root_id.clone(),
             kind: source.kind.clone(),
             item_ref: source.item_ref.clone(),
@@ -2004,12 +2049,15 @@ impl ThreadLifecycleService {
             &source.chain_root_id,
             params.reason.as_deref(),
             expected_resume_context,
+            successor_launch_metadata,
             initial_events,
         )?;
 
         let successor = self
-            .get_thread(&successor_id)?
-            .ok_or_else(|| anyhow!("successor thread missing after creation: {successor_id}"))?;
+            .get_thread(successor_thread_id)?
+            .ok_or_else(|| {
+                anyhow!("successor thread missing after creation: {successor_thread_id}")
+            })?;
         self.publish_records(&persisted);
 
         Ok(ThreadContinuationResult {

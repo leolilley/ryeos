@@ -130,9 +130,10 @@ pub struct SandboxLimitsPolicy {
 /// Backend resolution facts and the exact policy snapshot used by a runtime.
 ///
 /// Doctor and status surfaces consume this value rather than reparsing the
-/// source file with a second implementation. `resolved_executable` is absent
-/// while the sandbox is disabled because disabled policy does not inspect the
-/// configured backend.
+/// source file with a second implementation. Enforced policy loading captures
+/// the configured backend immediately. A disabled snapshot captures it during
+/// engine boot only when the admitted runtime registry requires a mandatory
+/// private launch-preparer profile.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SandboxInspection {
     pub source: Option<PathBuf>,
@@ -175,7 +176,8 @@ pub struct SandboxRuntime {
     app_root_destination: Option<PathBuf>,
     daemon_socket: Option<PathBuf>,
     verified_artifacts: Option<Arc<VerifiedArtifactStore>>,
-    /// Exact startup-captured backend inode executed for every enforced apply.
+    /// Exact startup-captured backend inode used by every enforced apply and
+    /// every mandatory private profile, irrespective of the general mode.
     backend_handle: Option<Arc<std::fs::File>>,
 }
 
@@ -608,9 +610,10 @@ impl SandboxRuntime {
     /// Load the node-owned policy from its fixed path and resolve its runtime.
     ///
     /// Missing files, malformed YAML, unknown fields, and unsupported versions
-    /// are errors in both modes. Disabled mode deliberately does not inspect or
-    /// canonicalize the configured backend. Enforced mode validates all static
-    /// backend and limit facts before this value is returned.
+    /// are errors in both modes. Enforced mode validates and captures the
+    /// configured backend before this value is returned. Disabled mode defers
+    /// backend admission unless an engine's runtime registry requires a
+    /// mandatory launch-preparer profile.
     pub fn load(app_root: &Path) -> Result<Self, EngineError> {
         Self::load_inner(app_root, None)
     }
@@ -712,28 +715,49 @@ impl SandboxRuntime {
         self.state == SandboxRuntimeState::Enforced
     }
 
-    /// Return a content-captured Bubblewrap executable for a mandatory private
-    /// profile such as launch preparation. This consumes the immutable policy
-    /// snapshot instead of reopening `sandbox.yaml`. General sandbox mode does
-    /// not disable mandatory profiles: when the node sandbox is disabled, the
-    /// configured backend is captured on demand and kept alive by the returned
-    /// file descriptor.
-    pub fn capture_mandatory_bubblewrap_backend(
-        &self,
-    ) -> Result<Arc<std::fs::File>, EngineError> {
-        if let Some(handle) = &self.backend_handle {
-            return Ok(handle.clone());
+    /// Return an immutable snapshot with the configured Bubblewrap backend
+    /// content-captured. Engine boot calls this only after the admitted runtime
+    /// registry proves that a mandatory launch-preparer profile is required.
+    /// An enforced snapshot is already captured, so this never reopens its
+    /// configured path.
+    pub fn with_mandatory_bubblewrap_backend(&self) -> Result<Self, EngineError> {
+        if self.backend_handle.is_some() {
+            return Ok(self.clone());
         }
-        let app_root = self.app_root.as_deref().ok_or_else(|| {
-            refused("mandatory Bubblewrap capture requires the immutable app root".to_string())
+        let artifacts = self.verified_artifacts.as_deref().ok_or_else(|| {
+            refused(
+                "mandatory Bubblewrap profile requires a production sandbox snapshot"
+                    .to_string(),
+            )
         })?;
-        let artifacts = VerifiedArtifactStore::create(app_root, &self.inspection.limits)?;
-        let policy = SandboxBackendPolicy {
+        let backend = SandboxBackendPolicy {
             kind: self.inspection.backend.kind,
             executable: self.inspection.backend.configured_executable.clone(),
         };
-        let (_, handle, _, _) = resolve_backend(&policy, &artifacts)?;
-        Ok(handle)
+        let (resolved, artifact, digest, version) = resolve_backend(&backend, artifacts)?;
+        let mut captured = self.clone();
+        captured.inspection.backend.resolved_executable = Some(resolved);
+        captured.inspection.backend.captured_digest = Some(digest);
+        captured.inspection.backend.captured_version = Some(version);
+        captured.backend_handle = Some(artifact);
+        Ok(captured)
+    }
+
+    /// Return a content-captured Bubblewrap executable for a mandatory private
+    /// profile such as launch preparation. This consumes the immutable policy
+    /// snapshot instead of reopening `sandbox.yaml`. General sandbox mode does
+    /// not disable mandatory profiles; engine boot conditionally captures the
+    /// backend before binding any registered launch preparer. This accessor
+    /// never reopens node policy or executable paths.
+    pub fn capture_mandatory_bubblewrap_backend(
+        &self,
+    ) -> Result<Arc<std::fs::File>, EngineError> {
+        self.backend_handle.clone().ok_or_else(|| {
+            refused(
+                "mandatory Bubblewrap profile requires a production sandbox snapshot with a startup-captured backend"
+                    .to_string(),
+            )
+        })
     }
 
     /// Apply this immutable policy snapshot to one executable request.
@@ -1396,29 +1420,34 @@ impl SandboxRuntime {
         };
         if state == SandboxRuntimeState::Enforced {
             validate_enforced_limits(&policy.limits)?;
+            if app_root.is_none() {
+                return Err(refused(
+                    "enforced sandbox runtime requires an app root".to_string(),
+                ));
+            }
         }
-        let verified_artifacts = if state == SandboxRuntimeState::Enforced {
-            let app_root = app_root.as_deref().ok_or_else(|| {
-                refused("enforced sandbox runtime requires an app root".to_string())
-            })?;
-            Some(Arc::new(VerifiedArtifactStore::create(
+        // Production snapshots capture Bubblewrap immediately when enforcement
+        // is enabled. Disabled snapshots defer that work until engine boot has
+        // admitted a runtime registry and knows whether a mandatory private
+        // profile exists. The `None` branch is retained solely for the in-memory
+        // `Default` fixture, which has no app root.
+        let verified_artifacts = match app_root.as_deref() {
+            Some(app_root) => Some(Arc::new(VerifiedArtifactStore::create(
                 app_root,
                 &policy.limits,
-            )?))
-        } else {
-            None
+            )?)),
+            None => None,
         };
         let (resolved_executable, backend_handle, captured_digest, captured_version) =
-            match policy.mode {
-                SandboxMode::Disabled => (None, None, None, None),
-                SandboxMode::Enforce => {
-                    let artifacts = verified_artifacts
-                        .as_deref()
-                        .expect("enforced sandbox runtime has a verified artifact store");
-                    let (resolved, artifact, digest, version) =
-                        resolve_backend(&policy.backend, artifacts)?;
-                    (Some(resolved), Some(artifact), Some(digest), Some(version))
-                }
+            if state == SandboxRuntimeState::Enforced {
+                let artifacts = verified_artifacts.as_deref().ok_or_else(|| {
+                    refused("enforced sandbox runtime requires an artifact store".to_string())
+                })?;
+                let (resolved, artifact, digest, version) =
+                    resolve_backend(&policy.backend, artifacts)?;
+                (Some(resolved), Some(artifact), Some(digest), Some(version))
+            } else {
+                (None, None, None, None)
             };
         Ok(Self {
             inspection: SandboxInspection {
@@ -1711,8 +1740,16 @@ fn probe_bubblewrap_backend(handle: &Arc<std::fs::File>) -> Result<String, Engin
     for required in [
         "--args",
         "--bind-fd",
+        "--cap-drop",
+        "--chdir",
+        "--clearenv",
+        "--dev-bind",
+        "--die-with-parent",
         "--json-status-fd",
+        "--new-session",
         "--ro-bind-fd",
+        "--tmpfs",
+        "--unshare-all",
         "--argv0",
     ] {
         if !help_tokens.contains(required) {
@@ -3085,11 +3122,12 @@ mod tests {
     }
 
     #[test]
-    fn disabled_runtime_does_not_inspect_missing_backend() {
+    #[cfg(target_os = "linux")]
+    fn disabled_runtime_captures_backend_only_for_mandatory_profile() {
         let app_root = tempfile::tempdir().unwrap();
         write_policy(
             app_root.path(),
-            &policy_yaml("disabled", Path::new("/definitely/missing-bwrap")),
+            &policy_yaml("disabled", Path::new("/usr/bin/bwrap")),
         );
 
         let runtime = SandboxRuntime::load(app_root.path()).unwrap();
@@ -3100,6 +3138,15 @@ mod tests {
         assert_eq!(runtime.source(), Some(expected_source.as_path()));
         assert!(runtime.digest().unwrap().starts_with("sha256:"));
         assert!(runtime.inspection().backend.resolved_executable.is_none());
+        assert!(runtime.inspection().backend.captured_digest.is_none());
+        assert!(runtime.inspection().backend.captured_version.is_none());
+        assert!(runtime.capture_mandatory_bubblewrap_backend().is_err());
+
+        let captured = runtime.with_mandatory_bubblewrap_backend().unwrap();
+        assert!(captured.inspection().backend.resolved_executable.is_some());
+        assert!(captured.inspection().backend.captured_digest.is_some());
+        assert!(captured.inspection().backend.captured_version.is_some());
+        captured.capture_mandatory_bubblewrap_backend().unwrap();
     }
 
     #[test]

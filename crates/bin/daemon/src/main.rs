@@ -185,15 +185,16 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Resolve the sandbox exactly once. Engine-owned parser/composer handlers
-    // and ordinary execution share this immutable node-policy snapshot.
+    // Parse the sandbox policy exactly once. Engine boot conditionally captures
+    // its backend after runtime admission, then returns the immutable snapshot
+    // shared by engine-owned handlers and ordinary execution.
     let sandbox = Arc::new(
         ryeos_engine::sandbox::SandboxRuntime::load_for_daemon(&config.app_root, &config.uds_path)
             .context("load node sandbox policy")?,
     );
 
     // ── Two-phase node-config bootstrap ──
-    let (engine, node_config_snapshot) =
+    let (engine, node_config_snapshot, sandbox) =
         bootstrap::load_node_config_two_phase(&config, Arc::clone(&sandbox))?;
 
     // Build the service registry early — self-check needs it.
@@ -1333,15 +1334,15 @@ async fn run_service_standalone(
     )
     .context("reconcile interrupted bundle transactions")?;
 
-    // Resolve once so engine-owned handler launches and service execution use
-    // the same immutable node-policy snapshot.
+    // Parse once; engine boot conditionally captures the backend and returns the
+    // immutable snapshot shared by handler launches and service execution.
     let sandbox = Arc::new(
         ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
             .context("load node sandbox policy")?,
     );
 
     // Two-phase node-config bootstrap (same as daemon-start path)
-    let (engine, node_config_snapshot) =
+    let (engine, node_config_snapshot, sandbox) =
         bootstrap::load_node_config_two_phase(config, Arc::clone(&sandbox))?;
 
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(

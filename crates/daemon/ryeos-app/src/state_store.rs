@@ -959,6 +959,18 @@ impl StateStore {
         thread: &NewThreadRecord,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_root_thread_with_events_and_launch_metadata(thread, initial_events, None)
+    }
+
+    /// Create a managed-launch root with its resume identity installed before
+    /// the authoritative chain head becomes visible. The runtime row is
+    /// auxiliary, so it is prepared first and removed if chain creation fails.
+    pub fn create_root_thread_with_events_and_launch_metadata(
+        &self,
+        thread: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+    ) -> Result<Vec<PersistedEventRecord>> {
         if thread.thread_id != thread.chain_root_id || thread.upstream_thread_id.is_some() {
             bail!("create_root_thread_with_events requires a root thread record");
         }
@@ -970,6 +982,10 @@ impl StateStore {
         }
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        // Initial facet events are subject to the same collection/key/value
+        // limits as ordinary appends. The new thread is not projected yet, so
+        // the validator correctly evaluates this batch against an empty set.
+        validate_facet_event_admission(&g, &thread.thread_id, &initial_events)?;
         let mut payload = json!({
             "kind": &thread.kind,
             "item_ref": &thread.item_ref,
@@ -998,6 +1014,21 @@ impl StateStore {
         // not safe to hand off.
         g.runtime_db
             .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+        if let Some(launch_metadata) = launch_metadata {
+            if let Err(error) = g
+                .runtime_db
+                .set_launch_metadata(&thread.thread_id, launch_metadata)
+            {
+                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&thread.thread_id) {
+                    tracing::error!(
+                        thread_id = %thread.thread_id,
+                        error = %cleanup_error,
+                        "failed to remove auxiliary runtime row after launch metadata seed failed"
+                    );
+                }
+                return Err(error);
+            }
+        }
         let committed = g.state_db.create_chain_with_events(
             &thread.chain_root_id,
             build_snapshot(thread),
@@ -1605,8 +1636,28 @@ impl StateStore {
         reason: Option<&str>,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_continuation_with_events_and_launch_metadata(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            reason,
+            initial_events,
+            None,
+        )
+    }
+
+    pub fn create_continuation_with_events_and_launch_metadata(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+    ) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         if !self
             .process_attachment_admission_open
             .load(Ordering::Acquire)
@@ -1698,6 +1749,23 @@ impl StateStore {
         }
         g.runtime_db
             .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+        if let Some(launch_metadata) = launch_metadata {
+            if let Err(error) = g
+                .runtime_db
+                .set_launch_metadata(&successor.thread_id, launch_metadata)
+            {
+                if let Err(cleanup_error) =
+                    g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        error = %cleanup_error,
+                        "failed to remove runtime row after continuation metadata seed failed"
+                    );
+                }
+                return Err(error);
+            }
+        }
 
         let successor_event = NewEventRecord {
             event_type: "thread_created".to_string(),
@@ -1716,10 +1784,26 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_commit = g.state_db.add_thread_with_events(
+        let source_event = NewEventRecord {
+            event_type: "thread_continued".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "successor_thread_id": &successor.thread_id,
+                "reason": reason,
+            }),
+        };
+        let ste = convert_events(
+            std::slice::from_ref(&source_event),
+            chain_root_id,
+            source_thread_id,
+        );
+        let successor_commit = g.state_db.add_thread_with_events_and_append(
             chain_root_id,
             build_snapshot(&successor_with_upstream),
             successor_thread_events,
+            source_thread_id,
+            ste,
+            source_snapshot_updates,
             g.signer.as_ref(),
         );
         let successor_result = match successor_commit {
@@ -1729,44 +1813,15 @@ impl StateStore {
                     tracing::error!(
                         thread_id = %successor.thread_id,
                         error = %cleanup_error,
-                        "failed to remove runtime row after successor birth failed"
+                        "failed to remove runtime row after atomic continuation birth failed"
                     );
                 }
                 return Err(error);
             }
         };
-
-        // Edge is derived from successor snapshot's upstream_thread_id during
-        // projection (see project_thread_snapshot in rye-state). No direct write needed.
-
-        let source_event = NewEventRecord {
-            event_type: "thread_continued".to_string(),
-            storage_class: "indexed".to_string(),
-            payload: json!({
-                "successor_thread_id": &successor.thread_id,
-                "reason": reason,
-            }),
-        };
-
-        let ste = convert_events(
-            std::slice::from_ref(&source_event),
-            chain_root_id,
-            source_thread_id,
-        );
-        let source_result = committed_value(g.state_db.append_events(
-            chain_root_id,
-            source_thread_id,
-            ste,
-            source_snapshot_updates,
-            g.signer.as_ref(),
-        )?);
-
-        let mut all_events = persisted_from_append(&source_result, &[source_event])?;
-        let mut successor_persisted =
-            persisted_from_add_thread_with_events(&successor_result, &successor_events)?;
-        successor_persisted.extend(all_events);
-        all_events = successor_persisted;
-        Ok(all_events)
+        let mut all_input_events = successor_events;
+        all_input_events.push(source_event);
+        persisted_from_add_thread_with_events(&successor_result, &all_input_events)
     }
 
     /// Machine continuation handoff (limit cut-off) — the autonomous path.
@@ -1800,6 +1855,7 @@ impl StateStore {
             chain_root_id,
             RunningContinuationKind::Machine { sanitized_reason },
             None,
+            None,
             Vec::new(),
         )
     }
@@ -1811,6 +1867,7 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
         expected_resume_context: &crate::launch_metadata::ResumeContext,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
         // The machine handoff carries a free-form runtime LOG reason. Scrub ALL
@@ -1824,6 +1881,7 @@ impl StateStore {
             chain_root_id,
             RunningContinuationKind::Machine { sanitized_reason },
             Some(expected_resume_context),
+            Some(successor_launch_metadata),
             initial_events,
         )
     }
@@ -1846,6 +1904,7 @@ impl StateStore {
             chain_root_id,
             RunningContinuationKind::GraphFollowResume,
             None,
+            None,
             Vec::new(),
         )
     }
@@ -1864,10 +1923,12 @@ impl StateStore {
         chain_root_id: &str,
         kind: RunningContinuationKind<'_>,
         expected_resume_context: Option<&crate::launch_metadata::ResumeContext>,
+        successor_launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         let source_row = g
             .state_db
             .get_thread(source_thread_id)?
@@ -1985,10 +2046,30 @@ impl StateStore {
         // state-db successor edge, source untouched and still running.
         g.runtime_db
             .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-        let successor_meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
-            .with_resume_context(source_resume_context);
-        g.runtime_db
-            .set_launch_metadata(&successor.thread_id, &successor_meta)?;
+        if successor_launch_metadata
+            .and_then(|metadata| metadata.resume_context.as_ref())
+            .is_some_and(|resume| resume != &source_resume_context)
+        {
+            let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+            bail!("prepared successor launch identity differs from its source ResumeContext");
+        }
+        let successor_meta = successor_launch_metadata.cloned().unwrap_or_else(|| {
+            crate::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_resume_context(source_resume_context)
+        });
+        if let Err(error) = g
+            .runtime_db
+            .set_launch_metadata(&successor.thread_id, &successor_meta)
+        {
+            if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
+                tracing::error!(
+                    thread_id = %successor.thread_id,
+                    error = %cleanup_error,
+                    "failed to remove runtime row after continuation metadata seed failed"
+                );
+            }
+            return Err(error);
+        }
 
         // The successor becomes observable with its creation record and complete
         // authoritative launch audit in the same signed chain head. ResumeContext
@@ -2010,28 +2091,8 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_commit = g.state_db.add_thread_with_events(
-            chain_root_id,
-            build_snapshot(&successor_with_upstream),
-            successor_thread_events,
-            g.signer.as_ref(),
-        );
-        let successor_result = match successor_commit {
-            Ok(committed) => committed_value(committed),
-            Err(error) => {
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
-                    tracing::error!(
-                        thread_id = %successor.thread_id,
-                        error = %cleanup_error,
-                        "failed to remove runtime row after machine successor birth failed"
-                    );
-                }
-                return Err(error);
-            }
-        };
-
-        // Settle the source to `continued` (running by the check above) in the
-        // same append as its `thread_continued` event — the final state change.
+        // Settle the source to `continued` in the same signed head that creates
+        // the successor and records its authoritative birth events.
         let now = lillux::time::iso8601_now();
         let source_snapshot = ThreadSnapshot {
             schema: ryeos_state::objects::SCHEMA_VERSION,
@@ -2083,8 +2144,10 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = committed_value(g.state_db.append_events(
+        let successor_commit = g.state_db.add_thread_with_events_and_append(
             chain_root_id,
+            build_snapshot(&successor_with_upstream),
+            successor_thread_events,
             source_thread_id,
             ste,
             vec![SnapshotUpdate {
@@ -2092,12 +2155,23 @@ impl StateStore {
                 new_snapshot: source_snapshot,
             }],
             g.signer.as_ref(),
-        )?);
-
-        let mut all_events =
-            persisted_from_add_thread_with_events(&successor_result, &successor_events)?;
-        all_events.extend(persisted_from_append(&source_result, &[source_event])?);
-        Ok(all_events)
+        );
+        let successor_result = match successor_commit {
+            Ok(committed) => committed_value(committed),
+            Err(error) => {
+                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        error = %cleanup_error,
+                        "failed to remove runtime row after atomic running-continuation birth failed"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let mut all_input_events = successor_events;
+        all_input_events.push(source_event);
+        persisted_from_add_thread_with_events(&successor_result, &all_input_events)
     }
 
     /// Operator follow-up continuation, made idempotent by a request fingerprint.
@@ -2119,7 +2193,7 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
         request_fingerprint: &str,
-        resume_context: Option<&crate::launch_metadata::ResumeContext>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
     ) -> Result<ContinuationOutcome> {
         self.create_or_get_continuation_with_events(
             successor,
@@ -2127,7 +2201,7 @@ impl StateStore {
             chain_root_id,
             reason,
             request_fingerprint,
-            resume_context,
+            launch_metadata,
             Vec::new(),
         )
     }
@@ -2139,11 +2213,12 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
         request_fingerprint: &str,
-        resume_context: Option<&crate::launch_metadata::ResumeContext>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<ContinuationOutcome> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         if !self
             .process_attachment_admission_open
             .load(Ordering::Acquire)
@@ -2242,24 +2317,30 @@ impl StateStore {
         if successor_with_upstream.upstream_thread_id.is_none() {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
-        // Write order mirrors the machine path: runtime row + launch metadata
-        // FIRST, then the state-db successor snapshot, then the source edge last.
-        // A failure before the edge write leaves at most a runtime row + an
-        // unlinked successor snapshot (no authoritative continuation edge), never
-        // a `continued`/edge'd source pointing at a half-built successor.
+        // Seed runtime state before the atomic signed-head transition. Failure
+        // leaves at most an auxiliary runtime row, which is removed below; the
+        // successor snapshot and source edge are indivisible.
         g.runtime_db
             .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
 
         // Seed the operator launch context (a `ResumeContext`) on the successor so
-        // the row is relaunchable the instant it exists — a crash before the
-        // spawned launcher runs leaves a successor the operator can re-drive
-        // (idempotently, via the fingerprint) or reconcile can recover, rather
-        // than a stranded row with no launch information.
-        if let Some(rc) = resume_context {
-            let meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
-                .with_resume_context(rc.clone());
-            g.runtime_db
-                .set_launch_metadata(&successor.thread_id, &meta)?;
+        // the row is relaunchable the instant the atomic transition exposes it.
+        if let Some(meta) = launch_metadata {
+            if let Err(error) = g
+                .runtime_db
+                .set_launch_metadata(&successor.thread_id, meta)
+            {
+                if let Err(cleanup_error) =
+                    g.runtime_db.delete_thread_runtime(&successor.thread_id)
+                {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        error = %cleanup_error,
+                        "failed to remove runtime row after operator continuation metadata seed failed"
+                    );
+                }
+                return Err(error);
+            }
         }
 
         let successor_event = NewEventRecord {
@@ -2279,26 +2360,6 @@ impl StateStore {
             chain_root_id,
             &successor.thread_id,
         );
-        let successor_commit = g.state_db.add_thread_with_events(
-            chain_root_id,
-            build_snapshot(&successor_with_upstream),
-            successor_thread_events,
-            g.signer.as_ref(),
-        );
-        let successor_result = match successor_commit {
-            Ok(committed) => committed_value(committed),
-            Err(error) => {
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
-                    tracing::error!(
-                        thread_id = %successor.thread_id,
-                        error = %cleanup_error,
-                        "failed to remove runtime row after operator successor birth failed"
-                    );
-                }
-                return Err(error);
-            }
-        };
-
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
             storage_class: "indexed".to_string(),
@@ -2313,18 +2374,33 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let source_result = committed_value(g.state_db.append_events(
+        let successor_commit = g.state_db.add_thread_with_events_and_append(
             chain_root_id,
+            build_snapshot(&successor_with_upstream),
+            successor_thread_events,
             source_thread_id,
             ste,
             source_snapshot_updates,
             g.signer.as_ref(),
-        )?);
-
-        let mut all_events =
-            persisted_from_add_thread_with_events(&successor_result, &successor_events)?;
-        all_events.extend(persisted_from_append(&source_result, &[source_event])?);
-        Ok(ContinuationOutcome::Created(all_events))
+        );
+        let successor_result = match successor_commit {
+            Ok(committed) => committed_value(committed),
+            Err(error) => {
+                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id) {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        error = %cleanup_error,
+                        "failed to remove runtime row after atomic operator continuation birth failed"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let mut all_input_events = successor_events;
+        all_input_events.push(source_event);
+        Ok(ContinuationOutcome::Created(
+            persisted_from_add_thread_with_events(&successor_result, &all_input_events)?,
+        ))
     }
 
     /// The `successor_request_fingerprint` recorded on a source's
