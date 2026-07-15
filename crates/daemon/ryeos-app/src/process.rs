@@ -120,6 +120,23 @@ pub fn validate_durable_process_control_support() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let self_pid = unsafe { libc::getpid() };
+        let self_pgid = unsafe { libc::getpgrp() };
+        if self_pgid != self_pid {
+            // PIDFD_SIGNAL_PROCESS_GROUP is valid only when the pidfd refers
+            // to a process-group leader. Lifecycle launchers do not guarantee
+            // that topology, so isolate ryeosd before probing or supervising
+            // any workload groups.
+            if unsafe { libc::setpgid(0, 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("place ryeosd in its own process group");
+            }
+            let isolated_pgid = unsafe { libc::getpgrp() };
+            if isolated_pgid != self_pid {
+                anyhow::bail!(
+                    "ryeosd process-group isolation returned PGID {isolated_pgid}, expected {self_pid}"
+                );
+            }
+        }
         let raw_pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, self_pid, 0u32) } as i32;
         if raw_pidfd < 0 {
             return Err(std::io::Error::last_os_error()).context("pidfd_open is unavailable");

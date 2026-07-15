@@ -801,6 +801,7 @@ impl StateStore {
             projection_health.clone(),
         )?;
         let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
+        reconcile_unauthenticated_process_fields(&state_db, &runtime_db)?;
 
         Ok(Self {
             inner: Mutex::new(Inner {
@@ -3879,6 +3880,75 @@ impl StateStore {
     }
 }
 
+/// Reconcile process fields introduced before durable process identities.
+///
+/// Terminal threads and rows absent from the authoritative projection cannot
+/// be resumed, so their pid/pgid values are non-authoritative history and are
+/// safe to clear. A nonterminal row may still name a live process incarnation;
+/// without its boot/start-time identity RyeOS cannot safely signal it or launch
+/// a replacement beside it, so startup remains fail-closed for those rows.
+fn reconcile_unauthenticated_process_fields(
+    state_db: &StateDb,
+    runtime_db: &runtime_db::RuntimeDb,
+) -> Result<()> {
+    const DIAGNOSTIC_SAMPLE_LIMIT: usize = 8;
+
+    let mut after_thread_id: Option<String> = None;
+    let mut cleared_total = 0usize;
+    let mut nonterminal_total = 0usize;
+    let mut nonterminal_sample = Vec::new();
+
+    loop {
+        let rows = runtime_db
+            .unauthenticated_process_rows_after(after_thread_id.as_deref())
+            .context("scan runtime process fields without durable identity")?;
+        if rows.is_empty() {
+            break;
+        }
+        after_thread_id = rows.last().map(|row| row.thread_id.clone());
+
+        let thread_ids = rows
+            .iter()
+            .map(|row| row.thread_id.clone())
+            .collect::<Vec<_>>();
+        let projected_statuses = queries::get_threads_many(state_db.projection(), &thread_ids)?
+            .into_iter()
+            .map(|thread| (thread.thread_id, thread.status))
+            .collect::<HashMap<_, _>>();
+
+        let mut clearable = Vec::with_capacity(rows.len());
+        for row in rows {
+            match projected_statuses.get(&row.thread_id) {
+                None => clearable.push(row.thread_id),
+                Some(status) if is_terminal_status(status) => clearable.push(row.thread_id),
+                Some(status) => {
+                    nonterminal_total += 1;
+                    if nonterminal_sample.len() < DIAGNOSTIC_SAMPLE_LIMIT {
+                        nonterminal_sample.push(format!("{} ({status})", row.thread_id));
+                    }
+                }
+            }
+        }
+        cleared_total += runtime_db
+            .clear_unauthenticated_process_fields(&clearable)
+            .context("clear non-authoritative process fields from terminal runtime history")?;
+    }
+
+    if cleared_total > 0 {
+        tracing::info!(
+            rows = cleared_total,
+            "cleared non-authoritative pid/pgid fields from terminal or unprojected runtime history"
+        );
+    }
+    if nonterminal_total > 0 {
+        bail!(
+            "runtime state contains {nonterminal_total} nonterminal process row(s) without durable identity; refusing startup because their live process incarnation cannot be proven (sample: {})",
+            nonterminal_sample.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Whether a thread's persisted `status` is terminal. The canonical predicate —
 /// `ThreadTerminalStatus`'s string mapping omits daemon-owned `timed_out`, so it
 /// is not usable for this; callers outside this module (e.g. the cancel cascade)
@@ -3905,6 +3975,7 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::{params, Connection};
     use tempfile::tempdir;
 
     struct LocalTestSigner;
@@ -3928,6 +3999,124 @@ mod tests {
             WriteBarrier::new(),
         )
         .expect("state store")
+    }
+
+    #[test]
+    fn startup_clears_unauthenticated_process_fields_only_from_inactive_history() {
+        let tmp = tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let runtime_path = tmp.path().join("runtime.sqlite3");
+
+        {
+            let store = StateStore::new(
+                state_dir.clone(),
+                runtime_path.clone(),
+                Arc::new(LocalTestSigner),
+                WriteBarrier::new(),
+            )
+            .expect("initial state store");
+            store
+                .create_thread(&thread_record("T-terminal", "T-terminal"))
+                .expect("terminal test thread");
+            store
+                .finalize_if_nonterminal(
+                    "T-terminal",
+                    &FinalizeThreadRecord {
+                        status: "completed".into(),
+                        outcome_code: None,
+                        result_json: None,
+                        error_json: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                    },
+                )
+                .expect("finalize test thread");
+        }
+
+        {
+            let runtime = runtime_db::RuntimeDb::open(&runtime_path).expect("runtime db");
+            runtime
+                .insert_thread_runtime("T-unprojected", "T-unprojected")
+                .expect("unprojected runtime row");
+        }
+        {
+            let conn = Connection::open(&runtime_path).expect("raw runtime db");
+            for thread_id in ["T-terminal", "T-unprojected"] {
+                conn.execute(
+                    "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
+                    params![thread_id, 101_i64, 101_i64],
+                )
+                .expect("seed process fields without identity");
+            }
+        }
+
+        let store = StateStore::new(
+            state_dir,
+            runtime_path,
+            Arc::new(LocalTestSigner),
+            WriteBarrier::new(),
+        )
+        .expect("reconciled state store");
+        let inner = store.lock().expect("state store lock");
+        for thread_id in ["T-terminal", "T-unprojected"] {
+            let runtime = inner
+                .runtime_db
+                .get_runtime_info(thread_id)
+                .expect("runtime info")
+                .expect("runtime row");
+            assert_eq!(runtime.pid, None);
+            assert_eq!(runtime.pgid, None);
+            assert_eq!(runtime.process_identity, None);
+        }
+    }
+
+    #[test]
+    fn startup_refuses_nonterminal_process_fields_without_durable_identity() {
+        let tmp = tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let runtime_path = tmp.path().join("runtime.sqlite3");
+
+        {
+            let store = StateStore::new(
+                state_dir.clone(),
+                runtime_path.clone(),
+                Arc::new(LocalTestSigner),
+                WriteBarrier::new(),
+            )
+            .expect("initial state store");
+            store
+                .create_thread(&thread_record("T-active", "T-active"))
+                .expect("active test thread");
+        }
+        {
+            let conn = Connection::open(&runtime_path).expect("raw runtime db");
+            conn.execute(
+                "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
+                params!["T-active", 202_i64, 202_i64],
+            )
+            .expect("seed active process fields without identity");
+        }
+
+        let error = StateStore::new(
+            state_dir,
+            runtime_path.clone(),
+            Arc::new(LocalTestSigner),
+            WriteBarrier::new(),
+        )
+        .expect_err("active process state must fail closed");
+        assert!(error
+            .to_string()
+            .contains("1 nonterminal process row(s) without durable identity"));
+
+        let conn = Connection::open(runtime_path).expect("raw runtime db");
+        let process_fields = conn
+            .query_row(
+                "SELECT pid, pgid FROM thread_runtime WHERE thread_id = ?1",
+                params!["T-active"],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .expect("active process fields");
+        assert_eq!(process_fields, (Some(202), Some(202)));
     }
 
     #[test]

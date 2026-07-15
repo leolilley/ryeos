@@ -105,6 +105,7 @@ pip-delete-this-directory.txt
 local/
 scratch/
 debug_*.py
+.worktrees/
 
 ## Backup files
 *.bak
@@ -148,6 +149,7 @@ bundles/*/.ai/refs/
 bundles/*/.ai/bin/*/
 bundles/*/PUBLISHER_TRUST.toml
 !bundles/.ai/PUBLISHER_TRUST.toml
+bundles/.*.lock
 
 # Local daemon state from dev/test runs
 .local/

@@ -1654,8 +1654,13 @@ pub fn get_facets_many_bounded(
     let mut facets = Vec::new();
     let mut content_bytes = 0usize;
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        // The CASE guards appear before the IN list in SQL text. Use explicit
+        // parameter numbers for the ids: if these were anonymous `?` slots,
+        // SQLite would number them after the earlier ?N guards and the actual
+        // parameter count would exceed the values supplied for every batch
+        // containing more than one thread.
+        let placeholders = (1..=batch.len())
+            .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(",");
         let key_bound_param = batch.len() + 1;
@@ -2458,6 +2463,33 @@ mod tests {
             list_thread_artifacts_bounded(&db, "T-1", 512, 1024, 256 * 1024, 4 * 1024 * 1024)
                 .unwrap();
         assert!(arts.is_empty());
+    }
+
+    #[test]
+    fn bounded_many_facets_binds_multiple_thread_ids_before_guard_params() {
+        let db = test_db();
+        for (thread_id, key, value) in [
+            ("T-1", "fleet", b"alpha".as_slice()),
+            ("T-2", "team", b"beta".as_slice()),
+        ] {
+            db.connection()
+                .execute(
+                    "INSERT INTO thread_facets (thread_id, key, value, updated_at)
+                     VALUES (?1, ?2, ?3, '2026-01-01T00:00:00Z')",
+                    rusqlite::params![thread_id, key, value],
+                )
+                .unwrap();
+        }
+
+        let thread_ids = vec!["T-1".to_string(), "T-2".to_string()];
+        let facets = get_facets_many_bounded(&db, &thread_ids, 8, 32, 32, 128).unwrap();
+        assert_eq!(facets.len(), 2);
+        assert_eq!(facets[0].thread_id, "T-1");
+        assert_eq!(facets[0].key, "fleet");
+        assert_eq!(facets[0].value.as_slice(), b"alpha");
+        assert_eq!(facets[1].thread_id, "T-2");
+        assert_eq!(facets[1].key, "team");
+        assert_eq!(facets[1].value.as_slice(), b"beta");
     }
 
     #[test]

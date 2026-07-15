@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:f90caf55420ea63638c871258ec4a8551e1f23512e9627d509ab3f039ba5137d:bFS41pCLFNQlU4BisVYDWRQT9tPSTGr9aHCw/aB+Ztqvwj0ds0nFjGM1yC1jkwdgMYnymZfP0kwr5xE7hljxCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:4faeb7eff9af68431cd62beb26d9283449db7f5966c5e8aa67d1026408291117:TiK7cRFzChv6YiEJTO5DNZKBsdxVACWQUhL4l/xcCPw58D5E6yajo5V96G7Gn3+kxHrGiXC1Rf5+GV9W5XBIBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "gc"
@@ -9,7 +9,7 @@ description: "Remove expired sessions and exhausted or expired invites."
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "gc"
   input_data: "{params_json}"
   timeout_secs: 15

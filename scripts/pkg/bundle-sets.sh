@@ -25,11 +25,11 @@ ryeos_bundle_set_names() {
 }
 
 # Bundles in a set that own compiled binaries populate must stage/clean —
-# every set member except `central-auth` (Python source bin, committed).
+# every set member except `central-auth` (Python tool-support source, committed).
 ryeos_bundle_set_bin_managed_names() {
   local name
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
-    # central-auth (Python source) and tv-tracker-authoring (reuses bin:core/
+# central-auth (Python tool support) and tv-tracker-authoring (reuses bin:core/
     # ryeos-core-tools) own no compiled binaries — exclude from bin staging.
     [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" ]] && continue
     printf '%s\n' "$name"
