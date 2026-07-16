@@ -509,16 +509,6 @@ pricing:
                     provider_dir.join("audit-noauth.yaml"),
                     lillux::signature::sign_content(provider, &fixture.publisher, "#", None),
                 )?;
-                let routing = r#"tiers:
-  general:
-    provider: audit-noauth
-    model: audit-model
-    context_window: 1024
-"#;
-                std::fs::write(
-                    config_root.join("model_routing.yaml"),
-                    lillux::signature::sign_content(routing, &fixture.publisher, "#", None),
-                )?;
                 Ok(())
             },
         )
@@ -532,6 +522,19 @@ pricing:
     // YAML so engine resolution succeeds and the dispatch loop reaches
     // the real directive runtime via the registry hop.
     let project = tempfile::tempdir().expect("project tempdir");
+    let routing_dir = project.path().join(".ai/config/ryeos-runtime");
+    std::fs::create_dir_all(&routing_dir).expect("create project routing dir");
+    let routing = r#"tiers:
+  general:
+    provider: audit-noauth
+    model: audit-model
+    context_window: 1024
+"#;
+    std::fs::write(
+        routing_dir.join("model_routing.yaml"),
+        lillux::signature::sign_content(routing, &fixture.publisher, "#", None),
+    )
+    .expect("write project model routing");
     let dir = project.path().join(".ai/directives/p16");
     std::fs::create_dir_all(&dir).expect("create project directive dir");
     let body = r#"---
@@ -539,6 +542,8 @@ name: flow
 category: "p16"
 description: "P1.6 root/runtime split pin"
 inputs: []
+model:
+  tier: general
 ---
 # P1.6
 "#;
@@ -554,10 +559,11 @@ inputs: []
         .await
         .expect("post /execute");
 
-    // The dispatch may succeed or fail when the runtime contacts the
-    // deliberately unreachable no-auth fixture provider. The KEY assertion is
-    // the thread row identity below — regardless of dispatch outcome.
-    let _ = (status, body);
+    // The deliberately unreachable provider may make the execution response a
+    // success or an error. The persisted subject row below is the authoritative
+    // proof that launch preparation reached the managed thread boundary; retain
+    // the response so any pre-launch fixture regression is explicit in failure
+    // diagnostics rather than discarded.
 
     // Open the projection DB and find the thread row created for
     // this directive invocation. ProjectionDb writes happen on the
@@ -587,8 +593,9 @@ inputs: []
         .unwrap_or_else(|| {
             panic!(
                 "no thread row with subject item_ref 'directive:p16/flow' \
-                 — root/runtime split regressed. All rows: {:#?}",
-                threads
+                 — root/runtime split regressed. response_status={status}; \
+                 response={body:#}; all rows: {:#?}",
+                threads,
             )
         });
 

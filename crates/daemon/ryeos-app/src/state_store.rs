@@ -1065,6 +1065,41 @@ fn has_indexed_collection_events(events: &[NewEventRecord]) -> bool {
     })
 }
 
+const LAUNCH_ATTEMPT_AUDIT_TYPES: [ryeos_runtime::RuntimeEventType; 3] = [
+    ryeos_runtime::RuntimeEventType::AsLaunchedResolution,
+    ryeos_runtime::RuntimeEventType::AsLaunchedRefBindings,
+    ryeos_runtime::RuntimeEventType::RuntimeLaunchFacts,
+];
+
+fn validate_launch_attempt_audit(events: &[NewEventRecord]) -> Result<()> {
+    if events.len() != LAUNCH_ATTEMPT_AUDIT_TYPES.len() {
+        bail!(
+            "launch attempt audit must contain exactly {} events, received {}",
+            LAUNCH_ATTEMPT_AUDIT_TYPES.len(),
+            events.len()
+        );
+    }
+    for (index, (event, expected)) in events.iter().zip(LAUNCH_ATTEMPT_AUDIT_TYPES).enumerate() {
+        if event.event_type != expected.as_str() {
+            bail!(
+                "launch attempt audit event {index} must be '{}', received '{}'",
+                expected.as_str(),
+                event.event_type
+            );
+        }
+        let expected_storage = expected.storage_class().as_str();
+        if event.storage_class != expected_storage {
+            bail!(
+                "launch attempt audit event '{}' must use canonical storage class '{}', received '{}'",
+                event.event_type,
+                expected_storage,
+                event.storage_class
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_artifact_shape(artifact_type: &str, metadata: Option<&Value>) -> Result<usize> {
     if artifact_type.is_empty() || artifact_type.len() > MAX_THREAD_ARTIFACT_TYPE_BYTES {
         bail!("artifact_type must be 1..={MAX_THREAD_ARTIFACT_TYPE_BYTES} UTF-8 bytes");
@@ -5377,6 +5412,87 @@ impl StateStore {
         .map(Some)
     }
 
+    /// Append the exact daemon-authored launch-attempt audit immediately before
+    /// a claimed managed-runtime spawn. Unlike the runtime callback event
+    /// boundary, this deliberately admits a still-`created` row: continuation
+    /// and follow successors must remain `created` until their process is
+    /// attached, but their recomputed attempt authority must be durable before
+    /// the spawn handoff becomes observable.
+    ///
+    /// Every lifecycle and operational guard is re-checked under the same state
+    /// lock as the append. This remains a daemon-only boundary; runtime-authored
+    /// events continue to require an already-`running` thread through
+    /// [`Self::append_events_if_thread_running`].
+    #[tracing::instrument(
+        name = "state:append_launch_attempt_audit",
+        skip(self, events),
+        fields(
+            thread_id = %thread_id,
+            chain_root_id = %chain_root_id,
+            event_count = events.len(),
+        )
+    )]
+    pub(crate) fn append_launch_attempt_audit(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+    ) -> Result<Vec<PersistedEventRecord>> {
+        validate_launch_attempt_audit(events)?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("launch attempt audit thread not found: {thread_id}"))?;
+        if thread.chain_root_id != chain_root_id {
+            bail!(
+                "launch attempt audit chain mismatch for {thread_id}: expected {}, received {chain_root_id}",
+                thread.chain_root_id
+            );
+        }
+        if !matches!(
+            ThreadStatus::from_str_lossy(&thread.status),
+            Some(ThreadStatus::Created | ThreadStatus::Running)
+        ) {
+            bail!(
+                "launch attempt audit requires a created or running thread; {thread_id} is '{}'",
+                thread.status
+            );
+        }
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("launch attempt audit refused: process attachment admission is closed");
+        }
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow!("runtime row missing while appending launch audit: {thread_id}")
+        })?;
+        if let Some(intent) = runtime.stop_intent {
+            bail!(
+                "launch attempt audit refused: thread {thread_id} has durable stop intent '{}'",
+                intent.as_str()
+            );
+        }
+        if runtime.pid.is_some() || runtime.pgid.is_some() || runtime.process_identity.is_some() {
+            bail!(
+                "launch attempt audit refused: thread {thread_id} already has a process attachment"
+            );
+        }
+        if g.runtime_db.get_launch_claim(thread_id)?.is_none() {
+            bail!("launch attempt audit refused: thread {thread_id} has no active launch claim");
+        }
+
+        append_events_locked(
+            &g,
+            Some(permit.cas_guard()),
+            chain_root_id,
+            thread_id,
+            events,
+        )
+    }
+
     /// The thread a live tail of `chain_root_id` should currently follow: the
     /// owner of the chain's highest-`chain_seq` event. `None` when the chain
     /// has no events yet.
@@ -6099,6 +6215,188 @@ mod tests {
             usage_subject_asserted_by: None,
             captured_history_policy,
         }
+    }
+
+    fn launch_attempt_audit_events() -> Vec<NewEventRecord> {
+        LAUNCH_ATTEMPT_AUDIT_TYPES
+            .into_iter()
+            .enumerate()
+            .map(|(index, event_type)| NewEventRecord {
+                event_type: event_type.as_str().to_string(),
+                storage_class: event_type.storage_class().as_str().to_string(),
+                payload: json!({"fixture": index}),
+            })
+            .collect()
+    }
+
+    fn replayed_event_types(store: &StateStore, thread_id: &str) -> Vec<String> {
+        store
+            .replay_events(thread_id, Some(thread_id), None, 32, 1024 * 1024)
+            .expect("replay thread events")
+            .events
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect()
+    }
+
+    #[test]
+    fn claimed_created_thread_accepts_exact_launch_attempt_audit() {
+        let store = test_store();
+        let thread_id = "T-launch-audit";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let audit = launch_attempt_audit_events();
+
+        // The runtime-authored boundary remains running-only.
+        assert!(store
+            .append_events_if_thread_running(thread_id, thread_id, &audit)
+            .expect("runtime append guard")
+            .is_none());
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+
+        assert_eq!(
+            store
+                .claim_thread_launch(thread_id, "claim-audit", "daemon:test")
+                .expect("claim launch"),
+            runtime_db::LaunchClaimOutcome::Claimed
+        );
+        let persisted = store
+            .append_launch_attempt_audit(thread_id, thread_id, &audit)
+            .expect("append claimed launch audit");
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(
+            persisted
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            LAUNCH_ATTEMPT_AUDIT_TYPES
+                .iter()
+                .map(|event_type| event_type.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            replayed_event_types(&store, thread_id),
+            [
+                "thread_created",
+                ryeos_runtime::RuntimeEventType::AsLaunchedResolution.as_str(),
+                ryeos_runtime::RuntimeEventType::AsLaunchedRefBindings.as_str(),
+                ryeos_runtime::RuntimeEventType::RuntimeLaunchFacts.as_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_attempt_audit_rejections_do_not_mutate_the_chain() {
+        let store = test_store();
+        let thread_id = "T-launch-audit-reject";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let audit = launch_attempt_audit_events();
+
+        let unclaimed = store
+            .append_launch_attempt_audit(thread_id, thread_id, &audit)
+            .expect_err("unclaimed launch audit must fail");
+        assert!(unclaimed.to_string().contains("no active launch claim"));
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+
+        assert_eq!(
+            store
+                .claim_thread_launch(thread_id, "claim-reject", "daemon:test")
+                .expect("claim launch"),
+            runtime_db::LaunchClaimOutcome::Claimed
+        );
+        let mut wrong_event = audit.clone();
+        wrong_event.swap(0, 1);
+        let wrong_event_error = store
+            .append_launch_attempt_audit(thread_id, thread_id, &wrong_event)
+            .expect_err("out-of-order audit must fail");
+        assert!(wrong_event_error.to_string().contains("event 0"));
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+
+        let mut wrong_storage = audit;
+        wrong_storage[0].storage_class = "journal".to_string();
+        let wrong_storage_error = store
+            .append_launch_attempt_audit(thread_id, thread_id, &wrong_storage)
+            .expect_err("non-canonical audit storage must fail");
+        assert!(wrong_storage_error
+            .to_string()
+            .contains("canonical storage class"));
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+    }
+
+    #[test]
+    fn launch_attempt_audit_rejects_terminal_and_process_attached_rows_without_mutation() {
+        let audit = launch_attempt_audit_events();
+
+        let terminal_store = test_store();
+        let terminal_id = "T-launch-audit-terminal";
+        terminal_store
+            .create_thread_for_test(&thread_record(terminal_id, terminal_id))
+            .expect("create terminal fixture");
+        terminal_store
+            .claim_thread_launch(terminal_id, "claim-terminal", "daemon:test")
+            .expect("claim terminal fixture");
+        terminal_store
+            .finalize_thread(
+                terminal_id,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Completed.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                },
+            )
+            .expect("finalize fixture");
+        let terminal_before = replayed_event_types(&terminal_store, terminal_id);
+        let terminal_error = terminal_store
+            .append_launch_attempt_audit(terminal_id, terminal_id, &audit)
+            .expect_err("terminal launch audit must fail");
+        assert!(terminal_error
+            .to_string()
+            .contains("requires a created or running thread"));
+        assert_eq!(
+            replayed_event_types(&terminal_store, terminal_id),
+            terminal_before
+        );
+
+        let attached_store = test_store();
+        let attached_id = "T-launch-audit-attached";
+        attached_store
+            .create_thread_for_test(&thread_record(attached_id, attached_id))
+            .expect("create attached fixture");
+        attached_store
+            .claim_thread_launch(attached_id, "claim-attached", "daemon:test")
+            .expect("claim attached fixture");
+        attached_store
+            .attach_thread_process(
+                attached_id,
+                12345,
+                67890,
+                &crate::process::ExecutionProcessIdentity {
+                    schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 12345,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 67890,
+                    group_leader_start_time_ticks: 20,
+                },
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+            )
+            .expect("attach fixture process");
+        let attached_before = replayed_event_types(&attached_store, attached_id);
+        let attached_error = attached_store
+            .append_launch_attempt_audit(attached_id, attached_id, &audit)
+            .expect_err("process-attached launch audit must fail");
+        assert!(attached_error.to_string().contains("process attachment"));
+        assert_eq!(
+            replayed_event_types(&attached_store, attached_id),
+            attached_before
+        );
     }
 
     fn continuation_resume_context(

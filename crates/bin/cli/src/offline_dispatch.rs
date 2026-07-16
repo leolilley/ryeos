@@ -1414,8 +1414,31 @@ import sys
 req = json.load(sys.stdin)
 cmd = req.get("command")
 
-if cmd in ("validate_parser_config", "validate_composer_config"):
+if cmd == "validate_parser_config":
     print(json.dumps({"result": "validate_ok"}))
+elif cmd == "validate_composer_config":
+    config = req.get("composer_config")
+    requirements = req.get("field_requirements", [])
+    if config not in (None, {}):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer takes no config",
+        }))
+    elif any(not item.get("field") for item in requirements):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer field requirement must not be empty",
+        }))
+    elif any(item.get("semantics") != "root_verbatim" for item in requirements):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer only preserves root fields verbatim",
+        }))
+    else:
+        print(json.dumps({
+            "result": "validate_composer_ok",
+            "field_requirements": requirements,
+        }))
 elif cmd == "parse":
     try:
         import yaml
