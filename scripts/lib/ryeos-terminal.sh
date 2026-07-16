@@ -182,7 +182,7 @@ _ryeos_term_tone() {
 
 _ryeos_term_clamp() {
     local value="$1" limit="$2" marker='...' marker_width=3
-    local current_width=0 index=0 ch ch_width value_width
+    local current_width=0 index=0 ch ch_code ch_width value_width
     (( limit < 1 )) && limit=1
     value_width="$(_ryeos_term_visible_width "$value")"
     if (( value_width <= limit )); then
@@ -199,7 +199,8 @@ _ryeos_term_clamp() {
     fi
     while (( index < ${#value} )); do
         ch="${value:index:1}"
-        if [[ "$ch" =~ ^[[:ascii:]]$ ]]; then ch_width=1; else ch_width=2; fi
+        printf -v ch_code '%d' "'$ch"
+        if (( ch_code <= 127 )); then ch_width=1; else ch_width=2; fi
         (( current_width + ch_width > limit - marker_width )) && break
         printf '%s' "$ch"
         current_width=$(( current_width + ch_width ))
@@ -209,10 +210,11 @@ _ryeos_term_clamp() {
 }
 
 _ryeos_term_visible_width() {
-    local value="$1" width=0 index ch
+    local value="$1" width=0 index ch ch_code
     for (( index=0; index<${#value}; index++ )); do
         ch="${value:index:1}"
-        if [[ "$ch" =~ ^[[:ascii:]]$ ]]; then
+        printf -v ch_code '%d' "'$ch"
+        if (( ch_code <= 127 )); then
             width=$(( width + 1 ))
         else
             width=$(( width + 2 ))

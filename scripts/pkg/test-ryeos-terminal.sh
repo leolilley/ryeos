@@ -16,6 +16,16 @@ after="$(set +o)"
     exit 1
 }
 
+visible_width="$(_ryeos_term_visible_width 'A界' 2>"$tmp/width-errors")"
+[[ "$visible_width" == 3 ]] || {
+    printf 'mixed ASCII/Unicode width was %s, expected 3\n' "$visible_width" >&2
+    exit 1
+}
+if [[ -s "$tmp/width-errors" ]]; then
+    printf 'visible-width calculation emitted diagnostics\n' >&2
+    exit 1
+fi
+
 RYEOS_TTY=never ryeos_term_init
 RYEOS_TTY=never ryeos_term_begin VERIFY "plain phase" 2>"$tmp/plain"
 RYEOS_TTY=never ryeos_term_update "plain update" "detail" 2>>"$tmp/plain"
