@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:4c4e0c77423a65451ea35810e2d7102c76b2e21b6610e2a072b14ab5a53cf057:u70lCNGtuv6cKufwfDbbXyTS5zMXACuz2HKmaPCPF2EzMq3Op5vC0Y7y5GPbjxtRXWMdO3LcYnylU4FClpmjCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:edeaf5ceca33a6b5a29b726380370f1194f3f6eab8ad7b1261dbbfde3a242bcd:bkNrfLflH/hJbNRKoPB3S3iiCA1NWR+9evdiAhUOUVRVvAJaFEhdoLJ4/IdLLkL4xOU6fZDxrSxkZ3oEPrXnAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -112,7 +112,7 @@ Authorized tool and runtime processes can be wrapped in an immutable
 node-owned Bubblewrap policy. Items cannot activate the boundary or broaden its
 filesystem, network, environment, or resource controls.
 
-→ [Execution Sandbox](node/execution-sandbox.md)
+→ [Execution Isolation](node/execution-isolation.md)
 
 ### 11. Signed Configuration as Compilation
 

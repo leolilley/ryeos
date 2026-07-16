@@ -63,7 +63,7 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
         }
     }
 
-    // Runtime sandboxes receive the callback UDS, so privileged lifecycle
+    // Runtime isolationes receive the callback UDS, so privileged lifecycle
     // control must never be routed over that socket. Signal the positively
     // identified local daemon instead; SIGTERM enters the same graceful
     // shutdown coordinator as Ctrl-C.

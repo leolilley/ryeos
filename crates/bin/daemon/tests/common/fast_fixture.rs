@@ -130,7 +130,7 @@ impl FastFixture {
 ///
 /// ```text
 /// <state>/.ai/node/identity/private_key.pem            (deterministic node Ed25519)
-/// <state>/.ai/node/sandbox.yaml                        (node sandbox policy)
+/// <state>/.ai/node/isolation.yaml                        (node isolation policy)
 /// <state>/.ai/node/command_registration/default.yaml   (deterministic node-signed seed)
 /// <state>/.ai/node/vault/private_key.pem               (deterministic vault X25519)
 /// <state>/.ai/node/vault/public_key.pem
@@ -181,13 +181,12 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
     }
 
     fs::write(
-        state_path.join(AI_DIR).join("node").join("sandbox.yaml"),
-        "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n\
-         executable: /usr/bin/bwrap\nfilesystem:\n  readable:\n    - \"{node_public_identity}\"\n    - \"{daemon_socket}\"\n    - \"{bundle_roots}\"\n    - \"{node_trusted_keys}\"\n    - \"{verified_code}\"\n  writable:\n    - \"{project}\"\n    - \"{checkpoint_dir}\"\n\
+        state_path.join(AI_DIR).join("node").join("isolation.yaml"),
+        "version: 1\nmode: disabled\nbackend:\n  bundle: sandbox-linux-bubblewrap\n  implementation: linux-bubblewrap\nfilesystem:\n  readable:\n    - \"{node_public_identity}\"\n    - \"{daemon_socket}\"\n    - \"{bundle_roots}\"\n    - \"{node_trusted_keys}\"\n    - \"{verified_code}\"\n  writable:\n    - \"{project}\"\n    - \"{checkpoint_dir}\"\n\
          network:\n  mode: host\nenvironment:\n  allow:\n    - \"*\"\n\
          limits:\n  open_files: 1024\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
     )
-    .context("write node sandbox policy")?;
+    .context("write node isolation policy")?;
 
     // ── Node Ed25519 identity ──
     let node_identity_dir = state_path.join(AI_DIR).join("node").join("identity");

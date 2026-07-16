@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:e50c989e1a174a362a03211d402e1eabe57fc10488c2fdd2efaef30a28417d55:lhuO0H6ukzCjx0qoHyjDbQfiZiYTtjlokhf/Zm0JTFrbvYCJBqg+Kvxac4Zk/b1BS2eYcsT9hm/UO4ZfOKlPAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:b70ba7144224effad8994bb75c220065914fba4a44a10f918f6eee8a2440590b:zM+/gaXJO6szmBtsn4q+RczIKq7mqqa9YdmvGdWwcJt3Bk6NTT0j8nBa6S/bihcVDGv2yk22re7xiupZlZd1Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, health, identity, status]
@@ -16,5 +16,5 @@ Invariant: health and public identity surfaces are safe unauthenticated reads; s
   snapshot's mode, schema version, source path, and policy digest.
 - `system/ingest-ignore` and `system/push-head` support CAS ingestion and remote pushed-head workflows.
 
-See [Execution Sandbox](../node/execution-sandbox.md) for snapshot and restart
+See [Execution Isolation](../node/execution-isolation.md) for snapshot and restart
 semantics.

@@ -219,6 +219,9 @@ pub struct SubprocessResult {
     pub duration_ms: f64,
     pub pid: u32,
     pub timed_out: bool,
+    /// Canonical isolation-layer diagnostic emitted by a trusted launcher
+    /// before target exec. Lillux validates only the strict outer envelope.
+    pub launcher_refusal: Option<String>,
     /// Set when a node-owned stdout/stderr retention limit was crossed. This
     /// outcome always makes `success` false, independently of the exit status.
     pub output_limit_exceeded: Option<OutputLimitExceeded>,
@@ -226,6 +229,25 @@ pub struct SubprocessResult {
     pub stdout_truncated: bool,
     /// Whether bytes beyond the retained stderr prefix were drained/discarded.
     pub stderr_truncated: bool,
+}
+
+#[derive(Debug)]
+enum InitialLauncherStatus {
+    Target(u32),
+    Refused(String),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LauncherTargetDocument {
+    #[serde(rename = "child-pid")]
+    child_pid: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LauncherRefusalDocument {
+    refused: Box<serde_json::value::RawValue>,
 }
 
 /// Validate retained descriptors and make them inheritable only inside this
@@ -426,6 +448,7 @@ impl RunningProcess {
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: false,
+            launcher_refusal: None,
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
@@ -449,6 +472,7 @@ impl RunningProcess {
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: false,
+            launcher_refusal: None,
             output_limit_exceeded: output_limit_exceeded(&out, &err),
             stdout_truncated: out.truncated,
             stderr_truncated: err.truncated,
@@ -538,6 +562,7 @@ impl RunningProcess {
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: true,
+            launcher_refusal: None,
             output_limit_exceeded: output_limit_exceeded(&out, &err),
             stdout_truncated: out.truncated,
             stderr_truncated: err.truncated,
@@ -564,6 +589,7 @@ impl RunningProcess {
             duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
             pid: self.pid,
             timed_out: false,
+            launcher_refusal: None,
             output_limit_exceeded: Some(exceeded),
             stdout_truncated: out.truncated,
             stderr_truncated: err.truncated,
@@ -839,7 +865,20 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
         let setup_deadline = supervised_setup_deadline(start, timeout);
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
         let reported_pid = match status_rx.recv_timeout(setup_wait) {
-            Ok(Ok(pid)) => pid,
+            Ok(Ok(InitialLauncherStatus::Target(pid))) => pid,
+            Ok(Ok(InitialLauncherStatus::Refused(diagnostic))) => {
+                kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
+                let _ = child.wait();
+                drain_stop.store(true, Ordering::Release);
+                if let Some(handle) = stdin_thread.take() {
+                    let _ = handle.join();
+                }
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                let _ = status_thread.join();
+                return Err(spawn_failure_with_launcher_refusal(start, diagnostic));
+            }
             Ok(Err(error)) => {
                 kill_process_group_if_safe(wrapper_pgid);
                 let _ = child.kill();
@@ -1064,7 +1103,7 @@ fn configure_nonblocking_fd<T>(_reader: &mut T) -> Result<(), String> {
 
 fn spawn_supervised_launcher_status_reader(
     mut status: SupervisedProcessStatus,
-    initial_tx: std::sync::mpsc::Sender<Result<u32, String>>,
+    initial_tx: std::sync::mpsc::Sender<Result<InitialLauncherStatus, String>>,
     stop: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>, String> {
     configure_nonblocking_fd(&mut status.reader)
@@ -1129,29 +1168,133 @@ fn spawn_supervised_launcher_status_reader(
 
 fn report_supervised_launcher_status_line(
     line: &[u8],
-    initial_tx: &mut Option<std::sync::mpsc::Sender<Result<u32, String>>>,
+    initial_tx: &mut Option<std::sync::mpsc::Sender<Result<InitialLauncherStatus, String>>>,
 ) {
-    let document: serde_json::Value = match serde_json::from_slice(line) {
-        Ok(document) => document,
-        Err(error) => {
-            if let Some(tx) = initial_tx.take() {
-                let _ = tx.send(Err(format!("invalid JSON status document: {error}")));
-            }
-            return;
-        }
+    let result = match reject_duplicate_status_keys(line) {
+        Err(error) => Err(format!("invalid JSON status document: {error}")),
+        Ok(()) => match serde_json::from_slice::<LauncherTargetDocument>(line) {
+            Ok(document) => Ok(InitialLauncherStatus::Target(document.child_pid)),
+            Err(target_error) => match serde_json::from_slice::<LauncherRefusalDocument>(line) {
+                Ok(document) => Ok(InitialLauncherStatus::Refused(
+                    document.refused.get().to_string(),
+                )),
+                Err(refusal_error) => Err(format!(
+                    "invalid JSON status document (target: {target_error}; refusal: {refusal_error})"
+                )),
+            },
+        },
     };
-    let Some(value) = document.get("child-pid") else {
-        return;
-    };
-    let result = value
-        .as_u64()
-        .ok_or_else(|| "child-pid must be an unsigned integer".to_string())
-        .and_then(|pid| {
-            u32::try_from(pid).map_err(|_| format!("child-pid {pid} exceeds the host PID range"))
-        });
     if let Some(tx) = initial_tx.take() {
         let _ = tx.send(result);
     }
+}
+
+fn reject_duplicate_status_keys(line: &[u8]) -> Result<(), serde_json::Error> {
+    const MAX_STATUS_JSON_DEPTH: usize = 32;
+
+    struct StrictStatusJson {
+        depth: usize,
+    }
+
+    impl<'de> serde::de::DeserializeSeed<'de> for StrictStatusJson {
+        type Value = ();
+
+        fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(StrictStatusJsonVisitor { depth: self.depth })
+        }
+    }
+
+    struct StrictStatusJsonVisitor {
+        depth: usize,
+    }
+
+    impl<'de> serde::de::Visitor<'de> for StrictStatusJsonVisitor {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded launcher status document with unique object keys")
+        }
+
+        fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            if self.depth >= MAX_STATUS_JSON_DEPTH {
+                return Err(serde::de::Error::custom(
+                    "launcher status JSON is too deeply nested",
+                ));
+            }
+            while sequence
+                .next_element_seed(StrictStatusJson {
+                    depth: self.depth + 1,
+                })?
+                .is_some()
+            {}
+            Ok(())
+        }
+
+        fn visit_map<A>(self, mut mapping: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            if self.depth >= MAX_STATUS_JSON_DEPTH {
+                return Err(serde::de::Error::custom(
+                    "launcher status JSON is too deeply nested",
+                ));
+            }
+            let mut keys = std::collections::BTreeSet::new();
+            while let Some(key) = mapping.next_key::<String>()? {
+                if !keys.insert(key.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate JSON object key `{key}`"
+                    )));
+                }
+                mapping.next_value_seed(StrictStatusJson {
+                    depth: self.depth + 1,
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(line);
+    serde::de::DeserializeSeed::deserialize(StrictStatusJson { depth: 0 }, &mut deserializer)?;
+    deserializer.end()
 }
 
 #[cfg(unix)]
@@ -1304,6 +1447,23 @@ fn spawn_failure(start: Instant, reason: impl Into<String>) -> SubprocessResult 
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
         pid: 0,
         timed_out: false,
+        launcher_refusal: None,
+        output_limit_exceeded: None,
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+fn spawn_failure_with_launcher_refusal(start: Instant, diagnostic: String) -> SubprocessResult {
+    SubprocessResult {
+        success: false,
+        stdout: String::new(),
+        stderr: "Failed to spawn: supervised launcher refused target execution".to_string(),
+        exit_code: -1,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+        pid: 0,
+        timed_out: false,
+        launcher_refusal: Some(diagnostic),
         output_limit_exceeded: None,
         stdout_truncated: false,
         stderr_truncated: false,

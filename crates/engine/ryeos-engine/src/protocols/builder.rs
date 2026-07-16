@@ -4,7 +4,7 @@
 //! "protocols-as-data" structurally true. It consumes a verified
 //! `ProtocolDescriptor` and dispatch-time inputs (`BuildRequest`),
 //! walks the descriptor's vocabulary fields, and emits a fully-formed
-//! `SubprocessSpec` ready for translation and `SandboxRuntime::apply`.
+//! `SubprocessSpec` ready for translation and `IsolationRuntime::apply`.
 //!
 //! ## Design invariants
 //!

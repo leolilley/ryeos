@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The RyeOS strict sandbox uses Bubblewrap's fd-native bind options so validation
-# and mount execution refer to the same opened inode. Ubuntu 24.04 ships 0.9.x,
-# which predates those options, so CI installs one pinned upstream release.
+# Build the exact Bubblewrap payload staged into the signed isolation bundle.
+# The resulting executable exists only as payload for the signed bundle.
+BWRAP_OUTPUT="${BWRAP_OUTPUT:?BWRAP_OUTPUT must name the bundle payload path}"
 bwrap_compatible() {
     local executable="$1"
     local output major minor help
@@ -20,7 +20,7 @@ bwrap_compatible() {
     done
 }
 
-if [[ -x /usr/bin/bwrap ]] && bwrap_compatible /usr/bin/bwrap; then
+if [[ -x "$BWRAP_OUTPUT" ]] && bwrap_compatible "$BWRAP_OUTPUT"; then
     exit 0
 fi
 
@@ -46,6 +46,7 @@ meson setup "$build_dir" "$source_dir" \
     -Dsupport_setuid=false \
     -Dtests=false
 meson compile -C "$build_dir"
-sudo meson install -C "$build_dir"
+mkdir -p "$(dirname "$BWRAP_OUTPUT")"
+install -m 0755 "$build_dir/bwrap" "$BWRAP_OUTPUT"
 
-bwrap_compatible /usr/bin/bwrap
+bwrap_compatible "$BWRAP_OUTPUT"

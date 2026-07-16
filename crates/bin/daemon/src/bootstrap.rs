@@ -588,17 +588,16 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// daemon bootstrap) for daemon-written `kind: node` items to verify on
 /// next boot.
 ///
-/// Returns the engine, node-config snapshot, and the immutable sandbox snapshot
-/// selected after runtime admission. The returned sandbox may add a captured
-/// Bubblewrap backend when a disabled general policy still has a registered
-/// mandatory launch preparer.
+/// Returns the engine, node-config snapshot, and the immutable isolation snapshot
+/// selected after runtime admission. A mandatory launch preparer may cause the
+/// returned snapshot to capture its selected isolation backend even when the
+/// general policy is disabled.
 pub fn load_node_config_two_phase(
     config: &Config,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
 ) -> Result<(
     Arc<Engine>,
     Arc<NodeConfigSnapshot>,
-    Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
     let app_root = &config.app_root;
 
@@ -626,6 +625,21 @@ pub fn load_node_config_two_phase(
     let effective_bundle_roots: Vec<PathBuf> =
         bundle_records.iter().map(|b| b.path.clone()).collect();
 
+    let isolation_backend = ryeos_app::engine_init::resolve_isolation_backend(
+        app_root,
+        &bundle_records,
+        &bootstrap_trust_store,
+    )
+    .context("Phase 1: resolve selected isolation backend")?;
+    let isolation = Arc::new(
+        ryeos_engine::isolation::IsolationRuntime::load_for_daemon(
+            app_root,
+            &config.uds_path,
+            isolation_backend,
+        )
+        .context("Phase 1: load node isolation policy")?,
+    );
+
     tracing::info!(
         app_root = %app_root.display(),
         bundle_count = effective_bundle_roots.len(),
@@ -634,8 +648,8 @@ pub fn load_node_config_two_phase(
     );
 
     // ── Build engine ──
-    let (engine, sandbox) =
-        crate::engine_init::build_engine(config, &effective_bundle_roots, sandbox)?;
+    let (engine, isolation) =
+        crate::engine_init::build_engine(config, &effective_bundle_roots, isolation)?;
     let engine = Arc::new(engine);
 
     // ── Phase 2: full node-config scan ──
@@ -655,7 +669,7 @@ pub fn load_node_config_two_phase(
         "Phase 2: node config loaded"
     );
 
-    Ok((engine, snapshot, sandbox))
+    Ok((engine, snapshot, isolation))
 }
 
 #[cfg(test)]

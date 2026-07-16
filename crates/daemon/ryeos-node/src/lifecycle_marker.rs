@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn running_marker_with_dead_pid_is_detectable() {
-        // A pid that is essentially never alive in the test sandbox.
+        // A pid that is essentially never alive in the test isolation.
         let tmp = tempfile::tempdir().unwrap();
         let marker = LifecycleMarker::Running {
             pid: u32::MAX - 1,

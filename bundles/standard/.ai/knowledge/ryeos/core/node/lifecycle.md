@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:c407608ec0696bb335e2a49e036a695a828cf83da392e2723496769956a29f34:E4x14T0O9HVvXpEzWxnLvukV8ieT2MtE7ZmhsJ40zpG8+tStBXpIobkD5yXWJzsLqjzb9pFSjl2Wy+bLgsUCCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:1f61b3edfe8ca830196410da6285d243d74c5833e90848bc6cebd9dd3a1d4dce:AkvB+0WY32i6pAKd3/niISOJ3UH209BgRgwE4UCHO4J3U7qXTxZJgiBAI4HefToGF5lgxJCl9cPugA7AZbA/DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
@@ -125,4 +125,4 @@ preflight for normal dispatch only; lifecycle verbs still ignore it.
 
 Sandbox policy is not a live-reload surface. Validate edits with
 `ryeos node doctor`, then stop/start the node so startup resolves a new immutable
-snapshot. See [Execution Sandbox](execution-sandbox.md).
+snapshot. See [Execution Isolation](execution-isolation.md).

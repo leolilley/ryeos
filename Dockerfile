@@ -7,7 +7,7 @@
 FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev ca-certificates && \
+        pkg-config libssl-dev ca-certificates curl xz-utils meson ninja-build libcap-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -44,7 +44,7 @@ FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883
 # so project images can install their own Python tool dependencies without
 # rebuilding the RyeOS base from scratch.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        bubblewrap ca-certificates python3 python3-venv python3-pip && \
+        ca-certificates python3 python3-venv python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=node-runtime /usr/local/ /usr/local/

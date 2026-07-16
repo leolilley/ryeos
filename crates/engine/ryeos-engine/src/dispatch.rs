@@ -74,7 +74,7 @@ fn dispatch_subprocess(
     item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
-    let request = sandbox_plan_request(spec, item_ref, ctx)?;
+    let request = isolation_plan_request(spec, item_ref, ctx)?;
     let capture = debug_raw.then(|| DebugCapture::from_spec(spec));
     let result = lillux::run(request);
     let debug = capture.map(|c| c.into_block(&result));
@@ -327,7 +327,7 @@ fn result_reports_failure(parsed: &Value) -> bool {
 
 /// A spawned but not-yet-completed execution.
 /// The daemon can inspect the supervised command's host PID and retained PGID
-/// before calling `wait()`. Under RyeOS strict, `pid` is Bubblewrap's reported
+/// before calling `wait()`. Under enforced isolation, `pid` is the adapter-reported
 /// command while `pgid` is the retained wrapper-led workload group. The daemon
 /// captures an exact durable control identity before attaching either target.
 pub struct SpawnedExecution {
@@ -380,7 +380,7 @@ fn spawn_subprocess(
     item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
-    let request = sandbox_plan_request(spec, item_ref, ctx)?;
+    let request = isolation_plan_request(spec, item_ref, ctx)?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
     match lillux::spawn(request) {
@@ -400,13 +400,13 @@ fn spawn_subprocess(
     }
 }
 
-fn sandbox_plan_request(
+fn isolation_plan_request(
     spec: &PlanSubprocessSpec,
     item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
     let request = spec_to_request(spec)?;
-    let mut verified_code = ctx.sandbox_verified_code.clone();
+    let mut verified_code = ctx.isolation_verified_code.clone();
     if let Some(command) = &spec.verified_command {
         if !verified_code.contains(command) {
             verified_code.push(command.clone());
@@ -417,7 +417,7 @@ fn sandbox_plan_request(
         crate::contracts::ProjectContext::None
         | crate::contracts::ProjectContext::SnapshotHash { .. }
         | crate::contracts::ProjectContext::ProjectRef { .. }
-            if !ctx.sandbox.is_enforced() =>
+            if !ctx.isolation.is_enforced() =>
         {
             // Disabled mode is an exact no-op. The value is never resolved or
             // promoted into mount authority, but apply still accepts one
@@ -427,22 +427,22 @@ fn sandbox_plan_request(
         crate::contracts::ProjectContext::None
         | crate::contracts::ProjectContext::SnapshotHash { .. }
         | crate::contracts::ProjectContext::ProjectRef { .. } => {
-            return Err(EngineError::SandboxPolicyRefused {
+            return Err(EngineError::IsolationPolicyRefused {
                 reason: "enforced executable plan requires an authoritative project context"
                     .to_string(),
             });
         }
     };
-    ctx.sandbox.apply(
+    ctx.isolation.apply(
         request,
-        crate::sandbox::SandboxLaunchContext {
+        crate::isolation::IsolationLaunchContext {
             project_path,
-            project_authority: ctx.sandbox_project_authority,
-            state_root: ctx.sandbox_state_root.as_deref(),
-            checkpoint_dir: ctx.sandbox_checkpoint_dir.as_deref(),
-            daemon_socket_path: ctx.sandbox_daemon_socket_path.as_deref(),
-            bundle_roots: &ctx.sandbox_bundle_roots,
-            node_trusted_keys_dir: ctx.sandbox_node_trusted_keys_dir.as_deref(),
+            project_authority: ctx.isolation_project_authority,
+            state_root: ctx.isolation_state_root.as_deref(),
+            checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+            daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+            bundle_roots: &ctx.isolation_bundle_roots,
+            node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
             item_ref,
             thread_id: &ctx.thread_id,
@@ -520,21 +520,22 @@ mod tests {
         let policy_dir = app_root.join(".ai/node");
         fs::create_dir_all(&policy_dir).unwrap();
         fs::write(
-            policy_dir.join("sandbox.yaml"),
-            "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /definitely/missing-bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            policy_dir.join("isolation.yaml"),
+            "version: 1\nmode: disabled\nbackend:\n  bundle: sandbox-linux-bubblewrap\n  implementation: linux-bubblewrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
-        let sandbox = std::sync::Arc::new(crate::sandbox::SandboxRuntime::load(&app_root).unwrap());
+        let isolation =
+            std::sync::Arc::new(crate::isolation::IsolationRuntime::load(&app_root).unwrap());
         EngineContext {
             app_root,
-            sandbox,
-            sandbox_project_authority: crate::sandbox::SandboxProjectAuthority::External,
-            sandbox_state_root: None,
-            sandbox_checkpoint_dir: None,
-            sandbox_daemon_socket_path: None,
-            sandbox_bundle_roots: Vec::new(),
-            sandbox_node_trusted_keys_dir: None,
-            sandbox_verified_code: Vec::new(),
+            isolation,
+            isolation_project_authority: crate::isolation::IsolationProjectAuthority::External,
+            isolation_state_root: None,
+            isolation_checkpoint_dir: None,
+            isolation_daemon_socket_path: None,
+            isolation_bundle_roots: Vec::new(),
+            isolation_node_trusted_keys_dir: None,
+            isolation_verified_code: Vec::new(),
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),
@@ -731,6 +732,7 @@ mod tests {
             duration_ms: 12.0,
             pid: 42,
             timed_out: false,
+            launcher_refusal: None,
             output_limit_exceeded: Some(lillux::OutputLimitExceeded::Stdout),
             stdout_truncated: true,
             stderr_truncated: false,
@@ -976,16 +978,14 @@ mod tests {
             "spawn error must be preserved: {error}"
         );
 
-        let mut ctx = test_engine_context();
+        let ctx = test_engine_context();
         fs::write(
-            ctx.app_root.join(".ai/node/sandbox.yaml"),
-            "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            ctx.app_root.join(".ai/node/isolation.yaml"),
+            "version: 1\nmode: enforce\nbackend:\n  bundle: sandbox-linux-bubblewrap\n  implementation: linux-bubblewrap\nfilesystem:\n  readable: []\n  writable: [\"{project}\"]\nnetwork:\n  mode: isolated\nenvironment:\n  allow: [\"*\"]\nlimits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
         .unwrap();
-        ctx.sandbox =
-            std::sync::Arc::new(crate::sandbox::SandboxRuntime::load(&ctx.app_root).unwrap());
-        let error = execute_plan(&plan, &ctx).unwrap_err();
-        assert!(matches!(error, EngineError::SandboxPolicyRefused { .. }));
+        let error = crate::isolation::IsolationRuntime::load(&ctx.app_root).unwrap_err();
+        assert!(matches!(error, EngineError::IsolationPolicyRefused { .. }));
     }
 
     #[test]

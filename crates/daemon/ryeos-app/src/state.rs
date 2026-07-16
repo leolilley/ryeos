@@ -5,7 +5,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, RwLock};
 
 use ryeos_engine::engine::Engine;
-use ryeos_engine::sandbox::{SandboxMode, SandboxRuntime};
+use ryeos_engine::isolation::{IsolationMode, IsolationRuntime};
 use ryeos_runtime::authorizer::Authorizer;
 use ryeos_runtime::CommandRegistry;
 use ryeos_scheduler::db::SchedulerDb;
@@ -39,10 +39,10 @@ pub struct CatalogHealth {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    /// Node-owned sandbox runtime resolved once at daemon composition.
+    /// Node-owned isolation runtime resolved once at daemon composition.
     /// Execution paths share this immutable state instead of re-reading
     /// activation or backend policy from the general daemon config.
-    pub sandbox: Arc<SandboxRuntime>,
+    pub isolation: Arc<IsolationRuntime>,
     pub state_store: Arc<StateStore>,
     pub engine: Arc<Engine>,
     /// Per-snapshot engine cache used for `pushed_head` requests.
@@ -124,11 +124,12 @@ pub struct AppState {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SandboxStatus {
-    pub mode: SandboxMode,
+pub struct IsolationStatus {
+    pub mode: IsolationMode,
     pub version: u32,
     pub source: Option<String>,
     pub policy_digest: Option<String>,
+    pub backend: ryeos_engine::isolation::IsolationBackendInspection,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,8 +148,8 @@ pub struct StatusResponse {
     pub bind: String,
     pub uds_path: String,
     pub db_path: String,
-    /// Immutable sandbox snapshot currently shared by every execution path.
-    pub sandbox: SandboxStatus,
+    /// Immutable isolation snapshot currently shared by every execution path.
+    pub isolation: IsolationStatus,
     pub active_threads: i64,
     pub thread_projection: ThreadProjectionHealthSnapshot,
     pub pending_head_transitions: crate::state_store::PendingHeadTransitionStatus,
@@ -177,11 +178,15 @@ impl AppState {
             bind: self.config.bind.to_string(),
             uds_path: self.config.uds_path.display().to_string(),
             db_path: self.config.db_path.display().to_string(),
-            sandbox: SandboxStatus {
-                mode: self.sandbox.mode(),
-                version: self.sandbox.version(),
-                source: self.sandbox.source().map(|path| path.display().to_string()),
-                policy_digest: self.sandbox.digest().map(str::to_owned),
+            isolation: IsolationStatus {
+                mode: self.isolation.mode(),
+                version: self.isolation.version(),
+                source: self
+                    .isolation
+                    .source()
+                    .map(|path| path.display().to_string()),
+                policy_digest: self.isolation.digest().map(str::to_owned),
+                backend: self.isolation.inspection().backend.clone(),
             },
             active_threads: self.state_store.active_thread_count().unwrap_or(0),
             thread_projection: self.state_store.projection_health_snapshot(),

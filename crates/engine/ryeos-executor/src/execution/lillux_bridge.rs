@@ -1,7 +1,7 @@
 //! Bridge between `SubprocessSpec` and `lillux::SubprocessRequest`.
 //!
 //! The single point where the unified subprocess boundary struct
-//! becomes a lillux subprocess call. The node-owned sandbox stage runs
+//! becomes a lillux subprocess call. The node-owned isolation stage runs
 //! after this translation and attaches its resource limits there.
 
 use ryeos_engine::subprocess_spec::SubprocessSpec;

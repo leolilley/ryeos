@@ -309,7 +309,7 @@ pub async fn run(
                 )
             })?
             .to_owned();
-        let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+        let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: executor.path,
             content_hash: executor.content_hash,
         }];
@@ -435,24 +435,24 @@ pub async fn run(
             supervised_status: None,
         };
         let subprocess_request = state
-            .sandbox
+            .isolation
             .apply(
                 subprocess_request,
-                ryeos_engine::sandbox::SandboxLaunchContext {
+                ryeos_engine::isolation::IsolationLaunchContext {
                     project_path,
-                    project_authority: provenance.sandbox_project_authority(),
+                    project_authority: provenance.isolation_project_authority(),
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(state.config.uds_path.as_path()),
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
-                    verified_code: &sandbox_verified_code,
+                    verified_code: &isolation_verified_code,
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },
             )
-            .map_err(|error| LaunchAugmentationError::Threads(format!("sandbox: {error}")))?;
+            .map_err(|error| LaunchAugmentationError::Threads(format!("isolation: {error}")))?;
         let workspace_lifeline = provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = child_thread_id.clone();

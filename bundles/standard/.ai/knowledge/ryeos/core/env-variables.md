@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:17Z:47f938565e4d3e987e70c7b297c517186381b62748f91fab5f25a8bda8e7984e:O6mbPsuU1fwYJwlil2iVeL2WtII+eLyqslx18bANHDZCQsRhjl/q2CSbfw9myYdwijX3Kj5wcnYplwP0UxKbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:6629dbbd3bd289d9e32d1c349c4364287aed9344a5755d77db2c84b5fe8e5bbe:9uuBPsjxlolYUF8QKbhX5Zz3uW7LNJZMJk5bFnqPi7aP57KZXBOjOHKmKwgksOBRqnmF+Dd6KCuctvIXHoCNCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -73,4 +73,4 @@ the target inside the namespace. Enforced mode replaces any inherited
 requests callback IPC, its `RYEOSD_SOCKET_PATH` value
 is checked against the daemon-pinned path before the exact socket is exposed.
 Callback-free launches do not mount it. See [Execution
-Sandbox](node/execution-sandbox.md).
+Sandbox](node/execution-isolation.md).

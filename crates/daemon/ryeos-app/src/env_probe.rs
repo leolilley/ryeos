@@ -4,18 +4,18 @@
 //! python-function tool runs a bounded subprocess that reproduces the runtime's
 //! exact `sys.path` and imports the tool module WITHOUT calling `execute`.
 //!
-//! It needs an `Engine` plus the node's immutable sandbox snapshot — never
+//! It needs an `Engine` plus the node's immutable isolation snapshot — never
 //! daemon secrets or callback tokens (an import probe doesn't use them) — so
 //! the daemon `tool/env-check` handler and offline `ryeos doctor` share one
 //! implementation. Execution is via the synchronous, bounded `lillux::run`,
-//! after the request passes through the same sandbox launch boundary as a real
+//! after the request passes through the same isolation launch boundary as a real
 //! tool process.
 
 use serde_json::{json, Value};
 
 use ryeos_engine::contracts::{ExecutionHints, PlanContext, PlanNode, VerifiedItem};
 use ryeos_engine::engine::Engine;
-use ryeos_engine::sandbox::{SandboxLaunchContext, SandboxRuntime};
+use ryeos_engine::isolation::{IsolationLaunchContext, IsolationRuntime};
 
 /// Wall-clock cap (seconds) on the import dry-run subprocess.
 const IMPORT_TIMEOUT_SECS: f64 = 20.0;
@@ -91,8 +91,8 @@ pub fn import_dry_run(
     plan_ctx: &PlanContext,
     verified: &VerifiedItem,
     required_secrets: &[String],
-    sandbox: &SandboxRuntime,
-    sandbox_context: SandboxLaunchContext<'_>,
+    isolation: &IsolationRuntime,
+    isolation_context: IsolationLaunchContext<'_>,
 ) -> Value {
     let plan = match engine.build_plan(plan_ctx, verified, &json!({}), &ExecutionHints::default()) {
         Ok(p) => p,
@@ -141,15 +141,15 @@ pub fn import_dry_run(
         .filter(|(k, _)| !required_secrets.iter().any(|s| s == *k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let mut verified_code = sandbox_context.verified_code.to_vec();
+    let mut verified_code = isolation_context.verified_code.to_vec();
     if let Some(command) = &spec.verified_command {
         if !verified_code.contains(command) {
             verified_code.push(command.clone());
         }
     }
-    let sandbox_context = SandboxLaunchContext {
+    let isolation_context = IsolationLaunchContext {
         verified_code: &verified_code,
-        ..sandbox_context
+        ..isolation_context
     };
 
     run_probe(
@@ -157,8 +157,8 @@ pub fn import_dry_run(
         args,
         spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
-        sandbox,
-        sandbox_context,
+        isolation,
+        isolation_context,
     )
 }
 
@@ -170,8 +170,8 @@ fn run_probe(
     args: Vec<String>,
     cwd: Option<String>,
     envs: Vec<(String, String)>,
-    sandbox: &SandboxRuntime,
-    sandbox_context: SandboxLaunchContext<'_>,
+    isolation: &IsolationRuntime,
+    isolation_context: IsolationLaunchContext<'_>,
 ) -> Value {
     let request = lillux::SubprocessRequest {
         cmd: interpreter.to_string(),
@@ -184,12 +184,12 @@ fn run_probe(
         inherited_fds: Vec::new(),
         supervised_status: None,
     };
-    let request = match sandbox.apply(request, sandbox_context) {
+    let request = match isolation.apply(request, isolation_context) {
         Ok(request) => request,
         Err(error) => {
             return json!({
                 "import_check": "unavailable",
-                "import_check_reason": format!("sandbox refused import probe: {error}"),
+                "import_check_reason": format!("isolation refused import probe: {error}"),
             });
         }
     };
@@ -258,7 +258,7 @@ fn shape_probe_result(interpreter: &str, result: lillux::SubprocessResult) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_engine::sandbox::{SandboxProjectAuthority, SandboxRuntime};
+    use ryeos_engine::isolation::{IsolationProjectAuthority, IsolationRuntime};
 
     fn python3() -> Option<String> {
         std::process::Command::new("python3")
@@ -301,16 +301,16 @@ mod tests {
         envs: Vec<(String, String)>,
         project: &std::path::Path,
     ) -> Value {
-        let sandbox = SandboxRuntime::default();
+        let isolation = IsolationRuntime::default();
         run_probe(
             interpreter,
             args,
             cwd,
             envs,
-            &sandbox,
-            SandboxLaunchContext {
+            &isolation,
+            IsolationLaunchContext {
                 project_path: project,
-                project_authority: SandboxProjectAuthority::External,
+                project_authority: IsolationProjectAuthority::External,
                 state_root: None,
                 checkpoint_dir: None,
                 daemon_socket_path: None,

@@ -89,7 +89,7 @@ pub struct HandlerRegistry {
     /// SHA-256 of (sorted canonical refs ++ binary content hashes ++
     /// abi_versions); contributes to engine composite fingerprint.
     fingerprint: String,
-    /// Immutable node sandbox snapshot and read-only bundle launch roots used
+    /// Immutable node isolation snapshot and read-only bundle launch roots used
     /// by every handler invocation issued through this registry.
     launch_runtime: Arc<super::subprocess::HandlerLaunchRuntime>,
 }
@@ -147,7 +147,7 @@ impl HandlerRegistry {
     pub fn load_base(
         roots: &[(PathBuf, TrustClass)],
         trust_store: &TrustStore,
-        sandbox: Arc<crate::sandbox::SandboxRuntime>,
+        isolation: Arc<crate::isolation::IsolationRuntime>,
     ) -> Result<Self, HandlerError> {
         let mut entries: HashMap<String, VerifiedHandler> = HashMap::new();
         let mut fingerprint_parts: Vec<String> = Vec::new();
@@ -199,7 +199,7 @@ impl HandlerRegistry {
             entries,
             fingerprint,
             launch_runtime: Arc::new(super::subprocess::HandlerLaunchRuntime::new(
-                sandbox,
+                isolation,
                 roots.iter().map(|(root, _)| root.clone()).collect(),
             )),
         })
@@ -216,7 +216,7 @@ impl HandlerRegistry {
         Self::load_base(
             roots,
             trust_store,
-            Arc::new(crate::sandbox::SandboxRuntime::default()),
+            Arc::new(crate::isolation::IsolationRuntime::default()),
         )
     }
 

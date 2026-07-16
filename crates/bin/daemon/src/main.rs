@@ -298,19 +298,9 @@ async fn main() -> Result<()> {
                 );
             }
 
-            // Resolve the node sandbox exactly once. Engine-owned handlers and
-            // ordinary execution share this immutable policy snapshot.
-            let sandbox = Arc::new(
-                ryeos_engine::sandbox::SandboxRuntime::load_for_daemon(
-                    &config.app_root,
-                    &config.uds_path,
-                )
-                .context("load node sandbox policy")?,
-            );
-
             // ── Two-phase node-config bootstrap ──
-            let (engine, node_config_snapshot, sandbox) =
-                bootstrap::load_node_config_two_phase(&config, Arc::clone(&sandbox))?;
+            let (engine, node_config_snapshot, isolation) =
+                bootstrap::load_node_config_two_phase(&config)?;
             let node_history_policy = {
                 let roots = engine.resolution_roots(Some(config.app_root.clone()));
                 let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;
@@ -628,7 +618,7 @@ async fn main() -> Result<()> {
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
-                sandbox,
+                isolation,
                 state_store,
                 engine: engine.clone(),
                 engine_cache: ryeos_app::engine_cache::EngineCache::new(
@@ -1878,14 +1868,8 @@ async fn run_service_standalone(
     )
     .context("reconcile interrupted bundle transactions")?;
 
-    let sandbox = Arc::new(
-        ryeos_engine::sandbox::SandboxRuntime::load(&config.app_root)
-            .context("load node sandbox policy")?,
-    );
-
     // Two-phase node-config bootstrap (same as daemon-start path)
-    let (engine, node_config_snapshot, sandbox) =
-        bootstrap::load_node_config_two_phase(config, Arc::clone(&sandbox))?;
+    let (engine, node_config_snapshot, isolation) = bootstrap::load_node_config_two_phase(config)?;
     let node_history_policy = {
         let roots = engine.resolution_roots(Some(config.app_root.clone()));
         let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;
@@ -2031,7 +2015,7 @@ async fn run_service_standalone(
 
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
-        sandbox,
+        isolation,
         state_store,
         engine: engine.clone(),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(

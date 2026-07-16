@@ -1001,7 +1001,7 @@ struct ProtocolLaunchEnv {
     bindings: Vec<EnvBinding>,
     callback_token: Option<String>,
     thread_auth_token: Option<String>,
-    sandbox_daemon_socket_path: Option<PathBuf>,
+    isolation_daemon_socket_path: Option<PathBuf>,
 }
 
 /// Resolve the signed subprocess protocol declared by the item's actual kind.
@@ -1038,7 +1038,7 @@ fn resolved_terminator_protocol<'a>(
 /// Build only the environment declared by the verified protocol. Callback and
 /// thread-auth authority are minted lazily from typed descriptor requirements;
 /// callback-free tools therefore receive neither credentials nor daemon-socket
-/// sandbox access.
+/// isolation access.
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
@@ -1114,7 +1114,8 @@ fn build_protocol_launch_env(
             .token
     });
 
-    let sandbox_daemon_socket_path = callback_ipc_requested.then(|| state.config.uds_path.clone());
+    let isolation_daemon_socket_path =
+        callback_ipc_requested.then(|| state.config.uds_path.clone());
     let callback_socket_path = if callback_socket_requested {
         Some(
             state
@@ -1179,7 +1180,7 @@ fn build_protocol_launch_env(
         bindings,
         callback_token,
         thread_auth_token,
-        sandbox_daemon_socket_path,
+        isolation_daemon_socket_path,
     })
 }
 
@@ -1350,7 +1351,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         bindings: protocol_env_bindings,
         callback_token,
         thread_auth_token,
-        sandbox_daemon_socket_path,
+        isolation_daemon_socket_path,
     } = build_protocol_launch_env(
         &state,
         protocol,
@@ -1390,13 +1391,13 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         .provenance
         .state_root_override()
         .map(std::path::Path::to_path_buf);
-    let inline_sandbox_project_authority = params.provenance.sandbox_project_authority();
+    let inline_isolation_project_authority = params.provenance.isolation_project_authority();
     let inline_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
     )?;
-    let inline_sandbox = state.sandbox.clone();
-    let inline_sandbox_daemon_socket_path = sandbox_daemon_socket_path;
+    let inline_isolation = state.isolation.clone();
+    let inline_isolation_daemon_socket_path = isolation_daemon_socket_path;
     let spawn_workspace_lifeline = guard.temp_dir.clone();
     let mut spawned = match task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
@@ -1409,9 +1410,9 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
             vault_bindings: vault,
             protocol_env_bindings,
             roots: inline_roots,
-            sandbox: inline_sandbox,
-            sandbox_project_authority: inline_sandbox_project_authority,
-            sandbox_daemon_socket_path: inline_sandbox_daemon_socket_path.as_deref(),
+            isolation: inline_isolation,
+            isolation_project_authority: inline_isolation_project_authority,
+            isolation_daemon_socket_path: inline_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
             original_snapshot_hash: inline_snapshot.as_deref(),
@@ -1717,7 +1718,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
 
     // Build the exact signed protocol env. Any minted credentials transfer to
     // the background task's revocation guards; callback-free protocols mint
-    // none and do not receive sandbox access to the daemon socket.
+    // none and do not receive isolation access to the daemon socket.
     let child_provenance = params.provenance.clone_for_borrowed_child();
     // Same runtime-state root selection as `run_inline` (see comment there).
     let runtime_state_root = params
@@ -1745,7 +1746,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bindings: protocol_env_bindings,
         callback_token,
         thread_auth_token,
-        sandbox_daemon_socket_path,
+        isolation_daemon_socket_path,
     } = build_protocol_launch_env(
         &state,
         protocol,
@@ -1803,7 +1804,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         .provenance
         .state_root_override()
         .map(std::path::Path::to_path_buf);
-    let bg_sandbox_project_authority = params.provenance.sandbox_project_authority();
+    let bg_isolation_project_authority = params.provenance.isolation_project_authority();
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1823,8 +1824,8 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_project_path,
         bg_pushed_head_ref,
         bg_state_root,
-        bg_sandbox_project_authority,
-        sandbox_daemon_socket_path,
+        bg_isolation_project_authority,
+        isolation_daemon_socket_path,
         bg_temp_dir,
         bg_skip_resume_snapshot_pin,
         bg_owns_pushed_head_lineage,
@@ -1869,7 +1870,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_protocol_env_bindings, bg_acting_principal, bg_pre_manifest_hash,
         bg_resume_snapshot_hash, bg_head_base_snapshot_hash, bg_manifest_publication,
         bg_project_path, bg_original_pushed_head_ref, bg_state_root,
-        bg_sandbox_project_authority, bg_sandbox_daemon_socket_path, bg_temp_dir,
+        bg_isolation_project_authority, bg_isolation_daemon_socket_path, bg_temp_dir,
         bg_skip_resume_snapshot_pin, bg_owns_pushed_head_lineage, bg_runtime_state_dir,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token, launch_claim
@@ -1898,8 +1899,8 @@ async fn dispatch_detached_bg_task(
     bg_project_path: Option<PathBuf>,
     bg_original_pushed_head_ref: Option<ryeos_app::launch_metadata::OriginalPushedHeadRef>,
     bg_state_root: Option<PathBuf>,
-    bg_sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
-    bg_sandbox_daemon_socket_path: Option<PathBuf>,
+    bg_isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
+    bg_isolation_daemon_socket_path: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_skip_resume_snapshot_pin: bool,
     bg_owns_pushed_head_lineage: bool,
@@ -1944,8 +1945,8 @@ async fn dispatch_detached_bg_task(
     let snap_for_spawn = bg_resume_snapshot_hash.clone();
     let pushed_head_ref_for_spawn = bg_original_pushed_head_ref;
     let state_root_for_spawn = bg_state_root;
-    let sandbox_for_spawn = bg_state.sandbox.clone();
-    let sandbox_daemon_socket_path_for_spawn = bg_sandbox_daemon_socket_path;
+    let isolation_for_spawn = bg_state.isolation.clone();
+    let isolation_daemon_socket_path_for_spawn = bg_isolation_daemon_socket_path;
     let spawn_workspace_lifeline = bg_temp_dir.clone();
 
     let spawn_result = task::spawn_blocking(move || {
@@ -1967,9 +1968,9 @@ async fn dispatch_detached_bg_task(
             vault_bindings: vault_for_spawn,
             protocol_env_bindings: protocol_env_for_spawn,
             roots,
-            sandbox: sandbox_for_spawn,
-            sandbox_project_authority: bg_sandbox_project_authority,
-            sandbox_daemon_socket_path: sandbox_daemon_socket_path_for_spawn.as_deref(),
+            isolation: isolation_for_spawn,
+            isolation_project_authority: bg_isolation_project_authority,
+            isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),
@@ -2829,7 +2830,7 @@ pub async fn run_existing_detached(
         bindings: protocol_env_bindings,
         callback_token,
         thread_auth_token,
-        sandbox_daemon_socket_path,
+        isolation_daemon_socket_path,
     } = build_protocol_launch_env(
         &state,
         protocol,
@@ -2888,7 +2889,7 @@ pub async fn run_existing_detached(
         .provenance
         .state_root_override()
         .map(std::path::Path::to_path_buf);
-    let bg_sandbox_project_authority = params.provenance.sandbox_project_authority();
+    let bg_isolation_project_authority = params.provenance.isolation_project_authority();
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -2908,8 +2909,8 @@ pub async fn run_existing_detached(
         bg_project_path,
         bg_pushed_head_ref,
         bg_state_root,
-        bg_sandbox_project_authority,
-        sandbox_daemon_socket_path,
+        bg_isolation_project_authority,
+        isolation_daemon_socket_path,
         bg_temp_dir,
         bg_skip_resume_snapshot_pin,
         bg_owns_pushed_head_lineage,

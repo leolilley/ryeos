@@ -152,7 +152,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     &node_config_root,
                     &state.engine.node_trust_store,
                     &prospective_validator,
-                    Arc::clone(&state.sandbox),
+                    Arc::clone(&state.isolation),
                 )
                 .context("admission refused completed replacement staging tree")
             },
@@ -179,7 +179,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     &node_config_root,
                     &state.engine.node_trust_store,
                     &prospective_validator,
-                    Arc::clone(&state.sandbox),
+                    Arc::clone(&state.isolation),
                 )
                 .context("admission refused completed install staging tree")
             },
@@ -262,7 +262,7 @@ pub(crate) fn verify_planned_candidate(
     bundle_name: &str,
     node_config_root: &Path,
     completed_staging: bool,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let job = plan
         .verification_jobs
@@ -284,7 +284,7 @@ pub(crate) fn verify_planned_candidate(
             bundle_name,
             &job.dependency_roots,
             node_config_root,
-            sandbox,
+            isolation,
         )
     } else {
         preflight_verify_named_bundle_in_context(
@@ -292,7 +292,7 @@ pub(crate) fn verify_planned_candidate(
             bundle_name,
             &job.dependency_roots,
             node_config_root,
-            sandbox,
+            isolation,
         )
     }
 }
@@ -307,7 +307,7 @@ pub(crate) fn admit_completed_staging(
     node_config_root: &Path,
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
     verify_planned_candidate(
@@ -315,15 +315,19 @@ pub(crate) fn admit_completed_staging(
         bundle_name,
         node_config_root,
         true,
-        Arc::clone(&sandbox),
+        Arc::clone(&isolation),
     )?;
     let prospective_roots: Vec<PathBuf> = plan
         .bundles
         .values()
         .map(|bundle| bundle.source.root_path().clone())
         .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(&prospective_roots, node_trust_store, sandbox)
-        .context("prospective bundle set would fail node engine boot")?;
+    ryeos_app::engine_init::admit_node_bundle_roots(
+        &prospective_roots,
+        node_trust_store,
+        isolation,
+    )
+    .context("prospective bundle set would fail node engine boot")?;
 
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and command/policy collisions are

@@ -418,7 +418,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // provenance: live-fs + inline only, explicit project required,
         // absolute path. The directory must already exist: callers cannot use
         // this field to make the daemon create arbitrary host paths. Enforced
-        // sandbox launches additionally require it to fall under an explicit
+        // isolation launches additionally require it to fall under an explicit
         // operator-declared writable root.
         let state_root: Option<std::path::PathBuf> = match &request.state_root {
             None => None,

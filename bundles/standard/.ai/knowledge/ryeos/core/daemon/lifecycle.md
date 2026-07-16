@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:6cf84c9cc834f0b858bff75218abb0adb972ef6237830a5bb690d37fff0bef04:bWlTu9VkDMJCwzOHQoOH8oTbZuHOkMa6f3iZxq58R6+S1Qz/QU9W5yy6kZ4mopCQO/tSko3NHhcXjfR+FZ2lAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:bc21aeed82b68e30214df745adb9c9a49e5ecc8b10ba47b2933b13aa1de4be52:kTFsM9R4QVEm6CacDZ6Wjg3TykzWJVrhjOLS6zwv5IA+RwdtVO0NA6tZYCjyl5yZAvzdyvBztjZ/X934jlj+CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
@@ -44,7 +44,7 @@ from unlinking the first daemon's live socket.
 
 The sandbox snapshot is immutable for the process lifetime. Operators validate
 edits with `ryeos node doctor` and restart before expecting a new policy
-generation. See [Execution Sandbox](../node/execution-sandbox.md).
+generation. See [Execution Isolation](../node/execution-isolation.md).
 
 ## State lock
 

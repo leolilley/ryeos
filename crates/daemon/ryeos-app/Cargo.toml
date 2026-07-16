@@ -22,6 +22,7 @@ regex = { workspace = true }
 rusqlite = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }

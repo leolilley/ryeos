@@ -16,7 +16,7 @@
 //!   * `ComposerRegistry::from_kinds` walks loaded kind schemas and
 //!     binds each kind name to its declared handler PLUS the
 //!     handler-validated config blob. The `compose()` call spawns
-//!     the handler binary through the immutable node sandbox and decodes the
+//!     the handler binary through the immutable node isolation and decodes the
 //!     wire response into a
 //!     `KindComposedView`.
 //!
@@ -175,7 +175,7 @@ impl ComposerRegistry {
     /// Test-only registration for synthetic cross-registry fixtures.
     /// Production has no registration escape hatch: every bound composer and
     /// exact-value requirement comes from the verified kind registry and every
-    /// production registry retains the immutable node sandbox snapshot.
+    /// production registry retains the immutable node isolation snapshot.
     #[cfg(test)]
     pub(crate) fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
         self.composers.insert(
@@ -209,7 +209,7 @@ impl ComposerRegistry {
     }
 
     /// Run the composer for `kind`. Spawns the handler subprocess
-    /// through the immutable node sandbox, serializes
+    /// through the immutable node isolation, serializes
     /// `(root, ancestors)` as a slim `ComposeRequest`, and decodes
     /// the response into a `KindComposedView`.
     ///

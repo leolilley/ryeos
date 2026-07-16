@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 struct NodeDefaultPaths {
-    sandbox_policy: PathBuf,
+    isolation_policy: PathBuf,
     ingest_dir: PathBuf,
     ignore_config: PathBuf,
     sync_dir: PathBuf,
@@ -17,9 +17,9 @@ impl NodeDefaultPaths {
         let ingest_dir = node.join("ingest");
         let sync_dir = node.join("sync");
         Self {
-            sandbox_policy: app_root
+            isolation_policy: app_root
                 .join(ryeos_engine::AI_DIR)
-                .join(ryeos_engine::sandbox::SANDBOX_POLICY_RELATIVE_PATH),
+                .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH),
             ignore_config: ingest_dir.join("ignore.yaml"),
             ingest_dir,
             sync_policy: sync_dir.join("policy.yaml"),
@@ -29,20 +29,20 @@ impl NodeDefaultPaths {
 }
 
 /// Materialize node-owned default policy files in their established init order.
-/// User-editable sandbox/ignore files are create-once; the generated sync view
+/// User-editable isolation/ignore files are create-once; the generated sync view
 /// is overwritten on every init so it tracks the running binary.
 pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
     let paths = NodeDefaultPaths::under(app_root);
 
-    if !paths.sandbox_policy.exists() {
+    if !paths.isolation_policy.exists() {
         let policy =
-            serde_yaml::to_string(&ryeos_engine::sandbox::SandboxPolicy::default_disabled())
-                .context("serialize default sandbox policy")?;
-        lillux::atomic_write_private(&paths.sandbox_policy, policy.as_bytes()).with_context(
+            serde_yaml::to_string(&ryeos_engine::isolation::IsolationPolicy::default_disabled())
+                .context("serialize default isolation policy")?;
+        lillux::atomic_write_private(&paths.isolation_policy, policy.as_bytes()).with_context(
             || {
                 format!(
-                    "write default sandbox policy {}",
-                    paths.sandbox_policy.display()
+                    "write default isolation policy {}",
+                    paths.isolation_policy.display()
                 )
             },
         )?;
@@ -80,8 +80,8 @@ mod tests {
         let paths = NodeDefaultPaths::under(Path::new("/srv/ryeos"));
 
         assert_eq!(
-            paths.sandbox_policy,
-            Path::new("/srv/ryeos/.ai/node/sandbox.yaml")
+            paths.isolation_policy,
+            Path::new("/srv/ryeos/.ai/node/isolation.yaml")
         );
         assert_eq!(
             paths.ignore_config,
@@ -94,16 +94,16 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_default_preserves_execution_policy() {
-        let policy = ryeos_engine::sandbox::SandboxPolicy::default_disabled();
+    fn isolation_default_preserves_execution_policy() {
+        let policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
 
         assert_eq!(policy.version, 1);
-        assert_eq!(policy.mode, ryeos_engine::sandbox::SandboxMode::Disabled);
         assert_eq!(
-            policy.backend.kind,
-            ryeos_engine::sandbox::SandboxBackendKind::Bubblewrap
+            policy.mode,
+            ryeos_engine::isolation::IsolationMode::Disabled
         );
-        assert_eq!(policy.backend.executable, Path::new("/usr/bin/bwrap"));
+        assert_eq!(policy.backend.bundle, "sandbox-linux-bubblewrap");
+        assert_eq!(policy.backend.implementation, "linux-bubblewrap");
         assert_eq!(
             policy.filesystem.readable,
             vec![
@@ -120,7 +120,7 @@ mod tests {
         );
         assert_eq!(
             policy.network.mode,
-            ryeos_engine::sandbox::SandboxNetworkMode::Host
+            ryeos_engine::isolation::IsolationNetworkMode::Host
         );
         assert_eq!(policy.environment.allow, vec!["*".to_string()]);
         assert_eq!(policy.limits.open_files, Some(1024));

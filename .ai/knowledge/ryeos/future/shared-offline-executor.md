@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:dc3a9788296ffef7ba326e01b29191b09cadf08e2f34915ec24a5a3518e84779:uRPadTdM66oBECGAM2ACsdfSkZQ+nqQenpUqJs8oRJfdRUeLczleMUkoHBa2+3fB3Z63WtGG75ERl/vtOiXABg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:7225cc4cc050b35ea16cb7119f4093eb0c7c1208f1079955e8977e09873d2839:C67muznMqt7e8l3A877xDvyVI1lR/b15zzdMaRrtpmgrym9kbJwvbNtqsxRB2xmroUJWJFmS0x4VDLU1GXS5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Shared Engine-Backed Offline Executor
 
 ## Status
@@ -22,8 +22,8 @@ Create a shared executor only when there is real pressure from more than one cal
 - More executable item shapes appear beyond the current field patterns.
 - Protocol handling grows beyond simple env injection, argv forwarding, stdin/stdout mode, and trusted binary resolution.
 - Execution needs centralized tracing, lifecycle control, or cancellation.
-- The existing shared immutable sandbox boundary proves insufficient for a new
-  offline executable shape; sandboxing alone is no longer a trigger because
+- The existing shared immutable isolation boundary proves insufficient for a new
+  offline executable shape; isolationing alone is no longer a trigger because
   current offline tool/service launches already share the node policy path when
   it is enabled. The default remains direct execution, and future backend
   selection belongs to

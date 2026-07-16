@@ -324,8 +324,8 @@ pub enum EngineError {
     #[error("invalid budget: {reason}")]
     InvalidBudget { reason: String },
 
-    #[error("sandbox policy refused execution: {reason}")]
-    SandboxPolicyRefused { reason: String },
+    #[error("isolation policy refused execution: {reason}")]
+    IsolationPolicyRefused { reason: String },
 
     // ── Lifecycle ────────────────────────────────────────────────────
     #[error("invalid state transition from `{from}` on event `{event}`")]

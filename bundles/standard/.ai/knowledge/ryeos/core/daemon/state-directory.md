@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:ed1ed79f3b2ec6eb2cd0f3c1039c2a0d6ce78da94856e3b22240b95fa5773e2e:h/ZhRqj6wpEmY4CXaUrI+FOWHdSQLyfb+Ky8d2OonfulZEbvmBtCKYCVNY107RFbe7bVGwKznNOoAppcCFxhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:e756ce32cdd2413b350ccf30a8d351bf53670099241f6e893889def53ea112d8:byLpTjUvN5KdBUfQHIDpJE5Q9yGFEOTvQkWIBXbFOkaGltPT2vipzzhjMNklrB12Bvay5EIyQr8Wr+1N8wFtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -29,7 +29,7 @@ System-space artifacts installed or registered by `ryeos init`:
 - `<system>/.ai/node/identity/private_key.pem` — node key.
 - `<system>/.ai/node/vault/private_key.pem` — vault X25519 key.
 - `<system>/.ai/node/ingest/ignore.yaml` — ingest-ignore config.
-- `<system>/.ai/node/sandbox.yaml` — create-once strict subprocess policy.
+- `<system>/.ai/node/isolation.yaml` — create-once strict subprocess policy.
 
 Daemon-local artifacts `ryeosd` may repair after init verification:
 
@@ -45,7 +45,7 @@ The daemon must not write user trust docs or regenerate the node key.
 
 - `.ai/bundles/` — installed bundles.
 - `.ai/node/config.yaml` — daemon config.
-- `.ai/node/sandbox.yaml` — immutable-at-runtime sandbox policy source.
+- `.ai/node/isolation.yaml` — immutable-at-runtime sandbox policy source.
 - `.ai/node/identity/` — node key and public identity.
 - `.ai/node/auth/authorized_keys/` — node-signed authorized callers.
 - `.ai/node/vault/` — vault key material.

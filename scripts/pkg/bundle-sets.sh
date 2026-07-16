@@ -15,11 +15,11 @@
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node ;;
-    central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
-    standard)        printf '%s\n' core central-auth standard ;;
+    full)            printf '%s\n' core central-auth sandbox-linux-bubblewrap standard web browser ryeos-ui hosted-node ;;
+    central-host)    printf '%s\n' core central-auth sandbox-linux-bubblewrap standard web tv-tracker-authoring ;;
+    standard)        printf '%s\n' core central-auth sandbox-linux-bubblewrap standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
-    hosted-workflow) printf '%s\n' core central-auth standard hosted-node ;;
+    hosted-workflow) printf '%s\n' core central-auth sandbox-linux-bubblewrap standard hosted-node ;;
     *) return 1 ;;
   esac
 }

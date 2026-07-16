@@ -302,17 +302,15 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     // A re-init inherits the existing immutable node policy. On first init the
     // policy is materialized later in this transaction and its defined default
     // is disabled, so authoring preflight uses the matching compiled snapshot.
-    let sandbox_policy = opts
+    let isolation_policy = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
-        .join(ryeos_engine::sandbox::SANDBOX_POLICY_RELATIVE_PATH);
-    let sandbox = if sandbox_policy.exists() {
-        Arc::new(
-            ryeos_engine::sandbox::SandboxRuntime::load(&opts.app_root)
-                .context("load existing node sandbox policy for init preflight")?,
-        )
+        .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
+    let isolation = if isolation_policy.exists() {
+        ryeos_app::engine_init::load_registered_isolation(&opts.app_root)
+            .context("load existing node isolation policy for init preflight")?
     } else {
-        Arc::new(ryeos_engine::sandbox::SandboxRuntime::default())
+        Arc::new(ryeos_engine::isolation::IsolationRuntime::default())
     };
 
     if !opts.skip_preflight {
@@ -321,7 +319,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 &job.subject_root,
                 &job.dependency_roots,
                 &operator_config_root,
-                Arc::clone(&sandbox),
+                Arc::clone(&isolation),
             )
             .with_context(|| {
                 format!("verify {} source against pinned publisher key", job.subject)
@@ -395,7 +393,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                         name,
                         &installed_dependency_roots,
                         &operator_config_root,
-                        Arc::clone(&sandbox),
+                        Arc::clone(&isolation),
                     )
                     .with_context(|| {
                         format!(
@@ -429,7 +427,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                         name,
                         &installed_dependency_roots,
                         &operator_config_root,
-                        Arc::clone(&sandbox),
+                        Arc::clone(&isolation),
                     )
                     .with_context(|| {
                         format!(
@@ -1724,6 +1722,7 @@ typo_field: oops
             runtime_authority: Default::default(),
             smoke: vec![],
             shadows: vec![],
+            isolation_backends: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

@@ -182,6 +182,7 @@ WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
 RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
+ISOLATION_BWRAP="$ROOT/bundles/sandbox-linux-bubblewrap"
 TVTA="$ROOT/bundles/tv-tracker-authoring"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
 INIT_SEED="$SOURCE_ROOT_AI/node/init"
@@ -213,6 +214,7 @@ STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
 BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
 RYEOS_UI_BIN="$RYEOS_UI/.ai/bin/$TRIPLE"
+ISOLATION_BWRAP_BIN="$ISOLATION_BWRAP/.ai/bin/$TRIPLE"
 
 # Bin dirs for exactly the bin-managed bundles this set builds.
 for BUNDLE_DIR in "${BUNDLE_DIRS[@]}"; do
@@ -226,15 +228,15 @@ case "$BUNDLE_SET" in
   full)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-browser-tools \
-          ryeos-client-terminal ryeos-client-web)
+          ryeos-client-terminal ryeos-client-web ryeos-bubblewrap-adapter)
     ;;
   central-host)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-bubblewrap-adapter)
     ;;
   standard|hosted-workflow)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-core-tools)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-bubblewrap-adapter)
     ;;
   hosted-node)
     pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools)
@@ -266,6 +268,11 @@ staged_release_bins_for_set() {
   printf '%s\n' \
     rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
     rye-composer-identity ryeos-core-tools
+  case "$BUNDLE_SET" in
+    full|central-host|standard|hosted-workflow)
+      printf '%s\n' ryeos-bubblewrap-adapter
+      ;;
+  esac
   case "$BUNDLE_SET" in
     full|central-host|standard|hosted-workflow)
       printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
@@ -328,6 +335,10 @@ install -m 0755 \
   "$CORE_BIN/"
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  echo "[populate-bundles] installing isolation bundle binaries → $ISOLATION_BWRAP_BIN"
+  install -m 0755 "$TARGET/release/ryeos-bubblewrap-adapter" "$ISOLATION_BWRAP_BIN/"
+  BWRAP_OUTPUT="$ISOLATION_BWRAP_BIN/bwrap" "$ROOT/scripts/ci/install-bubblewrap.sh"
+
   echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-directive-runtime" \
@@ -381,6 +392,13 @@ echo "[populate-bundles] publishing core bundle…"
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
+
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  echo "[populate-bundles] publishing sandbox-linux-bubblewrap bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$ISOLATION_BWRAP" \
+    --registry-root "$CORE" \
+    --owner "$OWNER" >/dev/null
+fi
 
 # central-auth ships in the source tree and is discovered/parsed at init, so its
 # manifest must stay current with the manifest schema. It depends only on core's

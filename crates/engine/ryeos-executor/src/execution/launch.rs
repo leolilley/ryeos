@@ -390,7 +390,7 @@ fn verify_materialized_executor_artifact(
 /// project tree — read-only project mounts work.
 ///
 /// Returns the materialized path and the verified raw-byte SHA-256 that every
-/// enforced launch must carry into the sandbox boundary.
+/// enforced launch must carry into the isolation boundary.
 pub fn materialize_native_executor(
     bundle_roots: &[PathBuf],
     executor_ref: &str,
@@ -2086,7 +2086,7 @@ async fn run_claimed_thread_row_inner(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("materialized runtime path is not valid UTF-8"))?
         .to_owned();
-    let sandbox_verified_command = ryeos_engine::sandbox::SandboxVerifiedCode {
+    let isolation_verified_command = ryeos_engine::isolation::IsolationVerifiedCode {
         source_path: materialized_binary_path,
         content_hash: materialized_binary.content_hash,
     };
@@ -2135,12 +2135,12 @@ async fn run_claimed_thread_row_inner(
         &engine_roots,
         &state.config.app_root,
     )?;
-    let sandbox = state.sandbox.clone();
-    let sandbox_project_authority = provenance.sandbox_project_authority();
-    let sandbox_state_root = provenance
+    let isolation = state.isolation.clone();
+    let isolation_project_authority = provenance.isolation_project_authority();
+    let isolation_state_root = provenance
         .state_root_override()
         .map(std::path::Path::to_path_buf);
-    let sandbox_workspace_lifeline = provenance.workspace_lifeline();
+    let isolation_workspace_lifeline = provenance.workspace_lifeline();
     let cas_root_owned = state
         .state_store
         .cas_root()
@@ -2179,9 +2179,9 @@ async fn run_claimed_thread_row_inner(
             acting_principal: &acting_principal_owned,
             binary: &binary_path,
             project_path: &project_owned,
-            project_authority: sandbox_project_authority,
-            state_root: sandbox_state_root.as_deref(),
-            workspace_lifeline: sandbox_workspace_lifeline,
+            project_authority: isolation_project_authority,
+            state_root: isolation_state_root.as_deref(),
+            workspace_lifeline: isolation_workspace_lifeline,
             envelope: &envelope,
             timeout_secs: duration,
             callback: &callback_owned,
@@ -2189,8 +2189,8 @@ async fn run_claimed_thread_row_inner(
             vault_bindings: &vault_owned,
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
-            sandbox: sandbox.as_ref(),
-            verified_command: &sandbox_verified_command,
+            isolation: isolation.as_ref(),
+            verified_command: &isolation_verified_command,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
             // A machine continuation of a replay-aware kind resumes from the

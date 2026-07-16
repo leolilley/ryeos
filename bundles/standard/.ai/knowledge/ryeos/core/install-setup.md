@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:af09bf367d8afe45b3cd664ca37d326b4cd2e14c6989f3dd1dcea71b9f8c1947:GzQwwHsI55Mb7OudHkzL4WozIGYT74vQJVCoqS6tjDYpRaXaXjic0BQoxTeqwJ2gaH4AdhIeZWqeyixmg+I4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:6b96f105729b7cfdfc0e7f2ba20f83ec208a10d0a690e7cc518f2aac23bda848:4RSLR9qwz0ziNUQC2iBmtLJPJ7+PQgur4/9s6Vl6ECumtE9u3N2U0EYo3dgZPmxpGvTePxyrmnQXlEKe9K00Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -81,7 +81,7 @@ ryeos start
 <system-space>/.ai/node/vault/{private_key.pem,public_key.pem}
 <system-space>/.ai/node/auth/authorized_keys/<user>.toml
 <system-space>/.ai/node/config.yaml
-<system-space>/.ai/node/sandbox.yaml
+<system-space>/.ai/node/isolation.yaml
 <system-space>/.ai/node/bundles/<name>.yaml
 <system-space>/.ai/node/ingest/ignore.yaml
 <system-space>/.ai/state/{operator.lock,lifecycle-start.lock,runtime.sqlite3,scheduler.sqlite3,objects,refs}
@@ -96,7 +96,7 @@ registered bundles and starts listeners.
 Bubblewrap is optional while the sandbox policy remains in its default
 `mode: disabled`. Install it before selecting `mode: enforce`, validate with
 `ryeos node doctor`, and restart. See [Execution
-Sandbox](node/execution-sandbox.md).
+Sandbox](node/execution-isolation.md).
 
 For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator
 Init](node/operator-init.md), and [Identity Model](identity-model.md).

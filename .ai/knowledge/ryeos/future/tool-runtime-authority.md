@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:37Z:b9c6275850053c98e0c373bb50205f6b219421a99b4d13e3ad045a5794ac375c:uPEDJo5aZMVVHgWlPstmZg7WaWqNS281kPwfVgCbvjX9RlE73jyrJPKdTylTicv4kMUcbSFTVPxXmSaGpyMrDA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:ae6c8a612abf72f7b15756637bfaa2da161ca3d3907583b53ad024cbf6288af4:HmL0yhHqOLDam+0F7rL70ZL8G8lEo3qURZu+DVwtMW3UX6Gom4Te0ZkAbTFge4FnyfEZaRs2ZMY8jUxYLDr4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Model
 
 ## Status
@@ -125,9 +125,9 @@ authority derivation      = signed manifest + install policy + caller delegation
 callback enforcement      = daemon callback token effective_caps
 ```
 
-A future managed tool runtime may standardize launch behavior, sandboxing, streaming, cancellation, and resumability, but it should not itself be the source of authority. Authority should remain a daemon-side derivation from signed metadata and explicit delegation.
+A future managed tool runtime may standardize launch behavior, isolationing, streaming, cancellation, and resumability, but it should not itself be the source of authority. Authority should remain a daemon-side derivation from signed metadata and explicit delegation.
 
-Any future per-tool sandbox profile must only narrow the immutable node-owned
+Any future per-tool isolation profile must only narrow the immutable node-owned
 policy. It cannot enable a disabled node boundary, add mounts/network access,
 or override node limits.
 
@@ -151,7 +151,7 @@ Revisit a full managed tool-runtime authority design when direct tools need any 
 - cross-bundle bundle-event or vault access;
 - caller-delegated caps narrower than the caller but broader than self-bundle authority;
 - user-visible approval grants;
-- per-tool sandbox profiles tied to authority;
+- per-tool isolation profiles tied to authority;
 - nested tool execution authority;
 - long-lived or resumable tool sessions;
 - install-time namespace ownership and revocation.

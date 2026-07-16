@@ -1635,7 +1635,7 @@ pub(crate) async fn dispatch_method(
         let project_path_str = request.project_path.to_str().ok_or_else(|| {
             DispatchError::Internal(anyhow::anyhow!("dispatch project path is not valid UTF-8"))
         })?;
-        let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+        let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: executor.path,
             content_hash: executor.content_hash,
         }];
@@ -1741,19 +1741,19 @@ pub(crate) async fn dispatch_method(
         };
         let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
         let subprocess_request = state
-            .sandbox
+            .isolation
             .apply(
                 subprocess_request,
-                ryeos_engine::sandbox::SandboxLaunchContext {
+                ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
-                    project_authority: request.provenance.sandbox_project_authority(),
+                    project_authority: request.provenance.isolation_project_authority(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(envelope.callback.socket_path.as_path()),
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&node_trusted_keys_dir),
-                    verified_code: &sandbox_verified_code,
+                    verified_code: &isolation_verified_code,
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
                 },
@@ -2516,12 +2516,13 @@ pub(crate) fn mint_runtime_capability_caps(
         installed_bundle_roots,
         node_trust_store,
     )?;
-    let manifest = ryeos_bundle::manifest::load_verified_manifest_yaml(
+    let verified_manifest = ryeos_bundle::manifest::load_verified_manifest(
         &ai_dir,
         &effective_bundle_id,
         node_trust_store,
     )
     .map_err(|err| err.to_string())?;
+    let manifest = &verified_manifest.manifest;
     manifest.runtime_authority.validate()?;
 
     // Manifest-declared caps form the upper bound. Cap strings come from the
@@ -4447,13 +4448,13 @@ runtime_authority:
         let node_trust_store = trust_store();
         let mut combined_trust_store = node_trust_store.clone();
         combined_trust_store.extend_from(&trust_store_for_key(&project_signing_key));
-        let project_manifest = ryeos_bundle::manifest::load_verified_manifest_yaml(
+        let project_manifest = ryeos_bundle::manifest::load_verified_manifest(
             &project.join(ryeos_engine::AI_DIR),
             "example-bundle",
             &combined_trust_store,
         )
         .expect("fixture project manifest must verify");
-        assert_eq!(project_manifest.name, "example-bundle");
+        assert_eq!(project_manifest.manifest.name, "example-bundle");
 
         let engine =
             build_test_engine_with_trust(Vec::new(), combined_trust_store, node_trust_store);
@@ -4504,13 +4505,13 @@ runtime_authority:
             fs::read(installed_ai.join("manifest.yaml")).unwrap(),
         )
         .unwrap();
-        let replayed_manifest = ryeos_bundle::manifest::load_verified_manifest_yaml(
+        let replayed_manifest = ryeos_bundle::manifest::load_verified_manifest(
             &project_ai,
             "example-bundle",
             &trust_store(),
         )
         .expect("fixture must be a valid replay of the node-signed manifest");
-        assert_eq!(replayed_manifest.name, "example-bundle");
+        assert_eq!(replayed_manifest.manifest.name, "example-bundle");
 
         let ctx = test_execution_context(installed_bundle);
         let mut resolved = resolved_tool_in_space(

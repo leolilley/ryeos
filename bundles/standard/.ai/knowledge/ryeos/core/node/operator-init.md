@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:11da537b84d5f86892b7c3eb20265c67b002d505b38abf18af46c12c7a1ee8a5:x9s8P6AEjkQbYmlg8sA6jHYhML2utdOV2bLQT2p08X8BDx23HEUEQ1EqS0eVgchR0A27lIL1f7Ey1GjjR1yWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:bc37979d534eeb4e15e55639bd92c71969b4191bfbaf49aa0af559b9a940a4ad:A6tXHABtzjxRhDpm50M9hvkCosHeahnVEVOjJ985XsP6bWpAcwiakaecqP7Uo2VU31DREl+BQrliPDODWd2MBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -94,5 +94,5 @@ one-generation backup.
 startup may repair daemon-local public identity, daemon config, vault
 public key output, and local authorized-key entry, but only after
 init-state verification succeeds. Init also never overwrites an existing
-operator-edited `.ai/node/sandbox.yaml`. See
-[Execution Sandbox](execution-sandbox.md) for the complete accepted policy.
+operator-edited `.ai/node/isolation.yaml`. See
+[Execution Isolation](execution-isolation.md) for the complete accepted policy.

@@ -1,22 +1,22 @@
-<!-- ryeos:signed:2026-07-15T08:13:19Z:ecb3e521d34401c89f9ed043c10b5e93b348176a6aee346b4a16f96e9e5e7874:16gBYMRFQU74FOG1MGFHjjBDnIeBpTHTClaVLgV20/i7ZSDQKHhFcNRRoEbE5CP8hkW9T016utIRvJpi2DhIDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:43:37Z:244bbcadd408014b58b48ea42753c1873a503da5d7e2e1c040df3c578c324ca6:PWJuijcYG4F0Q4qAPPDbqbOyzckxISBvyy0P8k9cYEs+afCAKRhbQnVRcruiUo1lXzzVnPvT2jh3UAIoMXcABA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
-tags: [node, sandbox, bubblewrap, security, subprocess, node-policy]
-version: "1.2.0"
+tags: [node, isolation, bubblewrap, security, subprocess, node-policy]
+version: "1.3.0"
 description: >
-  Node contract for the node-owned subprocess sandbox: strict policy
+  Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
 ---
 
-# Execution Sandbox
+# Execution Isolation
 
-RyeOS can launch executable tools and runtimes through a node-owned Bubblewrap
-policy on Linux. The only policy source is
-`<app-root>/.ai/node/sandbox.yaml`. `ryeos init` creates it once; later edits
+RyeOS can launch executable tools and runtimes through a node-owned isolation
+policy and a selected signed backend bundle. The only policy source is
+`<app-root>/.ai/node/isolation.yaml`. `ryeos init` creates it once; later edits
 belong to the node owner. Items, bundles, requests, and environment variables
-cannot activate the sandbox or weaken its controls.
+cannot activate the isolation or weaken its controls.
 
-This is the current Linux implementation, not a portable sandbox abstraction.
+This is the current Linux implementation, not a portable isolation abstraction.
 Its policy is structured, but backend inspection, capture, filesystem setup,
 and launch compilation are Bubblewrap-specific. A later multi-platform design
 must resolve typed isolation requirements against node-owned backend descriptors
@@ -33,8 +33,8 @@ installed runtime node-trusted.
 
 The policy has two modes:
 
-- `mode: disabled` does not wrap the subprocess in Bubblewrap. This is the
-  default and does not require Bubblewrap. Node-owned stdout/stderr retention
+- `mode: disabled` does not wrap the subprocess in an isolation adapter. This is the
+  default and does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement or verification-to-exec path pinning.
 - `mode: enforce` applies the complete policy and refuses the launch if any
@@ -46,8 +46,8 @@ The policy has two modes:
 version: 1
 mode: disabled
 backend:
-  kind: bubblewrap
-  executable: /usr/bin/bwrap
+  bundle: sandbox-linux-bubblewrap
+  implementation: linux-bubblewrap
 filesystem:
   readable:
     - "{node_public_identity}"
@@ -72,30 +72,27 @@ limits:
   verified_artifact_files: 4096
 ```
 
-The default is deliberately inert. To opt in, install unprivileged Bubblewrap
-0.11.0 or newer, change the node-owned mode to `enforce`, run
+The default is deliberately inert. To opt in, install the signed backend bundle,
+change the node-owned mode to `enforce`, run
 `ryeos node doctor`, and restart the node.
 The daemon loads one immutable policy generation at startup; editing the file
 does not change a running daemon. The daemon-backed `ryeos daemon status`
 surface (`service:node/status`) reports the loaded mode, version, source, and
-source digest. `ryeos node status` is the narrower local lifecycle probe.
+source digest together with the exact backend selection, signed bundle-manifest
+digest, signer fingerprint, adapter build, effective capabilities, and
+inspected artifact versions and digests. `ryeos node status` is the narrower
+local lifecycle probe. Doctor derives the same facts from the shared immutable
+runtime snapshot.
 
 ## Strict schema
 
 - `version` must be `1`, the first published strict-policy schema. Other
   versions and unknown fields are rejected without aliases or translation.
-- `backend.kind` is `bubblewrap`.
-- `backend.executable` must be absolute in both modes. Enforce mode also
-  resolves it, requires an unprivileged executable regular file (no setuid,
-  setgid, or Linux file capabilities), and captures its exact bytes in the
-  node-private verified-artifact store at policy-load time. Every launch uses
-  the captured inode rather than reopening the configured path; inspection
-  reports its captured SHA-256 and version. Startup runs that exact capture's
-  `--version` and `--help` probes and requires Bubblewrap 0.11.0+ with
-  `--args`, `--bind-fd`, `--json-status-fd`, `--ro-bind-fd`, and `--argv0`.
-  The executable selected in this node-owned file is node-approved host
-  execution authority; these probes establish interface compatibility, not
-  the provenance of arbitrary bytes.
+- `backend.bundle` names one registered signed bundle.
+- `backend.implementation` names one backend declaration in that bundle's
+  signed manifest. Enforce mode captures the exact signed adapter and artifact
+  executables, requires signer continuity with the bundle manifest, and runs
+  the adapter's strict live inspection before accepting the node generation.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
   `{node_trusted_keys}`, and `{verified_code}`.
@@ -106,7 +103,7 @@ source digest. `ryeos node status` is the narrower local lifecycle probe.
   in one `*`.
 - `limits.open_files` is an optional per-spawn file-descriptor limit in
   `mode: enforce`. Disabled mode preserves a tighter limit already owned by a
-  caller but does not install the sandbox policy's `RLIMIT_NOFILE`.
+  caller but does not install the isolation policy's `RLIMIT_NOFILE`.
 - `limits.stdout_bytes` and `limits.stderr_bytes` are mandatory positive
   bounds on bytes retained from each output stream. The node continues
   draining after a bound is crossed and terminates the supervised workload.
@@ -211,7 +208,7 @@ restart reconciliation must address the same process identifiers. The namespace
 contains an empty `/proc` directory rather than the host procfs: exposing the
 host mount would let a same-UID workload traverse another process's `root`,
 `cwd`, or `fd` links and bypass the selected filesystem surface. PID syscalls
-still use host identifiers, and the sandbox does not claim PID or same-UID
+still use host identifiers, and the isolation does not claim PID or same-UID
 signal isolation.
 
 Bubblewrap reports the target's host PID through a private
@@ -307,12 +304,12 @@ the same operations.
 This boundary limits filesystem visibility and writes, network namespace
 access, the target environment, and open file descriptors. It is not a virtual
 machine, does not defend against kernel vulnerabilities, and does not yet set
-CPU, memory, or per-sandbox process quotas. Do not model a process quota with
-`RLIMIT_NPROC`: it is scoped to the daemon's real UID rather than one sandbox.
+CPU, memory, or per-isolation process quotas. Do not model a process quota with
+`RLIMIT_NPROC`: it is scoped to the daemon's real UID rather than one isolation.
 Host PIDs remain visible to syscalls, same-UID signal isolation is not claimed,
 and transitive imports, libraries, and assets remain live read-only rather than
 content-pinned.
-Disabled means no OS sandbox, not unverified execution; resolution, signature,
+Disabled means no OS isolation, not unverified execution; resolution, signature,
 authorization, and capability checks remain active.
 
 ## Local use, hosted nodes, and Docker
@@ -323,7 +320,7 @@ normal signed-item and capability model. Enforcement becomes important when a
 node executes bundles for another person, accepts remotely supplied projects,
 or shares one worker among workloads with different trust.
 
-Docker and the RyeOS sandbox protect different boundaries. A container isolates
+Docker and the RyeOS isolation protect different boundaries. A container isolates
 the whole RyeOS node from its host, but the daemon and every tool inside that
 container normally share the container filesystem, network, environment, and
 Linux identity. The RyeOS policy creates a narrower boundary for each launched

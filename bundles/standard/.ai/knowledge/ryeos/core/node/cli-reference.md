@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:0a2b25d415332b323a812871fc3e13b162c7df8cba1e7d38a9351bf8d36cceeb:MzM0zcjjIn7abg2yBu0xFVXyAtISC4DPme9lmBJy5rW2wPdve09JGHQOyB5Fyi6zNnwek/aQ6ORXWzqAMnLtBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:bd0bf0f21adbc1ec03cb23b9c7f5eade51f8ae52e28b80e1b4193bfc29aaf136:0hNO31M3y3p+xzbHSDsViS3NghfaVbxNOL7apt+1VQGmWGmqrybr/+slFlvtqmt16nlyA35JEMz2l++d+4tRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -77,7 +77,7 @@ ryeos node doctor [--json] [--no-bundles] [--app-root <dir>]
 Runs the offline node checklist. Its sandbox row uses the production strict loader:
 disabled is a healthy inactive opt-out, while enforced mode validates the
 backend and resource limit. Policy edits require a daemon restart; see
-[Execution Sandbox](execution-sandbox.md).
+[Execution Isolation](execution-isolation.md).
 
 ## Other local operator verbs
 

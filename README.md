@@ -23,7 +23,7 @@ That is the whole idea. Everything in this repository is that one property
 at a different layer:
 
 - **Signed items and bundles** — behavior you can install and trust because
-  resolution verifies its signature and content identity. Enforced sandboxing
+  resolution verifies its signature and content identity. Enforced isolationing
   additionally pins verified entry bytes through execution.
 - **Threads** — every execution has an identity and a durable event log.
   The log _is_ the run: tail it live, replay it, resume it, cancel it.
@@ -155,7 +155,7 @@ primitives used for durable cancellation and lifecycle control. Official
 container images are currently `linux/amd64`, and packaged bundle executables target
 `x86_64-unknown-linux-gnu`. Other targets are tracked in the
 [platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
-the sandbox or durability contracts.
+the isolation or durability contracts.
 
 ### Arch Linux / AUR
 
@@ -170,12 +170,12 @@ ryeos node status
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
 into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. Unprivileged Bubblewrap 0.11.0+
-is an optional package dependency: the sandbox policy defaults to
-`mode: disabled`, and it is required only when an operator selects
-`mode: enforce`. `ryeos start`
+vault material, and writes node configuration. The signed
+`sandbox-linux-bubblewrap` bundle contains its adapter and launcher; RyeOS has
+no host Bubblewrap package dependency. The isolation policy defaults to
+`mode: disabled`. `ryeos start`
 launches `ryeosd`. See the
-[execution sandbox contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-sandbox.md) before
+[execution isolation contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
 enabling or tightening the node-owned policy.
 
 The user lifecycle surface is intentionally small:
@@ -201,7 +201,7 @@ entrypoint runs `ryeos init` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
 so keys, trust, and runtime state survive redeploys. Release containers rely
 only on the official publisher key compiled into `ryeos`; the entrypoint does
-not infer trust from files baked into the image. The initialized sandbox policy
+not infer trust from files baked into the image. The initialized isolation policy
 defaults to disabled, so the normal container profile needs no extra namespace
 capabilities. Bubblewrap remains installed in the image for operators who opt
 in to enforcement. Keep `/data` on a named volume:
@@ -221,7 +221,7 @@ verify both the running daemon's immutable snapshot and the backend check:
 
 ```bash
 docker exec ryeos sed -i 's/^mode: disabled$/mode: enforce/' \
-  /data/app/.ai/node/sandbox.yaml
+  /data/app/.ai/node/isolation.yaml
 docker rm -f ryeos
 docker run -d --name ryeos \
   --cap-add SYS_ADMIN \
@@ -248,18 +248,15 @@ for the complete operator contract.
 
 The release gate exercises two distinct profiles: default-disabled startup and
 signed execution without extra capabilities, then explicitly enforced startup,
-verification of the running daemon's sandbox snapshot, backend diagnostics, and
+verification of the running daemon's isolation snapshot, backend diagnostics, and
 signed execution with the namespace/AppArmor capability profile. Back up the
 `ryeos-data` volume before upgrades; it contains node identity, trust, vault,
 and durable execution state.
 
 ### From source
 
-Source installs do not require Bubblewrap while the sandbox policy remains in
-its default disabled mode. The installer emits an advisory when `bwrap` is
-absent but continues. Install unprivileged Bubblewrap 0.11.0 or newer before
-selecting `mode: enforce`, for example with `sudo pacman -S bubblewrap` on
-Arch or a current Debian/Ubuntu/Fedora package that meets that version.
+Source installs stage the selected isolation implementation as a signed bundle.
+No host process-confinement package is required in either policy mode.
 
 ```bash
 git clone https://github.com/leolilley/ryeos.git

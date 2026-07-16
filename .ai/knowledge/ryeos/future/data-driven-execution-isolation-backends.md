@@ -3,7 +3,7 @@ category: ryeos/future
 tags:
   - future
   - isolation
-  - sandboxing
+  - isolationing
   - node-policy
   - multi-platform
   - hosted-node
@@ -18,7 +18,7 @@ description: >
 
 ## Status and reason for this note
 
-Deferred. RyeOS does not currently need a portable sandbox subsystem for its
+Deferred. RyeOS does not currently need a portable isolation subsystem for its
 primary trusted, single-user local-node use case. The Linux Bubblewrap path was
 added during a hardening pass so the project could make a more honest distinction
 between verified execution and OS confinement. It remains optional and disabled
@@ -39,7 +39,7 @@ commitment to implement it now.
 
 Today:
 
-- `mode: disabled` is the default and launches without an OS sandbox;
+- `mode: disabled` is the default and launches without an OS isolation;
 - `mode: enforce` selects the one implemented backend, Bubblewrap on Linux;
 - node policy is immutable for one daemon generation;
 - items and requests cannot enable the backend or broaden its authority;
@@ -48,7 +48,7 @@ Today:
 
 Normal RyeOS verification, trust, authorization, capability, environment,
 output-bound, process-attachment, and cancellation rules remain active when the
-OS sandbox is disabled. Those are separate properties and must stay separate in
+OS isolation is disabled. Those are separate properties and must stay separate in
 the future model.
 
 ## Architectural rule
@@ -72,7 +72,7 @@ silently weaken the plan.
 
 ## Keep the concepts separate
 
-Do not replace the current boolean with another broad `sandboxed` flag. The
+Do not replace the current boolean with another broad `isolationed` flag. The
 eventual contract must distinguish at least:
 
 ```rust
@@ -155,22 +155,9 @@ not a live schema:
 ```yaml
 version: 1
 mode: disabled
-default_profile: local-direct
-backends:
-  local-direct:
-    kind: direct
-  linux-process:
-    kind: linux_bubblewrap
-    executable: /usr/bin/bwrap
-profiles:
-  local-direct:
-    requirement: direct
-    backend: local-direct
-  constrained-local:
-    requirement: process_confinement
-    backend: linux-process
-    network: host
-    filesystem: scoped
+backend:
+  bundle: sandbox-linux-bubblewrap
+  implementation: linux-bubblewrap
 ```
 
 If profiles later become signed RyeOS items, node configuration should still
@@ -253,7 +240,7 @@ need a dedicated worker, VM, or microVM selected by the deployment threat model.
 ### macOS
 
 Do not port the Bubblewrap command model or claim support from an incidental
-host sandbox utility. A supported macOS path needs a maintained boundary with a
+host isolation utility. A supported macOS path needs a maintained boundary with a
 documented product contract and CI coverage. If no native primitive can prove
 the required capability set, use a VM/dedicated worker backend or fail closed.
 
@@ -330,9 +317,9 @@ should not be simulated by unit tests that never invoke the platform boundary.
 - kernel-exploit resistance;
 - backend ownership and non-writability provenance beyond current capture;
 - inherited-file-descriptor adversarial coverage;
-- symlink and race-oriented sandbox integration coverage;
+- symlink and race-oriented isolation integration coverage;
 - network and environment leakage integration coverage;
-- a supported non-Linux node sandbox;
+- a supported non-Linux node isolation;
 - principal-specific hosted isolation and remote-worker attestation; and
 - comprehensive plaintext zeroization above the crypto-key layer.
 

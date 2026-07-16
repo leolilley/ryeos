@@ -471,8 +471,8 @@ pub fn resolve_shutdown_action(
 /// Terminate one exact execution without ever signalling a recycled PID/PGID.
 ///
 /// Graceful shutdown signals only the reported target. This leaves the retained
-/// Bubblewrap group leader alive while the target uses its declared grace. If
-/// the target/group survives the deadline, the already-pinned group is killed.
+/// launcher group leader alive while the target uses its declared grace. If the
+/// target/group survives the deadline, the already-pinned group is killed.
 pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownAction) -> KillResult {
     #[cfg(not(target_os = "linux"))]
     {

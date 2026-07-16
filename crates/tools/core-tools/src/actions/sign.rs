@@ -122,10 +122,8 @@ pub fn run_sign(
     .with_context(|| "load trust store")?;
 
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
-    let sandbox = Arc::new(
-        ryeos_engine::sandbox::SandboxRuntime::load(&app_root)
-            .context("load node sandbox policy")?,
-    );
+    let isolation = ryeos_app::engine_init::load_registered_isolation(&app_root)
+        .context("load node isolation policy")?;
 
     // `sign` canonically takes a ref (`graph:foo/bar`), but operators and LLMs
     // routinely pass the file path they just edited. A path under the project's
@@ -150,7 +148,7 @@ pub fn run_sign(
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
 
-    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, sandbox)?;
+    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, isolation)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
     let ai_root = source_ai_root(source, project_path)?;
@@ -641,7 +639,7 @@ fn build_parser_dispatcher(
     bundle_roots: &[PathBuf],
     kinds: &KindRegistry,
     trust_store: &TrustStore,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<ParserDispatcher> {
     let search: Vec<PathBuf> = bundle_roots.to_vec();
     let tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = bundle_roots
@@ -655,7 +653,7 @@ fn build_parser_dispatcher(
         .collect();
     let (parser_tools, _duplicates) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
-    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store, sandbox)
+    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store, isolation)
         .with_context(|| "load handler descriptors")?;
     Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
 }

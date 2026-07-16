@@ -736,7 +736,7 @@ fn remove_directory_contents(
 /// Remove rebuildable cache entries without touching live execution roots.
 ///
 /// `cache/executions` contains pushed-snapshot checkouts and isolated
-/// no-project workspaces whose `TempDirGuard`s own cleanup. The sandbox's
+/// no-project workspaces whose `TempDirGuard`s own cleanup. The isolation's
 /// `cache/verified-code` generations are likewise protected by process-held
 /// lifetime locks and remove themselves when their runtime generation drops.
 /// A deep maintenance pass cannot infer either in-memory liveness state here,

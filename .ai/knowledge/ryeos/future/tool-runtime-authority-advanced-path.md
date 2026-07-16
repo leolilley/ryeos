@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:37Z:3af1d2388d4d85b663d571f87883d86ebdffb9189fe7efb3a31c1e54f778e7f8:sW8cI6bR2FMFMrrIlAbwzc7gicpWnR+ePQIqi6QB1GJR38d3VbdjIVAGA2MtFd8UiANrFhun78qXAVLF+/hMAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:712e8f8f204b1bf9ca03bbd4a8023ba376355a395448df6c4b4d0d361f6db8e2:UNQd9/y9XYdRpwlGQJzsMcDdMBJYfAHNAscRRgtH4WwD1i52jAkjZrldL/L3NYT/WjwjmplQKZ58+b40SW2DBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
@@ -33,7 +33,7 @@ Reopen this design when direct tools need one or more of:
 - caller-delegated capabilities narrower than the caller but broader than self-bundle authority;
 - user-visible approval grants for tool authority;
 - install-time namespace ownership and revocation;
-- per-tool sandbox profiles tied to authority;
+- per-tool isolation profiles tied to authority;
 - nested tool execution authority;
 - long-lived, resumable, or cancellable tool runtime sessions;
 - a real managed tool runtime binary for launch standardization.
@@ -50,7 +50,7 @@ callback enforcement      = daemon callback token effective_caps
 
 A managed tool runtime can standardize process behavior, but it should not be the source of permission. Authority should be minted by the daemon from signed metadata and explicit delegation.
 
-Likewise, any future per-tool sandbox profile is an intersecting restriction
+Likewise, any future per-tool isolation profile is an intersecting restriction
 beneath the immutable node policy, never item-authored authority to enable or
 broaden mounts, network, environment, or limits.
 
@@ -64,7 +64,7 @@ the claim that hostile multi-tenancy is complete: CPU, memory, and process-count
 budgets belong to an outer cgroup/worker controller; hostile workloads require a
 VM, microVM, or dedicated worker boundary; and principal-scoped storage,
 secrets, networking, audit, and cleanup remain hosted-node concerns. The
-node-owned sandbox provides the stable launch handoff where those later layers
+node-owned isolation provides the stable launch handoff where those later layers
 can be attached. See `ryeos/future/hosted-node-trust-boundaries` for the layered
 completion model.
 
@@ -135,7 +135,7 @@ direct subprocess tool
 managed tool runtime
   -> daemon derives ToolAuthority
   -> daemon mints callback token
-  -> runtime supervises/streams/sandboxes actual tool execution
+  -> runtime supervises/streams/isolationes actual tool execution
 ```
 
 The same authority derivation should feed both paths.

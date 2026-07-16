@@ -631,7 +631,7 @@ pub fn compile_with_handlers(
         )?;
         (
             resolved.absolute_path.to_string_lossy().into_owned(),
-            Some(crate::sandbox::SandboxVerifiedCode {
+            Some(crate::isolation::IsolationVerifiedCode {
                 source_path: resolved.absolute_path,
                 content_hash: resolved.content_hash,
             }),

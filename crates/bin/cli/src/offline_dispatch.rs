@@ -92,18 +92,15 @@ pub async fn try_offline_dispatch(
         ..Default::default()
     })
     .map_err(local_err)?;
-    let sandbox = std::sync::Arc::new(
-        ryeos_engine::sandbox::SandboxRuntime::load(&node_config.app_root).map_err(|error| {
-            CliError::Local {
-                detail: format!("load node sandbox policy: {error}"),
-            }
-        })?,
-    );
+    let isolation = ryeos_app::engine_init::load_registered_isolation(&node_config.app_root)
+        .map_err(|error| CliError::Local {
+            detail: format!("load node isolation policy: {error:#}"),
+        })?;
     let engine = boot_engine(
         &node_config,
         project_path,
         &bundle_roots,
-        std::sync::Arc::clone(&sandbox),
+        std::sync::Arc::clone(&isolation),
     )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
@@ -131,7 +128,7 @@ pub async fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
-            &sandbox,
+            &isolation,
         );
     }
 
@@ -144,7 +141,7 @@ pub async fn try_offline_dispatch(
             params,
             app_root,
             project_path,
-            &sandbox,
+            &isolation,
         )
         .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
@@ -160,7 +157,7 @@ fn boot_engine(
     config: &ryeos_app::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
-    sandbox: std::sync::Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -173,7 +170,7 @@ fn boot_engine(
         bundle_roots,
         project_root.as_deref(),
         None, // no trust overlay
-        sandbox,
+        isolation,
     )
     .map_err(local_err)
 }
@@ -409,7 +406,7 @@ fn exec_tool(
     params: Value,
     app_root: &Path,
     project_path: &str,
-    sandbox: &ryeos_engine::sandbox::SandboxRuntime,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
     let executor_id = item
@@ -560,17 +557,17 @@ fn exec_tool(
         }
     }
 
-    let sandbox_verified_code = [
-        ryeos_engine::sandbox::SandboxVerifiedCode {
+    let isolation_verified_code = [
+        ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: item.source.path.clone(),
             content_hash: item.source.content_hash.clone(),
         },
-        ryeos_engine::sandbox::SandboxVerifiedCode {
+        ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: resolved.absolute_path.clone(),
             content_hash: resolved.content_hash.clone(),
         },
     ];
-    let request = sandbox
+    let request = isolation
         .apply(
             lillux::SubprocessRequest {
                 cmd: resolved.absolute_path.to_string_lossy().into_owned(),
@@ -583,9 +580,9 @@ fn exec_tool(
                 inherited_fds: Vec::new(),
                 supervised_status: None,
             },
-            ryeos_engine::sandbox::SandboxLaunchContext {
+            ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: Path::new(project_path),
-                project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
+                project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
                 state_root: None,
                 checkpoint_dir: None,
                 daemon_socket_path: None,
@@ -595,13 +592,13 @@ fn exec_tool(
                         .join(ryeos_engine::AI_DIR)
                         .join("config/keys/trusted"),
                 ),
-                verified_code: &sandbox_verified_code,
+                verified_code: &isolation_verified_code,
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
             },
         )
         .map_err(|error| CliError::Local {
-            detail: format!("offline tool sandbox refused execution: {error}"),
+            detail: format!("offline tool isolation refused execution: {error}"),
         })?;
 
     if inherit_stdio {
@@ -645,7 +642,7 @@ fn dispatch_service(
     tail: &[String],
     app_root: &Path,
     project_path: &str,
-    sandbox: &ryeos_engine::sandbox::SandboxRuntime,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
     let availability = item
@@ -727,7 +724,7 @@ fn dispatch_service(
         params,
         app_root,
         project_path,
-        sandbox,
+        isolation,
     )
     .map(|result| result.map(OfflineDispatchOutcome::Json))
 }
@@ -889,7 +886,7 @@ fn exec_inherited(
     lillux::configure_inherited_fds(&mut command, inherited_fds).map_err(|error| {
         CliError::Local {
             detail: format!(
-                "offline tool `{tool_ref}` could not retain sandbox descriptors: {error}"
+                "offline tool `{tool_ref}` could not retain isolation descriptors: {error}"
             ),
         }
     })?;
@@ -1025,8 +1022,8 @@ mod tests {
                 .join("identity");
             std::fs::create_dir_all(&node_identity_dir).unwrap();
             std::fs::write(
-                node_identity_dir.parent().unwrap().join("sandbox.yaml"),
-                "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\n\
+                node_identity_dir.parent().unwrap().join("isolation.yaml"),
+                "version: 1\nmode: disabled\nbackend:\n  bundle: sandbox-linux-bubblewrap\n  implementation: linux-bubblewrap\n\
                  filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n\
                  network:\n  mode: isolated\nenvironment:\n  allow:\n    - \"*\"\n\
                  limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",

@@ -4,8 +4,8 @@
 //! build the SAME struct. The struct is then translated into a
 //! `lillux::SubprocessRequest` at the lillux boundary.
 //!
-//! The node-owned sandbox is applied to the translated request through
-//! [`crate::sandbox::SandboxRuntime`].
+//! The node-owned isolation is applied to the translated request through
+//! [`crate::isolation::IsolationRuntime`].
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -47,7 +47,7 @@ pub struct SubprocessSpec {
     pub callback_channel: CallbackChannel,
 
     /// Provenance fields — used by tracing, callback wiring, and the
-    /// sandbox-wrap stage. Not passed to lillux directly.
+    /// isolation-wrap stage. Not passed to lillux directly.
     pub item_ref: CanonicalRef,
     pub thread_id: String,
     pub project_path: PathBuf,

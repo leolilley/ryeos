@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T08:13:20Z:b4c133fe585295912eb4f898cd9d45ad23d162464f18b68e8af1fe4d35076da6:SaOxGnHa2M5wBS91JYGC6dQM1bDVNDCRRTbS1TuTycL7LDjW8CyE9vsz/8ERTwgfS7ZI5Bmdc8BlaBzSGRfSCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:006d98653d193a8417c961b8b06386fa1e41fc3bb180a0882c59d2e4f62bbd65:+fex++VcAqCcS3reNatdhQeJ7xQBuyYYn5Ze8m9V2NEAmng06GwPOz1FdbuvpM+SY/rZ3T0CXXaLAyoiUfTlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
@@ -34,7 +34,7 @@ numeric-PID signal fallback. It also requires atomic bundle replacement through
 an unprivileged Bubblewrap 0.11.0-or-newer installation must also be present
 and permitted to create its configured user and other namespaces. Setuid, setgid, and
 file-capability Bubblewrap executables are refused because RyeOS executes an
-exact private capture. See [Execution Sandbox](node/execution-sandbox.md).
+exact private capture. See [Execution Isolation](node/execution-isolation.md).
 
 ## Compatibility boundaries
 

@@ -181,6 +181,10 @@ pub struct BundleManifestSource {
     /// most manifests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
+    /// Privileged node isolation implementations shipped by this bundle.
+    /// Presence never activates a backend; immutable node policy selects one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -205,6 +209,24 @@ pub struct BundleManifest {
     /// the generated (signed) manifest states the override intent too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
+    /// Signed privileged isolation declarations, carried verbatim from source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
+}
+
+fn validate_isolation_backends(
+    backends: &[ryeos_isolation_protocol::IsolationBackendDeclaration],
+) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for backend in backends {
+        backend.validate().map_err(|error| {
+            anyhow::anyhow!("invalid isolation backend `{}`: {error}", backend.id)
+        })?;
+        if !ids.insert(backend.id.as_str()) {
+            bail!("duplicate isolation backend id `{}`", backend.id);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_current_manifest_body(body: &str, origin: &Path) -> Result<BundleManifest> {
@@ -283,6 +305,8 @@ pub fn materialize_manifest(
         .map_err(|e| anyhow::anyhow!("invalid `smoke` declaration: {e}"))?;
     validate_shadow_decls(&source.shadows)
         .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
+    validate_isolation_backends(&source.isolation_backends)
+        .map_err(|e| anyhow::anyhow!("invalid `isolation_backends` declaration: {e}"))?;
     let provides_kinds = derive_provides_kinds(ai_dir)?;
     Ok(BundleManifest {
         name: source.name,
@@ -294,14 +318,22 @@ pub fn materialize_manifest(
         runtime_authority: source.runtime_authority,
         smoke: source.smoke,
         shadows: source.shadows,
+        isolation_backends: source.isolation_backends,
     })
 }
 
-pub fn load_verified_manifest_yaml(
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedBundleManifest {
+    pub manifest: BundleManifest,
+    pub body_digest: String,
+    pub signer_fingerprint: String,
+}
+
+pub fn load_verified_manifest(
     ai_dir: &Path,
     expected_name: &str,
     trust_store: &TrustStore,
-) -> Result<BundleManifest> {
+) -> Result<VerifiedBundleManifest> {
     let manifest_path = ai_dir.join("manifest.yaml");
     let file_type = match fs::symlink_metadata(&manifest_path) {
         Ok(metadata) => metadata.file_type(),
@@ -352,6 +384,12 @@ pub fn load_verified_manifest_yaml(
             manifest_path.display()
         )
     })?;
+    validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid `isolation_backends` declaration in {}: {error}",
+            manifest_path.display()
+        )
+    })?;
     if manifest.name != expected_name {
         bail!(
             "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}'",
@@ -359,7 +397,11 @@ pub fn load_verified_manifest_yaml(
             expected_name
         );
     }
-    Ok(manifest)
+    Ok(VerifiedBundleManifest {
+        manifest,
+        body_digest: lillux::sha256_hex(body.as_bytes()),
+        signer_fingerprint: sig_header.signer_fingerprint,
+    })
 }
 
 fn yaml_signature_envelope() -> SignatureEnvelope {
@@ -405,6 +447,12 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
     manifest.runtime_authority.validate().map_err(|e| {
         anyhow::anyhow!(
             "invalid `runtime_authority` declaration in {}: {e}",
+            manifest_path.display()
+        )
+    })?;
+    validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid `isolation_backends` declaration in {}: {error}",
             manifest_path.display()
         )
     })?;
@@ -617,7 +665,7 @@ fn parse_all_manifests(bundles: &[(String, PathBuf)]) -> Result<Vec<(String, Bun
     let mut manifests: Vec<(String, BundleManifest)> = Vec::new();
     for (name, path) in bundles {
         let mf = parse_manifest(path, name)
-            .with_context(|| format!("parse manifest for bundle {}", name))?;
+            .map_err(|error| anyhow::anyhow!("parse manifest for bundle {name}: {error:#}"))?;
         manifests.push((name.clone(), mf));
     }
     Ok(manifests)
@@ -1005,6 +1053,7 @@ typo_field: oops
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec![],
+            isolation_backends: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
@@ -1033,6 +1082,7 @@ typo_field: oops
             },
             smoke: vec![],
             shadows: vec![],
+            isolation_backends: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "arc").unwrap_err();
         assert!(err.to_string().contains("runtime_authority"), "got: {err}");
@@ -1200,6 +1250,7 @@ smoke:
                 timeout_secs: None,
             }],
             shadows: vec![],
+            isolation_backends: vec![],
         };
         let manifest = materialize_manifest(source.clone(), &ai_dir, "probe").unwrap();
         assert_eq!(manifest.smoke, source.smoke);
@@ -1271,6 +1322,7 @@ shadows:
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec!["no-colon".to_string()],
+            isolation_backends: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "downstream").unwrap_err();
         assert!(err.to_string().contains("shadows"), "{err}");
@@ -1288,5 +1340,70 @@ typo_field: oops
             result.is_err(),
             "unknown field in source should be rejected"
         );
+    }
+
+    fn isolation_backend(id: &str) -> ryeos_isolation_protocol::IsolationBackendDeclaration {
+        use ryeos_isolation_protocol::{
+            IsolationAdapterProtocolVersion, IsolationArtifactRole, IsolationCapability,
+            IsolationTargetTriple,
+        };
+
+        ryeos_isolation_protocol::IsolationBackendDeclaration {
+            id: id.to_string(),
+            protocol: IsolationAdapterProtocolVersion::V1,
+            targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
+            adapter: "adapter".to_string(),
+            artifacts: std::collections::BTreeMap::from([(
+                IsolationArtifactRole::Launcher,
+                "launcher".to_string(),
+            )]),
+            capabilities: std::collections::BTreeSet::from([
+                IsolationCapability::FilesystemPrivateRoot,
+            ]),
+        }
+    }
+
+    #[test]
+    fn isolation_backend_declarations_are_strict_and_unique() {
+        validate_isolation_backends(&[isolation_backend("linux")]).unwrap();
+        let error =
+            validate_isolation_backends(&[isolation_backend("linux"), isolation_backend("linux")])
+                .unwrap_err();
+        assert!(error.to_string().contains("duplicate isolation backend id"));
+
+        let yaml = r#"
+name: isolation
+version: "1.0"
+isolation_backends:
+  - id: linux
+    protocol: ryeos.isolation-adapter/v1
+    targets: [x86_64-unknown-linux-gnu]
+    adapter: adapter
+    artifacts: { launcher: launcher }
+    capabilities: [filesystem.private_root]
+    undeclared_field: true
+"#;
+        assert!(serde_yaml::from_str::<BundleManifestSource>(yaml).is_err());
+    }
+
+    #[test]
+    fn materialization_carries_the_signed_isolation_declaration_exactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let ai_dir = temp.path().join(".ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        let backend = isolation_backend("linux");
+        let source = BundleManifestSource {
+            name: "isolation".to_string(),
+            version: "1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![],
+            shadows: vec![],
+            isolation_backends: vec![backend.clone()],
+        };
+        let manifest = materialize_manifest(source, &ai_dir, "isolation").unwrap();
+        assert_eq!(manifest.isolation_backends, vec![backend]);
     }
 }

@@ -195,7 +195,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &node_config_root,
         &state.engine.node_trust_store,
         &prospective_validator,
-        Arc::clone(&state.sandbox),
+        Arc::clone(&state.isolation),
     );
     if let Err(error) = admission {
         // The canonical staging name is shared by transaction recovery. Remove

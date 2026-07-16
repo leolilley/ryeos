@@ -29,6 +29,248 @@ use ryeos_engine::trust::TrustStore;
 
 use crate::config::Config;
 use crate::node_config::BundleRecord;
+use ryeos_isolation_protocol::{
+    AdapterInspectionRequest, AdapterInspectionResponse, IsolationAdapterProtocolVersion,
+};
+
+pub fn load_registered_isolation(
+    app_root: &std::path::Path,
+) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
+    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))
+        .context("load node trust for isolation backend resolution")?;
+    let loader = crate::node_config::loader::BootstrapLoader {
+        app_root,
+        trust_store: &trust_store,
+    };
+    let records = loader
+        .load_bundle_section()
+        .context("load bundle registrations for isolation backend resolution")?;
+    let backend = resolve_isolation_backend(app_root, &records, &trust_store)?;
+    ryeos_engine::isolation::IsolationRuntime::load_with_backend(app_root, backend)
+        .map(Arc::new)
+        .map_err(anyhow::Error::from)
+}
+
+pub fn resolve_isolation_backend(
+    app_root: &std::path::Path,
+    bundle_records: &[BundleRecord],
+    node_trust_store: &TrustStore,
+) -> Result<Option<Arc<ryeos_engine::isolation::ResolvedIsolationBackend>>> {
+    let policy_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/isolation.yaml");
+    let raw = std::fs::read_to_string(&policy_path)
+        .with_context(|| format!("read node isolation policy {}", policy_path.display()))?;
+    let policy: ryeos_engine::isolation::IsolationPolicy = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse node isolation policy {}", policy_path.display()))?;
+    if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
+        return Ok(None);
+    }
+    let record = bundle_records
+        .iter()
+        .find(|record| record.name == policy.backend.bundle)
+        .with_context(|| {
+            format!(
+                "isolation bundle `{}` is not registered",
+                policy.backend.bundle
+            )
+        })?;
+    let verified = ryeos_bundle::manifest::load_verified_manifest(
+        &record.path.join(ryeos_engine::AI_DIR),
+        &record.name,
+        node_trust_store,
+    )
+    .context("verify selected isolation bundle manifest")?;
+    let declaration = verified
+        .manifest
+        .isolation_backends
+        .iter()
+        .find(|declaration| declaration.id == policy.backend.implementation)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "bundle `{}` does not declare isolation implementation `{}`",
+                record.name, policy.backend.implementation
+            )
+        })?;
+    let target = host_isolation_target()?;
+    if !declaration.targets.contains(&target) {
+        anyhow::bail!("selected isolation implementation does not declare the host target");
+    }
+    let adapter = ryeos_engine::binary_resolver::capture_bundle_executable(
+        &declaration.adapter,
+        &record.path,
+        node_trust_store,
+    )
+    .context("capture isolation adapter")?;
+    if adapter.identity.signer_fingerprint != verified.signer_fingerprint {
+        anyhow::bail!("isolation adapter signer does not match its bundle manifest signer");
+    }
+    let mut artifact_handles = std::collections::BTreeMap::new();
+    let mut artifact_digests = std::collections::BTreeMap::new();
+    for (role, executable) in &declaration.artifacts {
+        let artifact = ryeos_engine::binary_resolver::capture_bundle_executable(
+            executable,
+            &record.path,
+            node_trust_store,
+        )
+        .with_context(|| format!("capture isolation artifact `{executable}`"))?;
+        if artifact.identity.signer_fingerprint != verified.signer_fingerprint {
+            anyhow::bail!("isolation artifact `{executable}` signer does not match its bundle manifest signer");
+        }
+        artifact_digests.insert(*role, artifact.identity.content_hash);
+        artifact_handles.insert(*role, artifact.handle);
+    }
+    let inspection_response = inspect_isolation_backend(
+        &adapter.handle,
+        &artifact_handles,
+        &artifact_digests,
+        &declaration,
+        target,
+    )?;
+    let backend = ryeos_engine::isolation::ResolvedIsolationBackend {
+        selection: policy.backend,
+        declaration,
+        bundle_manifest_digest: verified.body_digest,
+        signer_fingerprint: verified.signer_fingerprint,
+        adapter_handle: adapter.handle,
+        artifact_handles,
+        adapter_build: inspection_response.adapter_build,
+        effective_capabilities: inspection_response.effective_capabilities,
+        inspected_artifacts: inspection_response.artifacts,
+    };
+    backend
+        .validate()
+        .context("validate resolved isolation backend")?;
+    Ok(Some(Arc::new(backend)))
+}
+
+fn host_isolation_target() -> Result<ryeos_isolation_protocol::IsolationTargetTriple> {
+    if cfg!(all(
+        target_arch = "x86_64",
+        target_os = "linux",
+        target_env = "gnu"
+    )) {
+        Ok(ryeos_isolation_protocol::IsolationTargetTriple::X86_64UnknownLinuxGnu)
+    } else if cfg!(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        target_env = "gnu"
+    )) {
+        Ok(ryeos_isolation_protocol::IsolationTargetTriple::Aarch64UnknownLinuxGnu)
+    } else {
+        anyhow::bail!("selected isolation implementation does not support this host platform")
+    }
+}
+
+fn inspect_isolation_backend(
+    adapter: &Arc<std::fs::File>,
+    artifact_handles: &std::collections::BTreeMap<
+        ryeos_isolation_protocol::IsolationArtifactRole,
+        Arc<std::fs::File>,
+    >,
+    artifact_digests: &std::collections::BTreeMap<
+        ryeos_isolation_protocol::IsolationArtifactRole,
+        String,
+    >,
+    declaration: &ryeos_isolation_protocol::IsolationBackendDeclaration,
+    target: ryeos_isolation_protocol::IsolationTargetTriple,
+) -> Result<AdapterInspectionResponse> {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            adapter,
+            artifact_handles,
+            artifact_digests,
+            declaration,
+            target,
+        );
+        anyhow::bail!("isolation adapters require inherited descriptor support");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        let artifacts = artifact_handles
+            .iter()
+            .map(|(role, handle)| {
+                let fd = u32::try_from(handle.as_raw_fd())
+                    .map_err(|_| anyhow::anyhow!("captured descriptor is negative"))?;
+                Ok((*role, fd))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+        let request = AdapterInspectionRequest {
+            protocol: IsolationAdapterProtocolVersion::V1,
+            target,
+            backend_id: declaration.id.clone(),
+            artifacts,
+        };
+        let request =
+            serde_json::to_vec(&request).context("serialize isolation inspection request")?;
+        if request.len() > ryeos_isolation_protocol::MAX_REQUEST_BYTES {
+            anyhow::bail!(
+                "isolation inspection request exceeds {} bytes",
+                ryeos_isolation_protocol::MAX_REQUEST_BYTES
+            );
+        }
+        let request_handle = lillux::sealed_memfd(c"ryeos-isolation-inspection", &request)
+            .map_err(|error| anyhow::anyhow!("seal isolation inspection request: {error}"))?;
+        let result = lillux::run(lillux::SubprocessRequest {
+            cmd: format!("/proc/self/fd/{}", adapter.as_raw_fd()),
+            args: vec![
+                "inspect".to_string(),
+                request_handle.as_raw_fd().to_string(),
+            ],
+            cwd: Some("/".to_string()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 5.0,
+            limits: Some(lillux::SubprocessLimits {
+                max_open_files: Some(64),
+                max_stdout_bytes: Some(ryeos_isolation_protocol::MAX_RESPONSE_BYTES as u64),
+                max_stderr_bytes: Some(64 * 1024),
+            }),
+            inherited_fds: std::iter::once(adapter.clone())
+                .chain(artifact_handles.values().cloned())
+                .chain(std::iter::once(request_handle))
+                .collect(),
+            supervised_status: None,
+        });
+        if !result.success {
+            anyhow::bail!(
+                "isolation adapter inspection failed: {}",
+                result.stderr.trim()
+            );
+        }
+        let response: AdapterInspectionResponse =
+            ryeos_isolation_protocol::from_json_str_strict(&result.stdout)
+                .context("parse strict isolation adapter inspection response")?;
+        if response.protocol != IsolationAdapterProtocolVersion::V1 {
+            anyhow::bail!("isolation adapter returned a different protocol version");
+        }
+        response
+            .validate()
+            .context("validate isolation adapter inspection response")?;
+        if !declaration
+            .capabilities
+            .is_subset(&response.effective_capabilities)
+        {
+            anyhow::bail!("isolation adapter does not provide every declared capability");
+        }
+        if response.artifacts.len() != artifact_digests.len() {
+            anyhow::bail!("isolation adapter inspected a different artifact set than declared");
+        }
+        for (role, expected_digest) in artifact_digests {
+            let inspected = response
+                .artifacts
+                .get(role)
+                .with_context(|| format!("isolation adapter omitted {role:?} inspection"))?;
+            if &inspected.digest != expected_digest {
+                anyhow::bail!("isolation adapter observed a different {role:?} artifact digest");
+            }
+        }
+        Ok(response)
+    }
+}
 
 /// Build the native engine from daemon configuration (Model B).
 ///
@@ -39,14 +281,14 @@ use crate::node_config::BundleRecord;
 pub fn build_engine(
     config: &Config,
     bundle_roots: &[PathBuf],
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
-) -> Result<(Engine, Arc<ryeos_engine::sandbox::SandboxRuntime>)> {
-    build_engine_for_roots_with_sandbox(
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+) -> Result<(Engine, Arc<ryeos_engine::isolation::IsolationRuntime>)> {
+    build_engine_for_roots_with_isolation(
         config,
         bundle_roots,
         None, // no project root at startup — resolved per-request
         None, // no overlay — daemon's persistent trust store wins
-        sandbox,
+        isolation,
     )
 }
 
@@ -85,19 +327,25 @@ pub fn build_engine_for_roots(
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<Engine> {
-    build_engine_for_roots_with_sandbox(config, bundle_roots, project_root, trust_overlay, sandbox)
-        .map(|(engine, _sandbox)| engine)
+    build_engine_for_roots_with_isolation(
+        config,
+        bundle_roots,
+        project_root,
+        trust_overlay,
+        isolation,
+    )
+    .map(|(engine, _isolation)| engine)
 }
 
-fn build_engine_for_roots_with_sandbox(
+fn build_engine_for_roots_with_isolation(
     config: &Config,
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
-) -> Result<(Engine, Arc<ryeos_engine::sandbox::SandboxRuntime>)> {
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+) -> Result<(Engine, Arc<ryeos_engine::isolation::IsolationRuntime>)> {
     // 1. Validate bundle roots exist and are readable
     if bundle_roots.is_empty() {
         anyhow::bail!(
@@ -173,8 +421,8 @@ fn build_engine_for_roots_with_sandbox(
         protocol_registry,
         runtimes,
         launch_preparers,
-        sandbox,
-    } = build_node_bundle_admission(&bundle_roots, &node_trust_store, sandbox.clone())?;
+        isolation,
+    } = build_node_bundle_admission(&bundle_roots, &node_trust_store, isolation.clone())?;
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
@@ -187,7 +435,7 @@ fn build_engine_for_roots_with_sandbox(
             &config.tool_env_passthrough,
         )?);
 
-    Ok((engine, sandbox))
+    Ok((engine, isolation))
 }
 
 /// Admit a prospective node bundle-root set without constructing an Engine.
@@ -199,9 +447,81 @@ fn build_engine_for_roots_with_sandbox(
 pub fn admit_node_bundle_roots(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
-    build_node_bundle_admission(bundle_roots, node_trust_store, sandbox).map(|_| ())
+    if isolation.is_enforced() {
+        let selection = &isolation.inspection().backend.selection;
+        let selected = bundle_roots
+            .iter()
+            .find_map(|root| {
+                ryeos_bundle::manifest::load_verified_manifest(
+                    &root.join(ryeos_engine::AI_DIR),
+                    &selection.bundle,
+                    node_trust_store,
+                )
+                .ok()
+                .map(|manifest| (root, manifest))
+            })
+            .with_context(|| {
+                format!(
+                    "prospective bundle set removes selected isolation bundle `{}`",
+                    selection.bundle
+                )
+            })?;
+        let (root, manifest) = selected;
+        let declaration = manifest
+            .manifest
+            .isolation_backends
+            .iter()
+            .find(|declaration| declaration.id == selection.implementation)
+            .with_context(|| {
+                format!(
+                    "prospective isolation bundle omits implementation `{}`",
+                    selection.implementation
+                )
+            })?;
+        let adapter = ryeos_engine::binary_resolver::capture_bundle_executable(
+            &declaration.adapter,
+            root,
+            node_trust_store,
+        )
+        .context("capture prospective isolation adapter")?;
+        if adapter.identity.signer_fingerprint != manifest.signer_fingerprint {
+            anyhow::bail!(
+                "prospective isolation adapter signer does not match its bundle manifest signer"
+            );
+        }
+        let mut artifact_handles = std::collections::BTreeMap::new();
+        let mut artifact_digests = std::collections::BTreeMap::new();
+        for (role, executable) in &declaration.artifacts {
+            let captured = ryeos_engine::binary_resolver::capture_bundle_executable(
+                executable,
+                root,
+                node_trust_store,
+            )
+            .with_context(|| format!("capture prospective isolation artifact `{executable}`"))?;
+            if captured.identity.signer_fingerprint != manifest.signer_fingerprint {
+                anyhow::bail!(
+                    "prospective isolation artifact `{executable}` signer does not match its bundle manifest signer"
+                );
+            }
+            artifact_digests.insert(*role, captured.identity.content_hash);
+            artifact_handles.insert(*role, captured.handle);
+        }
+        let target = host_isolation_target()?;
+        if !declaration.targets.contains(&target) {
+            anyhow::bail!("prospective isolation implementation omits the host target");
+        }
+        inspect_isolation_backend(
+            &adapter.handle,
+            &artifact_handles,
+            &artifact_digests,
+            declaration,
+            target,
+        )
+        .context("inspect prospective isolation backend")?;
+    }
+    build_node_bundle_admission(bundle_roots, node_trust_store, isolation).map(|_| ())
 }
 
 /// Verify that the signed node bundle registrations and installed manifests
@@ -260,13 +580,13 @@ struct NodeBundleAdmission {
     protocol_registry: ProtocolRegistry,
     runtimes: RuntimeRegistry,
     launch_preparers: LaunchPreparerRegistry,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 }
 
 fn build_node_bundle_admission(
     bundle_roots: &[PathBuf],
     node_trust_store: &TrustStore,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<NodeBundleAdmission> {
     if bundle_roots.is_empty() {
         anyhow::bail!("prospective node bundle set is empty");
@@ -317,7 +637,7 @@ fn build_node_bundle_admission(
     let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, node_trust_store, &kinds)
         .context("failed to build runtime registry")?;
     let handler_registry =
-        HandlerRegistry::load_base(&tagged_roots, node_trust_store, sandbox.clone())
+        HandlerRegistry::load_base(&tagged_roots, node_trust_store, isolation.clone())
             .context("failed to load handler descriptors from bundle roots")?;
     let handler_registry = std::sync::Arc::new(handler_registry);
     let protocol_registry = ProtocolRegistry::load_base(&tagged_roots, node_trust_store)
@@ -349,11 +669,16 @@ fn build_node_bundle_admission(
     }
 
     // Enforced policy binds preparers to the backend captured while the
-    // immutable sandbox snapshot was loaded. Disabled policy binds the same
+    // immutable isolation snapshot was loaded. Disabled policy binds the same
     // verified handlers to the direct bounded runner without resolving or
-    // probing Bubblewrap.
+    // probing a selected isolation adapter.
     let launch_preparers = if runtimes.requires_launch_preparer() {
-        bind_launch_preparers(&runtimes, &handler_registry, &sandbox)?
+        bind_launch_preparers(
+            &runtimes,
+            &handler_registry,
+            isolation.clone(),
+            bundle_roots,
+        )?
     } else {
         LaunchPreparerRegistry::default()
     };
@@ -371,17 +696,18 @@ fn build_node_bundle_admission(
         protocol_registry,
         runtimes,
         launch_preparers,
-        sandbox,
+        isolation,
     })
 }
 
 fn bind_launch_preparers(
     runtimes: &RuntimeRegistry,
     handlers: &HandlerRegistry,
-    sandbox: &ryeos_engine::sandbox::SandboxRuntime,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    bundle_roots: &[PathBuf],
 ) -> Result<LaunchPreparerRegistry> {
-    let runner = LaunchPreparerRunner::from_sandbox_runtime(sandbox)
-        .context("failed to initialize fixed launch-preparer sandbox")?;
+    let runner = LaunchPreparerRunner::from_isolation_runtime(isolation, bundle_roots)
+        .context("failed to initialize fixed launch-preparer isolation")?;
     if let Err(issues) = validate_runtime_launch_handlers(runtimes, handlers, &runner) {
         let mut message = String::from("runtime launch-preparer validation failed:\n");
         for issue in &issues {

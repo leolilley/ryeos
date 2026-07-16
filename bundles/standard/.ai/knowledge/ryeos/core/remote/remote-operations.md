@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:32aa040113a899e23106a7f3ab811958ba13ffb3ca4241aa8124c34f52bd416d:he4O+CfC+gtzmD6nX1Z/zgrmpSWadZH8utJtrJVk/jnEUGy6xHzCZKFTaA8BSAH8Ynuv2PzcU8F8sI00nwLXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:476964b58c9cbcee3403c1d817c3e9ef5fce115245750ef348477d8b72a98dad:p8yIdW5jatpx2FpN9pZTTyRKluZ93EbxYpUJes+xTs4BeonqY1e59CxqrLR4hr+AlkmkgAUibHAYx3+K6a6PCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -21,7 +21,7 @@ See also:
 - [Identity Model](../identity-model.md) for the four trust layers and request authentication flow.
 - [Spaces](../spaces.md) for project/system resolution.
 - [Execution Provenance](../execution/provenance.md) for local vs pushed-head execution source invariants.
-- [Execution Sandbox](../node/execution-sandbox.md) for the target node's immutable subprocess boundary.
+- [Execution Isolation](../node/execution-isolation.md) for the target node's immutable subprocess boundary.
 - [HTTP API](../node/http-api.md) and [Services: remote](../services/remote.md) for route/service mappings.
 
 ## v1 Trust Boundary

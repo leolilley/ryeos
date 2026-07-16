@@ -4448,11 +4448,11 @@ pub struct SpawnItemParams<'a> {
     /// typed vocabulary source through final composition.
     pub protocol_env_bindings: Vec<EnvBinding>,
     pub roots: DaemonRootEnv,
-    pub sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
-    pub sandbox_project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
+    pub isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    pub isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
     /// Exact daemon socket requested by the verified callback channel, or
     /// `None` for a callback-free launch.
-    pub sandbox_daemon_socket_path: Option<&'a std::path::Path>,
+    pub isolation_daemon_socket_path: Option<&'a std::path::Path>,
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
@@ -4487,9 +4487,9 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         vault_bindings,
         protocol_env_bindings,
         roots,
-        sandbox,
-        sandbox_project_authority,
-        sandbox_daemon_socket_path,
+        isolation,
+        isolation_project_authority,
+        isolation_daemon_socket_path,
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
@@ -4614,28 +4614,28 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         }
     }
 
-    let sandbox_project_root = match &resolved.plan_context.project_context {
+    let isolation_project_root = match &resolved.plan_context.project_context {
         ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
         _ => None,
     };
-    let sandbox_resolution_roots = engine.resolution_roots(sandbox_project_root);
-    let sandbox_bundle_roots = sandbox_resolution_roots
+    let isolation_resolution_roots = engine.resolution_roots(isolation_project_root);
+    let isolation_bundle_roots = isolation_resolution_roots
         .ordered
         .iter()
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
         .collect();
-    let sandbox_node_trusted_keys_dir = app_root
+    let isolation_node_trusted_keys_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("config/keys/trusted");
-    let sandbox_verified_code = plan
+    let isolation_verified_code = plan
         .nodes
         .iter()
         .filter_map(|node| match node {
             ryeos_engine::contracts::PlanNode::DispatchSubprocess {
                 tool_path: Some(source_path),
                 ..
-            } => Some(ryeos_engine::sandbox::SandboxVerifiedCode {
+            } => Some(ryeos_engine::isolation::IsolationVerifiedCode {
                 source_path: source_path.clone(),
                 content_hash: resolved.resolved_item.content_hash.clone(),
             }),
@@ -4644,14 +4644,15 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .collect();
     let engine_ctx = EngineContext {
         app_root,
-        sandbox,
-        sandbox_project_authority,
-        sandbox_state_root: state_root.map(std::path::Path::to_path_buf),
-        sandbox_checkpoint_dir: allocated_checkpoint_dir.clone(),
-        sandbox_daemon_socket_path: sandbox_daemon_socket_path.map(std::path::Path::to_path_buf),
-        sandbox_bundle_roots,
-        sandbox_node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
-        sandbox_verified_code,
+        isolation,
+        isolation_project_authority,
+        isolation_state_root: state_root.map(std::path::Path::to_path_buf),
+        isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
+        isolation_daemon_socket_path: isolation_daemon_socket_path
+            .map(std::path::Path::to_path_buf),
+        isolation_bundle_roots,
+        isolation_node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
+        isolation_verified_code,
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         current_site_id: resolved.current_site_id.clone(),
@@ -4738,8 +4739,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         Err(
             target_error @ crate::process::ExecutionProcessIdentityCaptureError::TargetAlreadyDeadOrStale,
         ) => {
-            // Bubblewrap can report a very short command and reap it before the
-            // daemon captures its birth identity. Lillux still retains the
+            // A supervised launcher can report a very short command and reap
+            // it before the daemon captures its birth identity. Lillux retains the
             // wrapper/group leader and owns its wait/output path. Use that exact
             // leader as the durable control target rather than turning a
             // successful fast command into a spawn failure. The reported child

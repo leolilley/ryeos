@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:37Z:25cfbf6f5e862669a92315504d9cf5f2a64bc2238072dd8e63896964c79fe6f1:K0aGS96nCkegloTp8otnafOhJMlBeWKnFalfjJgLx58ZxvJel17YGcbpOok+nRlqb7rXSV9ty/pwi7OFeKz6BA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:22b48c16872bcdd9c01807ca78a65b537f8f7fb216a9f32e3e0bca86965ddc6d:sbqDm9svi0rFcJVCXmfYm+Hc+5mz98gg31TDHJ8IVL6uY8flfdOhF0zBkCp2KTNzmiyiIQod5pqD9NwobAt0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
@@ -95,7 +95,7 @@ architecture. A hostile-workload scheduler must add, per principal or job:
 - an admitted immutable image/snapshot or closure policy when live read-only
   transitive imports and assets are not acceptable.
 
-Host PIDs and same-UID signals are not isolated by the current inner sandbox.
+Host PIDs and same-UID signals are not isolated by the current inner isolation.
 The outer worker design must remove that shared authority rather than claiming
 Bubblewrap alone solved it. Durable job records should therefore carry an
 explicit isolation class and worker/cgroup identity once this path is activated.

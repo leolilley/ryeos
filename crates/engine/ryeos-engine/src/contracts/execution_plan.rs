@@ -35,15 +35,15 @@ pub struct PlanContext {
 #[derive(Debug, Clone)]
 pub struct EngineContext {
     pub app_root: PathBuf,
-    pub sandbox: Arc<crate::sandbox::SandboxRuntime>,
-    pub sandbox_project_authority: crate::sandbox::SandboxProjectAuthority,
-    pub sandbox_state_root: Option<PathBuf>,
-    pub sandbox_checkpoint_dir: Option<PathBuf>,
+    pub isolation: Arc<crate::isolation::IsolationRuntime>,
+    pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
+    pub isolation_state_root: Option<PathBuf>,
+    pub isolation_checkpoint_dir: Option<PathBuf>,
     /// Typed callback-socket fact paired with this plan's daemon callback env.
-    pub sandbox_daemon_socket_path: Option<PathBuf>,
-    pub sandbox_bundle_roots: Vec<PathBuf>,
-    pub sandbox_node_trusted_keys_dir: Option<PathBuf>,
-    pub sandbox_verified_code: Vec<crate::sandbox::SandboxVerifiedCode>,
+    pub isolation_daemon_socket_path: Option<PathBuf>,
+    pub isolation_bundle_roots: Vec<PathBuf>,
+    pub isolation_node_trusted_keys_dir: Option<PathBuf>,
+    pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,
@@ -90,7 +90,7 @@ pub struct PlanSubprocessSpec {
     pub cmd: String,
     /// Exact identity of a bundle/CAS command resolved while building this
     /// plan. System executables and project-local interpreters use `None`.
-    pub verified_command: Option<crate::sandbox::SandboxVerifiedCode>,
+    pub verified_command: Option<crate::isolation::IsolationVerifiedCode>,
     #[serde(default)]
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,

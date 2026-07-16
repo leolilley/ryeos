@@ -17,7 +17,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub acting_principal: &'a str,
     pub binary: &'a str,
     pub project_path: &'a Path,
-    pub project_authority: ryeos_engine::sandbox::SandboxProjectAuthority,
+    pub project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
     pub state_root: Option<&'a Path>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     pub envelope: &'a LaunchEnvelope,
@@ -27,8 +27,8 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub vault_bindings: &'a [(String, String)],
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
-    pub sandbox: &'a ryeos_engine::sandbox::SandboxRuntime,
-    pub verified_command: &'a ryeos_engine::sandbox::SandboxVerifiedCode,
+    pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
+    pub verified_command: &'a ryeos_engine::isolation::IsolationVerifiedCode,
     pub cas_root: &'a Path,
     /// Daemon-allocated checkpoint dir for a replay-aware runtime.
     pub checkpoint_dir: Option<&'a Path>,
@@ -116,7 +116,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         vault_bindings,
         thread_auth_token,
         roots,
-        sandbox,
+        isolation,
         verified_command,
         cas_root,
         checkpoint_dir,
@@ -130,7 +130,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     let callback_ipc_requested = descriptor.callback_channel
         != ryeos_engine::protocol_vocabulary::CallbackChannel::None
         || callback_socket_requested;
-    let sandbox_daemon_socket_path =
+    let isolation_daemon_socket_path =
         callback_ipc_requested.then_some(callback.socket_path.as_path());
 
     let callback_socket_path = callback
@@ -215,24 +215,24 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         .build();
 
     let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
-    let sandbox_item_ref = item_ref.to_string();
-    let request = sandbox
+    let isolation_item_ref = item_ref.to_string();
+    let request = isolation
         .apply(
             request,
-            ryeos_engine::sandbox::SandboxLaunchContext {
+            ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: &spec.project_path,
                 project_authority,
                 state_root,
                 checkpoint_dir,
-                daemon_socket_path: sandbox_daemon_socket_path,
+                daemon_socket_path: isolation_daemon_socket_path,
                 bundle_roots: &envelope.roots.bundle_roots,
                 node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
                 verified_code: std::slice::from_ref(verified_command),
-                item_ref: &sandbox_item_ref,
+                item_ref: &isolation_item_ref,
                 thread_id,
             },
         )
-        .map_err(|error| anyhow::anyhow!("sandbox apply failed: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("isolation apply failed: {error}"))?;
     let spawned = match lillux::spawn(request) {
         Ok(spawned) => spawned,
         Err(result) => {

@@ -49,6 +49,76 @@ pub struct ResolvedBinary {
     pub signer_fingerprint: String,
 }
 
+#[derive(Debug)]
+pub struct CapturedExecutable {
+    pub identity: ResolvedBinary,
+    pub handle: std::sync::Arc<std::fs::File>,
+}
+
+/// Resolve, verify, open without following symlinks, and re-hash an installed
+/// bundle executable. Consumers execute the retained descriptor and never
+/// reopen `identity.absolute_path`.
+pub fn capture_bundle_executable(
+    executable_name: &str,
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<CapturedExecutable, EngineError> {
+    let identity = resolve_bundle_binary_ref(
+        &format!("bin:{executable_name}"),
+        bundle_root,
+        |fingerprint| {
+            node_trust_store
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
+        },
+        TrustClass::TrustedBundle,
+    )?;
+
+    #[cfg(unix)]
+    let handle = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&identity.absolute_path)
+    };
+    #[cfg(not(unix))]
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .open(&identity.absolute_path);
+    let mut handle = handle.map_err(|error| {
+        EngineError::Internal(format!(
+            "capture verified executable {}: {error}",
+            identity.absolute_path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut handle, &mut bytes).map_err(|error| {
+        EngineError::Internal(format!(
+            "read captured executable {}: {error}",
+            identity.absolute_path.display()
+        ))
+    })?;
+    let observed = lillux::sha256_hex(&bytes);
+    if observed != identity.content_hash {
+        return Err(EngineError::BinHashMismatch {
+            bin: executable_name.to_string(),
+            declared: identity.content_hash,
+            computed: observed,
+        });
+    }
+    std::io::Seek::seek(&mut handle, std::io::SeekFrom::Start(0)).map_err(|error| {
+        EngineError::Internal(format!(
+            "rewind captured executable {}: {error}",
+            identity.absolute_path.display()
+        ))
+    })?;
+    Ok(CapturedExecutable {
+        identity,
+        handle: std::sync::Arc::new(handle),
+    })
+}
+
 /// Resolve a runtime command binary ref for a concrete wrapper item.
 ///
 /// Accepted shapes:

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:87023d458c72212e35fdafe38798163f834498c660293db553d6461d5e733bb4:m/+J3qmOcIy8+Fejq/qrwwQ4EHyq/pI41gZULFdSJ1sbjNuRlsPydjrZUwxcZm3+iLLWpFZ9UcvNrF+iCA9wDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:300251619ba335c25878744bc1d43dbe79934b15c7fbc3435e3d11ad99efde4e:0LGwSzZqGf16eBlMQGAzVQktYy4BgJW8pT/iN48ocKb4Zpxi3McTW3LZv+CVAomSwd0xci/RkoKOD9KMaZfNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -53,7 +53,7 @@ overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 │   ├── identity/private_key.pem     ← daemon's Ed25519 signing key
 │   ├── vault/{private_key,public_key}.pem  ← X25519 sealed secrets
 │   ├── config.yaml                  ← daemon config
-│   ├── sandbox.yaml                 ← create-once node execution policy
+│   ├── isolation.yaml                 ← create-once node execution policy
 │   ├── bundles/
 │   │   ├── core.yaml                ← signed registration records
 │   │   └── standard.yaml
@@ -78,10 +78,10 @@ ryeos fetch tool:ryeos/core/sign --to project
 The copied item lives in project space and shadows the system
 version (first match wins).
 
-`sandbox.yaml` is operator-owned mutable node policy rather than installed
+`isolation.yaml` is operator-owned mutable node policy rather than installed
 bundle content. It defaults to disabled, is loaded as an immutable snapshot at
 daemon startup, and is documented in [Execution
-Sandbox](node/execution-sandbox.md).
+Sandbox](node/execution-isolation.md).
 
 ## Installing Bundles
 

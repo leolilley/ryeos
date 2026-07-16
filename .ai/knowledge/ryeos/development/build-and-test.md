@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:281e7445e7e2835f2a1acedcdc1983bedf9715986d800ec46675476bd78757d5:3tKUXs498qZm3HAVvqm+x5vaAZTb/j+L/ruqXwNrehYWJgiH6X9/x1hhvOaB7hRzbPh16AmN9mgnEx/vJtLpCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:54cb175baf6f0426edf3949de2f9d574f6d0fa4035791c97e3b940b8c3dd2fd7:EykCTu/OBMvrQOWnXajfigwwfNhl0ryj7sXnCuowsX5u1NjrMS/u2Vcn5B7eEvQtS3Ka7h4c9jD0kdexw5BnAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -136,10 +136,10 @@ ryeos execute tool:ryeos/core/identity/public_key
 script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
 
-The generated sandbox policy is disabled by default. `node doctor` uses the
+The generated isolation policy is disabled by default. `node doctor` uses the
 production policy loader; after changing mode or policy contents, restart the
 node before judging execution behavior. See [Execution
-Sandbox](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-sandbox.md).
+Isolation](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md).
 
 If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
 work around it by adding kind-specific CLI dispatch logic.

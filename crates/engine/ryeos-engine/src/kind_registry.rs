@@ -3223,7 +3223,7 @@ execution:
         let yaml = "\
 execution:
   terminator:
-    kind: wasm_sandbox
+    kind: wasm_isolation
     protocol: protocol:ryeos/core/opaque
 ";
         let err = parse_exec(yaml).unwrap_err();

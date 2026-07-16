@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:22Z:ad9f7aafac9e568e233b81f3231dce3d56fc22a0d8d3d6093113803c67ebedcc:Q+oRIhp0e2N9ItTynnfpuzW712s5zFo5C4ZZA8fJV5TWIq6zmXc6kmvxnlbiYcmNQc/4m4fePxOW+6Oe8mi/Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:49Z:91bcf719c89ba424fc7096b19456239ad3895e64a12929bae2505fa86e9c08df:Nlol/Lr9vYa1cI0z0E+GKVD1D/tYGpoHmBTeDqqcY1rk1jjHJ+pP1qBJW33P4KwD7lD2ZTN45PqPe5zHUjZBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -17,7 +17,7 @@ use the ordinary `runtime` workflow wire; knowledge uses the signed
 
 Authorized runtime subprocesses are wrapped by the node's immutable sandbox
 snapshot when policy is enforced; runtime/item metadata cannot enable or
-weaken it. See [Execution Sandbox](../core/node/execution-sandbox.md).
+weaken it. See [Execution Isolation](../core/node/execution-isolation.md).
 
 ## Directive Runtime (`runtime:directive-runtime`)
 

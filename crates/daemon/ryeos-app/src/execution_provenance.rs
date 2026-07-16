@@ -326,7 +326,9 @@ impl ExecutionProvenance {
 
     /// Whether the project path is a daemon-created runtime workspace that is
     /// allowed to live beneath the otherwise protected app-root cache.
-    pub fn sandbox_project_authority(&self) -> ryeos_engine::sandbox::SandboxProjectAuthority {
+    pub fn isolation_project_authority(
+        &self,
+    ) -> ryeos_engine::isolation::IsolationProjectAuthority {
         match self {
             Self::RootLiveFs {
                 workspace_lifeline, ..
@@ -334,13 +336,13 @@ impl ExecutionProvenance {
             | Self::BorrowedChildLiveFs {
                 workspace_lifeline, ..
             } if workspace_lifeline.is_some() => {
-                ryeos_engine::sandbox::SandboxProjectAuthority::RuntimeWorkspace
+                ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
             Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => {
-                ryeos_engine::sandbox::SandboxProjectAuthority::RuntimeWorkspace
+                ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
             Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => {
-                ryeos_engine::sandbox::SandboxProjectAuthority::External
+                ryeos_engine::isolation::IsolationProjectAuthority::External
             }
         }
     }

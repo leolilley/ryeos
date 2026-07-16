@@ -45,16 +45,14 @@ pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
             .with_context(|| "load project item trust")?,
         None => node_trust_store.clone(),
     };
-    let sandbox = Arc::new(
-        ryeos_engine::sandbox::SandboxRuntime::load(
-            &roots::app_root().context("resolve app root for node sandbox policy")?,
-        )
-        .context("load node sandbox policy")?,
-    );
+    let isolation = ryeos_app::engine_init::load_registered_isolation(
+        &roots::app_root().context("resolve app root for node isolation policy")?,
+    )
+    .context("load node isolation policy")?;
 
     let kinds = build_kind_registry(&bundle_roots, &node_trust_store)?;
     let (parsers, handlers) =
-        build_parser_dispatcher(&bundle_roots, &kinds, &node_trust_store, sandbox)?;
+        build_parser_dispatcher(&bundle_roots, &kinds, &node_trust_store, isolation)?;
     let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
         .with_context(|| "load composer registry")?;
 
@@ -79,7 +77,7 @@ fn build_parser_dispatcher(
     bundle_roots: &[PathBuf],
     kinds: &KindRegistry,
     trust_store: &TrustStore,
-    sandbox: Arc<ryeos_engine::sandbox::SandboxRuntime>,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<(ParserDispatcher, Arc<HandlerRegistry>)> {
     let search: Vec<PathBuf> = bundle_roots.to_vec();
     let tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = bundle_roots
@@ -93,7 +91,7 @@ fn build_parser_dispatcher(
         .collect();
     let (parser_tools, _) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
-    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store, sandbox)
+    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store, isolation)
         .with_context(|| "load handler descriptors")?;
     let handlers = Arc::new(handlers);
     Ok((

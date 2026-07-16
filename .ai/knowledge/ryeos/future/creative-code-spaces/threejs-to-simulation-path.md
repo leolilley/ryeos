@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-21T02:55:23Z:3afaa61d4ac71e7fb26db2d25d5926937f6a1e42c9409f30119b77445c123f32:OVX0VAlAfi+CFUvsnPGChwIlwbECCNHP4UHah9HxIc+tBPGEdIlCCoEMx7xHYZWNikROVXQcFfvh/OC9ut+TCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:b758ff57f64ffdff35d95bb5617c16af6f9d52b3fba37a2870e9400c37cfa017:/b2PQ+CpT/o+9kWczmxwMoPilZjvMa23ubv5/KJJWzkn8FRr2ZfFJ7mxwAn6y0IpivfMt5BwBGfLqetrrCdlAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 <!-- rye:signed:2026-06-03T03:31:14Z:d8bc3e01059956ee65f4c4e3e6fe2329a995792ab4d81955f9459cf9d5d7e909:h0V2gxpPl3HFlLr_vgOtzBB-bAnN9gtJLvcSrlFRUA5MkNJJbAgSMihAyN7kMul5JBOh-TDDVFWroT2twWkhAg:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future/creative-code-spaces
@@ -237,7 +237,7 @@ Only add executable hooks when declarative primitives are not enough.
 Possible progression:
 
 1. tiny expression language;
-2. sandboxed formulas;
+2. isolationed formulas;
 3. deterministic WASM/Lua-like modules;
 4. frame-specific plugin SDKs;
 5. node-attested runtime plugins.

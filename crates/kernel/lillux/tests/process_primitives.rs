@@ -289,7 +289,7 @@ fn sealed_memfd_fails_closed_off_linux() {
 fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
     let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_fd();
-    // Like the real sandbox launch, the mock target inherits the retained
+    // Like the real isolation launch, the mock target inherits the retained
     // wrapper's Lillux-owned session/process group. The status PID identifies
     // the target for accounting, while the wrapper keeps the shared PGID owned.
     let wrapper_script = format!(
@@ -378,6 +378,78 @@ fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
 
     assert!(
         result.stderr.contains("invalid JSON status document"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn duplicate_launcher_status_keys_fail_closed() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script =
+        format!("printf '%s\\n' '{{\"child-pid\":123,\"child-pid\":124}}' >&{status_fd}; sleep 30");
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("duplicate trusted-launcher status keys must refuse the spawn");
+    };
+    assert!(
+        result.stderr.contains("duplicate JSON object key"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn nested_duplicate_launcher_status_keys_fail_closed() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"one\",\"code\":\"two\"}}}}' >&{status_fd}; sleep 30"
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("nested duplicate status keys must refuse the spawn");
+    };
+    assert!(
+        result.stderr.contains("duplicate JSON object key"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn typed_launcher_refusal_is_retained_without_starting_a_target() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{{}}}}}}' >&{status_fd}"
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("a launcher refusal must prevent target execution");
+    };
+
+    assert_eq!(
+        result.launcher_refusal.as_deref(),
+        Some("{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{}}")
+    );
+    assert!(
+        result.stderr.contains("launcher refused"),
         "{}",
         result.stderr
     );

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T08:13:18Z:1ba4b315cfcaa08736c4d7021f1b25d9617385ae26236c542758c744d0115539:3VorN+PXRW3WvDeSNBzB2jXTltS3zd/bVFM2PxgQHzFj/6UBENVxRh1UIZvqDZ3iTAT77i5A1QZxTEC9nzyBCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:af50384e2c9e29923ffb7b95187ec9908ad5e170bebf7b6217bbd6ce72027e19:rUB1JjMayr94kP5VG+BK14ajbudLmybKXDGeH31cUOrGZTXw/TRin3FgZJ7rgm/tIH1oJ8Bap1710uftOETsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -30,7 +30,7 @@ and advertise exact capabilities; items may narrow node policy but may not
 select a backend, enable isolation, or request fallback. See
 `ryeos/future/data-driven-execution-isolation-backends` for that deferred path.
 
-See [Execution Sandbox](../node/execution-sandbox.md) for the complete node-owner
+See [Execution Isolation](../node/execution-isolation.md) for the complete node-owner
 schema, pickup behavior, diagnostics, and security limits.
 
 ## Hermetic Handler Execution

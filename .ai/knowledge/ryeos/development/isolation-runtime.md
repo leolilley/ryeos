@@ -1,69 +1,62 @@
-<!-- ryeos:signed:2026-07-14T10:12:37Z:fa017f0737da23456103015f654428a247657f053368f46ca74877f0fc434080:ONR/hlqMFsrseAPD7LxBIV9IWwaw592sMiOHwHgaj67T9cKBCTu4ZqJdqq9qTVTaPQxF+5uJqMV0NE/9kDoOAA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:49Z:1fa00e4d244007145f53b632480292df9555fe7ff9930273161db83366343ce2:T26/Acaek0D2/0MqZQ+ImB7jJkDDO+sJORwl4vo3ErkYEyOnq1HlJBGGZ0XWjghxZ3JHnKT0Oazrsx1LP7KqBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
-name: sandbox-runtime
-title: Node Sandbox Runtime Architecture
+name: isolation-runtime
+title: Node Isolation Runtime Architecture
 entry_type: implementation_guide
 version: "1.2.0"
-description: Deep implementation map for the immutable RyeOS strict sandbox, exact-byte execution boundary, launch coverage, path authority, and state durability.
+description: Deep implementation map for the immutable RyeOS strict isolation, exact-byte execution boundary, launch coverage, path authority, and state durability.
 tags:
-  - sandbox
+  - isolation
   - bubblewrap
   - execution
   - node-policy
   - security
 ```
 
-# Node Sandbox Runtime Architecture
+# Node Isolation Runtime Architecture
 
 ## Contract and ownership
 
 The node owns one strict `version: 1` policy at
-`<app-root>/.ai/node/sandbox.yaml`. `ryeos init` creates the disabled default
+`<app-root>/.ai/node/isolation.yaml`. `ryeos init` creates the disabled default
 only when the file is absent. This is the sole schema and activation source;
 other versions, unknown fields, item-authored profiles, and per-request
 overrides are rejected.
 
-`SandboxRuntime::load` in `ryeos-engine/src/sandbox.rs` first resolves one
+`IsolationRuntime::load` in `ryeos-engine/src/isolation.rs` first resolves one
 canonical app-root identity, opens the fixed source below that canonical root
 as a regular non-symlink file, strictly parses it, hashes the exact source, and
 re-resolves the supplied app root before returning an immutable typed snapshot.
 The supplied spelling is retained only as the namespace destination; a changed
 canonical association refuses startup. Daemon startup uses `load_for_daemon`
 to pin the configured callback UDS path into the same snapshot. Standalone and
-offline callers use `load`. Disabled snapshots still validate the full schema,
-absolute backend spelling, and mandatory output/artifact limits, but do not inspect
-backend availability or add OS-confinement wrapping. Node-owned output retention
-limits still apply to every request; a disabled snapshot preserves a caller-owned
-open-file limit but does not install the policy's `RLIMIT_NOFILE`. Enforced
-snapshots resolve and read the backend once, require unprivileged executable
-regular-file metadata
-(no setuid, setgid, or file capabilities), materialize its exact bytes in the
-runtime's private artifact generation, and validate the Lillux subprocess
-limits before startup succeeds. Later launches execute the captured inode through
-`/proc/self/fd`, not the configured pathname. Inspection exposes its captured
-SHA-256 and version. Startup invokes the exact capture with `--version` and
-`--help`, requiring Bubblewrap 0.11.0+ and the `--args`, fd-bind,
-`--json-status-fd`, and argv0 features used by request construction. The
-configured executable is a node-approved host
-dependency; the probe establishes compatibility, while the node-owned policy
-is the authority selecting those bytes.
+offline callers use the shared registered-isolation composition path. Disabled
+snapshots validate the strict schema and mandatory output/artifact limits but
+do not require the selected bundle. Enforced snapshots resolve the selected
+declaration from a registered signed bundle, capture the exact adapter and
+launcher descriptors through the normal executor-manifest trust chain, require
+signer continuity with the bundle manifest, and perform strict live protocol,
+capability, version, feature, and artifact-digest inspection. Later launches
+execute only those retained descriptors. The engine derives a backend-neutral
+authority plan; backend-specific command construction belongs to the adapter.
 
 ```text
 ryeos init
-  -> create-once .ai/node/sandbox.yaml
+  -> create-once .ai/node/isolation.yaml
 
 ryeosd main
-  -> SandboxRuntime::load_for_daemon(app_root, uds_path)
-  -> Arc<SandboxRuntime>
+  -> signed bundle resolution and adapter inspection
+  -> IsolationRuntime::load_for_daemon(app_root, uds_path, backend)
+  -> Arc<IsolationRuntime>
   -> AppState / EngineContext / runtime launch parameters
 
 standalone service / offline dispatch
-  -> SandboxRuntime::load(app_root)
+  -> IsolationRuntime::load(app_root)
   -> one immutable runtime for that process or command
 
 all node-workload executable-item subprocess paths
-  -> SandboxRuntime::apply(request, launch context)
+  -> IsolationRuntime::apply(request, launch context)
   -> Lillux spawn/run
 ```
 
@@ -79,7 +72,7 @@ to authorize native executor manifests. `Engine::with_trust_store` never
 implicitly expands node trust; full-node constructors must pass
 `with_node_trust_store` deliberately.
 
-The strict sandbox requires these runtime controls in `limits`:
+The strict isolation requires these runtime controls in `limits`:
 
 ```yaml
 stdout_bytes: 8388608
@@ -97,11 +90,11 @@ and the aggregate artifact byte bound cannot be below the per-file bound.
 
 ## Launch context and coverage
 
-`SandboxLaunchContext` carries engine/daemon-derived facts only: canonical item
+`IsolationLaunchContext` carries engine/daemon-derived facts only: canonical item
 reference, one-component thread identifier, project authority and path,
 optional state root and checkpoint directory, an optional typed daemon callback
 socket, verified bundle roots, node trusted-key directory, and zero or more
-`SandboxVerifiedCode` exact-byte identities. Socket authority is never inferred
+`IsolationVerifiedCode` exact-byte identities. Socket authority is never inferred
 from a child environment-variable name: an IPC-capable launch must carry the
 exact socket fact and enforced apply compares it with the path pinned at daemon
 startup. None of these fields can activate or relax the policy.
@@ -135,7 +128,7 @@ exception.
 External parser/composer handlers are node-trusted infrastructure rather than
 caller-selected executable items, but they still pass through the immutable
 runtime. The registry retains each signed executor-manifest content hash, the
-sandbox captures those exact bytes, presents installed bundle roots read-only,
+isolation captures those exact bytes, presents installed bundle roots read-only,
 and suppresses every configured host writable mount through a no-project launch
 authority. Their output then feeds the same signature, plan, and authorization
 boundary before item code can run.
@@ -146,7 +139,7 @@ Resolution records a whole-file SHA-256. `build_plan` rereads the requested
 root only if its bytes still match that digest. Every executor-chain hop uses
 the real Ed25519 verification path rather than trusting a claimed fingerprint.
 
-When an executable plan reaches enforced `apply`, each `SandboxVerifiedCode`
+When an executable plan reaches enforced `apply`, each `IsolationVerifiedCode`
 provides host provenance and a whole-file digest. The runtime:
 
 1. requires an absolute regular non-symlink source;
@@ -209,8 +202,8 @@ or `--bind-fd`, binding the validated kernel object even if its pathname is
 replaced before spawn. These handles keep `FD_CLOEXEC` in the multithreaded
 parent. Lillux clears that bit only in the forked child's `pre_exec` hook, then
 retains the handles through `Command::spawn`; an unrelated concurrent spawn
-cannot inherit another sandbox's mounts. Enforced apply refuses any inherited
-descriptor not created by the sandbox runtime itself.
+cannot inherit another isolation's mounts. Enforced apply refuses any inherited
+descriptor not created by the isolation runtime itself.
 
 Writable validation rejects filesystem root, protected host system roots, the
 app root and sensitive state, backend/socket overlap, and the resolved host home
@@ -227,7 +220,7 @@ in the descendant chain cannot redirect checkpoint authority.
 
 There is no state-root placeholder. A state override must already exist and be
 contained by the project or a node-policy absolute writable root. The
-HTTP layer no longer creates a caller-selected state-root path before sandbox
+HTTP layer no longer creates a caller-selected state-root path before isolation
 validation.
 
 ## Bubblewrap request construction
@@ -297,19 +290,19 @@ destination.
 In `mode: enforce`, `limits.open_files`, `limits.stdout_bytes`, and
 `limits.stderr_bytes` are each merged with request limits using the lower value,
 and the open-file cap is installed as `RLIMIT_NOFILE` before exec. In
-`mode: disabled`, sandbox policy does not introduce an open-file limit; an
+`mode: disabled`, isolation policy does not introduce an open-file limit; an
 explicit caller-owned `RLIMIT_NOFILE` is preserved. Output byte caps remain
 active in both modes because they protect the daemon's pipe drainers, which
 retain only the configured prefix, continue draining to avoid deadlock, and
 terminate the supervised workload with an explicit truncation outcome on
 overflow. `RLIMIT_NPROC` is deliberately absent because it is scoped to the
-daemon's real UID, not one sandbox.
+daemon's real UID, not one isolation.
 
 ## Workspace and CAS durability
 
 No-project requests and pushed-head checkouts use narrow request-owned
 workspaces. External handler invocations instead use their verified bundle root
-as a read-only cwd; `SandboxProjectAuthority::ReadOnly` suppresses all writable
+as a read-only cwd; `IsolationProjectAuthority::ReadOnly` suppresses all writable
 policy mounts, including `{project}` and `{cwd}`. Execution roots and writable
 workspaces are mode `0700` on Unix, and `TempDirGuard` lifelines are retained
 through every blocking, background, detached-child, follow-child, validation,
@@ -341,7 +334,7 @@ both execute through normal signature and authorization paths.
 
 ## Deferred extensions
 
-- delegated cgroup v2 CPU, memory, and per-sandbox `pids.max` quotas;
+- delegated cgroup v2 CPU, memory, and per-isolation `pids.max` quotas;
 - more production isolation backends in a future schema version; and
 - signed native runtime distributions for additional host triples.
 

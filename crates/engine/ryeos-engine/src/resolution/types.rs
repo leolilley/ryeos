@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::contracts::ItemSpace;
 
-/// Trust classification for resolved items (for sandbox profile enforcement and audit).
+/// Trust classification for resolved items (for isolation profile enforcement and audit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrustClass {
@@ -66,7 +66,7 @@ pub struct ResolvedAncestor {
     pub raw_content: String,
     /// SHA-256 of the exact whole source file as it was opened and verified,
     /// including its signature envelope. This is the identity used to pin
-    /// executable source bytes at the sandbox boundary.
+    /// executable source bytes at the isolation boundary.
     pub source_content_digest: String,
     /// SHA-256 of `raw_content` (signature-stripped, post-strip bytes).
     /// Named explicitly so it can never be confused with the original
@@ -89,7 +89,7 @@ pub struct ResolutionEdge {
     pub to_source_path: PathBuf,
     /// Typed resolution space of the target item.
     pub to_source_space: ItemSpace,
-    /// Trust class of the target (edge-local, subject enforces sandbox based on it).
+    /// Trust class of the target (edge-local, subject enforces isolation based on it).
     pub trust_class: TrustClass,
     /// Which step added this edge.
     pub added_by: ResolutionStepName,
@@ -583,7 +583,7 @@ impl TrustClass {
 ///
 /// Reference edges intentionally retain their per-edge `trust_class` and
 /// are NOT folded in here — references are lateral and the subject
-/// enforces sandbox per-reference at use time, not by collapsing them
+/// enforces isolation per-reference at use time, not by collapsing them
 /// into the effective scalar.
 ///
 /// Order (strongest → weakest):

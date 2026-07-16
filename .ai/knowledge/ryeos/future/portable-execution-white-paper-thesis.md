@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-04T08:14:11Z:12ce2af5440ad54fa4c131acab254b9e81609140b4cfa9be8657abb2ae2a10ca:nnYVN7K3GAc3PTAVSxDwDgAI99u0aFspIU64jq+gzyjHNot7/wLIoXRAeOkRCKg5J+fBLmpjjK6P3LNs5VzhBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:6d32fddb93c66f2d9da75bad46738997d616509b418e1c76dd31b3f3ab7af6f3:09qSUM1a2PVtTgTKFjFLOyxPe0vWDaZZZm1lWvhj3Ud/wlSfKVbXJN+w1gamJ0gW6jfZeSaUcI10gLRdHaxRBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [white-paper, portable-execution, cryptographic-identity, architecture]
 version: "0.2.0"
@@ -138,7 +138,7 @@ Cryptographic identity provides:
 It does not automatically provide:
 
 - safety;
-- sandboxing;
+- isolationing;
 - determinism;
 - semantic correctness;
 - authorization;
@@ -146,7 +146,7 @@ It does not automatically provide:
 - universal runtime compatibility.
 
 Those are layered concerns. The paper should separate identity from trust policy,
-authorization, sandboxing, and deterministic replay.
+authorization, isolationing, and deterministic replay.
 
 ## Adjacent systems and distinction
 
@@ -353,7 +353,7 @@ Acknowledge:
 
 - deterministic replay is runtime-dependent;
 - signatures do not imply safety;
-- sandboxing is separate;
+- isolationing is separate;
 - trust policy is hard;
 - revocation is hard for immutable objects;
 - portable authority must avoid leaking secrets;
@@ -362,7 +362,7 @@ Acknowledge:
 
 Possible future work:
 
-- stronger sandboxing;
+- stronger isolationing;
 - richer policy engines;
 - transparency logs;
 - deterministic runtime profiles;
@@ -710,7 +710,7 @@ microkernel.
 - Do not present "computation as data" / "everything is data" as the thesis
   itself: it is the mechanism — how cryptographic identity reaches execution
   at all — not the headline property.
-- Always distinguish identity, trust, authorization, sandboxing, and execution.
+- Always distinguish identity, trust, authorization, isolationing, and execution.
 - Emphasize the layer distinction: source, packages, containers, and data are
   adjacent portability layers; RyeOS targets executable capability and runtime
   history.

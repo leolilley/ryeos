@@ -2,7 +2,7 @@
 //!
 //! Both `ParserDispatcher` and `ComposerRegistry` spawn handler
 //! binaries the same way: serialize the request as JSON, run the
-//! binary through the immutable node [`SandboxRuntime`] (which also scrubs the
+//! binary through the immutable node [`IsolationRuntime`] (which also scrubs the
 //! environment), parse
 //! the stdout JSON envelope, and turn timeouts / non-zero exits /
 //! malformed envelopes into structured engine errors.
@@ -15,8 +15,8 @@ use ryeos_handler_protocol::{HandlerRequest, HandlerResponse};
 
 use crate::error::EngineError;
 use crate::handlers::VerifiedHandler;
-use crate::sandbox::{
-    SandboxLaunchContext, SandboxProjectAuthority, SandboxRuntime, SandboxVerifiedCode,
+use crate::isolation::{
+    IsolationLaunchContext, IsolationProjectAuthority, IsolationRuntime, IsolationVerifiedCode,
 };
 
 /// Immutable launch authority shared by every handler in one verified
@@ -25,26 +25,26 @@ use crate::sandbox::{
 /// granted.
 #[derive(Debug)]
 pub(crate) struct HandlerLaunchRuntime {
-    sandbox: Arc<SandboxRuntime>,
+    isolation: Arc<IsolationRuntime>,
     bundle_roots: Vec<PathBuf>,
 }
 
 impl HandlerLaunchRuntime {
-    pub(crate) fn new(sandbox: Arc<SandboxRuntime>, bundle_roots: Vec<PathBuf>) -> Self {
+    pub(crate) fn new(isolation: Arc<IsolationRuntime>, bundle_roots: Vec<PathBuf>) -> Self {
         Self {
-            sandbox,
+            isolation,
             bundle_roots,
         }
     }
 
     pub(crate) fn disabled() -> Self {
-        Self::new(Arc::new(SandboxRuntime::default()), Vec::new())
+        Self::new(Arc::new(IsolationRuntime::default()), Vec::new())
     }
 }
 
 /// Run a handler subprocess and decode its envelope.
 ///
-/// The registry's immutable sandbox snapshot is applied before Lillux sees
+/// The registry's immutable isolation snapshot is applied before Lillux sees
 /// the request. In enforce mode the exact manifest-verified binary is captured
 /// into the node's verified-code store, bundle roots are mounted read-only,
 /// and no host writable mount is granted. Disabled mode still applies the
@@ -106,15 +106,15 @@ pub(crate) fn run_handler_subprocess(
         supervised_status: None,
     };
 
-    let verified_code = [SandboxVerifiedCode {
+    let verified_code = [IsolationVerifiedCode {
         source_path: binary_path,
         content_hash: binary_hash,
     }];
-    let req = launch.sandbox.apply(
+    let req = launch.isolation.apply(
         req,
-        SandboxLaunchContext {
+        IsolationLaunchContext {
             project_path: &bundle_root,
-            project_authority: SandboxProjectAuthority::ReadOnly,
+            project_authority: IsolationProjectAuthority::ReadOnly,
             state_root: None,
             checkpoint_dir: None,
             daemon_socket_path: None,

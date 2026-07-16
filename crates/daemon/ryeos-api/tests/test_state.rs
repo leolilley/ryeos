@@ -174,7 +174,7 @@ fn build_app_state(
 
     let state = AppState {
         config: Arc::new(config),
-        sandbox: Arc::new(ryeos_engine::sandbox::SandboxRuntime::default()),
+        isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
         state_store,
         engine,
         engine_cache: ryeos_app::engine_cache::EngineCache::new(

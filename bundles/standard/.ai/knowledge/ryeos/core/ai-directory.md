@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:16Z:2116282a65a162d937312b5c5884d71da1ec6961c885a93ad593710864ffa94e:UMt+VIV4qyOCGpbLTvJpJxZ3CtAN5qguT2CoIiek7Q5aDTVHYtme1ko5pQPR/CRsmxacaPTR9c8Jj+Kiv4zLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:b5fff22bd8716b64813c3b6a72c6b3ef4acaebc33e0fec28d5e5e054216c2192:w9pm3niJ7rfdTmhP1PuTs6qMAjtkVuoj4Dq/DuVmdpxdCGpNHtJ59rRzb6AwRJss/73hbOqO3JBRS1VzqzVBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
@@ -95,7 +95,7 @@ Created by `ryeos init`. Lives in the system space
     │       └── trusted/<fp>.toml        # trusted publisher/operator/node keys
     ├── node/
     │   ├── config.yaml                  # daemon bind address, db_path, auth config
-    │   ├── sandbox.yaml                 # create-once strict execution policy
+    │   ├── isolation.yaml                 # create-once strict execution policy
     │   ├── identity/
     │   │   ├── private_key.pem          # node Ed25519 signing key (0600)
     │   │   └── public-identity.json     # node public identity document

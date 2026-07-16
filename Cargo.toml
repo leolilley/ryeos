@@ -18,6 +18,8 @@ members = [
     "crates/runtimes/graph",
     "crates/tools/handler-bins",
     "crates/engine/ryeos-handler-protocol",
+    "crates/engine/ryeos-isolation-protocol",
+    "crates/isolation/bubblewrap-adapter",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
     "crates/state/ryeos-scheduler",
@@ -51,6 +53,7 @@ ryeos-directive-core = { path = "crates/runtimes/directive-core" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }
+ryeos-isolation-protocol = { path = "crates/engine/ryeos-isolation-protocol" }
 ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }

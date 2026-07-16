@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_engine::engine::Engine;
-use ryeos_engine::sandbox::{
-    SandboxLaunchContext, SandboxProjectAuthority, SandboxRuntime, SandboxVerifiedCode,
+use ryeos_engine::isolation::{
+    IsolationLaunchContext, IsolationProjectAuthority, IsolationRuntime, IsolationVerifiedCode,
 };
 
 /// Status of a single doctor check.
@@ -58,11 +58,11 @@ pub struct DoctorReport {
 ///
 /// `engine` is `Err(reason)` when an offline engine could not be built; the
 /// static checks still run and the import check reports `unavailable` rather
-/// than the whole command failing. `sandbox` follows the same rule when the
+/// than the whole command failing. `isolation` follows the same rule when the
 /// immutable node policy snapshot cannot be loaded.
 pub fn run_doctor(
     engine: Result<&Engine, &str>,
-    sandbox: Result<Arc<SandboxRuntime>, &str>,
+    isolation: Result<Arc<IsolationRuntime>, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
@@ -73,12 +73,12 @@ pub fn run_doctor(
             source,
             dependency_roots,
             operator_config_root,
-            sandbox.as_ref().map(Arc::clone).map_err(|reason| *reason),
+            isolation.as_ref().map(Arc::clone).map_err(|reason| *reason),
         ),
     ];
     checks.extend(check_imports(
         engine,
-        sandbox.as_deref().map_err(|reason| *reason),
+        isolation.as_deref().map_err(|reason| *reason),
         source,
         operator_config_root,
     ));
@@ -240,15 +240,15 @@ fn check_verify(
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
-    sandbox: Result<Arc<SandboxRuntime>, &str>,
+    isolation: Result<Arc<IsolationRuntime>, &str>,
 ) -> CheckResult {
-    let sandbox = match sandbox {
-        Ok(sandbox) => sandbox,
+    let isolation = match isolation {
+        Ok(isolation) => isolation,
         Err(reason) => {
             return CheckResult::new(
                 "verify",
                 FAIL,
-                json!({ "error": format!("sandbox policy unavailable: {reason}") }),
+                json!({ "error": format!("isolation policy unavailable: {reason}") }),
             )
         }
     };
@@ -256,7 +256,7 @@ fn check_verify(
         source,
         dependency_roots,
         operator_config_root,
-        sandbox,
+        isolation,
     ) {
         Ok(report) => {
             let warnings: Vec<String> = report.warnings.iter().map(|w| format!("{w:?}")).collect();
@@ -269,7 +269,7 @@ fn check_verify(
 /// Python-tool import dry-run via the shared probe over an offline engine.
 fn check_imports(
     engine: Result<&Engine, &str>,
-    sandbox: Result<&SandboxRuntime, &str>,
+    isolation: Result<&IsolationRuntime, &str>,
     source: &Path,
     operator_config_root: &Path,
 ) -> Vec<CheckResult> {
@@ -295,15 +295,15 @@ fn check_imports(
             )];
         }
     };
-    let sandbox = match sandbox {
-        Ok(sandbox) => sandbox,
+    let isolation = match isolation {
+        Ok(isolation) => isolation,
         Err(reason) => {
             return vec![CheckResult::new(
                 "imports",
                 NA,
                 json!({
                     "import_check": "unavailable",
-                    "import_check_reason": format!("sandbox policy unavailable: {reason}"),
+                    "import_check_reason": format!("isolation policy unavailable: {reason}"),
                     "note": "static checks ran; python imports were not dry-run",
                 }),
             )];
@@ -334,14 +334,14 @@ fn check_imports(
             )];
         }
     };
-    let sandbox_bundle_roots = engine
+    let isolation_bundle_roots = engine
         .resolution_roots(Some(project_path.clone()))
         .ordered
         .iter()
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
         .collect::<Vec<_>>();
-    let sandbox_node_trusted_keys_dir = operator_config_root.join("keys/trusted");
+    let isolation_node_trusted_keys_dir = operator_config_root.join("keys/trusted");
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -361,11 +361,11 @@ fn check_imports(
         .map(|item_ref| {
             let detail = match import_one(
                 engine,
-                sandbox,
+                isolation,
                 &plan_ctx,
                 &project_path,
-                &sandbox_bundle_roots,
-                &sandbox_node_trusted_keys_dir,
+                &isolation_bundle_roots,
+                &isolation_node_trusted_keys_dir,
                 &item_ref,
             ) {
                 Ok(report) => report,
@@ -390,11 +390,11 @@ fn check_imports(
 
 fn import_one(
     engine: &Engine,
-    sandbox: &SandboxRuntime,
+    isolation: &IsolationRuntime,
     plan_ctx: &PlanContext,
     project_path: &Path,
-    sandbox_bundle_roots: &[PathBuf],
-    sandbox_node_trusted_keys_dir: &Path,
+    isolation_bundle_roots: &[PathBuf],
+    isolation_node_trusted_keys_dir: &Path,
     item_ref: &str,
 ) -> Result<Value, String> {
     let canonical = CanonicalRef::parse(item_ref).map_err(|e| format!("invalid ref: {e}"))?;
@@ -404,7 +404,7 @@ fn import_one(
     let verified = engine
         .verify(plan_ctx, resolved)
         .map_err(|e| format!("verify: {e}"))?;
-    let sandbox_verified_code = [SandboxVerifiedCode {
+    let isolation_verified_code = [IsolationVerifiedCode {
         source_path: verified.resolved.source_path.clone(),
         content_hash: verified.resolved.content_hash.clone(),
     }];
@@ -413,16 +413,16 @@ fn import_one(
         plan_ctx,
         &verified,
         &[],
-        sandbox,
-        SandboxLaunchContext {
+        isolation,
+        IsolationLaunchContext {
             project_path,
-            project_authority: SandboxProjectAuthority::External,
+            project_authority: IsolationProjectAuthority::External,
             state_root: None,
             checkpoint_dir: None,
             daemon_socket_path: None,
-            bundle_roots: sandbox_bundle_roots,
-            node_trusted_keys_dir: Some(sandbox_node_trusted_keys_dir),
-            verified_code: &sandbox_verified_code,
+            bundle_roots: isolation_bundle_roots,
+            node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
+            verified_code: &isolation_verified_code,
             item_ref,
             thread_id: "offline-doctor",
         },

@@ -332,7 +332,7 @@ fn resolve_pinned_snapshot_context_admitted(
                 &bundle_roots,
                 Some(exec_dir.as_path()),
                 None,
-                Arc::clone(&state.sandbox),
+                Arc::clone(&state.isolation),
             )
             .map_err(|e| {
                 ProjectSourceError::CheckoutFailed(format!("per-request engine build failed: {e}"))

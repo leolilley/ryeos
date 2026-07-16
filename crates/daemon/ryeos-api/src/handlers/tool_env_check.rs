@@ -188,20 +188,20 @@ pub async fn handle(
     // runs a bounded subprocess, so it goes off the async runtime.
     let import_report = {
         let engine = state.engine.clone();
-        let sandbox = state.sandbox.clone();
-        let sandbox_bundle_roots = engine
+        let isolation = state.isolation.clone();
+        let isolation_bundle_roots = engine
             .resolution_roots(Some(project_path.clone()))
             .ordered
             .iter()
             .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
             .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
             .collect::<Vec<_>>();
-        let sandbox_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-        let sandbox_verified_code = [ryeos_engine::sandbox::SandboxVerifiedCode {
+        let isolation_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+        let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
         }];
-        let sandbox_item_ref = req.item_ref.clone();
+        let isolation_item_ref = req.item_ref.clone();
         let probe_names = names.clone();
         tokio::task::spawn_blocking(move || {
             ryeos_app::env_probe::import_dry_run(
@@ -209,17 +209,17 @@ pub async fn handle(
                 &plan_ctx,
                 &verified,
                 &probe_names,
-                &sandbox,
-                ryeos_engine::sandbox::SandboxLaunchContext {
+                &isolation,
+                ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: &project_path,
-                    project_authority: ryeos_engine::sandbox::SandboxProjectAuthority::External,
+                    project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
                     state_root: None,
                     checkpoint_dir: None,
                     daemon_socket_path: None,
-                    bundle_roots: &sandbox_bundle_roots,
-                    node_trusted_keys_dir: Some(&sandbox_node_trusted_keys_dir),
-                    verified_code: &sandbox_verified_code,
-                    item_ref: &sandbox_item_ref,
+                    bundle_roots: &isolation_bundle_roots,
+                    node_trusted_keys_dir: Some(&isolation_node_trusted_keys_dir),
+                    verified_code: &isolation_verified_code,
+                    item_ref: &isolation_item_ref,
                     thread_id: "tool-env-check",
                 },
             )

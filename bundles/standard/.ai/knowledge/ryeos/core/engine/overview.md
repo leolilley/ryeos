@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T01:54:46Z:747457356f9f5190786eb97def07801f99c5a2b71dcf2af9bdc1fbb64eb8ff73:vrHqs/9ATq7FqOh4TlNWM99/42vP3RCi4U8AeB0gg/8+iWAFZosvDGevQbPBovKrEj2aNm1GgOEnOIOUTYG8Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:37676ea3571e33eed7c87a2ff0a5b5ce91d354f92531f456ce6c131e03798468:az4bzkiXUn3hpB8MGEJJ0WLPKroDJhjxgHxRbFrodQZeyBAoWd7DuzPO3OV/e6maTSqCU4ZRrRdqixM2GTrgBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, architecture, parse, compose, execute]
@@ -37,4 +37,4 @@ Core owns the generic machine: config, handler, parser, protocol, runtime, servi
 The engine stays generic by resolving these records from signed bundle items instead of compiling the workflow layer into the core dispatch path.
 
 The sandbox remains node authority rather than item composition. See
-[Execution Sandbox](../node/execution-sandbox.md).
+[Execution Isolation](../node/execution-isolation.md).

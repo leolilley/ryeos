@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:37Z:96742b8f0baed892c696bdef9a0ffc1cbcdf8170cf49e030dc549f4954b5fee7:xkLF6YFhpVXc1J3r4px7zxsDntBh899NbW0de+cJ+uoG1TpAv23G6uJTN5CA79ijq3FtOKEXZiRo/i24M3l2Aw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:483544cd9a03696e6d0269c2e9181e143e732c42fd8c03a401270256cac93633:TPyfwI+f93vpsz8TGZub/c7F4ZaH56ReuBXsEyEycOgQeaTDkF/iMCdJyOwshqioQQAPUR/IfeCxI/y6QN6IBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
@@ -9,7 +9,7 @@ description: The remaining trust boundaries for hosting other principals, includ
 tags:
   - hosted-node
   - federation
-  - sandboxing
+  - isolationing
   - security
 ```
 
@@ -103,7 +103,7 @@ stderr retention because guest memory limits do not cover daemon-owned buffers;
 hosted event-stream limits and optional private output spooling remain future
 work.
 Principal storage, secret, and network layers own cross-tenant data authority.
-None of those layers should be inferred from an item-authored sandbox profile.
+None of those layers should be inferred from an item-authored isolation profile.
 
 Backend selection and capability matching should follow
 `ryeos/future/data-driven-execution-isolation-backends`. In particular, a
