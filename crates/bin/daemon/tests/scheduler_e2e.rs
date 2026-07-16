@@ -51,7 +51,7 @@ async fn scheduler_register_and_list() {
         json!({
             "schedule_id": "test-interval",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "3600",
             "params": {},
@@ -93,7 +93,7 @@ async fn scheduler_register_update_existing() {
         json!({
             "schedule_id": "update-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "60",
             "params": {},
@@ -114,7 +114,7 @@ async fn scheduler_register_update_existing() {
         json!({
             "schedule_id": "update-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "120",
             "params": {},
@@ -144,7 +144,7 @@ async fn scheduler_pause_and_resume() {
         json!({
             "schedule_id": "pause-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "60",
             "params": {},
@@ -196,7 +196,7 @@ async fn scheduler_show_fires_empty() {
         json!({
             "schedule_id": "fires-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "86400",
             "params": {},
@@ -235,7 +235,7 @@ async fn scheduler_deregister_removes_schedule() {
         json!({
             "schedule_id": "deleteme",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "60",
             "params": {},
@@ -282,7 +282,7 @@ async fn scheduler_register_cron_schedule() {
         json!({
             "schedule_id": "cron-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "cron",
             "expression": "0 0 * * * *",
             "params": {},
@@ -313,7 +313,7 @@ async fn scheduler_register_rejects_bad_expression() {
         json!({
             "schedule_id": "bad-expr",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "cron",
             "expression": "not a cron expression",
             "params": {},
@@ -341,7 +341,7 @@ async fn scheduler_register_rejects_past_at() {
         json!({
             "schedule_id": "past-at",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "at",
             "expression": "2020-01-01T00:00:00Z",
             "params": {},
@@ -421,7 +421,7 @@ async fn scheduler_at_schedule_fires() {
         json!({
             "schedule_id": "at-fire-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "at",
             "expression": fire_at_str,
             "params": {},
@@ -479,7 +479,7 @@ async fn scheduler_interval_schedule_fires() {
         json!({
             "schedule_id": "interval-fire-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -555,7 +555,7 @@ async fn scheduler_interval_fires_twice() {
         json!({
             "schedule_id": "multi-fire-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -597,7 +597,7 @@ async fn scheduler_pause_prevents_fires() {
         json!({
             "schedule_id": "pause-no-fire",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -651,7 +651,7 @@ async fn scheduler_deregister_stops_fires() {
         json!({
             "schedule_id": "dereg-stop",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -716,7 +716,7 @@ async fn scheduler_reuse_blocked_after_deregister() {
         json!({
             "schedule_id": "reuse-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -753,7 +753,7 @@ async fn scheduler_reuse_blocked_after_deregister() {
         json!({
             "schedule_id": "reuse-test",
             "item_ref": "directive:test/different",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/different"},
             "schedule_type": "interval",
             "expression": "120",
             "params": {},
@@ -792,7 +792,7 @@ async fn scheduler_survives_restart() {
         json!({
             "schedule_id": "restart-test",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -856,7 +856,7 @@ async fn scheduler_fire_id_deterministic() {
         json!({
             "schedule_id": "det-fire",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "2",
             "params": {},
@@ -916,7 +916,7 @@ async fn scheduler_registered_at_preserved_on_update() {
         json!({
             "schedule_id": "ts-drift",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "60",
             "params": {},
@@ -942,7 +942,7 @@ async fn scheduler_registered_at_preserved_on_update() {
         json!({
             "schedule_id": "ts-drift",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "120",
             "params": {},
@@ -965,7 +965,7 @@ async fn scheduler_registered_at_preserved_on_update() {
         json!({
             "schedule_id": "ts-drift",
             "item_ref": "directive:test/hello",
-            "ref_bindings": {},
+            "ref_bindings": {"model": "directive:test/hello"},
             "schedule_type": "interval",
             "expression": "180",
             "params": {},

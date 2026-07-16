@@ -171,9 +171,15 @@ async fn post_execute_with_extras(
     parameters: serde_json::Value,
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
+    let project_path = (project_path != ".").then_some(project_path);
+    let ref_bindings = if item_ref.starts_with("directive:") {
+        serde_json::json!({ "model": item_ref })
+    } else {
+        serde_json::json!({})
+    };
     let mut body = serde_json::json!({
         "item_ref": item_ref,
-        "ref_bindings": {},
+        "ref_bindings": ref_bindings,
         "project_path": project_path,
         "parameters": parameters,
     });
@@ -276,6 +282,8 @@ async fn native_synth_request(
     .await
     .expect("start daemon with pin runtime");
     let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR))
+        .expect("initialize project root");
     let (status, value) = post_execute_with_extras(
         &h,
         "runtime:pin-fake-runtime",

@@ -1559,6 +1559,31 @@ mod tests {
         }
     }
 
+    /// Construct the authoritative root shape written for a detached follow
+    /// child before its first launch. The sealed fixture is the source of truth
+    /// for every identity field; mixing it with the generic system-task fixture
+    /// would correctly make reconciliation refuse to relaunch the row.
+    fn make_pending_follow_child_params(thread_id: &str) -> ThreadCreateParams {
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        ThreadCreateParams {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "graph_run".to_string(),
+            item_ref: sealed.item_ref().to_string(),
+            executor_ref: sealed.executor_ref().to_string(),
+            launch_mode: "detached".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("session:test".to_string()),
+            project_root: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(sealed.captured_history_policy().clone()),
+        }
+    }
+
     fn ensure_test_root(state: &AppState, thread_id: &str) {
         if state.threads.get_thread(thread_id).unwrap().is_none() {
             state
@@ -2179,6 +2204,52 @@ mod tests {
             .unwrap();
     }
 
+    /// Persist the complete pre-launch authority reconciliation requires for a
+    /// fresh follow child. This deliberately mirrors the production birth
+    /// boundary: resume identity, sealed request, and parent context are one
+    /// coherent record and agree with the waiter slot installed above.
+    fn seed_pending_follow_child_metadata(state: &AppState, child: &str) {
+        use ryeos_app::launch_metadata::{
+            PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
+        };
+        use ryeos_engine::contracts::{EffectivePrincipal, Principal, ProjectContext};
+
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let mut metadata = RuntimeLaunchMetadata::default()
+            .with_resume_context(ResumeContext {
+                kind: "graph_run".to_string(),
+                item_ref: sealed.item_ref().to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
+                launch_mode: "detached".to_string(),
+                parameters: json!({}),
+                project_context: ProjectContext::None,
+                original_snapshot_hash: None,
+                original_pushed_head_ref: None,
+                state_root: None,
+                current_site_id: "site:test".to_string(),
+                origin_site_id: "site:test".to_string(),
+                requested_by: EffectivePrincipal::Local(Principal {
+                    fingerprint: "session:test".to_string(),
+                    scopes: Vec::new(),
+                }),
+                execution_hints: Default::default(),
+                effective_caps: Vec::new(),
+                executor_ref: Some(sealed.executor_ref().to_string()),
+                runtime_ref: Some(sealed.runtime_ref().to_string()),
+            })
+            .with_sealed_root_request(sealed);
+        metadata.follow_parent_context = Some(PersistedParentExecutionContext {
+            parent_thread_id: "P".to_string(),
+            hard_limits: serde_json::Value::Null,
+            depth: 0,
+        });
+        state
+            .state_store
+            .seed_launch_metadata(child, &metadata)
+            .unwrap();
+    }
+
     fn finalize_child(
         state: &AppState,
         child: &str,
@@ -2204,6 +2275,13 @@ mod tests {
     #[tokio::test]
     async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
         let (_tmp, state) = setup_app_state();
+        for child in ["CW", "CR", "CX"] {
+            state
+                .threads
+                .create_thread_for_test(&make_create_params(child, child))
+                .unwrap();
+        }
+        state.threads.mark_running("CW").unwrap();
         // A still-waiting waiter: its child chain has not been recorded terminal, so
         // the parent resume is not yet drivable — no intent. (Distinct successors:
         // parent_successor_thread_id is UNIQUE.)
@@ -2260,9 +2338,10 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Cpre", "Cpre"))
+            .create_thread_for_test(&make_pending_follow_child_params("Cpre"))
             .unwrap();
         arm_waiting_follow(&state, "wk-pre", "Cpre");
+        seed_pending_follow_child_metadata(&state, "Cpre");
         assert_eq!(
             state.threads.get_thread("Cpre").unwrap().unwrap().status,
             ryeos_state::objects::ThreadStatus::Created.as_str(),
@@ -2629,7 +2708,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Cres", "Cres"))
+            .create_thread_for_test(&make_pending_follow_child_params("Cres"))
             .unwrap();
         ensure_test_root(&state, "P");
         state
@@ -2647,6 +2726,7 @@ mod tests {
             })
             .unwrap();
         set_test_follow_child(&state, "wk-res", "Cres");
+        seed_pending_follow_child_metadata(&state, "Cres");
         state
             .state_store
             .set_follow_parent_successor("wk-res", "S")
@@ -2934,7 +3014,15 @@ mod tests {
                     error: None,
                     metadata: None,
                     artifacts: vec![],
-                    final_cost: None,
+                    final_cost: Some(ryeos_engine::contracts::FinalCost {
+                        turns: 0,
+                        input_tokens: 5,
+                        output_tokens: 1,
+                        spend: 0.001,
+                        provider: None,
+                        basis: None,
+                        metadata: None,
+                    }),
                     summary_json: None,
                 },
                 envelope,
@@ -4045,6 +4133,7 @@ mod tests {
                     "project_path": "/p",
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -4085,6 +4174,7 @@ mod tests {
                 "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
                 "action": {
                     "item_id": "directive:ryeos/agent/core/base",
+                    "ref_bindings": {},
                     "thread": "inline",
                 },
             })),
@@ -4137,6 +4227,7 @@ mod tests {
                     "acting_principal": "fp:attacker-spoofed-principal",
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -4169,6 +4260,7 @@ mod tests {
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -4214,6 +4306,7 @@ mod tests {
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -4260,6 +4353,7 @@ mod tests {
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),

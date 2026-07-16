@@ -773,9 +773,25 @@ impl DaemonHarness {
         project_path: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+        // The live HTTP contract does not accept relative project paths.
+        // Historical tests used `.` merely to mean "no project overlay";
+        // represent that intent with the current omitted-project shape so the
+        // daemon creates its isolated execution workspace. Tests exercising a
+        // real project pass its absolute tempdir path instead.
+        let project_path = (project_path != ".").then_some(project_path);
+
+        // The directive runtime's signed launch contract requires an explicit
+        // model identity. These fixtures keep model configuration on the
+        // directive itself, so the correct binding is the independently
+        // authorized directive ref repeated in the `model` slot.
+        let ref_bindings = if item_ref.starts_with("directive:") {
+            serde_json::json!({ "model": item_ref })
+        } else {
+            serde_json::json!({})
+        };
         let body = serde_json::json!({
             "item_ref": item_ref,
-            "ref_bindings": {},
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": params,
         });

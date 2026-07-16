@@ -90,6 +90,7 @@ config:
     greet:
       action:
         item_id: "tool:echo/echo"
+        ref_bindings: {}
         params:
           msg: "hello"
       assign:
@@ -117,6 +118,7 @@ config:
     greet:
       action:
         item_id: "tool:echo/echo"
+        ref_bindings: {}
         params:
           msg: "hello"
       assign:

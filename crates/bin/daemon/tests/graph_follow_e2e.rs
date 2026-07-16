@@ -81,7 +81,6 @@ config:
   nodes:
     work:
       node_type: gate
-      assign: {tick: true}
       next:
         type: conditional
         branches:
@@ -122,6 +121,7 @@ config:
       follow: true
       action:
         item_id: "graph:child"
+        ref_bindings: {}
         params: {}
       assign:
         child_ran: "${result.child_ran}"
@@ -130,7 +130,6 @@ config:
         to: mark
     mark:
       node_type: gate
-      assign: {seen: true}
       next:
         type: conditional
         branches:
@@ -420,6 +419,7 @@ config:
     boom:
       action:
         item_id: "tool:nonexistent/boom"
+        ref_bindings: {}
         params: {}
       next:
         type: unconditional
@@ -451,6 +451,7 @@ config:
       follow: true
       action:
         item_id: "graph:child_fail"
+        ref_bindings: {}
         params: {}
       on_error: recover
       next:
@@ -458,14 +459,12 @@ config:
         to: unreached
     recover:
       node_type: gate
-      assign: {recovered: true}
       next:
         type: conditional
         branches:
           - to: done
     unreached:
       node_type: gate
-      assign: {wrong: true}
       next:
         type: conditional
         branches:
@@ -580,7 +579,6 @@ config:
   nodes:
     worka:
       node_type: gate
-      assign: {tick: true}
       next:
         type: conditional
         branches:
@@ -603,7 +601,6 @@ config:
   nodes:
     workb:
       node_type: gate
-      assign: {tick: true}
       next:
         type: conditional
         branches:
@@ -635,6 +632,7 @@ config:
       follow: true
       action:
         item_id: "graph:child_a"
+        ref_bindings: {}
         params: {}
       next:
         type: unconditional
@@ -644,6 +642,7 @@ config:
       follow: true
       action:
         item_id: "graph:child_b"
+        ref_bindings: {}
         params: {}
       next:
         type: unconditional
@@ -860,6 +859,8 @@ config:
       follow: true
       action:
         item_id: "directive:costchild"
+        ref_bindings:
+          model: "directive:costchild"
         params: {}
       next:
         type: unconditional

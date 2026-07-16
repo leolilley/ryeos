@@ -80,14 +80,12 @@ config:
   nodes:
     a:
       node_type: gate
-      assign: {at: "a"}
       next:
         type: conditional
         branches:
           - to: b
     b:
       node_type: gate
-      assign: {at: "b"}
       next:
         type: conditional
         branches:

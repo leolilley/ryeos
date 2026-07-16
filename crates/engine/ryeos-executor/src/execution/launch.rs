@@ -775,22 +775,32 @@ pub struct NativeLaunchResult {
 }
 
 /// Spawn-gate: refuse to spawn an effective item whose composed trust class
-/// is `Unsigned`. Pulled out of `build_and_launch` so the policy is
-/// independently unit-testable.
+/// is `Unsigned`. The rejection remains a typed dispatch-policy error all the
+/// way to the HTTP boundary; it must never collapse into an opaque 500.
 pub(crate) fn enforce_effective_trust(
     trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     kind: &str,
-) -> Result<()> {
+) -> std::result::Result<(), DispatchError> {
     if matches!(trust_class, ryeos_engine::resolution::TrustClass::Unsigned) {
-        anyhow::bail!(
-            "refusing to spawn `{}` ({}): effective_trust_class is Unsigned — \
-             root or one of its ancestors lacks a valid signature from a trusted signer",
-            item_ref,
-            kind
-        );
+        return Err(effective_trust_unsigned_error(item_ref, kind));
     }
     Ok(())
+}
+
+/// Construct the single typed policy rejection used when either the composed
+/// resolution pipeline or a direct verified-root gate proves unsigned launch
+/// authority. Keeping this shape centralized prevents method and envelope
+/// dispatch from drifting at the HTTP boundary.
+pub(crate) fn effective_trust_unsigned_error(item_ref: &str, kind: &str) -> DispatchError {
+    DispatchError::LaunchPolicyForbidden {
+        code: "effective_trust_unsigned".to_owned(),
+        message: format!(
+            "refusing to spawn `{item_ref}` ({kind}): effective_trust_class is Unsigned — \
+             root or one of its ancestors lacks a valid signature from a trusted signer"
+        ),
+        binding: None,
+    }
 }
 
 /// Conventional name of the launcher-facing capability list inside
@@ -1012,11 +1022,13 @@ pub struct BuildAndLaunchParams<'a> {
     pub launch_handoff: Option<&'a LaunchHandoff>,
 }
 
-/// One-shot readiness signal for an acknowledged managed launch.
+/// One-shot readiness signal for an acknowledged subprocess launch.
 ///
 /// Pre-handoff failures publish a structured error; cancellation/panic closes
-/// the receiver. The dispatch task's typed error remains authoritative. Only
-/// the managed-envelope launcher can publish success.
+/// the receiver. The dispatch task's typed error remains authoritative.
+/// Managed-envelope, method-runtime, and terminal-subprocess launchers publish
+/// success only after their exact execution authority is owned by a scheduled
+/// task.
 #[derive(Debug, Clone)]
 pub struct LaunchHandoff {
     sender: Arc<Mutex<Option<tokio::sync::oneshot::Sender<LaunchHandoffResult>>>>,
@@ -1054,7 +1066,7 @@ impl LaunchHandoff {
         }
     }
 
-    fn publish(&self, thread_id: String) {
+    pub(crate) fn publish(&self, thread_id: String) {
         self.publish_result(Ok(thread_id));
     }
 
@@ -2979,18 +2991,28 @@ pub async fn prepare_machine_successor_launch(
     resume: &ryeos_app::launch_metadata::ResumeContext,
     source_thread_id: &str,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
-    Ok(PreparedMachineSuccessorLaunch {
-        prepared: prepare_successor_launch(
-            state,
-            successor_thread_id,
-            resume,
-            SuccessorMode::Machine,
-            Some(source_thread_id),
-            None,
-            true,
-        )
-        .await?,
-    })
+    let mut prepared = prepare_successor_launch(
+        state,
+        successor_thread_id,
+        resume,
+        SuccessorMode::Machine,
+        Some(source_thread_id),
+        None,
+        false,
+    )
+    .await?;
+
+    // A machine continuation is another segment of the same admitted launch,
+    // not a fresh launch identity. Preparing it may materialize a pinned
+    // project snapshot into a request-owned checkout, but that ephemeral path
+    // must never replace the source's durable ResumeContext. The state boundary
+    // verifies exact equality before committing the continuation edge.
+    prepared.resume_context = resume.clone();
+    prepared.launch_metadata =
+        std::mem::take(&mut prepared.launch_metadata).with_resume_context(resume.clone());
+    prepared.authority.launch_metadata = Some(prepared.launch_metadata.clone());
+
+    Ok(PreparedMachineSuccessorLaunch { prepared })
 }
 
 /// Launch a newly persisted operator successor with the exact authoritative
@@ -5107,6 +5129,12 @@ mod tests {
     fn enforce_trust_blocks_unsigned() {
         let err = enforce_effective_trust(TrustClass::Unsigned, "directive:my/agent", "directive")
             .unwrap_err();
+        assert_eq!(err.code(), "effective_trust_unsigned");
+        assert_eq!(err.http_status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(matches!(
+            &err,
+            DispatchError::LaunchPolicyForbidden { binding: None, .. }
+        ));
         let msg = format!("{err}");
         assert!(msg.contains("refusing to spawn"));
         assert!(msg.contains("Unsigned"));

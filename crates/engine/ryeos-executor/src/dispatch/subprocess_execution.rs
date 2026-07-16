@@ -224,6 +224,7 @@ pub(crate) async fn dispatch_subprocess(
                 request,
                 ctx,
                 state,
+                launch_handoff,
             )
             .await
         }
@@ -946,6 +947,7 @@ async fn dispatch_tool_subprocess(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
 
@@ -990,7 +992,7 @@ async fn dispatch_tool_subprocess(
             detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
         })?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
-        return dispatch_via_method_executor(&resolved, request, ctx, state).await;
+        return dispatch_via_method_executor(&resolved, request, ctx, state, launch_handoff).await;
     }
 
     // A method-dispatch wrapper carries the target's admission through the
@@ -1099,7 +1101,7 @@ async fn dispatch_tool_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        let result = crate::execution::runner::run_detached(state.clone(), params)
+        let result = crate::execution::runner::run_detached(state.clone(), params, launch_handoff)
             .await
             .map_err(|e| DispatchError::SubprocessRunFailed {
                 item_ref: item_ref_for_error.clone(),
@@ -1110,7 +1112,7 @@ async fn dispatch_tool_subprocess(
             "detached": true,
         }))
     } else {
-        let result = crate::execution::runner::run_inline(state.clone(), params)
+        let result = crate::execution::runner::run_inline(state.clone(), params, launch_handoff)
             .await
             .map_err(|e| DispatchError::SubprocessRunFailed {
                 item_ref: item_ref_for_error,

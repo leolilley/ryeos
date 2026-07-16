@@ -140,5 +140,7 @@ async fn read_only_actions_allow_session_local_seat_services() {
     .expect("read-only session may open local UI seat");
 
     assert_eq!(result["status"], "executed");
-    assert!(result["result"]["thread_id"].is_string());
+    assert_eq!(result["result"]["thread"]["kind"], "service_run");
+    assert_eq!(result["result"]["thread"]["recorded"].as_bool(), Some(true));
+    assert!(result["result"]["result"]["thread_id"].is_string());
 }

@@ -3087,7 +3087,8 @@ async fn malformed_hook_cost_fails_terminal_accounting() {
     assert!(!result.success);
     let error = result.error.as_deref().unwrap_or_default();
     assert!(error.contains("graph run history rejected"), "{error}");
-    assert!(error.contains("malformed native runtime cost"), "{error}");
+    assert!(error.contains("invalid native runtime cost"), "{error}");
+    assert!(error.contains("settlement storage maximum"), "{error}");
 }
 
 #[tokio::test]

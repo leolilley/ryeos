@@ -145,55 +145,64 @@ pub async fn run(
             .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?
     );
 
-    // 6. Mint the augmentation worker as an independent internal root. Launch
-    // augmentations are part of the authoritative pre-birth pass, so the
-    // prospective parent thread deliberately does not exist yet. The worker's
-    // lifecycle guard owns cancellation until it settles; the final parent
-    // audit records only the validated augmented resolution, never this
-    // transient execution as a continuation/child relation.
+    // 6. Mint the augmentation worker as an independently admitted executable
+    // root. Launch augmentations are part of the authoritative pre-birth pass,
+    // so the prospective parent thread deliberately does not exist yet. The
+    // worker executes the verified runtime item directly and therefore uses
+    // the runtime kind's schema-owned thread profile. It must cross the same
+    // sealed root-admission boundary as every other executable root; the
+    // generic `create_thread` child boundary correctly refuses root rows.
     let child_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
-    // Derive the child thread's kind from the target kind's schema-declared
-    // thread_profile. This keeps thread kinds in sync with kind schemas
-    // rather than hardcoding "system_task".
+    // RuntimeRegistry is built exclusively from verified bundle roots. Resolve
+    // the admission subject without the caller's project overlay, then bind it
+    // back to the registry entry's exact bundle and signature-stripped bytes.
+    let mut runtime_plan_ctx = plan_ctx.clone();
+    runtime_plan_ctx.project_context = ryeos_engine::contracts::ProjectContext::None;
+    let runtime_resolved = engine
+        .resolve(&runtime_plan_ctx, &runtime_item_ref)
+        .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?;
+    let expected_bundle_ai = verified_runtime.bundle_root.join(ryeos_engine::AI_DIR);
+    if runtime_resolved.source_space != ryeos_engine::contracts::ItemSpace::Bundle
+        || !runtime_resolved
+            .source_path
+            .starts_with(&expected_bundle_ai)
+        || runtime_resolved.raw_content_digest != verified_runtime.raw_content_digest
+    {
+        return Err(LaunchAugmentationError::RuntimeRegistry(format!(
+            "resolved augmentation runtime `{runtime_item_ref}` does not match its verified registry authority"
+        )));
+    }
+    let runtime_verified = engine
+        .verify(&runtime_plan_ctx, runtime_resolved)
+        .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?;
     let child_thread_kind = engine
         .kinds
-        .get(target_kind)
+        .get("runtime")
         .and_then(|schema| schema.execution())
         .and_then(|exec| exec.thread_profile.as_ref())
         .map(|tp| tp.name.as_str())
         .ok_or_else(|| {
             LaunchAugmentationError::RuntimeRegistry(format!(
-                "target kind '{target_kind}' must declare execution.thread_profile"
+                "runtime kind for augmentation worker `{runtime_item_ref}` must declare execution.thread_profile"
             ))
         })?;
+    let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
+        engine,
+        &runtime_plan_ctx,
+        runtime_verified,
+        &state.node_history_policy,
+        child_thread_kind.to_string(),
+        BTreeMap::new(),
+        None,
+        None,
+    )
+    .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+    let admitted_request = root_admission
+        .execution_request(executor_ref.clone(), "inline".to_string(), Value::Null)
+        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     state
         .threads
-        .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
-            thread_id: child_thread_id.clone(),
-            chain_root_id: child_thread_id.clone(),
-            kind: child_thread_kind.to_string(),
-            item_ref: runtime_item_ref_string.clone(),
-            executor_ref: executor_ref.clone(),
-            launch_mode: "inline".to_string(),
-            current_site_id: plan_ctx.current_site_id.clone(),
-            origin_site_id: plan_ctx.origin_site_id.clone(),
-            upstream_thread_id: None,
-            requested_by: Some(principal_fingerprint.to_string()),
-            project_root: match &plan_ctx.project_context {
-                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                    Some(path.canonicalize().map_err(|error| {
-                        LaunchAugmentationError::Threads(format!(
-                            "canonicalize augmentation project {}: {error}",
-                            path.display()
-                        ))
-                    })?)
-                }
-                _ => None,
-            },
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            captured_history_policy: None,
-        })
+        .create_root_thread_with_id(&child_thread_id, &admitted_request)
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);

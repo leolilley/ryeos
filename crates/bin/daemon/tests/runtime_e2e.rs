@@ -247,13 +247,8 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
         .await
         .expect("start daemon with synth runtime");
 
-    let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
-        .post_execute(
-            "runtime:e2e-direct-runtime",
-            project.path().to_str().unwrap(),
-            serde_json::json!({}),
-        )
+        .post_execute("runtime:e2e-direct-runtime", ".", serde_json::json!({}))
         .await
         .expect("post /execute");
 
@@ -279,7 +274,6 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
              (native:/manifest/bundle/binary), got: {err}"
         );
     }
-    drop(project);
 }
 
 // ── 4. Multi-default conflict at startup → daemon refuses ──────────────

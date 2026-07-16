@@ -139,7 +139,9 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         .unwrap(),
     );
     let engine = Arc::new(build_live_bundle_engine());
-    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
+    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));

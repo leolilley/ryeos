@@ -62,21 +62,18 @@ config:
   nodes:
     a:
       node_type: gate
-      assign: {at: "a"}
       next:
         type: conditional
         branches:
           - to: b
     b:
       node_type: gate
-      assign: {at: "b"}
       next:
         type: conditional
         branches:
           - to: c
     c:
       node_type: gate
-      assign: {at: "c"}
       next:
         type: conditional
         branches:
@@ -103,7 +100,7 @@ config:
   segment_steps: 1
   nodes:
     flaky:
-      action: {item_id: "tool:segmenttest/never_resolves"}
+      action: {item_id: "tool:segmenttest/never_resolves", ref_bindings: {}}
       retry: {attempts: 2, backoff_ms: 1}
       on_error: recover
     recover:

@@ -283,6 +283,7 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
         state_path.join(AI_DIR).join("node").join("vault"),
         state_path.join(AI_DIR).join("node").join("identity"),
         state_path.join(AI_DIR).join("state").join("objects"),
+        state_path.join(AI_DIR).join("state").join("locators"),
         state_path.join(AI_DIR).join("state").join("refs"),
         state_path
             .join(AI_DIR)
@@ -486,6 +487,53 @@ pub fn register_fixture_bundle(
     let abs = bundle_root
         .canonicalize()
         .with_context(|| format!("canonicalize synthetic bundle {}", bundle_root.display()))?;
+
+    // Registered bundles are current bundle roots, not loose descriptor
+    // directories. Give synthetic fixtures the same signed manifest boundary
+    // as a published bundle. Custom kind schemas in the fixture are the kinds
+    // it provides; its runtime descriptors and schema references consume the
+    // core-owned handler/parser/runtime kinds.
+    let kinds_root = abs.join(AI_DIR).join("node/engine/kinds");
+    let mut provides_kinds = Vec::new();
+    match fs::read_dir(&kinds_root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    provides_kinds.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    provides_kinds.sort();
+    provides_kinds.dedup();
+
+    let provides_kinds_yaml = if provides_kinds.is_empty() {
+        "provides_kinds: []\n".to_string()
+    } else {
+        format!(
+            "provides_kinds:\n{}",
+            provides_kinds
+                .iter()
+                .map(|kind| format!("  - {kind}\n"))
+                .collect::<String>()
+        )
+    };
+    let manifest_body = format!(
+        "name: {bundle_name}\nversion: 1.0.0\ndescription: synthetic daemon integration fixture\n{provides_kinds_yaml}requires_kinds:\n  - handler\n  - parser\n  - runtime\nuses_kinds: []\n"
+    );
+    let manifest = lillux::signature::sign_content_at(
+        &manifest_body,
+        &fixture.publisher,
+        "#",
+        None,
+        FAST_FIXTURE_TIME,
+    );
+    fs::create_dir_all(abs.join(AI_DIR))?;
+    fs::write(abs.join(AI_DIR).join("manifest.yaml"), manifest)?;
+
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
