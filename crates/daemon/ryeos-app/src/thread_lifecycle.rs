@@ -1167,6 +1167,13 @@ impl SealedRootExecutionRequest {
         &self.item_ref
     }
 
+    /// Exact captured policy carried by the synthetic storage fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn captured_history_policy(&self) -> &ryeos_state::objects::CapturedThreadHistoryPolicy {
+        &self.captured_history_policy
+    }
+
     /// Structurally complete current-format value for storage-boundary tests.
     /// It is deliberately unavailable in production builds and is never valid
     /// launch authority because its synthetic subject is unsigned.
