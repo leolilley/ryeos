@@ -322,6 +322,16 @@ impl IsolationBackendDeclaration {
         }
         Ok(())
     }
+
+    /// Narrow live adapter claims to the maximum authority granted by the
+    /// signed bundle declaration. Inspection can remove authority but cannot
+    /// add authority that the manifest signer did not grant.
+    pub fn effective_capabilities(
+        &self,
+        inspected: &BTreeSet<IsolationCapability>,
+    ) -> BTreeSet<IsolationCapability> {
+        self.capabilities.intersection(inspected).copied().collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -898,6 +908,29 @@ mod tests {
         declaration.targets.truncate(1);
         declaration.adapter = "../adapter".to_string();
         assert!(declaration.validate().is_err());
+    }
+
+    #[test]
+    fn signed_declaration_is_the_capability_upper_bound() {
+        let declaration = IsolationBackendDeclaration {
+            id: "linux".to_string(),
+            protocol: IsolationAdapterProtocolVersion::V1,
+            targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
+            adapter: "adapter".to_string(),
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, "launcher".to_string())]),
+            capabilities: BTreeSet::from([
+                IsolationCapability::NetworkIsolated,
+                IsolationCapability::EnvironmentExact,
+            ]),
+        };
+        let inspected = BTreeSet::from([
+            IsolationCapability::NetworkHost,
+            IsolationCapability::NetworkIsolated,
+        ]);
+        assert_eq!(
+            declaration.effective_capabilities(&inspected),
+            BTreeSet::from([IsolationCapability::NetworkIsolated])
+        );
     }
 
     #[test]

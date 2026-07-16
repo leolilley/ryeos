@@ -11,9 +11,9 @@
 #![cfg(unix)]
 
 use lillux::{
-    configure_subprocess_limits, is_alive, kill, run, sealed_memfd, spawn, spawn_detached,
-    supervised_launcher_status_pipe, validate_subprocess_limits, OutputLimitExceeded,
-    SubprocessLimits, SubprocessRequest,
+    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_memfd, spawn,
+    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
+    OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -330,6 +330,45 @@ fn reported_target_group_is_exposed_and_killed_on_timeout() {
         !is_alive(target_pid),
         "reported target survived timeout cleanup"
     );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn inherited_stdio_retains_supervised_target_identity_and_cleanup() {
+    let mut request = supervised_launcher_protocol_shell("sleep 30", 0.25);
+    request.limits = Some(SubprocessLimits {
+        max_open_files: Some(64),
+        max_stdout_bytes: None,
+        max_stderr_bytes: None,
+    });
+    let result = run_inherited_stdio(request);
+
+    assert!(result.timed_out, "stderr: {}", result.stderr);
+    assert_ne!(result.pid, 0);
+    for _ in 0..50 {
+        if !is_alive(result.pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(result.pid),
+        "inherited-stdio target survived supervised timeout cleanup"
+    );
+}
+
+#[test]
+fn inherited_stdio_refuses_captured_output_limits() {
+    let mut request = sh(&["-c", "exit 0"]);
+    request.limits = Some(SubprocessLimits {
+        max_stdout_bytes: Some(1),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run_inherited_stdio(request);
+
+    assert!(!result.success);
+    assert!(result.stderr.contains("captured-output byte limits"));
 }
 
 #[test]

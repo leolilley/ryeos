@@ -6,7 +6,7 @@ set -euo pipefail
 BWRAP_OUTPUT="${BWRAP_OUTPUT:?BWRAP_OUTPUT must name the bundle payload path}"
 bwrap_compatible() {
     local executable="$1"
-    local output major minor help
+    local output major minor help dynamic
     output="$("$executable" --version 2>/dev/null)" || return 1
     [[ "$output" =~ ^bubblewrap[[:space:]]([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
     major="${BASH_REMATCH[1]}"
@@ -18,6 +18,13 @@ bwrap_compatible() {
     for option in --bind-fd --ro-bind-fd --argv0; do
         grep -Eq "(^|[[:space:]])${option}([[:space:]]|$)" <<<"$help" || return 1
     done
+    # libcap is part of the signed payload, not an ambient host dependency.
+    # glibc remains the declared base ABI for the supported target triple.
+    dynamic="$(readelf -d "$executable" 2>/dev/null)" || return 1
+    if grep -Eq 'Shared library: \[libcap\.so' <<<"$dynamic"; then
+        return 1
+    fi
+    return 0
 }
 
 if [[ -x "$BWRAP_OUTPUT" ]] && bwrap_compatible "$BWRAP_OUTPUT"; then
@@ -39,6 +46,7 @@ rm -rf "$source_dir" "$build_dir"
 tar --extract --file "$archive_path" --directory "${RUNNER_TEMP:-/tmp}"
 meson setup "$build_dir" "$source_dir" \
     --prefix=/usr \
+    -Dprefer_static=true \
     -Dbash_completion=disabled \
     -Dzsh_completion=disabled \
     -Dman=disabled \

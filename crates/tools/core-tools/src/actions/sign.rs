@@ -99,31 +99,24 @@ pub fn run_sign(
             .map(|d| d.join("ryeos"))
             .expect("could not determine XDG data directory"),
     };
-    let bundle_roots = {
-        let bundles_dir = app_root.join(ryeos_engine::AI_DIR).join("bundles");
-        let mut additional: Vec<PathBuf> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    additional.push(entry.path());
-                }
-            }
-        }
-        roots::bundle_roots(&additional)
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
+        .context("load retained node isolation generation")?;
+    let bundle_roots = isolation
+        .registered_generation_bundle_roots()
+        .context("retained isolation generation omitted bundle roots")?
+        .to_vec();
+    let node_trust_store = isolation
+        .registered_generation_node_trust()
+        .context("retained isolation generation omitted node trust")?;
+    let trust_store = match project_path {
+        Some(project_path) => node_trust_store
+            .with_project_keys(project_path)
+            .map(std::borrow::Cow::into_owned)
+            .with_context(|| "load project trust")?,
+        None => node_trust_store.clone(),
     };
 
-    let operator_config_root = roots::runtime_root().ok().map(|root| root.config());
-    let trust_store = TrustStore::load(
-        project_path,
-        operator_config_root
-            .as_deref()
-            .ok_or_else(|| anyhow!("cannot resolve app root"))?,
-    )
-    .with_context(|| "load trust store")?;
-
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
-    let isolation = ryeos_app::engine_init::load_registered_isolation(&app_root)
-        .context("load node isolation policy")?;
 
     // `sign` canonically takes a ref (`graph:foo/bar`), but operators and LLMs
     // routinely pass the file path they just edited. A path under the project's

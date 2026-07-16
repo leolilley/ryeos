@@ -116,6 +116,10 @@ pub struct Engine {
 
     /// System bundle roots (parents of `AI_DIR`)
     pub bundle_roots: Vec<PathBuf>,
+
+    /// Generation guard shared with launch preparation. It is inert for
+    /// directly-constructed test engines and active for node engines.
+    isolation_generation: std::sync::Arc<crate::isolation::IsolationRuntime>,
 }
 
 impl Engine {
@@ -135,7 +139,31 @@ impl Engine {
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
+            isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
         }
+    }
+
+    pub fn with_isolation_generation(
+        mut self,
+        isolation: std::sync::Arc<crate::isolation::IsolationRuntime>,
+    ) -> Self {
+        self.isolation_generation = isolation;
+        self
+    }
+
+    fn checked_bundle_generation<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let _operation_guard = self
+            .isolation_generation
+            .begin_registered_generation_operation()?;
+        self.isolation_generation
+            .ensure_registered_generation_current()?;
+        let value = operation()?;
+        self.isolation_generation
+            .ensure_registered_generation_current()?;
+        Ok(value)
     }
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
@@ -197,6 +225,14 @@ impl Engine {
 
     /// Resolve a canonical ref to a concrete item.
     pub fn resolve(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+    ) -> Result<ResolvedItem, EngineError> {
+        self.checked_bundle_generation(|| self.resolve_current(ctx, item_ref))
+    }
+
+    fn resolve_current(
         &self,
         ctx: &PlanContext,
         item_ref: &CanonicalRef,
@@ -353,6 +389,13 @@ impl Engine {
         &self,
         request: EffectiveItemRequest,
     ) -> Result<EffectiveItem, EngineError> {
+        self.checked_bundle_generation(|| self.effective_item_current(request))
+    }
+
+    fn effective_item_current(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<EffectiveItem, EngineError> {
         let ref_str = request.item_ref.to_string();
 
         if let Some(expected) = &request.expected_kind {
@@ -486,6 +529,16 @@ impl Engine {
         parameters: &Value,
         hints: &ExecutionHints,
     ) -> Result<ExecutionPlan, EngineError> {
+        self.checked_bundle_generation(|| self.build_plan_current(ctx, item, parameters, hints))
+    }
+
+    fn build_plan_current(
+        &self,
+        ctx: &PlanContext,
+        item: &VerifiedItem,
+        parameters: &Value,
+        hints: &ExecutionHints,
+    ) -> Result<ExecutionPlan, EngineError> {
         crate::scope::check_execution_scope(&ctx.requested_by)?;
 
         tracing::debug!(
@@ -543,6 +596,23 @@ impl Engine {
         root_kind: &str,
         project_root: Option<PathBuf>,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
+        self.checked_bundle_generation(|| {
+            self.resolve_terminal_executor_current(
+                root_source_path,
+                root_executor_id,
+                root_kind,
+                project_root,
+            )
+        })
+    }
+
+    fn resolve_terminal_executor_current(
+        &self,
+        root_source_path: &std::path::Path,
+        root_executor_id: &str,
+        root_kind: &str,
+        project_root: Option<PathBuf>,
+    ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         let roots = self.resolution_roots(project_root.clone());
         let trust_store = self.effective_trust_store(project_root.as_deref())?;
         let effective_parsers = self.effective_parser_dispatcher(project_root.as_deref())?;
@@ -563,12 +633,14 @@ impl Engine {
         ctx: &EngineContext,
         plan: ExecutionPlan,
     ) -> Result<ExecutionCompletion, EngineError> {
-        tracing::debug!(plan_id = %plan.plan_id, "executing plan");
-        let result = crate::dispatch::execute_plan(&plan, ctx);
-        if let Ok(ref completion) = result {
-            tracing::info!(plan_id = %plan.plan_id, status = ?completion.status, "plan execution completed");
-        }
-        result
+        self.checked_bundle_generation(|| {
+            tracing::debug!(plan_id = %plan.plan_id, "executing plan");
+            let result = crate::dispatch::execute_plan(&plan, ctx);
+            if let Ok(ref completion) = result {
+                tracing::info!(plan_id = %plan.plan_id, status = ?completion.status, "plan execution completed");
+            }
+            result
+        })
     }
 
     /// Spawn a plan's subprocess without waiting.
@@ -578,8 +650,10 @@ impl Engine {
         ctx: &EngineContext,
         plan: &ExecutionPlan,
     ) -> Result<crate::dispatch::SpawnedExecution, EngineError> {
-        tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
-        crate::dispatch::spawn_plan(plan, ctx)
+        self.checked_bundle_generation(|| {
+            tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
+            crate::dispatch::spawn_plan(plan, ctx)
+        })
     }
 
     /// Build resolution roots for a given project root (project-first order).

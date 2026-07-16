@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use serde_json::{json, Value};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -216,8 +216,8 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
 
     let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
     let isolation_item_ref = item_ref.to_string();
-    let request = isolation
-        .apply(
+    let applied = isolation
+        .apply_with_provenance(
             request,
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: &spec.project_path,
@@ -233,6 +233,11 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             },
         )
         .map_err(|error| anyhow::anyhow!("isolation apply failed: {error}"))?;
+    state
+        .state_store
+        .seed_isolation_provenance(thread_id, applied.provenance)
+        .context("persist managed-runtime isolation provenance")?;
+    let request = applied.request;
     let spawned = match lillux::spawn(request) {
         Ok(spawned) => spawned,
         Err(result) => {

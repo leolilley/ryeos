@@ -10,7 +10,7 @@ pub mod time;
 pub mod vault;
 
 pub use exec::{
-    configure_inherited_fds, configure_subprocess_limits, sealed_memfd,
+    configure_inherited_fds, configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
     supervised_launcher_status_pipe, validate_subprocess_limits, OutputLimitExceeded,
     RunningProcess, SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
     SupervisedLauncherStatusPipe, SupervisedProcessStatus,
@@ -43,6 +43,10 @@ pub fn run(request: SubprocessRequest) -> SubprocessResult {
 
 pub fn spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
     exec::lib_spawn(request)
+}
+
+pub fn run_inherited_stdio(request: SubprocessRequest) -> SubprocessResult {
+    exec::lib_run_inherited_stdio(request)
 }
 
 pub fn spawn_detached(

@@ -1740,9 +1740,9 @@ pub(crate) async fn dispatch_method(
             supervised_status: None,
         };
         let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-        let subprocess_request = state
+        let applied = state
             .isolation
-            .apply(
+            .apply_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
@@ -1759,6 +1759,11 @@ pub(crate) async fn dispatch_method(
                 },
             )
             .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        state
+            .state_store
+            .seed_isolation_provenance(&thread_id, applied.provenance)
+            .map_err(DispatchError::Internal)?;
+        let subprocess_request = applied.request;
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = thread_id.clone();

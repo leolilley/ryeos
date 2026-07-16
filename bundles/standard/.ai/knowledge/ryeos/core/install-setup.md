@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:6b96f105729b7cfdfc0e7f2ba20f83ec208a10d0a690e7cc518f2aac23bda848:4RSLR9qwz0ziNUQC2iBmtLJPJ7+PQgur4/9s6Vl6ECumtE9u3N2U0EYo3dgZPmxpGvTePxyrmnQXlEKe9K00Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:58Z:823ae6283470e5c600b1cc2559b6ba3be49b22a8303aae63d579e5c5a285b01d:ngg9HH5D1t4t2zWM86mw99XNGL07xm5bqQ0xvghkh5mvPQxA6HY/yqP1XwUsBkDIYyfs6psqW8bRq3oV+nT3CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
-version: "3.1.0"
+version: "3.2.0"
 description: >
   How to install and set up ryEOS from package to initialized local node.
   Covers ryeos-node init, bundle discovery, trust pinning, identity, and
@@ -39,7 +39,7 @@ are local-node operations and ignore `RYEOSD_URL`.
 operator-owned setup. It creates layout, user key, node key, self-trust,
 official/additional publisher trust, discovers and plans bundles,
 installs and registers bundles, creates vault key material, writes
-create-once node policies (including the disabled strict sandbox policy), and
+create-once node policies (including the disabled strict isolation policy), and
 verifies post-init trust.
 
 Daemon bootstrap can repair daemon-local artifacts after init, but it
@@ -93,10 +93,11 @@ initialization before writing runtime state, acquires the state lock
 before unlinking sockets, repairs only daemon-local artifacts, then loads
 registered bundles and starts listeners.
 
-Bubblewrap is optional while the sandbox policy remains in its default
-`mode: disabled`. Install it before selecting `mode: enforce`, validate with
-`ryeos node doctor`, and restart. See [Execution
-Sandbox](node/execution-isolation.md).
+The signed `sandbox-linux-bubblewrap` bundle carries both the isolation adapter
+and its Bubblewrap launcher; RyeOS does not resolve Bubblewrap from the host.
+Select that installed bundle in `isolation.yaml` before choosing
+`mode: enforce`, validate with `ryeos node doctor`, and restart. See [Execution
+Isolation](node/execution-isolation.md).
 
 For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator
 Init](node/operator-init.md), and [Identity Model](identity-model.md).

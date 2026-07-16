@@ -322,12 +322,8 @@ pub(crate) fn admit_completed_staging(
         .values()
         .map(|bundle| bundle.source.root_path().clone())
         .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(
-        &prospective_roots,
-        node_trust_store,
-        isolation,
-    )
-    .context("prospective bundle set would fail node engine boot")?;
+    ryeos_app::engine_init::admit_node_bundle_roots(app_root, &prospective_roots, node_trust_store)
+        .context("prospective bundle set would fail node engine boot")?;
 
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and command/policy collisions are

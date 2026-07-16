@@ -4713,6 +4713,26 @@ impl StateStore {
         g.runtime_db.set_launch_metadata(thread_id, launch_metadata)
     }
 
+    /// Atomically add the exact isolation generation/plan identity to a
+    /// thread's already-seeded launch metadata without disturbing resume or
+    /// cancellation authority.
+    pub fn seed_isolation_provenance(
+        &self,
+        thread_id: &str,
+        provenance: ryeos_engine::isolation::IsolationLaunchProvenance,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        let mut metadata = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .and_then(|info| info.launch_metadata)
+            .unwrap_or_default();
+        metadata.isolation = Some(provenance);
+        g.runtime_db.set_launch_metadata(thread_id, &metadata)
+    }
+
     #[tracing::instrument(
         name = "state:attach_thread_process",
         skip(self, launch_metadata),

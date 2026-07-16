@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:bc21aeed82b68e30214df745adb9c9a49e5ecc8b10ba47b2933b13aa1de4be52:kTFsM9R4QVEm6CacDZ6Wjg3TykzWJVrhjOLS6zwv5IA+RwdtVO0NA6tZYCjyl5yZAvzdyvBztjZ/X934jlj+CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:58Z:aad8812583cfb4a0eae2fcf8618e57a22c296f3701e8999c967fc94a6654bd9d:AL5niHgNktQhkLKkSRo+qhWxeUsxfocPw+oo1LGMFbqpVgApl6RMPRKevn+FN+5wmm+DCTkEnDFnZqfqiBvvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
-version: "2.2.0"
+version: "2.3.0"
 description: >
   Daemon process lifecycle: strict startup ordering, local lifecycle status,
   exact signal control, daemon.json metadata, and shutdown cleanup.
@@ -33,16 +33,16 @@ initialization has been verified:
 7. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
    and fail when operator init artifacts are missing.
 8. Remove stale configured socket and ensure runtime paths.
-9. Two-phase node-config bootstrap, engine construction, and sandbox-policy
-   snapshot resolution. Invalid policy fails startup; disabled mode does not
-   require or inspect Bubblewrap.
+9. Two-phase node-config bootstrap, engine construction, and isolation-policy
+   snapshot resolution. Invalid policy fails startup; enforce mode resolves and
+   inspects the selected signed backend bundle.
 10. Service self-check, route table build, listeners, scheduler, and metadata
    write.
 
 The state-lock-before-socket-unlink ordering prevents a second daemon
 from unlinking the first daemon's live socket.
 
-The sandbox snapshot is immutable for the process lifetime. Operators validate
+The isolation snapshot is immutable for the process lifetime. Operators validate
 edits with `ryeos node doctor` and restart before expecting a new policy
 generation. See [Execution Isolation](../node/execution-isolation.md).
 
@@ -68,7 +68,7 @@ The daemon UDS server exposes one read-only lifecycle method:
 
 It is a local UDS status message, not a public HTTP route and not signal
 authority. There is deliberately no unauthenticated shutdown RPC because
-sandboxed runtimes may receive the callback socket. Local `ryeos stop` captures
+isolated runtimes may receive the callback socket. Local `ryeos stop` captures
 the connected socket peer through `SO_PEERCRED` and `SO_PEERPIDFD` and signals
 that exact process incarnation.
 

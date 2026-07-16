@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:483544cd9a03696e6d0269c2e9181e143e732c42fd8c03a401270256cac93633:TPyfwI+f93vpsz8TGZub/c7F4ZaH56ReuBXsEyEycOgQeaTDkF/iMCdJyOwshqioQQAPUR/IfeCxI/y6QN6IBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:49:38Z:c8ae232917b6811a4d3444ef9da610aceb38f6e84cd7a94e974c4617083961eb:s1INGLy8HEBkvrSojbcocBjybyhqWdABNDqM58HJoeXUWMXhhRpO67GV36afhVRRGJU0Wq3TIMRQpoYSxlF3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.5.0"
-description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around the optional Linux process boundary and future typed backends.
+version: "0.5.1"
+description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around typed signed backends.
 tags:
   - hosted-node
   - federation
@@ -105,8 +105,8 @@ work.
 Principal storage, secret, and network layers own cross-tenant data authority.
 None of those layers should be inferred from an item-authored isolation profile.
 
-Backend selection and capability matching should follow
-`ryeos/future/data-driven-execution-isolation-backends`. In particular, a
+Backend selection and capability matching follow
+`ryeos/core/node/execution-isolation`. In particular, a
 hostile-workload requirement cannot fall back to direct execution or be marked
 satisfied by a process-confinement backend. The selected backend kind,
 capabilities, worker identity, and inspection/attestation evidence belong in

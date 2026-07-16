@@ -1,0 +1,35 @@
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationProjectAuthority {
+    External,
+    RuntimeWorkspace,
+    /// Pure node handler launch. The project path supplies a read-only cwd;
+    /// no configured host writable mount is granted for this launch.
+    ReadOnly,
+}
+
+/// Verified file identity for executable code used by one launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationVerifiedCode {
+    pub source_path: PathBuf,
+    pub content_hash: String,
+}
+
+/// Per-launch facts used to resolve policy placeholders and record provenance.
+#[derive(Debug, Clone, Copy)]
+pub struct IsolationLaunchContext<'a> {
+    pub project_path: &'a Path,
+    pub project_authority: IsolationProjectAuthority,
+    pub state_root: Option<&'a Path>,
+    pub checkpoint_dir: Option<&'a Path>,
+    pub daemon_socket_path: Option<&'a Path>,
+    pub bundle_roots: &'a [PathBuf],
+    pub node_trusted_keys_dir: Option<&'a Path>,
+    pub verified_code: &'a [IsolationVerifiedCode],
+    pub item_ref: &'a str,
+    pub thread_id: &'a str,
+}

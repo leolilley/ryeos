@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:ae6c8a612abf72f7b15756637bfaa2da161ca3d3907583b53ad024cbf6288af4:HmL0yhHqOLDam+0F7rL70ZL8G8lEo3qURZu+DVwtMW3UX6Gom4Te0ZkAbTFge4FnyfEZaRs2ZMY8jUxYLDr4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:58Z:aa85f8377ac1a5dee44ba46052327aa2e2057835d79720d059767a221eee5e25:wiV9LNHI4+FgNVJ8KTRw5tjqTcB6slEDNUY0HSyOzogX5Mx4zl2eAt3RhTnvyHdpVfR2Ws1ltlUvkesWo2C9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Model
 
 ## Status
@@ -133,7 +133,7 @@ or override node limits.
 
 Profiles should express typed isolation requirements, not backend names or
 backend-specific flags. Backend selection remains deterministic node-owned data
-and must follow `ryeos/future/data-driven-execution-isolation-backends`.
+and follows `ryeos/core/node/execution-isolation`.
 
 Per-tool profiles are not a substitute for hosted workload isolation. The
 current inner boundary deliberately does not provide CPU/memory/process cgroup

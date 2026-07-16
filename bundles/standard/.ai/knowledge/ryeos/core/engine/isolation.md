@@ -1,12 +1,13 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:af50384e2c9e29923ffb7b95187ec9908ad5e170bebf7b6217bbd6ce72027e19:rUB1JjMayr94kP5VG+BK14ajbudLmybKXDGeH31cUOrGZTXw/TRin3FgZJ7rgm/tIH1oJ8Bap1710uftOETsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T04:18:05Z:1e5929e2b9facb63797d24a1f0020b7175ad30b3a43dff930fb366bfbff0700c:uiUN8Td0JmAMh4GHmdLe63t7kWSALI7YCvFT1Tma+Zn4s3GocqOJdZYz68RaEDxFi6WCIDBZ7qkZMui0IOENAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
 tags: [architecture, isolation, hermetic, env, security, subprocess]
-version: "2.0.0"
+version: "2.2.0"
 description: >
   Hermetic execution and optional OS isolation — env_clear, explicit env
-  injection, node-owned Bubblewrap policy, per-route semaphores, and callback
+  injection, node-owned policy, signed backend bundles, per-route semaphores,
+  and callback
   capability boundaries.
 ---
 
@@ -15,20 +16,27 @@ description: >
 Rye OS enforces isolation at multiple layers to prevent privilege
 escalation, secret leakage, and environment-dependent behavior.
 
-## Node-owned OS sandbox
+## Node-owned OS isolation
 
 Tool and runtime item launches can additionally pass through the immutable strict
-node sandbox snapshot. The default mode is disabled. In enforce mode, the
-node—not the item—owns Bubblewrap filesystem/network policy, environment
-filtering, and the Lillux open-file cap. Policy is resolved once at startup and
-shared across launch paths; edits require restart. Parser/composer handlers are
-trusted engine infrastructure and retain the hermetic handler boundary below.
+node isolation snapshot. The default mode is disabled. In enforce mode, the
+node—not the item—owns filesystem/network policy, environment filtering, and
+the Lillux open-file cap. Policy is resolved once at startup and shared across
+launch paths; edits require restart. Parser/composer handlers are trusted engine
+infrastructure and retain the hermetic handler boundary below.
 
-Bubblewrap is the one current Linux backend, not the engine's intended portable
-contract. Future backends should consume a typed, backend-neutral isolation plan
-and advertise exact capabilities; items may narrow node policy but may not
-select a backend, enable isolation, or request fallback. See
-`ryeos/future/data-driven-execution-isolation-backends` for that deferred path.
+The engine emits a typed backend-neutral launch plan. The selected signed bundle
+declares an adapter, launcher artifacts, target triples, and a capability upper
+bound; live inspection may narrow but never broaden that authority. The current
+`sandbox-linux-bubblewrap` bundle implements the Linux backend. Items may narrow
+node policy but may not select a backend, enable isolation, or request fallback.
+
+At bootstrap and prospective bundle admission, the selected adapter and
+payloads are signature-verified and copied into immutable sealed executable
+handles. Registry construction receives that exact runtime snapshot. Managed
+launch metadata records the policy, backend, signer, executable digests,
+effective capability set, and a canonical plan digest whose argument and
+environment plaintext has been redacted.
 
 See [Execution Isolation](../node/execution-isolation.md) for the complete node-owner
 schema, pickup behavior, diagnostics, and security limits.

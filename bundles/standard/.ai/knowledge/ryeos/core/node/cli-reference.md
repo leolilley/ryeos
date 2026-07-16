@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:bd0bf0f21adbc1ec03cb23b9c7f5eade51f8ae52e28b80e1b4193bfc29aaf136:0hNO31M3y3p+xzbHSDsViS3NghfaVbxNOL7apt+1VQGmWGmqrybr/+slFlvtqmt16nlyA35JEMz2l++d+4tRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:58Z:e711732f39805ff362e4b7d3b966b5edd306939f4465fbcf1b283830a4eb5d44:dJSh9szgVRwCok8/yI68R3LkU4YKbtbAb7gT0qEES/reD7P6YxpfRl5eZ2CaFAD+49uOXF/CpZB/j2jBjKPoCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.2.0"
+version: "3.2.1"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -74,9 +74,10 @@ only a `lifecycle.status` response reporting `status: "running"`.
 ryeos node doctor [--json] [--no-bundles] [--app-root <dir>]
 ```
 
-Runs the offline node checklist. Its sandbox row uses the production strict loader:
-disabled is a healthy inactive opt-out, while enforced mode validates the
-backend and resource limit. Policy edits require a daemon restart; see
+Runs the offline node checklist. Its isolation row uses the production strict
+loader: disabled is a healthy inactive opt-out, while enforced mode resolves
+and inspects the selected signed backend bundle and validates resource limits.
+Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md).
 
 ## Other local operator verbs

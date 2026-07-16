@@ -601,6 +601,14 @@ pub fn load_node_config_two_phase(
 )> {
     let app_root = &config.app_root;
 
+    // Freeze the installed namespace from the first signed registration read
+    // through backend capture, registry construction, and the full phase-two
+    // snapshot. Mutation paths take this same node-wide lock before planning
+    // or activation, so one daemon generation cannot mix bundle generations.
+    let _bundle_generation_lock =
+        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(app_root)
+            .context("acquire bundle-generation lock for node bootstrap")?;
+
     // ── Phase 1: bootstrap trust store + bundle section ──
     // Use operator config trust so daemon-written items verify.
     let operator_config_root = config.runtime_root().config();
@@ -616,29 +624,50 @@ pub fn load_node_config_two_phase(
         .load_bundle_section()
         .context("Phase 1: failed to load bundle section from node config")?;
 
+    let generation = Arc::new(
+        ryeos_app::engine_init::VerifiedBundleGeneration::capture(
+            bundle_records,
+            &bootstrap_trust_store,
+        )
+        .context("Phase 1: capture verified bundle generation")?,
+    );
+
     // Signed registration syntax alone is not enough to boot safely. Require
     // every installed manifest and the complete dependency/provider graph to
     // validate before any registry is constructed from these roots.
-    ryeos_app::engine_init::validate_installed_bundle_plan(app_root, &bundle_records)
+    generation
+        .checked(&bootstrap_trust_store, || {
+            ryeos_app::engine_init::validate_installed_bundle_plan(
+                app_root,
+                &generation,
+                &bootstrap_trust_store,
+            )
+        })
         .context("Phase 1: installed bundle graph admission failed")?;
 
-    let effective_bundle_roots: Vec<PathBuf> =
-        bundle_records.iter().map(|b| b.path.clone()).collect();
+    let effective_bundle_roots = generation.roots();
 
-    let isolation_backend = ryeos_app::engine_init::resolve_isolation_backend(
+    let isolation_backend = generation
+        .checked(&bootstrap_trust_store, || {
+            ryeos_app::engine_init::resolve_isolation_backend(
+                app_root,
+                &generation,
+                &bootstrap_trust_store,
+            )
+        })
+        .context("Phase 1: resolve selected isolation backend")?;
+    let isolation = ryeos_engine::isolation::IsolationRuntime::load_for_daemon(
         app_root,
-        &bundle_records,
-        &bootstrap_trust_store,
+        &config.uds_path,
+        isolation_backend,
     )
-    .context("Phase 1: resolve selected isolation backend")?;
-    let isolation = Arc::new(
-        ryeos_engine::isolation::IsolationRuntime::load_for_daemon(
-            app_root,
-            &config.uds_path,
-            isolation_backend,
-        )
-        .context("Phase 1: load node isolation policy")?,
-    );
+    .context("Phase 1: load node isolation policy")?;
+    let isolation = Arc::new(ryeos_app::engine_init::retain_daemon_generation(
+        isolation,
+        app_root.to_path_buf(),
+        Arc::clone(&generation),
+        bootstrap_trust_store.clone(),
+    ));
 
     tracing::info!(
         app_root = %app_root.display(),
@@ -649,7 +678,7 @@ pub fn load_node_config_two_phase(
 
     // ── Build engine ──
     let (engine, isolation) =
-        crate::engine_init::build_engine(config, &effective_bundle_roots, isolation)?;
+        crate::engine_init::build_engine(config, &generation, isolation, &bootstrap_trust_store)?;
     let engine = Arc::new(engine);
 
     // ── Phase 2: full node-config scan ──
@@ -658,11 +687,11 @@ pub fn load_node_config_two_phase(
         app_root,
         trust_store: &bootstrap_trust_store,
     };
-    let snapshot = Arc::new(
+    let snapshot = Arc::new(generation.checked(&bootstrap_trust_store, || {
         full_loader
-            .load_full(&section_table, &bundle_records)
-            .context("Phase 2: failed to load full node config")?,
-    );
+            .load_full(&section_table, generation.records())
+            .context("Phase 2: failed to load full node config")
+    })?);
     tracing::info!(
         bundle_count = snapshot.bundles.len(),
         route_count = snapshot.routes.len(),

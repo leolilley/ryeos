@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:22b48c16872bcdd9c01807ca78a65b537f8f7fb216a9f32e3e0bca86965ddc6d:sbqDm9svi0rFcJVCXmfYm+Hc+5mz98gg31TDHJ8IVL6uY8flfdOhF0zBkCp2KTNzmiyiIQod5pqD9NwobAt0CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:57Z:200cae5a3f9ec896f8c99a6ca799d315ce3a5f59f4d8d0b5c07e52bcfc76d235:rzs4W3m7wJ0VcxrYkk1QvBuvwvUBFOVrqR2RzirENxxs2HiJ2Mv1KNcVA1T3zouqZLlS05da18xB0qhR+wRQCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
 title: Distributed Substrate Deferred Advanced Implementation
 entry_type: implementation_guide
-version: "0.4.0"
+version: "0.4.1"
 author: amp
 created_at: 2026-05-30T00:00:00Z
 description: Future implementation notes intentionally left out of the immediate distributed substrate hardening path, with triggers for when to pull them forward.
@@ -102,8 +102,8 @@ explicit isolation class and worker/cgroup identity once this path is activated.
 That outer identity also closes the spawn-to-durable-attachment crash window:
 if a node dies after creating a process but before committing its exact birth
 tuple, the worker/cgroup remains an independently nameable teardown boundary.
-The backend, capability matching, and multi-platform contract is specified in
-`ryeos/future/data-driven-execution-isolation-backends`.
+The backend and capability-matching contract is specified in
+`ryeos/core/node/execution-isolation`.
 
 ### CAS attribution and staging metadata
 

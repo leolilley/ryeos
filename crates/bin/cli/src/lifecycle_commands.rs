@@ -601,7 +601,18 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     // 5. Verified node config + per-bundle doctor. Requires init; degrades to
     //    n/a rather than piling failures onto an uninitialized node.
     if initialized {
-        match crate::node_descriptors::load_verified_snapshot(&config.app_root) {
+        let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&config.app_root)
+            .map_err(|error| error.to_string());
+        let snapshot = match &isolation {
+            Ok(runtime) => crate::node_descriptors::load_verified_snapshot_with_trust(
+                &config.app_root,
+                runtime
+                    .registered_generation_node_trust()
+                    .expect("locked isolation runtime retains node trust"),
+            ),
+            Err(error) => Err(anyhow::anyhow!(error.clone())),
+        };
+        match snapshot {
             Ok(snapshot) => {
                 let roots: Vec<PathBuf> = snapshot.bundles.iter().map(|b| b.path.clone()).collect();
                 checks.push(check(
@@ -612,9 +623,6 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 if !args.no_bundles {
                     let operator_config_root =
                         ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
-                    let isolation =
-                        ryeos_app::engine_init::load_registered_isolation(&config.app_root)
-                            .map_err(|error| error.to_string());
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
                         // still uses the node's immutable isolation snapshot.
@@ -721,7 +729,7 @@ fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolic
     use ryeos_core_tools::actions::doctor::{NA, OK};
     use ryeos_engine::isolation::IsolationMode;
 
-    let runtime = ryeos_app::engine_init::load_registered_isolation(app_root)?;
+    let runtime = ryeos_app::engine_init::load_locked_registered_isolation(app_root)?;
     let inspection = runtime.inspection();
     let enforced = runtime.mode() == IsolationMode::Enforce;
     let open_files_status = match (enforced, inspection.limits.open_files) {
@@ -736,7 +744,7 @@ fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolic
             "mode": runtime.mode(),
             "policy_digest": runtime.digest(),
             "backend": inspection.backend,
-            "backend_status": if enforced { "signed_bundle_inspected" } else { "not_loaded" },
+            "backend_status": inspection.backend.status,
             "filesystem": inspection.filesystem,
             "network": inspection.network,
             "environment": inspection.environment,
@@ -1098,7 +1106,7 @@ mod tests {
         let inspection = inspect_isolation_policy(temp.path()).unwrap();
         assert_eq!(inspection.status, NA);
         assert_eq!(inspection.detail["mode"], "disabled");
-        assert_eq!(inspection.detail["backend_status"], "not_loaded");
+        assert_eq!(inspection.detail["backend_status"], "disabled");
         assert_eq!(
             inspection.detail["limit_enforcement"]["open_files"]["status"],
             "inactive"

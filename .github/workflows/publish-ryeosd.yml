@@ -82,7 +82,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -623,6 +623,21 @@ jobs:
           assert_isolation_mode enforce
           docker exec --workdir /tmp "$CONTAINER" \
             ryeos execute tool:ryeos/core/identity/public_key
+          docker exec "$CONTAINER" sh -eu -c '
+            bwrap=/data/app/.ai/bundles/sandbox-linux-bubblewrap/.ai/bin/x86_64-unknown-linux-gnu/bwrap
+            test -x "$bwrap"
+            printf authority > /tmp/ryeos-isolation-fd-authority
+            exec 7< /tmp/ryeos-isolation-fd-authority
+            exec 8> /tmp/ryeos-isolation-fd-status
+            exec "$bwrap" \
+              --json-status-fd 8 \
+              --unshare-user \
+              --ro-bind / / \
+              --ro-bind-fd 7 /run/ryeos-isolation-fd-authority \
+              --proc /proc \
+              --dev /dev \
+              -- /usr/bin/python3 -c "import os; leaks=[fd for fd in range(3,256) if os.path.exists(\"/proc/self/fd/\"+str(fd))]; assert not leaks, leaks"
+          '
 
       - name: Scan standard image for known vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:7225cc4cc050b35ea16cb7119f4093eb0c7c1208f1079955e8977e09873d2839:C67muznMqt7e8l3A877xDvyVI1lR/b15zzdMaRrtpmgrym9kbJwvbNtqsxRB2xmroUJWJFmS0x4VDLU1GXS5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:57Z:c94332fb19102ffc4cab0427bb5fd0bdec57a964f6069677d805064f459360fd:4DLIpgvSuNis/kgTDl7WrOUtjT7Kx+iOJ2INvY+ERx8aVMCrHBb0vkethMf7MqyJxtHIruH9VGk1FGZxOiBoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Shared Engine-Backed Offline Executor
 
 ## Status
@@ -25,10 +25,8 @@ Create a shared executor only when there is real pressure from more than one cal
 - The existing shared immutable isolation boundary proves insufficient for a new
   offline executable shape; isolationing alone is no longer a trigger because
   current offline tool/service launches already share the node policy path when
-  it is enabled. The default remains direct execution, and future backend
-  selection belongs to
-  `ryeos/future/data-driven-execution-isolation-backends` rather than this
-  executor.
+  it is enabled. The default remains direct execution, and backend selection
+  follows `ryeos/core/node/execution-isolation` rather than this executor.
 - Engine startup cost per CLI invocation becomes a measurable problem and needs a cached local execution service.
 
 ## Target shape

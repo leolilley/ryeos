@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:e756ce32cdd2413b350ccf30a8d351bf53670099241f6e893889def53ea112d8:byLpTjUvN5KdBUfQHIDpJE5Q9yGFEOTvQkWIBXbFOkaGltPT2vipzzhjMNklrB12Bvay5EIyQr8Wr+1N8wFtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:58Z:e7acddc6cafb3edad95b7044339ac4b9258ee9024b89a382a2ec498ee5727775:Mzf4/wOnRGC0fOAAPIzGzHCHzHuXDC2scZMKVxJzAw3R1yjHGp8LmKvwlKnBmJ/HgLuj14nQd91rJN2HFgHWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
-version: "2.1.0"
+version: "2.1.1"
 description: >
   Daemon state directory layout, file ownership, lifecycle locks, and what
   persists across restarts.
@@ -45,7 +45,7 @@ The daemon must not write user trust docs or regenerate the node key.
 
 - `.ai/bundles/` — installed bundles.
 - `.ai/node/config.yaml` — daemon config.
-- `.ai/node/isolation.yaml` — immutable-at-runtime sandbox policy source.
+- `.ai/node/isolation.yaml` — immutable-at-runtime isolation policy source.
 - `.ai/node/identity/` — node key and public identity.
 - `.ai/node/auth/authorized_keys/` — node-signed authorized callers.
 - `.ai/node/vault/` — vault key material.

@@ -420,15 +420,60 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
     let argument_fd = argument_file.as_raw_fd();
     prepared.inherited_fds.insert(argument_fd);
 
-    set_cloexec(prepared.launcher_fd, true)?;
-    for fd in &prepared.inherited_fds {
-        if *fd != prepared.launcher_fd {
-            set_cloexec(*fd, false)?;
-        }
-    }
+    seal_descriptor_boundary(prepared.launcher_fd, &prepared.inherited_fds)?;
 
     let error = exact_launcher_command(prepared.launcher_fd, argument_fd).exec();
     Err(format!("exec exact Bubblewrap launcher: {error}"))
+}
+
+fn seal_descriptor_boundary(
+    launcher_fd: RawFd,
+    inherited_fds: &BTreeSet<RawFd>,
+) -> Result<(), String> {
+    let open_fds = std::fs::read_dir("/proc/self/fd")
+        .map_err(|error| format!("enumerate adapter descriptors: {error}"))?
+        .map(|entry| {
+            entry
+                .map_err(|error| format!("enumerate adapter descriptor: {error}"))?
+                .file_name()
+                .to_string_lossy()
+                .parse::<RawFd>()
+                .map_err(|error| format!("parse adapter descriptor: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Mark every ambient non-stdio descriptor close-on-exec first. Only the
+    // signed plan's authorities, launcher argument file, and status channel
+    // are then made inheritable. The launcher remains CLOEXEC: `/proc/self/fd`
+    // resolves it for the initial exec and the descriptor disappears in the
+    // Bubblewrap image.
+    for fd in open_fds.into_iter().filter(|fd| *fd > libc::STDERR_FILENO) {
+        set_cloexec_if_open(fd)?;
+    }
+    for fd in inherited_fds {
+        if *fd != launcher_fd {
+            set_cloexec(*fd, false)?;
+        }
+    }
+    set_cloexec(launcher_fd, true)
+}
+
+fn set_cloexec_if_open(fd: RawFd) -> Result<(), String> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EBADF) {
+            return Ok(());
+        }
+        return Err(format!("inspect ambient descriptor {fd}: {error}"));
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(format!(
+            "protect ambient descriptor {fd}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 fn exact_launcher_command(launcher_fd: RawFd, argument_fd: RawFd) -> Command {
@@ -879,6 +924,27 @@ mod tests {
         let rendered = format!("{command:?}");
         assert!(!rendered.contains("secret"));
         assert!(!rendered.contains("API_TOKEN"));
+    }
+
+    #[test]
+    fn launcher_boundary_closes_every_unreferenced_descriptor_on_exec() {
+        let (request, _handles) = valid_launch_request();
+        let prepared = prepare_launch(&request).unwrap();
+        let ambient = File::open("/dev/null").unwrap();
+        set_cloexec(ambient.as_raw_fd(), false).unwrap();
+
+        seal_descriptor_boundary(prepared.launcher_fd, &prepared.inherited_fds).unwrap();
+
+        let flags = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(flags(ambient.as_raw_fd()) & libc::FD_CLOEXEC, 0);
+        assert_ne!(flags(prepared.launcher_fd) & libc::FD_CLOEXEC, 0);
+        for fd in prepared
+            .inherited_fds
+            .iter()
+            .filter(|fd| **fd != prepared.launcher_fd)
+        {
+            assert_eq!(flags(*fd) & libc::FD_CLOEXEC, 0);
+        }
     }
 
     #[test]

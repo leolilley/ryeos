@@ -782,9 +782,9 @@ async fn dispatch_streaming_subprocess(
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
-        let subprocess_request = state
+        let applied = state
             .isolation
-            .apply(
+            .apply_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
@@ -800,6 +800,11 @@ async fn dispatch_streaming_subprocess(
                 },
             )
             .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?;
+        state
+            .state_store
+            .seed_isolation_provenance(&thread_id, applied.provenance)
+            .map_err(DispatchError::Internal)?;
+        let subprocess_request = applied.request;
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = thread_id.clone();

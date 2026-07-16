@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:43:37Z:244bbcadd408014b58b48ea42753c1873a503da5d7e2e1c040df3c578c324ca6:PWJuijcYG4F0Q4qAPPDbqbOyzckxISBvyy0P8k9cYEs+afCAKRhbQnVRcruiUo1lXzzVnPvT2jh3UAIoMXcABA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T05:11:07Z:ddd5208b11ba8b73cc6d16972fdbe601de8bc546c2a9d0faed47147d5662f8b0:kWJIyYwqKLon7VSfqmaisoGVD9EkCP4MasbC7hr8mjAeNxBHPzAh1MAubyiKRdhreCirc9oEpQqMMhT2aC+lDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, bubblewrap, security, subprocess, node-policy]
-version: "1.3.0"
+version: "1.5.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -16,13 +16,11 @@ policy and a selected signed backend bundle. The only policy source is
 belong to the node owner. Items, bundles, requests, and environment variables
 cannot activate the isolation or weaken its controls.
 
-This is the current Linux implementation, not a portable isolation abstraction.
-Its policy is structured, but backend inspection, capture, filesystem setup,
-and launch compilation are Bubblewrap-specific. A later multi-platform design
-must resolve typed isolation requirements against node-owned backend descriptors
-and fail closed when a platform cannot provide the required capabilities. That
-deferred architecture is recorded in
-`ryeos/future/data-driven-execution-isolation-backends`.
+The engine resolves typed isolation requirements against signed backend
+declarations and live inspected capabilities. It emits a strict backend-neutral
+plan; the selected adapter owns backend-specific inspection and launch
+compilation. The current signed Linux bundle supplies a Bubblewrap adapter and
+launcher, while the engine has no Bubblewrap dependency or host-path lookup.
 
 The engine also keeps node trust separate from project/request trust. The
 `node_trust_store` is loaded only from persistent node configuration and is the
@@ -79,10 +77,11 @@ The daemon loads one immutable policy generation at startup; editing the file
 does not change a running daemon. The daemon-backed `ryeos daemon status`
 surface (`service:node/status`) reports the loaded mode, version, source, and
 source digest together with the exact backend selection, signed bundle-manifest
-digest, signer fingerprint, adapter build, effective capabilities, and
-inspected artifact versions and digests. `ryeos node status` is the narrower
-local lifecycle probe. Doctor derives the same facts from the shared immutable
-runtime snapshot.
+digest, signer fingerprint, adapter content digest and build, declared and
+effective capabilities, and inspected artifact versions and digests. Backend
+status is the typed value `disabled`, `available`, `unavailable`, or
+`incompatible`. `ryeos node status` is the narrower local lifecycle probe.
+Doctor derives the same facts from the shared immutable runtime snapshot.
 
 ## Strict schema
 
@@ -91,8 +90,11 @@ runtime snapshot.
 - `backend.bundle` names one registered signed bundle.
 - `backend.implementation` names one backend declaration in that bundle's
   signed manifest. Enforce mode captures the exact signed adapter and artifact
-  executables, requires signer continuity with the bundle manifest, and runs
-  the adapter's strict live inspection before accepting the node generation.
+  executables into sealed anonymous executable files, requires signer
+  continuity with the bundle manifest, refuses symlinks, privilege bits, and
+  Linux file capabilities, and runs the adapter's strict live inspection
+  before accepting the node generation. The effective capability set is the
+  intersection of the signed declaration and live inspection.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
   `{node_trusted_keys}`, and `{verified_code}`.
@@ -117,6 +119,44 @@ Missing required sections, malformed YAML, invalid paths or wildcard forms,
 and unsupported values are errors even when disabled. Disabled mode skips
 backend availability and OS-confinement controls, not node-owned output caps.
 
+## Generation admission
+
+Daemon bootstrap holds the node-wide bundle-registry mutation lock from its
+first signed registration read through manifest admission, backend capture,
+engine-registry construction, and the full node-config snapshot. Every
+component consumes the same immutable node-trust snapshot; inner manifest and
+engine builders do not reload trust. Phase one captures a verified generation
+record for every bundle: canonical root directory identity, signed bundle
+manifest body digest and signer, and signed executor-manifest hash and signer.
+The root directory handles remain pinned, and every path-based phase-one reader
+checks the exact root and signed identities before and after its read. An
+out-of-band root replacement therefore refuses the generation instead of
+mixing independently valid bundle versions. Daemon item resolution, plan
+construction, and spawn preparation additionally hold the registry mutation
+lock as a read-side generation guard, so a cooperative replacement cannot
+enter between identity checks and path consumption. The running daemon
+retains sealed adapter and payload handles; a later atomic bundle replacement
+cannot change that runtime until restart.
+
+Standalone doctor, inspection, signing, and offline execution retain the same
+generation lock together with the exact trust snapshot and registered root set
+for the lifetime of their isolation runtime. A caller-provided earlier snapshot
+is reverified or compared against that retained generation before execution.
+
+Install, replacement, removal, and re-init independently prove the exact
+prospective generation before activation. With enforcement enabled this means
+capturing and inspecting the backend selected from the post-operation roots,
+then constructing prospective registries with that prospective runtime. The
+currently running runtime confines candidate verification but is never used as
+the prospective registry runtime. Removing the selected bundle or replacing it
+with an incompatible generation fails before mutation. Disabled policy has no
+artificial dependency on the selected bundle.
+
+Re-init validates the complete source generation even when ordinary preflight
+is skipped. It also re-resolves the selected backend from its completed staging
+tree before that tree can be atomically activated. First init has no policy and
+uses the compiled disabled default until it creates the policy once.
+
 ## Filesystem authority
 
 The policy source and all later app-root authority are associated with one
@@ -138,7 +178,11 @@ mount sources with `O_PATH` descriptors and gives Bubblewrap `--bind-fd` or
 The descriptors remain close-on-exec in the
 multithreaded daemon and are made inheritable only in the forked child, so a
 pathname replacement cannot redirect a validated mount and concurrent spawns
-cannot inherit another launch's authority.
+cannot inherit another launch's authority. Before the adapter executes its
+launcher it marks every ambient non-stdio descriptor close-on-exec, then clears
+that flag only for the signed plan's authorities, sealed argument file, and
+target-status channel. The adapter descriptor itself closes in the launcher
+image.
 
 The narrow readable placeholders mean:
 
@@ -221,6 +265,22 @@ that stable group ownership. A descendant that deliberately creates another
 session remains outside this local process-group guarantee; hostile hosted
 workers additionally use `cgroup.kill` at the outer worker boundary.
 
+Offline tools that inherit terminal stdin/stdout/stderr use the same Lillux
+session, target-status, timeout, group-cleanup, and refusal contract. They do
+not drop the supervised target channel to execute through a raw host command.
+Because terminal output is not retained by RyeOS, retained-output byte caps are
+explicitly removed at that composition boundary; Lillux rejects an inherited-
+stdio request that still claims captured-output limits. Open-file and timeout
+limits remain enforced.
+
+Each managed launch persists secret-free provenance in its runtime launch
+metadata: policy digest, selected backend, manifest and signer identities,
+adapter and payload digests, protocol version, effective capabilities, and a
+compiled-plan digest. The digest redacts target argument and environment
+plaintext before canonical hashing; changes to authority-bearing plan
+structure still change it. Non-managed infrastructure launches emit the same
+provenance to the diagnostic log surface.
+
 Managed launches pin the exact target and retained group leader before durable
 attachment. The version-1 process identity records the boot ID, numeric target
 and leader IDs, and both `/proc` start-time ticks. Every later target or group
@@ -289,13 +349,16 @@ execution workspaces; their lifelines are retained for the whole subprocess.
 ## Diagnostics and limits
 
 `ryeos node doctor` uses the production policy loader. Disabled mode reports a
-healthy inactive opt-out without requiring Bubblewrap. Enforce mode verifies
+healthy inactive opt-out without resolving the selected backend. Enforce mode verifies
 backend availability and capture digest, and reports filesystem, network,
 environment, open-file, captured-output, and verified-artifact-limit posture.
 
 The published container runs the default disabled profile without extra
-capabilities. Enforce mode requires unprivileged Bubblewrap 0.11.0 or newer
-and usable user namespaces; setuid or file-capability backends are refused.
+capabilities. Enforce mode requires the selected signed bundle and usable user
+namespaces. The shipped bundle contains Bubblewrap 0.11.2 with libcap linked
+into the payload; no host Bubblewrap or libcap installation is consulted.
+Setuid, setgid, and file-capability adapter or launcher artifacts are refused,
+and verified bytes execute from sealed private captures.
 The supported Docker profile adds `SYS_ADMIN` and uses unconfined seccomp and
 AppArmor profiles for the required namespace and mount operations. A
 purpose-built AppArmor profile may replace `apparmor=unconfined` when it grants
@@ -340,8 +403,7 @@ provide CPU, memory, or process-count isolation; production multi-tenant hosting
 still needs cgroup quotas plus a VM, microVM, or dedicated outer worker for
 hostile code.
 
-Do not generalize this policy by adding more backend-specific fields to the
-current schema. When another operating system or isolation backend is actually
-needed, extract the backend-neutral plan and typed capability model described in
-`ryeos/future/data-driven-execution-isolation-backends`, then keep Bubblewrap as
-one Linux adapter.
+Do not generalize this policy by adding backend-specific fields to the current
+schema. New implementations declare their adapter, artifacts, target triples,
+and capability upper bound in a signed bundle and consume the existing typed
+plan. Bubblewrap remains one Linux adapter rather than engine policy.

@@ -38,7 +38,7 @@ where
 /// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 2;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -133,6 +133,12 @@ pub struct RuntimeLaunchMetadata {
     /// Durable launch-window policy for crash repair before admission.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub follow_launch_window: Option<FollowLaunchWindow>,
+
+    /// Exact secret-free isolation generation and compiled-plan identity used
+    /// at the spawn boundary. `None` only before isolation compilation or for
+    /// execution paths that never launch a subprocess.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub isolation: Option<ryeos_engine::isolation::IsolationLaunchProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +168,7 @@ impl Default for RuntimeLaunchMetadata {
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            isolation: None,
         }
     }
 }
@@ -403,6 +410,7 @@ impl RuntimeLaunchMetadata {
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            isolation: None,
         }
     }
 
@@ -419,6 +427,7 @@ impl RuntimeLaunchMetadata {
             && self.sealed_root_request.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
+            && self.isolation.is_none()
     }
 
     /// Set the daemon-allocated checkpoint directory.
@@ -558,6 +567,7 @@ mod tests {
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            isolation: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();

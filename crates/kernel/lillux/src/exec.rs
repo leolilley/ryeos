@@ -151,11 +151,36 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
 /// for the child exec that consumes the data.
 #[cfg(target_os = "linux")]
 pub fn sealed_memfd(name: &std::ffi::CStr, bytes: &[u8]) -> Result<Arc<std::fs::File>, String> {
+    sealed_memfd_with_flags(name, bytes, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+}
+
+/// Create a sealed anonymous file that the supported Linux kernel may execute.
+/// This is separate from protocol-data memfds so hardened `memfd_noexec`
+/// policies cannot silently turn an exact executable capture into a noexec fd.
+#[cfg(target_os = "linux")]
+pub fn sealed_executable_memfd(
+    name: &std::ffi::CStr,
+    bytes: &[u8],
+) -> Result<Arc<std::fs::File>, String> {
+    // MFD_EXEC was added in Linux 6.3; RyeOS requires Linux 6.9 or newer.
+    const MFD_EXEC: libc::c_uint = 0x0010;
+    sealed_memfd_with_flags(
+        name,
+        bytes,
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | MFD_EXEC,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn sealed_memfd_with_flags(
+    name: &std::ffi::CStr,
+    bytes: &[u8],
+    flags: libc::c_uint,
+) -> Result<Arc<std::fs::File>, String> {
     use std::io::{Seek as _, Write as _};
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
-    let mut fd =
-        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    let mut fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
     if fd < 0 {
         return Err(format!(
             "create sealed memfd: {}",
@@ -207,6 +232,14 @@ pub fn sealed_memfd(name: &std::ffi::CStr, bytes: &[u8]) -> Result<Arc<std::fs::
 #[cfg(not(target_os = "linux"))]
 pub fn sealed_memfd(_name: &std::ffi::CStr, _bytes: &[u8]) -> Result<Arc<std::fs::File>, String> {
     Err("sealed memfd is supported only on Linux".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sealed_executable_memfd(
+    _name: &std::ffi::CStr,
+    _bytes: &[u8],
+) -> Result<Arc<std::fs::File>, String> {
+    Err("sealed executable memfd is supported only on Linux".to_string())
 }
 
 /// Result of a synchronous subprocess execution.
@@ -643,6 +676,22 @@ fn poll_wrapper(child: &mut process::Child) -> std::io::Result<WrapperPoll> {
 
 /// Spawn a subprocess and return a handle that can be waited on later.
 pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
+    lib_spawn_with_stdio(request, false)
+}
+
+/// Spawn with inherited terminal stdio while retaining the same session,
+/// supervised-launcher status, timeout, process-group cleanup, and wait
+/// contract as captured execution.
+pub fn lib_spawn_inherited_stdio(
+    request: SubprocessRequest,
+) -> Result<RunningProcess, SubprocessResult> {
+    lib_spawn_with_stdio(request, true)
+}
+
+fn lib_spawn_with_stdio(
+    request: SubprocessRequest,
+    inherit_stdio: bool,
+) -> Result<RunningProcess, SubprocessResult> {
     let start = Instant::now();
     let SubprocessRequest {
         cmd,
@@ -655,6 +704,16 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
         inherited_fds,
         supervised_status,
     } = request;
+    if inherit_stdio
+        && limits.as_ref().is_some_and(|limits| {
+            limits.max_stdout_bytes.is_some() || limits.max_stderr_bytes.is_some()
+        })
+    {
+        return Err(spawn_failure(
+            start,
+            "Failed to spawn: inherited stdio cannot enforce captured-output byte limits",
+        ));
+    }
 
     #[cfg(unix)]
     let raw_inherited_fds = {
@@ -715,12 +774,29 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
     if let Some(ref dir) = cwd {
         command.current_dir(dir);
     }
-    command.stdin(if stdin_data.is_some() {
+    if inherit_stdio && stdin_data.is_some() {
+        return Err(spawn_failure(
+            start,
+            "Failed to spawn: inherited stdio cannot also carry buffered stdin data",
+        ));
+    }
+    command.stdin(if inherit_stdio {
+        Stdio::inherit()
+    } else if stdin_data.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
     });
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdout(if inherit_stdio {
+        Stdio::inherit()
+    } else {
+        Stdio::piped()
+    });
+    command.stderr(if inherit_stdio {
+        Stdio::inherit()
+    } else {
+        Stdio::piped()
+    });
     // `inherited_fds` remains owned in this scope through `Command::spawn`.
     // Descriptors stay CLOEXEC in the multithreaded parent and are made
     // inheritable only in the forked child, preventing unrelated concurrent
@@ -769,50 +845,55 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
     #[cfg(not(unix))]
     let wrapper_pgid = -1i64;
 
-    let mut stdout_handle = child.stdout.take().expect("stdout configured as piped");
-    let mut stderr_handle = child.stderr.take().expect("stderr configured as piped");
-    if let Err(error) = configure_nonblocking_fd(&mut stdout_handle)
-        .and_then(|_| configure_nonblocking_fd(&mut stderr_handle))
-    {
-        kill_process_group_if_safe(wrapper_pgid);
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(spawn_failure(
-            start,
-            format!("Failed to spawn: configure bounded output capture: {error}"),
-        ));
-    }
-
     let stdout_capture = Arc::new(Mutex::new(BoundedCapture::default()));
     let stderr_capture = Arc::new(Mutex::new(BoundedCapture::default()));
     let drain_stop = Arc::new(AtomicBool::new(false));
     let (output_overflow_tx, output_overflow_rx) = std::sync::mpsc::channel();
-    let stdout_thread = spawn_bounded_drain(
-        stdout_handle,
-        Some(
-            limits
-                .as_ref()
-                .and_then(|limits| limits.max_stdout_bytes)
-                .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
-        ),
-        CapturedStream::Stdout,
-        Arc::clone(&stdout_capture),
-        Arc::clone(&drain_stop),
-        output_overflow_tx.clone(),
-    );
-    let stderr_thread = spawn_bounded_drain(
-        stderr_handle,
-        Some(
-            limits
-                .as_ref()
-                .and_then(|limits| limits.max_stderr_bytes)
-                .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
-        ),
-        CapturedStream::Stderr,
-        Arc::clone(&stderr_capture),
-        Arc::clone(&drain_stop),
-        output_overflow_tx,
-    );
+    let (stdout_thread, stderr_thread) = if inherit_stdio {
+        (thread::spawn(|| {}), thread::spawn(|| {}))
+    } else {
+        let mut stdout_handle = child.stdout.take().expect("stdout configured as piped");
+        let mut stderr_handle = child.stderr.take().expect("stderr configured as piped");
+        if let Err(error) = configure_nonblocking_fd(&mut stdout_handle)
+            .and_then(|_| configure_nonblocking_fd(&mut stderr_handle))
+        {
+            kill_process_group_if_safe(wrapper_pgid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(spawn_failure(
+                start,
+                format!("Failed to spawn: configure bounded output capture: {error}"),
+            ));
+        }
+        (
+            spawn_bounded_drain(
+                stdout_handle,
+                Some(
+                    limits
+                        .as_ref()
+                        .and_then(|limits| limits.max_stdout_bytes)
+                        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
+                ),
+                CapturedStream::Stdout,
+                Arc::clone(&stdout_capture),
+                Arc::clone(&drain_stop),
+                output_overflow_tx.clone(),
+            ),
+            spawn_bounded_drain(
+                stderr_handle,
+                Some(
+                    limits
+                        .as_ref()
+                        .and_then(|limits| limits.max_stderr_bytes)
+                        .unwrap_or(DEFAULT_MAX_CAPTURE_BYTES),
+                ),
+                CapturedStream::Stderr,
+                Arc::clone(&stderr_capture),
+                Arc::clone(&drain_stop),
+                output_overflow_tx,
+            ),
+        )
+    };
 
     // Never write request input on the spawning thread. A child can stop
     // reading before the pipe buffer is empty; the dedicated writer may then
@@ -1603,6 +1684,13 @@ mod resource_limit_tests {
 /// Run a subprocess synchronously and return structured results.
 pub fn lib_run(request: SubprocessRequest) -> SubprocessResult {
     match lib_spawn(request) {
+        Ok(running) => running.wait(),
+        Err(result) => result,
+    }
+}
+
+pub fn lib_run_inherited_stdio(request: SubprocessRequest) -> SubprocessResult {
+    match lib_spawn_inherited_stdio(request) {
         Ok(running) => running.wait(),
         Err(result) => result,
     }

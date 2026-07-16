@@ -1066,7 +1066,7 @@ fn run_doctor(
         ..Default::default()
     })
     .context("load config for offline doctor engine")?;
-    let isolation = ryeos_app::engine_init::load_registered_isolation(&app_root);
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root);
     // A failed engine build is non-fatal: the static checks still run and the
     // import dry-run reports `unavailable` (e.g. when doctoring a bundle that
     // provides its own parsers, where the offline engine can't bootstrap them).
@@ -1272,7 +1272,7 @@ fn run_bundle_verify(
                 .expect("could not determine XDG data directory")
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
-    let isolation = ryeos_app::engine_init::load_registered_isolation(&app_root)
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
         .context("load node isolation policy")?;
 
     let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(

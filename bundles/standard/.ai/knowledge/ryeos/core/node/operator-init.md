@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:bc37979d534eeb4e15e55639bd92c71969b4191bfbaf49aa0af559b9a940a4ad:A6tXHABtzjxRhDpm50M9hvkCosHeahnVEVOjJ985XsP6bWpAcwiakaecqP7Uo2VU31DREl+BQrliPDODWd2MBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T04:18:05Z:4f1586c4d0e69da43222e3c5d2e941c2292aac39d4f3f89e2bb81fea1ad5f614:h7mN3qAHaemRype2KhHiqxEcnRNGv/lNCG16MBWOTFizbn13ta/F906Cb4NQh7sRqRwLK/xTxExNYAsrK1DzBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   Operator initialization contract implemented by ryeos-node: keys,
   trust, bundle discovery, bundle planning, install, and post-init checks.
@@ -35,13 +35,18 @@ or `RYEOS_APP_ROOT`. Packaged installs initialize with plain `ryeos init`.
 7. Pin any additional `--trust-file` publisher docs.
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
-10. Preflight-verify source bundles unless explicitly skipped by tests.
-11. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
+10. Compose and admit the exact prospective source generation. An existing
+    enforced policy must resolve and inspect its selected backend here even
+    when ordinary test preflight is skipped.
+11. Preflight-verify source bundles unless explicitly skipped by tests.
+12. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
     write signed registrations under `<system>/.ai/node/bundles/`.
-12. Create/load the vault X25519 keypair.
-13. Write create-once node policy files if missing, including the disabled strict
-    subprocess sandbox policy and ingest-ignore config.
-14. Reload trust and verify official publisher, user key, and node key
+    Before selected-backend activation, resolve and inspect its exact completed
+    staging tree.
+13. Create/load the vault X25519 keypair.
+14. Write create-once node policy files if missing, including the disabled strict
+    subprocess isolation policy and ingest-ignore config.
+15. Reload trust and verify official publisher, user key, and node key
     are trusted.
 
 The init report includes the app root, operator/node key fingerprints,

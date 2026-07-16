@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:6629dbbd3bd289d9e32d1c349c4364287aed9344a5755d77db2c84b5fe8e5bbe:9uuBPsjxlolYUF8QKbhX5Zz3uW7LNJZMJk5bFnqPi7aP57KZXBOjOHKmKwgksOBRqnmF+Dd6KCuctvIXHoCNCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:58Z:e7a14d53230c5d0763105681e7a562e0fe02a4fbbee748adf4c5fba367cec334:zScjd+11z5reoiN9vD7AA8rMSE0quzltu15+roNWb8pq/fUgpMItaFNH8AsOw7fjIUpt+uiuv7fK9fCLkP4VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
-version: "2.1.0"
+version: "2.1.1"
 description: >
   Environment variables for local lifecycle, daemon dispatch, CLI
   signing, runtimes, tools, and provider auth.
@@ -65,12 +65,12 @@ The daemon propagates: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`,
 and the proxy/CA vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
 `SSL_CERT_FILE`, `SSL_CERT_DIR`, and their lowercase forms).
 
-This is the construction allowlist. When node sandbox policy is enforced,
+This is the construction allowlist. When node isolation policy is enforced,
 `environment.allow` is a second node-owned filter over the completed target
 environment. Bubblewrap itself starts env-empty; accepted variables are set for
 the target inside the namespace. Enforced mode replaces any inherited
-`TMPDIR` value with `/tmp`, the sandbox-private tmpfs. When a verified protocol
+`TMPDIR` value with `/tmp`, the isolation-private tmpfs. When a verified protocol
 requests callback IPC, its `RYEOSD_SOCKET_PATH` value
 is checked against the daemon-pinned path before the exact socket is exposed.
 Callback-free launches do not mount it. See [Execution
-Sandbox](node/execution-isolation.md).
+Isolation](node/execution-isolation.md).

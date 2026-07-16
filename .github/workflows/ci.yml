@@ -103,7 +103,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -153,7 +153,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -190,7 +190,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -223,7 +223,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev xz-utils pkg-config libssl-dev ca-certificates openssl python3
+          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned

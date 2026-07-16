@@ -160,6 +160,18 @@ pub fn load_installed_plan_inputs(app_root: &Path) -> Result<Vec<PlanInput>> {
     })
 }
 
+pub fn load_installed_plan_inputs_with_trust(
+    app_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<Vec<PlanInput>> {
+    load_installed_bundle_records_with_trust(app_root, trust_store).map(|records| {
+        records
+            .into_iter()
+            .map(InstalledBundleRecord::into_plan_input)
+            .collect()
+    })
+}
+
 fn verify_installed_manifest(
     name: &str,
     bundle_root: &Path,

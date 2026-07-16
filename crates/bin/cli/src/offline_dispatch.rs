@@ -47,11 +47,29 @@ pub async fn try_offline_dispatch(
     argv: &[String],
     app_root: &Path,
     project_path: &str,
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    _snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
-    // 1. The verified node config comes from the caller, loaded once per
-    //    invocation in `dispatcher::run` from signed installed bundle
-    //    registrations.
+    // Freeze one registered generation before consuming command or bundle
+    // records. The caller's earlier snapshot is only a fast dispatch hint; a
+    // standalone execution re-verifies it with the retained trust snapshot.
+    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        ..Default::default()
+    })
+    .map_err(local_err)?;
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&node_config.app_root)
+        .map_err(|error| CliError::Local {
+            detail: format!("load node isolation policy: {error:#}"),
+        })?;
+    let node_trust = isolation
+        .registered_generation_node_trust()
+        .ok_or_else(|| CliError::Local {
+            detail: "retained isolation generation omitted node trust".to_string(),
+        })?;
+    let snapshot = crate::node_descriptors::load_verified_snapshot_with_trust(app_root, node_trust)
+        .map_err(local_err)?;
+
+    // 1. Consume bundle and command records from that same generation.
     let bundle_roots: Vec<PathBuf> = snapshot
         .bundles
         .iter()
@@ -87,15 +105,6 @@ pub async fn try_offline_dispatch(
     })?;
 
     // 4. Boot engine (lazy — only reached when we know we have a match)
-    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
-    let isolation = ryeos_app::engine_init::load_registered_isolation(&node_config.app_root)
-        .map_err(|error| CliError::Local {
-            detail: format!("load node isolation policy: {error:#}"),
-        })?;
     let engine = boot_engine(
         &node_config,
         project_path,
@@ -165,7 +174,7 @@ fn boot_engine(
         Some(PathBuf::from(project_path))
     };
 
-    ryeos_app::engine_init::build_engine_for_roots(
+    ryeos_app::engine_init::build_registered_engine_for_roots(
         config,
         bundle_roots,
         project_root.as_deref(),
@@ -602,16 +611,24 @@ fn exec_tool(
         })?;
 
     if inherit_stdio {
-        return exec_inherited(
-            tool_ref_str,
-            Path::new(&request.cmd),
-            &request.args,
-            request.cwd.as_deref(),
-            &request.envs,
-            request.limits.as_ref(),
-            &request.inherited_fds,
-            false,
-        );
+        // Terminal streams are not retained by RyeOS, so captured-output byte
+        // limits are inapplicable. Lillux rejects them on inherited-stdio
+        // requests unless this composition root explicitly removes them;
+        // timeout, RLIMIT_NOFILE, target identity, and group cleanup remain.
+        if let Some(limits) = request.limits.as_mut() {
+            limits.max_stdout_bytes = None;
+            limits.max_stderr_bytes = None;
+        }
+        let result = lillux::run_inherited_stdio(request);
+        if !result.success {
+            return Err(CliError::Local {
+                detail: format!(
+                    "offline tool `{tool_ref_str}` failed with exit {:?}: {}",
+                    result.exit_code, result.stderr
+                ),
+            });
+        }
+        return Ok(Some(serde_json::json!({ "status": "ok" })));
     }
 
     let result = lillux::run(request);
@@ -852,60 +869,6 @@ fn resolve_offline_cwd(
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-fn exec_inherited(
-    tool_ref: &str,
-    cmd: &Path,
-    args: &[String],
-    cwd: Option<&str>,
-    envs: &[(String, String)],
-    limits: Option<&lillux::SubprocessLimits>,
-    inherited_fds: &[std::sync::Arc<std::fs::File>],
-    inherit_env: bool,
-) -> Result<Option<Value>, CliError> {
-    let mut command = std::process::Command::new(cmd);
-    command.args(args);
-    if !inherit_env {
-        command.env_clear();
-    }
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-    command
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-
-    lillux::configure_subprocess_limits(&mut command, limits).map_err(|error| CliError::Local {
-        detail: format!(
-            "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
-        ),
-    })?;
-    lillux::configure_inherited_fds(&mut command, inherited_fds).map_err(|error| {
-        CliError::Local {
-            detail: format!(
-                "offline tool `{tool_ref}` could not retain isolation descriptors: {error}"
-            ),
-        }
-    })?;
-
-    let status = command
-        .status()
-        .with_context(|| format!("run inherited offline tool `{tool_ref}`"))
-        .map_err(local_err)?;
-    if !status.success() {
-        return Err(CliError::Local {
-            detail: format!(
-                "offline tool `{tool_ref}` failed with exit {:?}",
-                status.code()
-            ),
-        });
-    }
-    Ok(Some(serde_json::json!({ "status": "ok" })))
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -923,19 +886,19 @@ mod tests {
             ..lillux::SubprocessLimits::default()
         };
 
-        let error = exec_inherited(
-            "tool:test/inherited",
-            Path::new("unused"),
-            &[],
-            None,
-            &[],
-            Some(&limits),
-            &[],
-            false,
-        )
-        .unwrap_err();
+        let result = lillux::run_inherited_stdio(lillux::SubprocessRequest {
+            cmd: "unused".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: Some(limits),
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        });
 
-        assert!(error.to_string().contains("resource limits"));
+        assert!(result.stderr.contains("resource limits"));
     }
 
     #[test]

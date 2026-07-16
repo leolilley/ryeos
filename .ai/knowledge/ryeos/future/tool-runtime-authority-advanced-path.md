@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:712e8f8f204b1bf9ca03bbd4a8023ba376355a395448df6c4b4d0d361f6db8e2:UNQd9/y9XYdRpwlGQJzsMcDdMBJYfAHNAscRRgtH4WwD1i52jAkjZrldL/L3NYT/WjwjmplQKZ58+b40SW2DBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:57Z:2d98b5482c02321fa3abc0fe1580cfce91fc863893b9a1590c10c1fed6b9923a:4KePbUgPy1TuDyOQpDGb1EZwq8EKUwzS6TbGXviMZfrosb8RUqukBziJSk9E2N144V59cAn/ZjkWXp7FBjRjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
@@ -56,7 +56,7 @@ broaden mounts, network, environment, or limits.
 
 The profile should name typed requirements rather than an OS backend. The node
 selects and proves the backend using the contract in
-`ryeos/future/data-driven-execution-isolation-backends`; an unavailable required
+`ryeos/core/node/execution-isolation`; an unavailable required
 boundary fails closed instead of falling back to direct execution.
 
 That profile remains an inner application-policy layer. It must not be used as

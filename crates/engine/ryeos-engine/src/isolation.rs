@@ -10,220 +10,34 @@ use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::canonical_ref::CanonicalRef;
+use crate::error::EngineError;
+use crate::trust::TrustStore;
 use ryeos_isolation_protocol::{
-    AdapterLaunchRequest, InspectedArtifact, IsolationAdapterProtocolVersion,
-    IsolationArtifactRole, IsolationAuthority, IsolationAuthorityId, IsolationAuthorityPurpose,
-    IsolationBackendDeclaration, IsolationBackendSelection, IsolationCapability,
+    AdapterLaunchRequest, IsolationAdapterProtocolVersion, IsolationArtifactRole,
+    IsolationAuthority, IsolationAuthorityId, IsolationAuthorityPurpose, IsolationCapability,
     IsolationDeviceSurface, IsolationEnvironment, IsolationMount, IsolationMountAccess,
     IsolationNetwork, IsolationPath, IsolationPlan, IsolationTarget,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::canonical_ref::CanonicalRef;
-use crate::error::EngineError;
+mod authority;
+mod backend;
+mod inspection;
+mod policy;
+mod provenance;
 
-pub const ISOLATION_POLICY_VERSION: u32 = 1;
-pub const ISOLATION_POLICY_RELATIVE_PATH: &str = "node/isolation.yaml";
+pub use authority::{IsolationLaunchContext, IsolationProjectAuthority, IsolationVerifiedCode};
+pub use backend::ResolvedIsolationBackend;
+pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
+pub use policy::{
+    IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationMode,
+    IsolationNetworkMode, IsolationNetworkPolicy, IsolationPolicy, ISOLATION_POLICY_RELATIVE_PATH,
+    ISOLATION_POLICY_VERSION,
+};
+use provenance::redacted_plan_digest;
+pub use provenance::{AppliedIsolationLaunch, IsolationLaunchProvenance};
+
 const VERIFIED_CODE_ISOLATION_ROOT: &str = "/run/ryeos/verified-code";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IsolationPolicy {
-    pub version: u32,
-    pub mode: IsolationMode,
-    pub backend: IsolationBackendSelection,
-    pub filesystem: IsolationFilesystemPolicy,
-    pub network: IsolationNetworkPolicy,
-    pub environment: IsolationEnvironmentPolicy,
-    pub limits: IsolationLimitsPolicy,
-}
-
-impl IsolationPolicy {
-    /// Canonical first-init and in-memory-fixture policy. Keeping this typed
-    /// value in the engine gives node init and `IsolationRuntime::default()` one
-    /// source of truth while leaving the on-disk file create-once.
-    pub fn default_disabled() -> Self {
-        Self {
-            version: ISOLATION_POLICY_VERSION,
-            mode: IsolationMode::Disabled,
-            backend: IsolationBackendSelection {
-                bundle: "sandbox-linux-bubblewrap".to_string(),
-                implementation: "linux-bubblewrap".to_string(),
-            },
-            filesystem: IsolationFilesystemPolicy {
-                readable: vec![
-                    "{node_public_identity}".to_string(),
-                    "{daemon_socket}".to_string(),
-                    "{bundle_roots}".to_string(),
-                    "{node_trusted_keys}".to_string(),
-                    "{verified_code}".to_string(),
-                ],
-                writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],
-            },
-            network: IsolationNetworkPolicy {
-                mode: IsolationNetworkMode::Host,
-            },
-            environment: IsolationEnvironmentPolicy {
-                allow: vec!["*".to_string()],
-            },
-            limits: IsolationLimitsPolicy {
-                open_files: Some(1024),
-                stdout_bytes: 8_388_608,
-                stderr_bytes: 8_388_608,
-                verified_artifact_file_bytes: 67_108_864,
-                verified_artifact_total_bytes: 268_435_456,
-                verified_artifact_files: 4_096,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IsolationMode {
-    Disabled,
-    Enforce,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IsolationFilesystemPolicy {
-    pub readable: Vec<String>,
-    pub writable: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IsolationNetworkPolicy {
-    pub mode: IsolationNetworkMode,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum IsolationNetworkMode {
-    Host,
-    Isolated,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IsolationEnvironmentPolicy {
-    pub allow: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IsolationLimitsPolicy {
-    pub open_files: Option<u64>,
-    pub stdout_bytes: u64,
-    pub stderr_bytes: u64,
-    pub verified_artifact_file_bytes: u64,
-    pub verified_artifact_total_bytes: u64,
-    pub verified_artifact_files: u64,
-}
-
-/// Backend resolution facts and the exact policy snapshot used by a runtime.
-///
-/// Doctor and status surfaces consume this value rather than reparsing the
-/// source file with a second implementation. Enforced policy loading captures
-/// the configured backend immediately. Disabled policy never resolves or
-/// probes a backend.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct IsolationInspection {
-    pub source: Option<PathBuf>,
-    pub version: u32,
-    pub mode: IsolationMode,
-    pub digest: Option<String>,
-    pub backend: IsolationBackendInspection,
-    pub filesystem: IsolationFilesystemPolicy,
-    pub network: IsolationNetworkPolicy,
-    pub environment: IsolationEnvironmentPolicy,
-    pub limits: IsolationLimitsPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct IsolationBackendInspection {
-    pub selection: IsolationBackendSelection,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bundle_manifest_digest: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signer_fingerprint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub adapter_build: Option<String>,
-    pub effective_capabilities: BTreeSet<IsolationCapability>,
-    pub artifacts: BTreeMap<IsolationArtifactRole, InspectedArtifact>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedIsolationBackend {
-    pub selection: IsolationBackendSelection,
-    pub declaration: IsolationBackendDeclaration,
-    pub bundle_manifest_digest: String,
-    pub signer_fingerprint: String,
-    pub adapter_handle: Arc<std::fs::File>,
-    pub artifact_handles: BTreeMap<IsolationArtifactRole, Arc<std::fs::File>>,
-    pub adapter_build: String,
-    pub effective_capabilities: BTreeSet<IsolationCapability>,
-    pub inspected_artifacts: BTreeMap<IsolationArtifactRole, InspectedArtifact>,
-}
-
-impl ResolvedIsolationBackend {
-    pub fn validate(&self) -> Result<(), EngineError> {
-        self.selection
-            .validate()
-            .map_err(|error| refused(error.to_string()))?;
-        self.declaration
-            .validate()
-            .map_err(|error| refused(error.to_string()))?;
-        if self.declaration.id != self.selection.implementation {
-            return Err(refused(
-                "resolved isolation implementation does not match node policy".to_string(),
-            ));
-        }
-        if self.signer_fingerprint.is_empty() || self.bundle_manifest_digest.is_empty() {
-            return Err(refused(
-                "resolved isolation backend lacks signed bundle identity".to_string(),
-            ));
-        }
-        let declared_roles = self
-            .declaration
-            .artifacts
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let captured_roles = self
-            .artifact_handles
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let inspected_roles = self
-            .inspected_artifacts
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        if captured_roles != declared_roles || inspected_roles != declared_roles {
-            return Err(refused(
-                "resolved isolation backend artifact sets do not exactly match its signed declaration"
-                    .to_string(),
-            ));
-        }
-        for artifact in self.inspected_artifacts.values() {
-            artifact.validate().map_err(|error| {
-                refused(format!("invalid inspected isolation artifact: {error}"))
-            })?;
-        }
-        if !self
-            .declaration
-            .capabilities
-            .is_subset(&self.effective_capabilities)
-        {
-            return Err(refused(
-                "resolved isolation adapter lacks a declared capability".to_string(),
-            ));
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IsolationRuntimeState {
@@ -231,8 +45,15 @@ enum IsolationRuntimeState {
     Enforced,
 }
 
+/// Higher-level guard that binds a composed runtime to the exact registered
+/// bundle generation from which it was built.
+pub trait IsolationGenerationLifeline: Send + Sync {
+    fn begin_operation(&self) -> Result<Box<dyn Send + Sync>, String>;
+    fn ensure_current(&self) -> Result<(), String>;
+}
+
 /// A strictly parsed, immutable isolation snapshot shared by process launches.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IsolationRuntime {
     inspection: IsolationInspection,
     state: IsolationRuntimeState,
@@ -249,6 +70,27 @@ pub struct IsolationRuntime {
     /// Exact daemon-lifetime backend capture used by enforced execution.
     /// Disabled snapshots always carry `None`.
     backend_capture: Option<Arc<ResolvedIsolationBackend>>,
+    /// Optional higher-level generation guard retained by standalone
+    /// composition roots. Daemon bootstrap owns its guard outside this value.
+    _generation_lifeline: Option<Arc<dyn IsolationGenerationLifeline>>,
+    generation_node_trust: Option<TrustStore>,
+    generation_bundle_roots: Option<Vec<PathBuf>>,
+}
+
+impl std::fmt::Debug for IsolationRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IsolationRuntime")
+            .field("inspection", &self.inspection)
+            .field("state", &self.state)
+            .field("app_root", &self.app_root)
+            .field("has_backend_capture", &self.backend_capture.is_some())
+            .field(
+                "retains_registered_generation",
+                &self._generation_lifeline.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -757,52 +599,6 @@ fn remove_flat_artifact_generation(
 }
 
 /// Provenance of the writable project root presented to one launch.
-///
-/// `RuntimeWorkspace` is set only by daemon-owned execution provenance. It
-/// permits that exact workspace beneath the otherwise protected runtime cache;
-/// caller-selected live paths always use `External`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolationProjectAuthority {
-    External,
-    RuntimeWorkspace,
-    /// Pure node handler launch. The project path supplies a read-only cwd;
-    /// no configured host writable mount is granted for this launch.
-    ReadOnly,
-}
-
-/// Verified file identity for executable code used by one launch.
-///
-/// The source path records the host-side provenance. Enforced apply re-reads
-/// it, requires the already-verified whole-file digest to match, materializes
-/// those exact bytes into node-owned content-addressed storage, and executes
-/// the artifact from a synthetic read-only code namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IsolationVerifiedCode {
-    pub source_path: PathBuf,
-    pub content_hash: String,
-}
-
-/// Per-launch facts used to resolve policy placeholders and record provenance.
-#[derive(Debug, Clone, Copy)]
-pub struct IsolationLaunchContext<'a> {
-    pub project_path: &'a Path,
-    pub project_authority: IsolationProjectAuthority,
-    pub state_root: Option<&'a Path>,
-    pub checkpoint_dir: Option<&'a Path>,
-    /// Daemon-owned callback socket this launch is authorized to reach.
-    ///
-    /// This is a typed launch fact rather than an inference from child
-    /// environment names. Enforced mode validates it against the socket
-    /// identity pinned when the daemon loaded the isolation policy.
-    pub daemon_socket_path: Option<&'a Path>,
-    pub bundle_roots: &'a [PathBuf],
-    pub node_trusted_keys_dir: Option<&'a Path>,
-    pub verified_code: &'a [IsolationVerifiedCode],
-    pub item_ref: &'a str,
-    pub thread_id: &'a str,
-}
-
 #[derive(Debug, Clone)]
 struct ReadableMount {
     source: PathBuf,
@@ -840,6 +636,14 @@ struct WritableMount {
     source_handle: Arc<std::fs::File>,
 }
 
+struct LoadedIsolationPolicy {
+    policy: IsolationPolicy,
+    source: PathBuf,
+    digest: String,
+    runtime_app_root: PathBuf,
+    app_root_authority: lillux::PinnedDirectory,
+}
+
 impl IsolationRuntime {
     /// Load the node-owned policy from its fixed path and resolve its runtime.
     ///
@@ -849,6 +653,24 @@ impl IsolationRuntime {
     /// resolves, validates, or probes the configured backend.
     pub fn load(app_root: &Path) -> Result<Self, EngineError> {
         Self::load_with_backend(app_root, None)
+    }
+
+    /// Securely read and fully validate the fixed node policy without
+    /// resolving or executing its selected backend. Prospective composition
+    /// uses this before selecting any privileged bundle artifact.
+    pub fn load_policy(app_root: &Path) -> Result<IsolationPolicy, EngineError> {
+        let loaded = load_policy_source(app_root)?;
+        if loaded.policy.version != ISOLATION_POLICY_VERSION {
+            return Err(refused(format!(
+                "unsupported node isolation policy version {} (expected {})",
+                loaded.policy.version, ISOLATION_POLICY_VERSION
+            )));
+        }
+        validate_policy_semantics(&loaded.policy)?;
+        if loaded.policy.mode == IsolationMode::Enforce {
+            validate_enforced_limits(&loaded.policy.limits)?;
+        }
+        Ok(loaded.policy)
     }
 
     pub fn load_with_backend(
@@ -918,69 +740,13 @@ impl IsolationRuntime {
         daemon_socket: Option<PinnedDaemonSocket>,
         backend: Option<Arc<ResolvedIsolationBackend>>,
     ) -> Result<Self, EngineError> {
-        validate_namespace_destination("app root", app_root)?;
-        // Bind the policy bytes and all later authority checks to one canonical
-        // app-root identity. The supplied spelling remains the namespace
-        // destination, but it is never used as the host-side authority root.
-        let runtime_app_root = canonicalize_context_mount("app root", app_root)?;
-        let app_root_authority = lillux::PinnedDirectory::open(&runtime_app_root)
-            .map_err(|error| refused(format!("app root cannot be pinned: {error}")))?
-            .ok_or_else(|| {
-                refused("app root disappeared while loading isolation policy".to_string())
-            })?;
-        let policy_parent = open_relative_directory(
-            &app_root_authority,
-            &[crate::AI_DIR, "node"],
-            "isolation policy parent",
-        )?;
-        let source = runtime_app_root
-            .join(crate::AI_DIR)
-            .join(ISOLATION_POLICY_RELATIVE_PATH);
-        let mut file = policy_parent
-            .open_regular("isolation.yaml".as_ref(), false)
-            .map_err(|error| refused(format!("node isolation policy cannot be opened: {error}")))?
-            .ok_or_else(|| {
-                refused(format!(
-                    "node isolation policy is required at {}",
-                    source.display()
-                ))
-            })?;
-        let mut raw = String::new();
-        file.read_to_string(&mut raw)
-            .map_err(|error| EngineError::IsolationPolicyRefused {
-                reason: format!(
-                    "node isolation policy is required at {}: {error}",
-                    source.display()
-                ),
-            })?;
-        let policy: IsolationPolicy =
-            serde_yaml::from_str(&raw).map_err(|error| EngineError::IsolationPolicyRefused {
-                reason: format!(
-                    "invalid node isolation policy {}: {error}",
-                    source.display()
-                ),
-            })?;
-        let digest = format!("sha256:{}", lillux::sha256_hex(raw.as_bytes()));
-        let observed_app_root = lillux::PinnedDirectory::open(app_root)
-            .map_err(|error| refused(format!("app root cannot be rechecked: {error}")))?
-            .ok_or_else(|| {
-                refused("app root disappeared while loading isolation policy".to_string())
-            })?;
-        if !app_root_authority
-            .is_same_directory(&observed_app_root)
-            .map_err(|error| refused(format!("app-root identity cannot be compared: {error}")))?
-        {
-            return Err(refused(format!(
-                "app root {} changed while its isolation policy was being loaded",
-                app_root.display()
-            )));
-        }
+        let loaded = load_policy_source(app_root)?;
         Self::resolve(
-            policy,
-            Some(source),
-            Some(digest),
-            Some(runtime_app_root),
-            Some(Arc::new(app_root_authority)),
+            loaded.policy,
+            Some(loaded.source),
+            Some(loaded.digest),
+            Some(loaded.runtime_app_root),
+            Some(Arc::new(loaded.app_root_authority)),
             Some(app_root.to_path_buf()),
             daemon_socket,
             backend,
@@ -1007,6 +773,54 @@ impl IsolationRuntime {
         &self.inspection
     }
 
+    pub fn retain_registered_generation(
+        mut self,
+        lifeline: Arc<dyn IsolationGenerationLifeline>,
+        node_trust: TrustStore,
+        bundle_roots: Vec<PathBuf>,
+    ) -> Self {
+        self._generation_lifeline = Some(lifeline);
+        self.generation_node_trust = Some(node_trust);
+        self.generation_bundle_roots = Some(bundle_roots);
+        self
+    }
+
+    pub fn registered_generation_node_trust(&self) -> Option<&TrustStore> {
+        self.generation_node_trust.as_ref()
+    }
+
+    pub fn registered_generation_bundle_roots(&self) -> Option<&[PathBuf]> {
+        self.generation_bundle_roots.as_deref()
+    }
+
+    pub fn ensure_registered_generation_current(&self) -> Result<(), EngineError> {
+        match &self._generation_lifeline {
+            Some(lifeline) => {
+                lifeline
+                    .ensure_current()
+                    .map_err(|reason| EngineError::IsolationPolicyRefused {
+                        reason: format!("registered bundle generation changed: {reason}"),
+                    })
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub fn begin_registered_generation_operation(
+        &self,
+    ) -> Result<Option<Box<dyn Send + Sync>>, EngineError> {
+        self._generation_lifeline
+            .as_ref()
+            .map(|lifeline| {
+                lifeline
+                    .begin_operation()
+                    .map_err(|reason| EngineError::IsolationPolicyRefused {
+                        reason: format!("cannot guard registered bundle generation: {reason}"),
+                    })
+            })
+            .transpose()
+    }
+
     /// Load and resolve a policy for an inspection-only caller such as doctor.
     /// This shares the production parser and validator rather than maintaining
     /// a second diagnostic interpretation of the policy.
@@ -1024,6 +838,31 @@ impl IsolationRuntime {
         request: lillux::SubprocessRequest,
         context: IsolationLaunchContext<'_>,
     ) -> Result<lillux::SubprocessRequest, EngineError> {
+        self.apply_with_provenance(request, context).map(|applied| {
+            tracing::debug!(
+                isolation = ?applied.provenance,
+                "compiled isolation launch provenance"
+            );
+            applied.request
+        })
+    }
+
+    pub fn apply_with_provenance(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<AppliedIsolationLaunch, EngineError> {
+        self.ensure_registered_generation_current()?;
+        let applied = self.apply_with_provenance_current(request, context)?;
+        self.ensure_registered_generation_current()?;
+        Ok(applied)
+    }
+
+    fn apply_with_provenance_current(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<AppliedIsolationLaunch, EngineError> {
         if !request.timeout.is_finite() || request.timeout < 0.0 {
             return Err(refused(format!(
                 "invalid subprocess timeout {}",
@@ -1056,7 +895,10 @@ impl IsolationRuntime {
                         }),
                 ),
             });
-            return Ok(request);
+            return Ok(AppliedIsolationLaunch {
+                request,
+                provenance: self.launch_provenance(None),
+            });
         }
         if !request.inherited_fds.is_empty() {
             return Err(refused(
@@ -1717,6 +1559,7 @@ impl IsolationRuntime {
                 "selected isolation adapter is missing required capabilities: {missing}"
             )));
         }
+        let plan_digest = redacted_plan_digest(&plan)?;
         let artifact_fds = backend
             .artifact_handles
             .iter()
@@ -1753,7 +1596,9 @@ impl IsolationRuntime {
         let request_fd = mount_fd_arg(&request_handle);
         inherited_fds.extend(authority_handles);
         inherited_fds.extend(backend.artifact_handles.values().cloned());
-        inherited_fds.push(backend.adapter_handle.clone());
+        // The adapter descriptor is used only as the initial exec path. Keep
+        // its parent handle alive through spawn but leave FD_CLOEXEC set so it
+        // disappears in the adapter image and cannot reach Bubblewrap/target.
         inherited_fds.push(request_handle);
 
         let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);
@@ -1781,19 +1626,39 @@ impl IsolationRuntime {
             max_stderr_bytes: Some(effective_stderr_bytes),
         });
 
-        Ok(lillux::SubprocessRequest {
-            cmd: format!("/proc/self/fd/{}", mount_fd_arg(&backend.adapter_handle)),
-            args: vec!["launch".to_string(), request_fd],
-            cwd: Some(canonical_cwd.to_string_lossy().into_owned()),
-            // The adapter receives only the sealed plan. It constructs the
-            // target environment inside the selected isolation backend.
-            envs: Vec::new(),
-            stdin_data,
-            timeout,
-            limits,
-            inherited_fds,
-            supervised_status: Some(status.reader),
+        Ok(AppliedIsolationLaunch {
+            request: lillux::SubprocessRequest {
+                cmd: format!("/proc/self/fd/{}", mount_fd_arg(&backend.adapter_handle)),
+                args: vec!["launch".to_string(), request_fd],
+                cwd: Some(canonical_cwd.to_string_lossy().into_owned()),
+                // The adapter receives only the sealed plan. It constructs the
+                // target environment inside the selected isolation backend.
+                envs: Vec::new(),
+                stdin_data,
+                timeout,
+                limits,
+                inherited_fds,
+                supervised_status: Some(status.reader),
+            },
+            provenance: self.launch_provenance(Some(plan_digest)),
         })
+    }
+
+    fn launch_provenance(&self, plan_digest: Option<String>) -> IsolationLaunchProvenance {
+        IsolationLaunchProvenance {
+            policy_digest: self.inspection.digest.clone(),
+            mode: self.inspection.mode,
+            backend: self.inspection.backend.selection.clone(),
+            backend_status: self.inspection.backend.status,
+            bundle_manifest_digest: self.inspection.backend.bundle_manifest_digest.clone(),
+            signer_fingerprint: self.inspection.backend.signer_fingerprint.clone(),
+            adapter_digest: self.inspection.backend.adapter_digest.clone(),
+            adapter_protocol: (self.state == IsolationRuntimeState::Enforced)
+                .then_some(IsolationAdapterProtocolVersion::V1),
+            payloads: self.inspection.backend.artifacts.clone(),
+            effective_capabilities: self.inspection.backend.effective_capabilities.clone(),
+            plan_digest,
+        }
     }
 
     fn resolve(
@@ -1876,9 +1741,16 @@ impl IsolationRuntime {
         let signer_fingerprint = captured_backend
             .as_ref()
             .map(|backend| backend.signer_fingerprint.clone());
+        let adapter_digest = captured_backend
+            .as_ref()
+            .map(|backend| backend.adapter_digest.clone());
         let adapter_build = captured_backend
             .as_ref()
             .map(|backend| backend.adapter_build.clone());
+        let declared_capabilities = captured_backend
+            .as_ref()
+            .map(|backend| backend.declaration.capabilities.clone())
+            .unwrap_or_default();
         let effective_capabilities = captured_backend
             .as_ref()
             .map(|backend| backend.effective_capabilities.clone())
@@ -1895,9 +1767,16 @@ impl IsolationRuntime {
                 digest,
                 backend: IsolationBackendInspection {
                     selection: policy.backend,
+                    status: if state == IsolationRuntimeState::Enforced {
+                        IsolationBackendStatus::Available
+                    } else {
+                        IsolationBackendStatus::Disabled
+                    },
                     bundle_manifest_digest,
                     signer_fingerprint,
+                    adapter_digest,
                     adapter_build,
+                    declared_capabilities,
                     effective_capabilities,
                     artifacts: inspected_artifacts,
                 },
@@ -1914,6 +1793,9 @@ impl IsolationRuntime {
             daemon_socket,
             verified_artifacts,
             backend_capture: captured_backend,
+            _generation_lifeline: None,
+            generation_node_trust: None,
+            generation_bundle_roots: None,
         })
     }
 
@@ -2968,6 +2850,73 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
+fn load_policy_source(app_root: &Path) -> Result<LoadedIsolationPolicy, EngineError> {
+    validate_namespace_destination("app root", app_root)?;
+    // Bind the policy bytes and all later authority checks to one canonical
+    // app-root identity. The supplied spelling remains the namespace
+    // destination, but it is never used as the host-side authority root.
+    let runtime_app_root = canonicalize_context_mount("app root", app_root)?;
+    let app_root_authority = lillux::PinnedDirectory::open(&runtime_app_root)
+        .map_err(|error| refused(format!("app root cannot be pinned: {error}")))?
+        .ok_or_else(|| {
+            refused("app root disappeared while loading isolation policy".to_string())
+        })?;
+    let policy_parent = open_relative_directory(
+        &app_root_authority,
+        &[crate::AI_DIR, "node"],
+        "isolation policy parent",
+    )?;
+    let source = runtime_app_root
+        .join(crate::AI_DIR)
+        .join(ISOLATION_POLICY_RELATIVE_PATH);
+    let mut file = policy_parent
+        .open_regular("isolation.yaml".as_ref(), false)
+        .map_err(|error| refused(format!("node isolation policy cannot be opened: {error}")))?
+        .ok_or_else(|| {
+            refused(format!(
+                "node isolation policy is required at {}",
+                source.display()
+            ))
+        })?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)
+        .map_err(|error| EngineError::IsolationPolicyRefused {
+            reason: format!(
+                "node isolation policy is required at {}: {error}",
+                source.display()
+            ),
+        })?;
+    let policy =
+        serde_yaml::from_str(&raw).map_err(|error| EngineError::IsolationPolicyRefused {
+            reason: format!(
+                "invalid node isolation policy {}: {error}",
+                source.display()
+            ),
+        })?;
+    let digest = format!("sha256:{}", lillux::sha256_hex(raw.as_bytes()));
+    let observed_app_root = lillux::PinnedDirectory::open(app_root)
+        .map_err(|error| refused(format!("app root cannot be rechecked: {error}")))?
+        .ok_or_else(|| {
+            refused("app root disappeared while loading isolation policy".to_string())
+        })?;
+    if !app_root_authority
+        .is_same_directory(&observed_app_root)
+        .map_err(|error| refused(format!("app-root identity cannot be compared: {error}")))?
+    {
+        return Err(refused(format!(
+            "app root {} changed while its isolation policy was being loaded",
+            app_root.display()
+        )));
+    }
+    Ok(LoadedIsolationPolicy {
+        policy,
+        source,
+        digest,
+        runtime_app_root,
+        app_root_authority,
+    })
+}
+
 fn refused(reason: String) -> EngineError {
     EngineError::IsolationPolicyRefused { reason }
 }
@@ -2975,6 +2924,9 @@ fn refused(reason: String) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_isolation_protocol::{
+        InspectedArtifact, IsolationBackendDeclaration, IsolationBackendSelection,
+    };
 
     #[cfg(unix)]
     fn resolved_backend() -> ResolvedIsolationBackend {
@@ -2999,6 +2951,7 @@ mod tests {
             },
             bundle_manifest_digest: "a".repeat(64),
             signer_fingerprint: "b".repeat(64),
+            adapter_digest: "d".repeat(64),
             adapter_handle: Arc::new(std::fs::File::open("/dev/null").unwrap()),
             artifact_handles: BTreeMap::from([(IsolationArtifactRole::Launcher, launcher)]),
             adapter_build: "0.1.0".to_string(),
@@ -3030,14 +2983,55 @@ mod tests {
         assert_eq!(runtime.mode(), IsolationMode::Disabled);
         assert!(!runtime.is_enforced());
         assert!(runtime.digest().unwrap().starts_with("sha256:"));
+        assert_eq!(
+            runtime.inspection().backend.status,
+            IsolationBackendStatus::Disabled
+        );
         assert!(runtime
             .inspection()
             .backend
             .bundle_manifest_digest
             .is_none());
         assert!(runtime.inspection().backend.signer_fingerprint.is_none());
+        assert!(runtime.inspection().backend.adapter_digest.is_none());
+        assert!(runtime
+            .inspection()
+            .backend
+            .declared_capabilities
+            .is_empty());
         assert!(runtime.inspection().backend.adapter_build.is_none());
         assert!(runtime.inspection().backend.artifacts.is_empty());
+    }
+
+    #[test]
+    fn launch_plan_digest_redacts_arguments_and_environment_values() {
+        let mut plan = IsolationPlan {
+            target: IsolationTarget {
+                executable: IsolationAuthorityId::new("target").unwrap(),
+                argv0: "tool".to_string(),
+                arguments: vec!["first-secret".to_string()],
+                cwd: IsolationPath::new("/workspace").unwrap(),
+            },
+            mounts: Vec::new(),
+            environment: IsolationEnvironment {
+                values: BTreeMap::from([("API_TOKEN".to_string(), "first-token".to_string())]),
+            },
+            network: IsolationNetwork::Isolated,
+            devices: IsolationDeviceSurface::Minimal,
+            private_tmp: true,
+            host_pid_namespace: true,
+            shared_process_group: true,
+        };
+        let digest = redacted_plan_digest(&plan).unwrap();
+
+        plan.target.arguments[0] = "second-secret".to_string();
+        plan.environment
+            .values
+            .insert("API_TOKEN".to_string(), "second-token".to_string());
+        assert_eq!(redacted_plan_digest(&plan).unwrap(), digest);
+
+        plan.network = IsolationNetwork::Host;
+        assert_ne!(redacted_plan_digest(&plan).unwrap(), digest);
     }
 
     #[cfg(unix)]
@@ -3049,13 +3043,19 @@ mod tests {
         wrong_implementation.selection.implementation = "other".to_string();
         assert!(wrong_implementation.validate().is_err());
 
-        let mut missing_capability = resolved_backend();
-        missing_capability.effective_capabilities.clear();
-        assert!(missing_capability
+        let mut narrowed_capabilities = resolved_backend();
+        narrowed_capabilities.effective_capabilities.clear();
+        narrowed_capabilities.validate().unwrap();
+
+        let mut broadened_capabilities = resolved_backend();
+        broadened_capabilities
+            .effective_capabilities
+            .insert(IsolationCapability::NetworkHost);
+        assert!(broadened_capabilities
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("lacks a declared capability"));
+            .contains("exceed its signed declaration"));
 
         let mut mismatched_artifacts = resolved_backend();
         mismatched_artifacts.inspected_artifacts.clear();
@@ -3144,10 +3144,11 @@ mod tests {
         .unwrap();
         symlink(real_policy, policy_path).unwrap();
 
-        assert!(IsolationRuntime::load(app_root.path())
-            .unwrap_err()
+        let error = IsolationRuntime::load(app_root.path()).unwrap_err();
+        assert!(matches!(&error, EngineError::IsolationPolicyRefused { .. }));
+        assert!(error
             .to_string()
-            .contains("regular non-symlink file"));
+            .contains("node isolation policy cannot be opened"));
     }
 
     #[test]

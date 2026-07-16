@@ -306,12 +306,38 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .app_root
         .join(ryeos_engine::AI_DIR)
         .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
-    let isolation = if isolation_policy.exists() {
-        ryeos_app::engine_init::load_registered_isolation(&opts.app_root)
-            .context("load existing node isolation policy for init preflight")?
-    } else {
-        Arc::new(ryeos_engine::isolation::IsolationRuntime::default())
+    let isolation = match fs::symlink_metadata(&isolation_policy) {
+        Ok(_) => ryeos_app::engine_init::load_registered_isolation(&opts.app_root)
+            .context("load existing node isolation policy for init preflight")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::default())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect existing node isolation policy {}",
+                    isolation_policy.display()
+                )
+            });
+        }
     };
+
+    // Prove the complete source generation can become the next immutable
+    // runtime before the first installed bundle is touched. This privileged
+    // admission is mandatory even for test-only `skip_preflight`: that flag
+    // may skip ordinary candidate execution, never selected-backend capture or
+    // next-boot registry construction.
+    let prospective_roots = plan
+        .bundles
+        .values()
+        .map(|bundle| bundle.source.root_path().clone())
+        .collect::<Vec<_>>();
+    let prospective_isolation = ryeos_app::engine_init::admit_node_bundle_roots(
+        &opts.app_root,
+        &prospective_roots,
+        &seed_trust_store,
+    )
+    .context("prospective init source set would fail node boot")?;
 
     if !opts.skip_preflight {
         for job in &plan.verification_jobs {
@@ -385,6 +411,14 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 &transaction,
                 registration.clone(),
                 |staging| {
+                    validate_selected_backend_staging(
+                        &opts.app_root,
+                        name,
+                        staging,
+                        &plan,
+                        &prospective_isolation,
+                        &seed_trust_store,
+                    )?;
                     if opts.skip_preflight {
                         return Ok(());
                     }
@@ -419,6 +453,14 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 &transaction,
                 registration.clone(),
                 |staging| {
+                    validate_selected_backend_staging(
+                        &opts.app_root,
+                        name,
+                        staging,
+                        &plan,
+                        &prospective_isolation,
+                        &seed_trust_store,
+                    )?;
                     if opts.skip_preflight {
                         return Ok(());
                     }
@@ -511,6 +553,37 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         bundles_installed,
         next_steps,
     })
+}
+
+fn validate_selected_backend_staging(
+    app_root: &Path,
+    bundle_name: &str,
+    staging: &Path,
+    plan: &ryeos_bundle::plan::BundlePlan,
+    prospective_isolation: &ryeos_engine::isolation::IsolationRuntime,
+    node_trust_store: &TrustStore,
+) -> Result<()> {
+    if !prospective_isolation.is_enforced()
+        || prospective_isolation.inspection().backend.selection.bundle != bundle_name
+    {
+        return Ok(());
+    }
+    let roots = plan
+        .bundles
+        .iter()
+        .map(|(name, bundle)| {
+            if name == bundle_name {
+                staging.to_path_buf()
+            } else {
+                bundle.source.root_path().clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    ryeos_app::engine_init::load_prospective_isolation(app_root, &roots, node_trust_store)
+        .with_context(|| {
+            format!("selected isolation backend `{bundle_name}` staging tree would fail next boot")
+        })?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]

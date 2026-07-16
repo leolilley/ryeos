@@ -25,19 +25,17 @@ use ryeos_engine::trust::TrustStore;
 
 /// Boot the engine from the same sources the daemon uses.
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
-    let node_config_root = roots::runtime_root().ok().map(|root| root.config());
-    // Match daemon boot semantics: content roots are the installed bundle
-    // roots only. `RYEOS_APP_ROOT` is the daemon runtime state dir that
-    // contains registrations and runtime state; treating it as a content
-    // root makes effective items report the state dir as their bundle_root,
-    // which breaks bundle-local binary resolution for client launchers.
-    let bundle_roots = discover_bundle_roots();
-
-    let node_config_root = node_config_root
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve app root"))?;
-    let node_trust_store =
-        TrustStore::load(None, node_config_root).with_context(|| "load node trust store")?;
+    let app_root = roots::app_root().context("resolve app root for node isolation policy")?;
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
+        .context("load retained node isolation generation")?;
+    let bundle_roots = isolation
+        .registered_generation_bundle_roots()
+        .context("retained isolation generation omitted bundle roots")?
+        .to_vec();
+    let node_trust_store = isolation
+        .registered_generation_node_trust()
+        .context("retained isolation generation omitted node trust")?
+        .clone();
     let trust_store = match project_path {
         Some(project_path) => node_trust_store
             .with_project_keys(project_path)
@@ -45,11 +43,6 @@ pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
             .with_context(|| "load project item trust")?,
         None => node_trust_store.clone(),
     };
-    let isolation = ryeos_app::engine_init::load_registered_isolation(
-        &roots::app_root().context("resolve app root for node isolation policy")?,
-    )
-    .context("load node isolation policy")?;
-
     let kinds = build_kind_registry(&bundle_roots, &node_trust_store)?;
     let (parsers, handlers) =
         build_parser_dispatcher(&bundle_roots, &kinds, &node_trust_store, isolation)?;
@@ -98,32 +91,4 @@ fn build_parser_dispatcher(
         ParserDispatcher::new(parser_tools, handlers.clone()),
         handlers,
     ))
-}
-
-/// Discover installed bundle roots from the daemon state directory.
-fn discover_bundle_roots() -> Vec<PathBuf> {
-    let app_root = match std::env::var("RYEOS_APP_ROOT") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => dirs::data_dir()
-            .map(|d| d.join("ryeos"))
-            .expect("could not determine XDG data directory"),
-    };
-    let mut roots = Vec::new();
-    let ai_dir = app_root.join(ryeos_engine::AI_DIR);
-    // When RYEOS_APP_ROOT is itself a bundle tree (it carries a signed
-    // `.ai/manifest.yaml`), it IS the content root and the installed-bundle
-    // layout (`.ai/bundles/*`) is absent. Include it so single-bundle app
-    // roots resolve.
-    if ai_dir.join("manifest.yaml").is_file() {
-        roots.push(app_root.clone());
-    }
-    let bundles_dir = ai_dir.join("bundles");
-    if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                roots.push(entry.path());
-            }
-        }
-    }
-    roots
 }

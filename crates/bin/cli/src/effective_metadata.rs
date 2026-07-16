@@ -23,10 +23,10 @@ pub fn build_effective_item_engine(
         app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })?;
-    let isolation = ryeos_app::engine_init::load_registered_isolation(&config.app_root)
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&config.app_root)
         .context("load node isolation policy")?;
 
-    ryeos_app::engine_init::build_engine_for_roots(
+    ryeos_app::engine_init::build_registered_engine_for_roots(
         &config,
         bundle_roots,
         project_path,

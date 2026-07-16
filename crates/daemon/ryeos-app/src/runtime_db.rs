@@ -1168,6 +1168,7 @@ fn normalize_migrated_launch_metadata(raw: &str) -> Result<String> {
         "sealed_root_request",
         "follow_parent_context",
         "follow_launch_window",
+        "isolation",
     ] {
         object.entry(field.to_string()).or_insert(Value::Null);
     }
@@ -5366,6 +5367,7 @@ mod tests {
             .expect("stored launch metadata must survive migration");
         assert_eq!(metadata.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
         assert!(metadata.resume_context.is_none());
+        assert!(metadata.isolation.is_none());
         let child_links: i64 = migrated
             .conn
             .query_row(

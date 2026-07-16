@@ -120,7 +120,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &plan,
         &state.engine.node_trust_store,
         &prospective_validator,
-        Arc::clone(&state.isolation),
     )?;
 
     // Invalidate before any new journal or namespace mutation. Reconciliation
@@ -162,7 +161,6 @@ fn admit_prospective_remove(
     plan: &BundlePlan,
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
-    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let removal = plan
         .bundles
@@ -181,12 +179,8 @@ fn admit_prospective_remove(
         .filter(|bundle| bundle.action != BundleAction::Remove)
         .map(|bundle| bundle.source.root_path().clone())
         .collect();
-    ryeos_app::engine_init::admit_node_bundle_roots(
-        &prospective_roots,
-        node_trust_store,
-        isolation,
-    )
-    .context("prospective removal would fail node engine boot")?;
+    ryeos_app::engine_init::admit_node_bundle_roots(app_root, &prospective_roots, node_trust_store)
+        .context("prospective removal would fail node engine boot")?;
 
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
         app_root,

@@ -55,9 +55,22 @@ pub struct CapturedExecutable {
     pub handle: std::sync::Arc<std::fs::File>,
 }
 
+/// Signed identity of one bundle's complete native-executor authorization
+/// manifest. A bundle without native executables has no such identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleExecutorManifestIdentity {
+    pub manifest_hash: String,
+    pub signer_fingerprint: String,
+}
+
+struct VerifiedBundleExecutorSet {
+    identity: Option<BundleExecutorManifestIdentity>,
+    item_refs: HashSet<String>,
+}
+
 /// Resolve, verify, open without following symlinks, and re-hash an installed
-/// bundle executable. Consumers execute the retained descriptor and never
-/// reopen `identity.absolute_path`.
+/// bundle executable. The verified bytes are copied into a sealed anonymous
+/// file so later mutation of the installed path cannot change what executes.
 pub fn capture_bundle_executable(
     executable_name: &str,
     bundle_root: &Path,
@@ -92,6 +105,7 @@ pub fn capture_bundle_executable(
             identity.absolute_path.display()
         ))
     })?;
+    validate_captured_executable(&handle, &identity.absolute_path)?;
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut handle, &mut bytes).map_err(|error| {
         EngineError::Internal(format!(
@@ -107,16 +121,76 @@ pub fn capture_bundle_executable(
             computed: observed,
         });
     }
-    std::io::Seek::seek(&mut handle, std::io::SeekFrom::Start(0)).map_err(|error| {
-        EngineError::Internal(format!(
-            "rewind captured executable {}: {error}",
-            identity.absolute_path.display()
-        ))
+    let handle =
+        lillux::sealed_executable_memfd(c"ryeos-bundle-executable", &bytes).map_err(|error| {
+            EngineError::Internal(format!(
+                "materialize immutable executable {}: {error}",
+                identity.absolute_path.display()
+            ))
+        })?;
+    Ok(CapturedExecutable { identity, handle })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_captured_executable(handle: &std::fs::File, path: &Path) -> Result<(), EngineError> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = handle.metadata().map_err(|error| {
+        EngineError::Internal(format!("inspect executable {}: {error}", path.display()))
     })?;
-    Ok(CapturedExecutable {
-        identity,
-        handle: std::sync::Arc::new(handle),
-    })
+    if !metadata.file_type().is_file() {
+        return Err(EngineError::Internal(format!(
+            "refuse executable {}: captured object is not a regular file",
+            path.display()
+        )));
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Err(EngineError::Internal(format!(
+            "refuse executable {}: no execute bit is set",
+            path.display()
+        )));
+    }
+    if mode & (libc::S_ISUID | libc::S_ISGID) != 0 {
+        return Err(EngineError::Internal(format!(
+            "refuse executable {}: setuid and setgid files are forbidden",
+            path.display()
+        )));
+    }
+
+    // An exact byte digest does not cover Linux file capabilities. Refuse the
+    // xattr before copying the verified bytes into the unprivileged memfd.
+    let result = unsafe {
+        libc::fgetxattr(
+            handle.as_raw_fd(),
+            b"security.capability\0".as_ptr().cast(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result >= 0 {
+        return Err(EngineError::Internal(format!(
+            "refuse executable {}: Linux file capabilities are forbidden",
+            path.display()
+        )));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() != Some(libc::ENODATA) {
+        return Err(EngineError::Internal(format!(
+            "inspect Linux file capabilities on {}: {error}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_captured_executable(_handle: &std::fs::File, path: &Path) -> Result<(), EngineError> {
+    Err(EngineError::Internal(format!(
+        "immutable executable capture is unsupported on this platform: {}",
+        path.display()
+    )))
 }
 
 /// Resolve a runtime command binary ref for a concrete wrapper item.
@@ -512,6 +586,95 @@ pub fn verify_bundle_executor_manifest(
     verify_bundle_executor_manifest_items(bundle_root, node_trust_store).map(|_| ())
 }
 
+/// Verify the executable set and retain its signed manifest identity for a
+/// multi-reader bundle-generation snapshot.
+pub fn verify_bundle_executor_manifest_identity(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<Option<BundleExecutorManifestIdentity>, EngineError> {
+    verify_bundle_executor_manifest_items(bundle_root, node_trust_store)
+        .map(|verified| verified.identity)
+}
+
+/// Re-verify only the signed executor-manifest reference identity. Generation
+/// guards use this after initial full admission to detect replacement without
+/// re-hashing every executable on every launch.
+pub fn verify_bundle_executor_manifest_ref_identity(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<Option<BundleExecutorManifestIdentity>, EngineError> {
+    let ai_dir = bundle_root.join(crate::AI_DIR);
+    let bin_root = ai_dir.join("bin");
+    let manifest_ref_path = ai_dir.join("refs").join("bundles").join("manifest");
+    let bin_exists = match std::fs::symlink_metadata(&bin_root) {
+        Ok(metadata) if metadata.file_type().is_dir() => true,
+        Ok(_) => {
+            return Err(bundle_executor_error(
+                bundle_root,
+                format!("{} must be a regular directory", bin_root.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(bundle_executor_error(
+                bundle_root,
+                format!("stat {}: {error}", bin_root.display()),
+            ))
+        }
+    };
+    let manifest_ref_exists = match std::fs::symlink_metadata(&manifest_ref_path) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => {
+            return Err(bundle_executor_error(
+                bundle_root,
+                format!("{} must be a regular file", manifest_ref_path.display()),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(bundle_executor_error(
+                bundle_root,
+                format!("stat {}: {error}", manifest_ref_path.display()),
+            ))
+        }
+    };
+    if !bin_exists && !manifest_ref_exists {
+        return Ok(None);
+    }
+    if !bin_exists || !manifest_ref_exists {
+        return Err(EngineError::BinManifestMissing {
+            bundle_root: bundle_root.display().to_string(),
+        });
+    }
+    let signed_manifest_ref = lillux::read_regular_file_to_string_no_follow(&manifest_ref_path)
+        .map_err(|error| {
+            bundle_executor_error(
+                bundle_root,
+                format!("read {}: {error}", manifest_ref_path.display()),
+            )
+        })?;
+    let verified = crate::executor_resolution::verify_signed_executor_manifest_ref(
+        &signed_manifest_ref,
+        |fingerprint| {
+            node_trust_store
+                .get(fingerprint)
+                .map(|signer| signer.verifying_key)
+        },
+        TrustClass::TrustedBundle,
+    )
+    .map_err(|error| bundle_executor_error(bundle_root, error.to_string()))?;
+    if !is_dispatchable_trust_class(verified.trust_class) {
+        return Err(EngineError::BinUntrusted {
+            bin: bundle_root.display().to_string(),
+            fingerprint: verified.signer_fingerprint,
+        });
+    }
+    Ok(Some(BundleExecutorManifestIdentity {
+        manifest_hash: verified.manifest_hash,
+        signer_fingerprint: verified.signer_fingerprint,
+    }))
+}
+
 /// Verify every admitted bundle's executable set and require one owner for
 /// each native-executor identity.
 ///
@@ -530,6 +693,7 @@ pub fn verify_bundle_executor_manifests(
     for bundle_root in bundle_roots {
         let mut item_refs: Vec<String> =
             verify_bundle_executor_manifest_items(bundle_root, node_trust_store)?
+                .item_refs
                 .into_iter()
                 .collect();
         item_refs.sort_unstable();
@@ -553,7 +717,7 @@ pub fn verify_bundle_executor_manifests(
 fn verify_bundle_executor_manifest_items(
     bundle_root: &Path,
     node_trust_store: &TrustStore,
-) -> Result<HashSet<String>, EngineError> {
+) -> Result<VerifiedBundleExecutorSet, EngineError> {
     let ai_dir = bundle_root.join(crate::AI_DIR);
     require_regular_bundle_ai_tree(bundle_root, &ai_dir, true)?;
     let bin_root = ai_dir.join("bin");
@@ -597,7 +761,10 @@ fn verify_bundle_executor_manifest_items(
     };
 
     if bin_root_metadata.is_none() && !manifest_ref_exists {
-        return Ok(HashSet::new());
+        return Ok(VerifiedBundleExecutorSet {
+            identity: None,
+            item_refs: HashSet::new(),
+        });
     }
     if !manifest_ref_exists {
         return Err(EngineError::BinManifestMissing {
@@ -837,7 +1004,13 @@ fn verify_bundle_executor_manifest_items(
         ));
     }
 
-    Ok(expected_item_refs)
+    Ok(VerifiedBundleExecutorSet {
+        identity: Some(BundleExecutorManifestIdentity {
+            manifest_hash: verified_manifest_ref.manifest_hash,
+            signer_fingerprint: verified_manifest_ref.signer_fingerprint,
+        }),
+        item_refs: expected_item_refs,
+    })
 }
 
 fn bundle_executor_error(bundle_root: &Path, reason: impl Into<String>) -> EngineError {
@@ -1460,6 +1633,7 @@ mod tests {
             "item_ref": item_ref,
             "content_blob_hash": content_blob_hash,
             "integrity": format!("sha256:{content_blob_hash}"),
+            "signature_info": { "fingerprint": fingerprint },
             "mode": 0o755,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
@@ -1508,6 +1682,48 @@ mod tests {
             verifying_key: key.verifying_key(),
             label: None,
         }])
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_executable_is_sealed_against_installed_path_mutation() {
+        use std::io::{Read as _, Seek as _};
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
+        let captured =
+            capture_bundle_executable("demo", &bundle, &trust_store_for(&fingerprint, &key))
+                .expect("signed executable should be captured");
+
+        std::fs::write(&captured.identity.absolute_path, b"mutated-after-capture\n").unwrap();
+        let mut retained = captured.handle.try_clone().unwrap();
+        retained.rewind().unwrap();
+        let mut bytes = Vec::new();
+        retained.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"placeholder-binary\n");
+
+        let seals = unsafe { libc::fcntl(retained.as_raw_fd(), libc::F_GET_SEALS) };
+        let required =
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        assert_eq!(seals & required, required);
+        assert_ne!(retained.metadata().unwrap().permissions().mode() & 0o111, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn captured_executable_rejects_set_id_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("set-id");
+        std::fs::write(&path, b"binary").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4755)).unwrap();
+        let handle = std::fs::File::open(&path).unwrap();
+        let error = validate_captured_executable(&handle, &path).unwrap_err();
+        assert!(error.to_string().contains("setuid and setgid"));
     }
 
     #[test]
