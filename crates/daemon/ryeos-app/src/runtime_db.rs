@@ -5263,10 +5263,11 @@ mod tests {
 
     #[test]
     fn open_is_idempotent() {
-        let (tmp, _db) = fresh_db();
+        let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
-        let _ = RuntimeDb::open(&path).unwrap();
-        let _ = RuntimeDb::open(&path).unwrap();
+        drop(db);
+        drop(RuntimeDb::open(&path).unwrap());
+        drop(RuntimeDb::open(&path).unwrap());
     }
 
     #[test]

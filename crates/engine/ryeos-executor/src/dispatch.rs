@@ -1026,6 +1026,9 @@ fn project_corpus(
 /// corpus build). Callers run it either as `validate_only` validation (no
 /// thread minted) or inside the post-mint guard, so a projection failure
 /// finalizes the created thread instead of orphaning the returned id.
+// Method declaration, verified hop/root evidence, resolution roots, and request
+// context remain explicit at the projection boundary.
+#[allow(clippy::too_many_arguments)]
 fn project_method_payload(
     method_decl: &MethodDecl,
     canonical_ref: &CanonicalRef,
@@ -1643,7 +1646,7 @@ pub(crate) async fn dispatch_method(
             &engine_roots,
             &state.config.app_root,
         )
-        .map_err(|error| DispatchError::Internal(error.into()))?;
+        .map_err(DispatchError::Internal)?;
         let callback_socket_requested = runtime_protocol
             .descriptor
             .env_injections
@@ -3105,7 +3108,7 @@ pub enum RootDispatchClass {
 
 #[derive(Debug, Clone)]
 pub enum LaunchContractApplicability {
-    ManagedEnvelope { runtime: VerifiedRuntime },
+    ManagedEnvelope { runtime: Box<VerifiedRuntime> },
     NonEnvelope { class: RootDispatchClass },
 }
 
@@ -3178,7 +3181,9 @@ pub fn launch_contract_applicability(
                             "managed envelope path `{current}` has no selected runtime"
                         ),
                     })?;
-                return Ok(LaunchContractApplicability::ManagedEnvelope { runtime });
+                return Ok(LaunchContractApplicability::ManagedEnvelope {
+                    runtime: Box::new(runtime),
+                });
             }
         }
     }
@@ -3241,7 +3246,7 @@ pub fn admit_launch_contract(
                 message: error.to_string(),
                 classification: "internal".to_owned(),
                 binding: None,
-                details: BTreeMap::new(),
+                details: Box::new(BTreeMap::new()),
             }
         }
     })
@@ -3279,7 +3284,7 @@ pub fn prepare_launch_contract(
             message: error.to_string(),
             classification: "configuration".to_owned(),
             binding: None,
-            details: BTreeMap::new(),
+            details: Box::new(BTreeMap::new()),
         })?;
     let resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &primary.canonical_ref,
@@ -3294,7 +3299,7 @@ pub fn prepare_launch_contract(
         message: error.to_string(),
         classification: "caller".to_owned(),
         binding: None,
-        details: BTreeMap::new(),
+        details: Box::new(BTreeMap::new()),
     })?;
     crate::execution::launch_preparation::prepare_runtime_launch(
         crate::execution::launch_preparation::PrepareRuntimeLaunchRequest {
@@ -3345,6 +3350,9 @@ pub struct RootDispatchPreflight {
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
 }
 
+// Route class, requested/root evidence, usage attribution, bindings, and daemon
+// policy context remain explicit at this admission boundary.
+#[allow(clippy::too_many_arguments)]
 fn finish_root_dispatch_preflight(
     class: RootDispatchClass,
     requested_subject: VerifiedItem,
@@ -3393,6 +3401,9 @@ fn finish_root_dispatch_preflight(
 ///
 /// Synchronous: classification touches verified resolution/composition, schema,
 /// and the authorizer only — never the executing leaf dispatchers.
+// Caller route identity, payload/bindings, usage attribution, and daemon policy
+// context remain explicit so synchronous admission checks cannot omit them.
+#[allow(clippy::too_many_arguments)]
 pub fn preflight_root_dispatch(
     item_ref: &str,
     original_root_kind: &str,

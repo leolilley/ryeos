@@ -212,7 +212,7 @@ fn build_and_launch_error(
         BuildAndLaunchError::CapabilityRejected { reason } => dispatch_error(
             ryeos_executor::dispatch_error::DispatchError::CapabilityRejected { reason },
         ),
-        BuildAndLaunchError::LaunchPreparation(error) => dispatch_error(error),
+        BuildAndLaunchError::LaunchPreparation(error) => dispatch_error(*error),
         BuildAndLaunchError::Materialization(error) => {
             HandlerError::Internal(format!("launch materialization failed: {error}"))
         }

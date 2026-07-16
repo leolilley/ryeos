@@ -8,7 +8,7 @@
 use ryeos_app::state::AppState;
 
 pub(crate) enum ThreadLaunchClaimOutcome {
-    Claimed(ThreadLaunchClaim),
+    Claimed(Box<ThreadLaunchClaim>),
     AlreadyClaimed,
 }
 
@@ -44,11 +44,11 @@ impl ThreadLaunchClaim {
             .claim_thread_launch(thread_id, &claim_id, claimed_by)?
         {
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {
-                Ok(ThreadLaunchClaimOutcome::Claimed(Self {
+                Ok(ThreadLaunchClaimOutcome::Claimed(Box::new(Self {
                     state: state.clone(),
                     thread_id: thread_id.to_string(),
                     claim_id,
-                }))
+                })))
             }
             ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
                 Ok(ThreadLaunchClaimOutcome::AlreadyClaimed)

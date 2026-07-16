@@ -424,6 +424,9 @@ pub fn fold_back_outputs(
 ///
 /// The `principal_key` is the raw fingerprint hex (from
 /// [`ryeos_state::refs::principal_storage_key`]).
+// Pinned authority, held CAS guard, signed head identity, and both snapshot
+// hashes remain explicit at the compare-and-swap fold-back boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn advance_after_foldback(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
@@ -475,6 +478,9 @@ pub fn advance_after_foldback(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+// The traversal's pinned authority, mutation guard, roots, integrity map, and
+// accumulators remain explicit because they share one guarded walk.
+#[allow(clippy::too_many_arguments)]
 fn walk_and_diff(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,

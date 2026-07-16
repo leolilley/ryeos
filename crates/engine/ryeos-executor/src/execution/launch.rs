@@ -220,9 +220,15 @@ pub enum BuildAndLaunchError {
     #[error("{reason}")]
     CapabilityRejected { reason: String },
     #[error("{0}")]
-    LaunchPreparation(#[source] DispatchError),
+    LaunchPreparation(#[source] Box<DispatchError>),
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
+}
+
+impl From<DispatchError> for BuildAndLaunchError {
+    fn from(error: DispatchError) -> Self {
+        Self::LaunchPreparation(Box::new(error))
+    }
 }
 
 impl BuildAndLaunchError {
@@ -457,7 +463,7 @@ pub fn materialize_native_executor(
                 |fingerprint| {
                     trust_store
                         .get(fingerprint)
-                        .map(|signer| signer.verifying_key.clone())
+                        .map(|signer| signer.verifying_key)
                 },
                 root_trust_class,
             ) {
@@ -1222,12 +1228,12 @@ async fn prepare_managed_launch_authority(
         .runtimes
         .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
         .map_err(|error| {
-            BuildAndLaunchError::LaunchPreparation(DispatchError::LaunchPreparationFailed {
+            BuildAndLaunchError::from(DispatchError::LaunchPreparationFailed {
                 code: "runtime_launch_contract_unavailable".to_owned(),
                 message: error.to_string(),
                 classification: "configuration".to_owned(),
                 binding: None,
-                details: BTreeMap::new(),
+                details: Box::new(BTreeMap::new()),
             })
         })?
         .clone();
@@ -1242,7 +1248,7 @@ async fn prepare_managed_launch_authority(
             principal: &params.resolved.plan_context.requested_by,
         },
     )
-    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+    .map_err(BuildAndLaunchError::from)?;
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(params.project_path));
     let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
     merge_prepared_secret_requirements(
@@ -1566,7 +1572,8 @@ async fn run_claimed_thread_row(
         Err(error) => {
             let terminal_error = match &error {
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
-                    crate::structured_error::StructuredErrorPayload::from(dispatch_error).to_value()
+                    crate::structured_error::StructuredErrorPayload::from(dispatch_error.as_ref())
+                        .to_value()
                 }
                 other => json!({
                     "code": "launch_preparation_failed",
@@ -2663,7 +2670,7 @@ async fn prepare_follow_child_launch_inner(
         validate_only: false,
     };
     let admission_primary = engine.resolve(&plan_context, &canonical).map_err(|error| {
-        BuildAndLaunchError::LaunchPreparation(map_follow_child_resolution_error(
+        BuildAndLaunchError::from(map_follow_child_resolution_error(
             "admission",
             &resume.item_ref,
             error,
@@ -2691,7 +2698,7 @@ async fn prepare_follow_child_launch_inner(
     };
     let applicability =
         crate::dispatch::launch_contract_applicability(&resume.item_ref, &admission_context)
-            .map_err(BuildAndLaunchError::LaunchPreparation)?;
+            .map_err(BuildAndLaunchError::from)?;
     crate::dispatch::admit_launch_contract(
         &applicability,
         &admission_primary,
@@ -2700,12 +2707,12 @@ async fn prepare_follow_child_launch_inner(
         &admission_context,
         state,
     )
-    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+    .map_err(BuildAndLaunchError::from)?;
 
     // The authoritative pass begins from a fresh primary resolution against the
     // exact borrowed-provenance engine. No admission output crosses this seam.
     let resolved_item = engine.resolve(&plan_context, &canonical).map_err(|error| {
-        BuildAndLaunchError::LaunchPreparation(map_follow_child_resolution_error(
+        BuildAndLaunchError::from(map_follow_child_resolution_error(
             "authority",
             &resume.item_ref,
             error,
@@ -2817,7 +2824,7 @@ fn map_follow_child_resolution_error(
             ),
             classification: "unavailable".to_owned(),
             binding: None,
-            details: BTreeMap::new(),
+            details: Box::new(BTreeMap::new()),
         },
         _ => {
             DispatchError::LaunchPreparationFailed {
@@ -2827,7 +2834,7 @@ fn map_follow_child_resolution_error(
                 ),
                 classification: "configuration".to_owned(),
                 binding: None,
-                details: BTreeMap::new(),
+                details: Box::new(BTreeMap::new()),
             }
         }
     }
@@ -3004,7 +3011,7 @@ pub async fn launch_prepared_operator_successor(
     .await;
     match &result {
         Err(BuildAndLaunchError::LaunchPreparation(error)) => {
-            launch_handoff.publish_dispatch_failure(error)
+            launch_handoff.publish_dispatch_failure(error.as_ref())
         }
         Err(error) => launch_handoff.publish_failure(
             "operator_successor_launch_failed",
@@ -3079,7 +3086,7 @@ fn prepare_and_spawn_successor_recovery_inner(
     mode: SuccessorMode,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
     let claim = match ThreadLaunchClaim::acquire(&state, successor_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -3139,7 +3146,7 @@ async fn launch_successor_inner_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, successor_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             // Another launcher (live dispatch or a concurrent reconcile) owns the
             // window. Benign no-op — must NOT burn the attempt budget or finalize.
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
@@ -3505,7 +3512,7 @@ pub fn prepare_and_spawn_existing_native_resume_recovery(
     thread_id: &str,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
     let claim = match ThreadLaunchClaim::acquire(&state, thread_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -3540,7 +3547,7 @@ async fn launch_existing_native_resume_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, thread_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
                 return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
             }
@@ -3795,7 +3802,7 @@ pub async fn launch_prepared_follow_child(
     .await;
     match &result {
         Err(BuildAndLaunchError::LaunchPreparation(error)) => {
-            launch_handoff.publish_dispatch_failure(error)
+            launch_handoff.publish_dispatch_failure(error.as_ref())
         }
         Err(error) => {
             launch_handoff.publish_failure("child_launch_failed", error.to_string(), 500, false)
@@ -3832,7 +3839,7 @@ pub fn prepare_and_spawn_follow_child(
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
     let claim = match ThreadLaunchClaim::acquire(&state, child_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -3881,7 +3888,7 @@ async fn launch_follow_child_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, child_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
                 return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
             }
@@ -4345,7 +4352,7 @@ pub fn prepare_and_spawn_follow_resume_recovery(
         ))
     })?;
     let claim = match ThreadLaunchClaim::acquire(&state, &successor_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             // Preserve the live launcher's waiter-cleanup semantics: if this is
             // provably the right successor and it already advanced, the owning
@@ -4416,7 +4423,7 @@ async fn launch_follow_resume_successor_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, &successor_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
                 // Another launcher holds the claim. Retire the waiter ONLY if the
                 // successor is a VALID follow-resume successor of THIS parent (upstream +

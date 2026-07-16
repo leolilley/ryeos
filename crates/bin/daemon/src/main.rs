@@ -485,7 +485,7 @@ async fn main() -> Result<()> {
             let mut head_trust = ryeos_state::refs::TrustStore::new();
             head_trust.insert(
                 identity.fingerprint().to_string(),
-                identity.verifying_key().clone(),
+                *identity.verifying_key(),
             );
             let head_trust = Arc::new(head_trust);
 
@@ -1073,11 +1073,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        if let Some(state) = shutdown_drain_state
-            .lock()
-            .expect("shutdown drain state mutex poisoned")
-            .take()
-        {
+        let shutdown_state = {
+            let mut guard = shutdown_drain_state
+                .lock()
+                .expect("shutdown drain state mutex poisoned");
+            guard.take()
+        };
+        if let Some(state) = shutdown_state {
             if !drain_running_threads(&state).await && result.is_ok() {
                 result = Err(anyhow::anyhow!(
                     "shutdown could not prove every attached process terminated"
@@ -1941,7 +1943,7 @@ async fn run_service_standalone(
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let head_trust = Arc::new(head_trust);

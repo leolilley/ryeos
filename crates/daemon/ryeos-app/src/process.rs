@@ -1131,8 +1131,11 @@ mod tests {
     ) {
         let marker = tmp.path().join("got_term");
         let marker_str = marker.display().to_string();
+        // Keep the signalable shell itself in the loop. A shell blocked on an
+        // infinite foreground subshell defers its trap until that child exits,
+        // which does not model a runtime handling a signal on the exact PID.
         let script = format!(
-            r#"trap 'echo term > "{m}"; exit 0' TERM; (while true; do sleep 0.05; done)"#,
+            r#"trap 'echo term > "{m}"; exit 0' TERM; while true; do sleep 0.05; done"#,
             m = marker_str
         );
         let child = unsafe {
@@ -1204,7 +1207,19 @@ mod tests {
         child: &mut std::process::Child,
     ) -> (R, std::process::ExitStatus) {
         let kill_handle = std::thread::spawn(kill);
-        let status = child.wait().expect("wait child");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                let _ = kill_handle.join();
+                panic!("signal target did not exit within the bounded test deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let result = kill_handle.join().expect("kill thread join");
         (result, status)
     }
@@ -1358,8 +1373,11 @@ mod tests {
     ) {
         let marker = tmp.path().join("got_usr1");
         let marker_str = marker.display().to_string();
+        // As above, the exact target must own the loop so its trap can run;
+        // an infinite foreground subshell would cause the parent shell to
+        // defer SIGUSR1 indefinitely.
         let script = format!(
-            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; (while true; do sleep 0.05; done)"#,
+            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; while true; do sleep 0.05; done"#,
             m = marker_str
         );
         let child = unsafe {

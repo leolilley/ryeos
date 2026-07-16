@@ -554,7 +554,7 @@ mod tests {
     fn trust_store(identity: &NodeIdentity) -> ryeos_engine::trust::TrustStore {
         ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
             fingerprint: identity.fingerprint().to_string(),
-            verifying_key: identity.verifying_key().clone(),
+            verifying_key: *identity.verifying_key(),
             label: Some("test".into()),
         }])
     }

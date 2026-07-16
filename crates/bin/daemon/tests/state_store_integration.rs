@@ -47,7 +47,7 @@ mod integration_tests {
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
             identity.fingerprint().to_string(),
-            identity.verifying_key().clone(),
+            *identity.verifying_key(),
         );
 
         let write_barrier = WriteBarrier::new();

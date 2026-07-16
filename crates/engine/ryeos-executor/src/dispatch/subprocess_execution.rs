@@ -343,7 +343,7 @@ async fn dispatch_managed_subprocess(
     })
     .await
     .map_err(|e| match e {
-        launch::BuildAndLaunchError::LaunchPreparation(error) => error,
+        launch::BuildAndLaunchError::LaunchPreparation(error) => *error,
         launch::BuildAndLaunchError::MissingSecrets { item_ref, secrets } => {
             let first = secrets.first().expect("missing secret error has a secret");
             let source = first.primary_source();
@@ -383,6 +383,9 @@ async fn dispatch_managed_subprocess(
     }))
 }
 
+// Verified hop identity, root authority, request context, daemon state, and
+// protocol contract remain explicit at the subprocess dispatch boundary.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_streaming_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
@@ -527,7 +530,7 @@ async fn dispatch_streaming_subprocess(
         &engine_roots,
         &state.config.app_root,
     )
-    .map_err(|error| DispatchError::Internal(error.into()))?;
+    .map_err(DispatchError::Internal)?;
     let env_request = ryeos_engine::subprocess_spec::SubprocessBuildRequest {
         cmd: executor_path,
         args: Vec::new(),

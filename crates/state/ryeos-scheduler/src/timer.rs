@@ -693,7 +693,7 @@ mod tests {
             self.gate.clone()
         }
 
-        fn trust_store(&self) -> &TrustStore {
+        fn schedule_trust_store(&self) -> &TrustStore {
             &self.trust
         }
 

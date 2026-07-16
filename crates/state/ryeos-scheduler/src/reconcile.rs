@@ -55,7 +55,8 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     if drained > 0 {
         tracing::info!(drained, "scheduler: recovered durable fire-journal outbox");
     }
-    let live_ids = projection::rebuild_specs_from_dir(&schedules_dir, &db, ctx.trust_store())?;
+    let live_ids =
+        projection::rebuild_specs_from_dir(&schedules_dir, &db, ctx.schedule_trust_store())?;
 
     let specs = db.list_specs(false, None)?;
     let now = lillux::time::timestamp_millis();
@@ -334,7 +335,7 @@ mod tests {
             self.gate.clone()
         }
 
-        fn trust_store(&self) -> &TrustStore {
+        fn schedule_trust_store(&self) -> &TrustStore {
             &self.trust
         }
 

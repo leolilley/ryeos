@@ -2691,7 +2691,7 @@ pub async fn run_existing_detached(
     // detached background task below, making a successful return a durable
     // claimed-and-enqueued boundary rather than an in-memory scheduling hint.
     let resume_claim = match ThreadLaunchClaim::acquire(&state, &thread_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }

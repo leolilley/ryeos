@@ -684,7 +684,7 @@ mod tests {
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
             identity.fingerprint().to_string(),
-            identity.verifying_key().clone(),
+            *identity.verifying_key(),
         );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
         let state_store = Arc::new(

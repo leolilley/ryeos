@@ -605,16 +605,7 @@ fn exec_tool(
         })?;
 
     if inherit_stdio {
-        return exec_inherited(
-            tool_ref_str,
-            Path::new(&request.cmd),
-            &request.args,
-            request.cwd.as_deref(),
-            &request.envs,
-            request.limits.as_ref(),
-            &request.inherited_fds,
-            false,
-        );
+        return exec_inherited(tool_ref_str, request, false);
     }
 
     let result = lillux::run(request);
@@ -857,23 +848,18 @@ fn resolve_offline_cwd(
 
 fn exec_inherited(
     tool_ref: &str,
-    cmd: &Path,
-    args: &[String],
-    cwd: Option<&str>,
-    envs: &[(String, String)],
-    limits: Option<&lillux::SubprocessLimits>,
-    inherited_fds: &[std::sync::Arc<std::fs::File>],
+    request: lillux::SubprocessRequest,
     inherit_env: bool,
 ) -> Result<Option<Value>, CliError> {
-    let mut command = std::process::Command::new(cmd);
-    command.args(args);
+    let mut command = std::process::Command::new(&request.cmd);
+    command.args(&request.args);
     if !inherit_env {
         command.env_clear();
     }
-    for (key, value) in envs {
+    for (key, value) in &request.envs {
         command.env(key, value);
     }
-    if let Some(dir) = cwd {
+    if let Some(dir) = request.cwd.as_deref() {
         command.current_dir(dir);
     }
     command
@@ -881,12 +867,14 @@ fn exec_inherited(
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
 
-    lillux::configure_subprocess_limits(&mut command, limits).map_err(|error| CliError::Local {
-        detail: format!(
-            "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
-        ),
-    })?;
-    lillux::configure_inherited_fds(&mut command, inherited_fds).map_err(|error| {
+    lillux::configure_subprocess_limits(&mut command, request.limits.as_ref()).map_err(
+        |error| CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
+            ),
+        },
+    )?;
+    lillux::configure_inherited_fds(&mut command, &request.inherited_fds).map_err(|error| {
         CliError::Local {
             detail: format!(
                 "offline tool `{tool_ref}` could not retain sandbox descriptors: {error}"
@@ -928,12 +916,17 @@ mod tests {
 
         let error = exec_inherited(
             "tool:test/inherited",
-            Path::new("unused"),
-            &[],
-            None,
-            &[],
-            Some(&limits),
-            &[],
+            lillux::SubprocessRequest {
+                cmd: "unused".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: Some(limits),
+                inherited_fds: Vec::new(),
+                supervised_status: None,
+            },
             false,
         )
         .unwrap_err();

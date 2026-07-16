@@ -184,6 +184,9 @@ pub async fn execute_service(
 /// transport. It is selected only when the verified service item explicitly
 /// declares `ui_dispatch: session_local`; ordinary services always receive the
 /// verified execution principal derived from `ctx`.
+// Verified subject, execution mode/context, pre-minted identity, and trusted
+// local handler context remain explicit at the service execution boundary.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_service_verified(
     verified: ryeos_engine::contracts::VerifiedItem,
     service_ref: &str,
