@@ -14,9 +14,6 @@ const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
     Install,
-    Verify,
-    Publish,
-    Fetch,
     Run,
 }
 
@@ -24,9 +21,6 @@ impl OperationKind {
     fn verb(self) -> &'static str {
         match self {
             Self::Install => "INSTALL",
-            Self::Verify => "VERIFY",
-            Self::Publish => "PUBLISH",
-            Self::Fetch => "FETCH",
             Self::Run => "RUN",
         }
     }
