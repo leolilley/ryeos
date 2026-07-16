@@ -13,6 +13,7 @@ impl CliError {
             CliError::Transport(t) => t.exit_code(),
             CliError::Io(_) => EX_SOFTWARE,
             CliError::Local { .. } => 1,
+            CliError::Reported { .. } => 1,
             CliError::ProjectResolution(_) => EX_USAGE,
         }
     }

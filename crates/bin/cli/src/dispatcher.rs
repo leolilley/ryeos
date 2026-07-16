@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use ryeos_runtime::{
@@ -37,7 +36,7 @@ pub struct Cli {
 }
 
 /// Main dispatch flow.
-pub async fn run(cli: Cli) -> Result<(), CliError> {
+pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError> {
     // 1. Project root
     let body_project_path = cli
         .project
@@ -52,18 +51,38 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 2. App root
     let app_root = discover_app_root();
 
+    // Help is presentation, including for lifecycle commands. Intercept it
+    // before Clap's local parsers so every command shares the semantic model.
+    if let Some(help_idx) = cli.rest.iter().position(|t| t == "--help" || t == "-h") {
+        let command_tokens = &cli.rest[..help_idx];
+        let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);
+        if command_tokens.is_empty() {
+            crate::help::print_help(console, &app_root, &snapshot)?;
+        } else {
+            crate::help::print_command_help(
+                console,
+                command_tokens,
+                &app_root,
+                body_project_path.as_deref().unwrap_or("."),
+                &snapshot,
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
     // 3. Hardcoded lifecycle/bootstrap commands (must work before daemon exists):
     //      ryeos identity                   — print local node identity
     //      ryeos init                       — bootstrap operator state
     //      ryeos start/stop                 — manage the local daemon
     //      ryeos node status                — inspect lifecycle state
-    if lifecycle_commands::try_dispatch(&cli.rest).await? {
+    if lifecycle_commands::try_dispatch(&cli.rest, console).await? {
         return Ok(());
     }
 
-    if should_show_tty_screen(&cli.rest, stdout_supports_tty()) {
+    if should_show_tty_screen(&cli.rest, console.capabilities().tty()) {
         let screen = tty_screen_for(&cli.rest);
-        crate::tty::run(&app_root, cli.project.as_deref(), screen).await?;
+        crate::tty::run(console, &app_root, cli.project.as_deref(), screen).await?;
         return Ok(());
     }
 
@@ -77,51 +96,33 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 
     // 4. No command = help
     if cli.rest.is_empty() {
-        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
+        crate::help::print_help(console, &app_root, &snapshot)?;
         return Ok(());
     }
 
     // Non-TTY `ryeos help` keeps the plain top-level help path. TTY stdout
     // is intercepted above and rendered through the compact TTY help screen.
     if cli.rest == ["help"] {
-        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
+        crate::help::print_help(console, &app_root, &snapshot)?;
         return Ok(());
     }
 
     // `ryeos help --all` / `ryeos commands` → exhaustive command reference.
     if cli.rest == ["help", "--all"] || cli.rest == ["commands"] {
-        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
+        crate::help::print_help(console, &app_root, &snapshot)?;
         return Ok(());
     }
 
     // `ryeos help <command...>` → command help (queries daemon for alias info)
     if cli.rest.len() > 1 && cli.rest[0] == "help" {
         crate::help::print_command_help(
+            console,
             &cli.rest[1..],
             &app_root,
             body_project_path.as_deref().unwrap_or("."),
             &snapshot,
         )
         .await?;
-        return Ok(());
-    }
-
-    // `ryeos <command...> --help` / `-h` should feel like a normal CLI.
-    // Without this guard the trailing help flag is bound as service
-    // input and strict service schemas return noisy "unknown field help".
-    if let Some(help_idx) = cli.rest.iter().position(|t| t == "--help" || t == "-h") {
-        let command_tokens = &cli.rest[..help_idx];
-        if command_tokens.is_empty() {
-            crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
-        } else {
-            crate::help::print_command_help(
-                command_tokens,
-                &app_root,
-                body_project_path.as_deref().unwrap_or("."),
-                &snapshot,
-            )
-            .await?;
-        }
         return Ok(());
     }
 
@@ -138,8 +139,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 5. Descriptor-driven offline dispatch.
     //    For commands whose service descriptor declares availability: offline,
     //    run the in-process handler. Returns None to fall through to daemon.
-    let stdout_is_tty = stdout_supports_tty() && !forces_plain_output(&cli.rest);
-    let mut presenter = Presenter::for_stdout(stdout_is_tty);
+    let mut presenter = Presenter::for_console(console);
 
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
         &cli.rest,
@@ -166,8 +166,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    the command remains supported by clap above.
 
     let mut resolved = resolve_command_for_daemon(&cli.rest, snapshot, cli.project.as_deref())?;
-    let stdout_is_tty = stdout_is_tty && !resolved_forces_plain_output(&resolved, &cli.rest);
-    let mut presenter = Presenter::for_stdout(stdout_is_tty);
+    let mut presenter = Presenter::for_console(console);
     let item_ref_for_contract = resolved.item_ref.clone();
     normalize_resolved_parameters(
         &app_root,
@@ -241,7 +240,9 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
                 .into(),
         });
     }
-    let want_stream = resolved.stream.unwrap_or_else(stdout_supports_tty);
+    let want_stream = resolved
+        .stream
+        .unwrap_or_else(|| console.capabilities().tty());
     let stream_live = resolved.direct_execute
         && !resolved.async_launch
         && resolved.project_path.is_some()
@@ -286,14 +287,7 @@ fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
     stdout_is_tty && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
 }
 
-fn stdout_supports_tty() -> bool {
-    std::io::stdout().is_terminal()
-        && std::env::var("TERM")
-            .map(|term| term != "dumb")
-            .unwrap_or(true)
-}
-
-fn forces_plain_output(rest: &[String]) -> bool {
+pub fn forces_plain_output(rest: &[String]) -> bool {
     rest.iter().any(|token| plain_output_flag_is_on(token))
 }
 
@@ -307,10 +301,6 @@ fn plain_output_flag_is_on(token: &str) -> bool {
     };
     let plain_flag = matches!(name, "json" | "raw" | "plain" | "no-tty" | "no-stream");
     plain_flag && inline != Some("false")
-}
-
-fn resolved_forces_plain_output(resolved: &CliResolvedExecute, rest: &[String]) -> bool {
-    forces_plain_output(rest) || (resolved.direct_execute && resolved.stream == Some(false))
 }
 
 fn tty_screen_for(rest: &[String]) -> crate::tty::TtyScreen {
@@ -436,7 +426,7 @@ async fn follow_stream_descriptor(
         discovered.effective_base_url.trim_end_matches('/')
     );
 
-    let mut terminal: Option<Result<(), String>> = None;
+    let mut terminal: Option<Result<(), StreamTerminalFailure>> = None;
     presenter.stream_with_previous(
         if command_label.trim().is_empty() {
             path
@@ -447,10 +437,9 @@ async fn follow_stream_descriptor(
     )?;
     crate::transport::http::get_streaming(&url, &headers, |ev| {
         let outcome = match presenter.stream_event(ev) {
-            Ok(Some(outcome)) => outcome,
-            Ok(None) => crate::exec_stream::render_event(ev),
+            Ok(outcome) => outcome,
             Err(err) => {
-                terminal = Some(Err(format!("render stream: {err}")));
+                terminal = Some(Err(StreamTerminalFailure::Io(err)));
                 return true;
             }
         };
@@ -465,7 +454,7 @@ async fn follow_stream_descriptor(
                 true
             }
             StreamOutcome::Failed(detail) => {
-                terminal = Some(Err(detail));
+                terminal = Some(Err(StreamTerminalFailure::Outcome(detail)));
                 true
             }
         }
@@ -473,9 +462,15 @@ async fn follow_stream_descriptor(
     .await?;
 
     match terminal {
-        Some(Err(detail)) => Err(CliError::Local { detail }),
+        Some(Err(StreamTerminalFailure::Io(error))) => Err(CliError::Io(error)),
+        Some(Err(StreamTerminalFailure::Outcome(detail))) => Err(CliError::Reported { detail }),
         Some(Ok(())) | None => Ok(()),
     }
+}
+
+enum StreamTerminalFailure {
+    Io(std::io::Error),
+    Outcome(String),
 }
 
 struct CliResolvedExecute {
@@ -1162,7 +1157,7 @@ async fn post_to_daemon_streaming(
 
     // Track the explicit terminal outcome: `Some(Ok)` success, `Some(Err)`
     // failure, `None` means the stream ended without any terminal event.
-    let mut terminal: Option<Result<(), String>> = None;
+    let mut terminal: Option<Result<(), StreamTerminalFailure>> = None;
     let mut thread_id: Option<String> = None;
     let command_label = command_tokens.join(" ");
     presenter.stream_with_previous(
@@ -1183,10 +1178,9 @@ async fn post_to_daemon_streaming(
             }
         }
         let outcome = match presenter.stream_event(ev) {
-            Ok(Some(outcome)) => outcome,
-            Ok(None) => crate::exec_stream::render_event(ev),
+            Ok(outcome) => outcome,
             Err(err) => {
-                terminal = Some(Err(format!("render stream: {err}")));
+                terminal = Some(Err(StreamTerminalFailure::Io(err)));
                 return true;
             }
         };
@@ -1197,7 +1191,7 @@ async fn post_to_daemon_streaming(
                 true
             }
             StreamOutcome::Failed(detail) => {
-                terminal = Some(Err(detail));
+                terminal = Some(Err(StreamTerminalFailure::Outcome(detail)));
                 true
             }
         }
@@ -1205,7 +1199,10 @@ async fn post_to_daemon_streaming(
     .await?;
 
     match terminal {
-        Some(Err(detail)) => return Err(CliError::Local { detail }),
+        Some(Err(StreamTerminalFailure::Io(error))) => return Err(CliError::Io(error)),
+        Some(Err(StreamTerminalFailure::Outcome(detail))) => {
+            return Err(CliError::Reported { detail })
+        }
         None => {
             return Err(CliError::Local {
                 detail: "execute stream ended before a terminal event".into(),
@@ -1265,8 +1262,13 @@ fn print_result(
     previous_lines: usize,
 ) -> Result<(), CliError> {
     let command = command_tokens.join(" ");
-    if presenter.structured_result(&command, &payload, previous_lines)? {
-        return Ok(());
+    let machine_failure = crate::tty::structured_result_failure(&payload);
+    match presenter.structured_result(&command, &payload, previous_lines)? {
+        crate::presenter::StructuredPresentation::Rendered => return Ok(()),
+        crate::presenter::StructuredPresentation::Failed(detail) => {
+            return Err(CliError::Local { detail })
+        }
+        crate::presenter::StructuredPresentation::Machine => {}
     }
 
     // A state-root override echoes both roots as top-level `execution`
@@ -1277,14 +1279,18 @@ fn print_result(
             execution.get("source_root").and_then(|v| v.as_str()),
             execution.get("state_root").and_then(|v| v.as_str()),
         ) {
-            eprintln!("source_root: {source}");
-            eprintln!("state_root:  {state}");
+            crate::tty::write_machine_diagnostics(&[
+                format!("source_root: {source}"),
+                format!("state_root:  {state}"),
+            ])?;
         }
     }
     let result = payload.get("result").cloned().unwrap_or(payload);
-    let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-    println!("{pretty}");
-    Ok(())
+    crate::tty::write_json(&result)?;
+    match machine_failure {
+        Some(detail) => Err(CliError::Reported { detail }),
+        None => Ok(()),
+    }
 }
 
 fn discover_app_root() -> PathBuf {

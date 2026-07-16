@@ -7,9 +7,13 @@
 
 set -euo pipefail
 export LC_ALL=C
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$root/scripts/lib/ryeos-terminal.sh"
+ryeos_term_init
 
 usage() {
-    echo "usage: $0 --version X.Y.Z --archive PATH [--checksum PATH]" >&2
+    ryeos_term_fail "usage: $0 --version X.Y.Z --archive PATH [--checksum PATH]"
     exit 2
 }
 
@@ -26,37 +30,37 @@ while (($#)); do
 done
 [[ -n "$version" && -n "$archive" ]] || usage
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$ ]] || {
-    echo "bundle artifact verify: unsupported version: $version" >&2
+    ryeos_term_fail "unsupported version: $version"
     exit 2
 }
-[[ -f "$archive" ]] || { echo "bundle artifact verify: archive missing: $archive" >&2; exit 2; }
+[[ -f "$archive" ]] || { ryeos_term_fail "archive missing: $archive"; exit 2; }
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
 archive_name="ryeos-bundles-${version}-x86_64.tar.gz"
 archive_root="${archive_name%.tar.gz}"
+ryeos_term_begin VERIFY "bundle artifact"
 [[ "$(basename "$archive")" == "$archive_name" ]] || {
-    echo "bundle artifact verify: expected archive name $archive_name" >&2
+    ryeos_term_fail "expected archive name $archive_name"
     exit 2
 }
 
 if [[ -n "$checksum" ]]; then
     [[ -f "$checksum" && "$(basename "$checksum")" == "${archive_name}.sha256" ]] || {
-        echo "bundle artifact verify: invalid checksum file: $checksum" >&2
+        ryeos_term_fail "invalid checksum file: $checksum"
         exit 2
     }
     [[ "$(wc -l < "$checksum")" -eq 1 ]] || {
-        echo "bundle artifact verify: checksum file must contain exactly one entry" >&2
+        ryeos_term_fail "checksum file must contain exactly one entry"
         exit 2
     }
     checksum_line="$(cat "$checksum")"
     read -r expected_digest expected_name extra < "$checksum"
     [[ -z "${extra:-}" && "$expected_digest" =~ ^[0-9a-f]{64}$ && "$expected_name" == "$archive_name" && "$checksum_line" == "$expected_digest  $archive_name" ]] || {
-        echo "bundle artifact verify: malformed checksum file" >&2
+        ryeos_term_fail "malformed checksum file"
         exit 2
     }
     actual_digest="$(sha256sum "$archive" | awk '{print $1}')"
     [[ "$actual_digest" == "$expected_digest" ]] || {
-        echo "bundle artifact verify: archive checksum mismatch" >&2
+        ryeos_term_fail "archive checksum mismatch"
         exit 2
     }
 fi
@@ -64,7 +68,14 @@ fi
 entries="$(mktemp)"
 listing="$(mktemp)"
 extracted="$(mktemp -d)"
-trap 'rm -f "$entries" "$listing"; rm -rf "$extracted"' EXIT
+cleanup_verify() {
+    local status="$1"
+    ryeos_term_handle_exit "$status"
+    rm -f "$entries" "$listing"
+    rm -rf "$extracted"
+    return "$status"
+}
+trap 'cleanup_verify "$?"' EXIT
 tar --absolute-names -tzf "$archive" > "$entries"
 tar --absolute-names -tvzf "$archive" > "$listing"
 
@@ -73,7 +84,7 @@ if awk -v root="$archive_root" '
     /(^|\/)\.\.($|\/)/ || /^\// { bad = 1 }
     END { exit !bad }
 ' "$entries"; then
-    echo "bundle artifact verify: path escapes $archive_root" >&2
+    ryeos_term_fail "path escapes $archive_root"
     exit 2
 fi
 if awk '
@@ -81,12 +92,12 @@ if awk '
     substr($1, 1, 10) ~ /[sS]/ { bad = 1 }
     END { exit !bad }
 ' "$listing"; then
-    echo "bundle artifact verify: link, special, setuid, or setgid entry present" >&2
+    ryeos_term_fail "link, special, setuid, or setgid entry present"
     exit 2
 fi
 duplicate_entry="$(awk 'seen[$0]++ { print; exit }' "$entries")"
 [[ -z "$duplicate_entry" ]] || {
-    echo "bundle artifact verify: duplicate archive entry: $duplicate_entry" >&2
+    ryeos_term_fail "duplicate archive entry: $duplicate_entry"
     exit 2
 }
 
@@ -96,7 +107,7 @@ duplicate_entry="$(awk 'seen[$0]++ { print; exit }' "$entries")"
 tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$extracted"
 stage="$extracted/$archive_root"
 [[ -d "$stage" ]] || {
-    echo "bundle artifact verify: archive root directory missing after extraction" >&2
+    ryeos_term_fail "archive root directory missing after extraction"
     exit 2
 }
 # The private extraction tree contains no links or special files at this point.
@@ -105,7 +116,7 @@ stage="$extracted/$archive_root"
 chmod -R u+rX "$stage"
 while IFS= read -r -d '' staged_path; do
     if [[ "$staged_path" =~ [[:cntrl:]] ]]; then
-        echo "bundle artifact verify: control characters are not allowed in archive paths" >&2
+        ryeos_term_fail "control characters are not allowed in archive paths"
         exit 2
     fi
 done < <(find "$stage" -print0)
@@ -119,7 +130,7 @@ unsafe_name="$(find "$stage" -type f \( \
     -iname '*private*key*' \
 \) -print -quit)"
 [[ -z "$unsafe_name" ]] || {
-    echo "bundle artifact verify: possible private key file present: $unsafe_name" >&2
+    ryeos_term_fail "possible private key file present: $unsafe_name"
     exit 2
 }
 private_key_markers="$(
@@ -127,23 +138,23 @@ private_key_markers="$(
         || true
 )"
 [[ -z "$private_key_markers" ]] || {
-    echo "bundle artifact verify: private key material present: $private_key_markers" >&2
+    ryeos_term_fail "private key material present: $private_key_markers"
     exit 2
 }
 
 grep -qx "$archive_root/.ai/PUBLISHER_TRUST.toml" "$entries" || {
-    echo "bundle artifact verify: source-root publisher metadata missing" >&2
+    ryeos_term_fail "source-root publisher metadata missing"
     exit 2
 }
 # shellcheck source=scripts/pkg/bundle-sets.sh
 source "$root/scripts/pkg/bundle-sets.sh"
 while IFS= read -r bundle; do
     grep -qx "$archive_root/$bundle/.ai/" "$entries" || {
-        echo "bundle artifact verify: $bundle/.ai missing" >&2
+        ryeos_term_fail "$bundle/.ai missing"
         exit 2
     }
     grep -qx "$archive_root/$bundle/PUBLISHER_TRUST.toml" "$entries" || {
-        echo "bundle artifact verify: $bundle publisher metadata missing" >&2
+        ryeos_term_fail "$bundle publisher metadata missing"
         exit 2
     }
 done < <(ryeos_bundle_set_names full)
@@ -153,8 +164,8 @@ trust_doc="$(tar -xOzf "$archive" "$archive_root/.ai/PUBLISHER_TRUST.toml")"
 artifact_fp="$(printf '%s\n' "$trust_doc" | sed -n 's/^[[:space:]]*fingerprint[[:space:]]*=[[:space:]]*"\([0-9A-Fa-f]\{64\}\)"[[:space:]]*$/\1/p')"
 artifact_owner="$(printf '%s\n' "$trust_doc" | sed -n 's/^[[:space:]]*owner[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p')"
 [[ "${artifact_fp,,}" == "$official_fp" && "$artifact_owner" == ryeos-official ]] || {
-    echo "bundle artifact verify: official publisher metadata mismatch" >&2
+    ryeos_term_fail "official publisher metadata mismatch"
     exit 2
 }
 
-printf 'verified bundle artifact: %s\n' "$archive"
+ryeos_term_end success "VERIFY COMPLETE" "$archive"

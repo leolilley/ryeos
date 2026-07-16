@@ -1,15 +1,78 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ryeos_app::offline_gc::{
-    OfflineThreadHistoryGcPhase, OfflineThreadHistoryGcProgress, OfflineThreadHistoryGcReport,
-};
+use ryeos_app::offline_gc::{OfflineThreadHistoryGcPhase, OfflineThreadHistoryGcProgress};
 use ryeos_node::{
     LifecycleProgressObserver, LifecycleStatus, StartReport, StartupPhase, StopReport,
 };
 
-const BAR_WIDTH: usize = 18;
+use super::TerminalCapabilities;
+
+const MAX_BAR_WIDTH: usize = 18;
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const TICK_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationKind {
+    Fetch,
+    Install,
+    Run,
+}
+
+impl OperationKind {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Fetch => "FETCH",
+            Self::Install => "INSTALL",
+            Self::Run => "RUN",
+        }
+    }
+}
+
+pub struct OperationProgress {
+    line: ProgressLine,
+    operation: OperationKind,
+}
+
+impl OperationProgress {
+    pub fn new(
+        operation: OperationKind,
+        label: &str,
+        capabilities: TerminalCapabilities,
+    ) -> io::Result<Option<Self>> {
+        if !capabilities.tty() {
+            return Ok(None);
+        }
+        let mut progress = Self {
+            line: ProgressLine::new(capabilities),
+            operation,
+        };
+        progress.line.render(operation.verb(), label, None, None)?;
+        Ok(Some(progress))
+    }
+
+    pub fn update(&mut self, label: &str, detail: Option<&str>) -> io::Result<()> {
+        self.line.render(self.operation.verb(), label, None, detail)
+    }
+
+    pub fn update_determinate(
+        &mut self,
+        label: &str,
+        completed: usize,
+        total: usize,
+        detail: Option<&str>,
+    ) -> io::Result<()> {
+        let ratio = (total > 0).then(|| completed as f64 / total as f64);
+        self.line
+            .render(self.operation.verb(), label, ratio, detail)
+    }
+
+    pub fn finish(mut self) -> io::Result<()> {
+        self.line.clear()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleProgressAction {
@@ -32,9 +95,12 @@ pub struct LifecycleProgress {
 }
 
 impl LifecycleProgress {
-    pub fn new(action: LifecycleProgressAction) -> Option<Self> {
-        terminal_supports_progress().then(|| Self {
-            line: ProgressLine::new(),
+    pub fn new(
+        action: LifecycleProgressAction,
+        capabilities: TerminalCapabilities,
+    ) -> Option<Self> {
+        capabilities.tty().then(|| Self {
+            line: ProgressLine::new(capabilities),
             action,
         })
     }
@@ -48,12 +114,16 @@ impl LifecycleProgress {
             "boot complete"
         };
         let mut out = io::stdout().lock();
-        writeln!(
-            out,
-            "{}  RYE/OS  {}  {} · {elapsed}",
+        let summary = format!(
+            "{}  RYEOS  {}  {}",
             self.line.success_glyph(),
             self.line.success("NODE ONLINE"),
-            self.line.dim(qualifier),
+            self.line.dim(&format!("{qualifier} · {elapsed}")),
+        );
+        writeln!(
+            out,
+            "{}",
+            super::clamp_visible(&summary, self.line.width.saturating_sub(1).max(1))
         )?;
         if let LifecycleStatus::Running { metadata, .. } = &report.status {
             let mut details = Vec::new();
@@ -67,7 +137,12 @@ impl LifecycleProgress {
                 details.push(socket.display().to_string());
             }
             if !details.is_empty() {
-                writeln!(out, "   {}", self.line.dim(&details.join("  ·  ")))?;
+                let details = format!("   {}", self.line.dim(&details.join("  ·  ")));
+                writeln!(
+                    out,
+                    "{}",
+                    super::clamp_visible(&details, self.line.width.saturating_sub(1).max(1))
+                )?;
             }
         }
         out.flush()
@@ -82,12 +157,16 @@ impl LifecycleProgress {
             "shutdown complete"
         };
         let mut out = io::stdout().lock();
-        writeln!(
-            out,
-            "{}  RYE/OS  {}  {} · {elapsed}",
+        let summary = format!(
+            "{}  RYEOS  {}  {}",
             self.line.success_glyph(),
             self.line.success("NODE OFFLINE"),
-            self.line.dim(qualifier),
+            self.line.dim(&format!("{qualifier} · {elapsed}")),
+        );
+        writeln!(
+            out,
+            "{}",
+            super::clamp_visible(&summary, self.line.width.saturating_sub(1).max(1))
         )?;
         out.flush()
     }
@@ -112,9 +191,9 @@ pub struct OfflineGcProgress {
 }
 
 impl OfflineGcProgress {
-    pub fn new(enabled: bool) -> Option<Self> {
-        (enabled && terminal_supports_progress()).then(|| Self {
-            line: ProgressLine::new(),
+    pub fn new(enabled: bool, capabilities: TerminalCapabilities) -> Option<Self> {
+        (enabled && capabilities.tty()).then(|| Self {
+            line: ProgressLine::new(capabilities),
             last_phase: None,
             last_rendered: Instant::now()
                 .checked_sub(Duration::from_secs(1))
@@ -153,20 +232,63 @@ impl OfflineGcProgress {
     }
 }
 
-struct ProgressLine {
-    started: Instant,
+#[derive(Clone)]
+struct ProgressFrame {
+    verb: String,
+    label: String,
+    ratio: Option<f64>,
+    detail: Option<String>,
+}
+
+#[derive(Default)]
+struct ProgressState {
     frame: usize,
     active: bool,
+    current: Option<ProgressFrame>,
+    stopped: bool,
+}
+
+struct SharedProgressState {
+    state: Mutex<ProgressState>,
+    wake: Condvar,
+}
+
+struct ProgressLine {
+    started: Instant,
+    shared: Arc<SharedProgressState>,
+    ticker: Option<JoinHandle<()>>,
     color: bool,
+    unicode: bool,
+    width: usize,
 }
 
 impl ProgressLine {
-    fn new() -> Self {
+    fn new(capabilities: TerminalCapabilities) -> Self {
+        let started = Instant::now();
+        let shared = Arc::new(SharedProgressState {
+            state: Mutex::new(ProgressState::default()),
+            wake: Condvar::new(),
+        });
+        let ticker_shared = Arc::clone(&shared);
+        let ticker = std::thread::Builder::new()
+            .name("ryeos-tty-progress".to_string())
+            .spawn(move || {
+                progress_ticker(
+                    ticker_shared,
+                    started,
+                    capabilities.color,
+                    capabilities.unicode,
+                    capabilities.width,
+                );
+            })
+            .ok();
         Self {
-            started: Instant::now(),
-            frame: 0,
-            active: false,
-            color: std::env::var_os("NO_COLOR").is_none(),
+            started,
+            shared,
+            ticker,
+            color: capabilities.color,
+            unicode: capabilities.unicode,
+            width: capabilities.width,
         }
     }
 
@@ -177,55 +299,52 @@ impl ProgressLine {
         ratio: Option<f64>,
         detail: Option<&str>,
     ) -> io::Result<()> {
-        self.frame = self.frame.wrapping_add(1);
-        let spinner = SPINNER[self.frame % SPINNER.len()];
-        let bar = ratio
-            .map(|ratio| determinate_bar(ratio, BAR_WIDTH))
-            .unwrap_or_else(|| pulse_bar(self.frame, BAR_WIDTH));
-        let elapsed = human_duration(self.started.elapsed());
-        let detail = detail
-            .filter(|detail| !detail.is_empty())
-            .map(|detail| format!(" · {detail}"))
-            .unwrap_or_default();
-        let plain = format!("{spinner}  RYE/OS  {verb:<5}  {bar}  {label}{detail} · {elapsed}");
-        let plain = super::clamp_line(&plain, super::terminal_width());
-        let rendered = if self.color {
-            colorize_progress_line(&plain, spinner)
-        } else {
-            plain
-        };
-        let mut err = io::stderr().lock();
-        write!(err, "\r\x1b[2K{rendered}")?;
-        err.flush()?;
-        self.active = true;
-        Ok(())
+        let mut state = lock_progress_state(&self.shared);
+        state.current = Some(ProgressFrame {
+            verb: verb.to_string(),
+            label: label.to_string(),
+            ratio,
+            detail: detail.map(ToString::to_string),
+        });
+        let result = render_progress_state(
+            &mut state,
+            self.started,
+            self.color,
+            self.unicode,
+            self.width,
+        );
+        drop(state);
+        self.shared.wake.notify_one();
+        result
     }
 
     fn clear(&mut self) -> io::Result<()> {
-        if !self.active {
+        {
+            let mut state = lock_progress_state(&self.shared);
+            state.stopped = true;
+            state.current = None;
+        }
+        self.shared.wake.notify_one();
+        if let Some(ticker) = self.ticker.take() {
+            let _ = ticker.join();
+        }
+        let mut state = lock_progress_state(&self.shared);
+        if !state.active {
             return Ok(());
         }
         let mut err = io::stderr().lock();
         write!(err, "\r\x1b[2K")?;
         err.flush()?;
-        self.active = false;
+        state.active = false;
         Ok(())
     }
 
     fn success(&self, value: &str) -> String {
-        if self.color {
-            format!("\x1b[1;38;5;48m{value}\x1b[0m")
-        } else {
-            value.to_string()
-        }
+        super::theme::style(value, super::Tone::Success, self.color)
     }
 
     fn dim(&self, value: &str) -> String {
-        if self.color {
-            format!("\x1b[2m{value}\x1b[0m")
-        } else {
-            value.to_string()
-        }
+        super::theme::style(value, super::Tone::Secondary, self.color)
     }
 
     fn success_glyph(&self) -> String {
@@ -233,35 +352,125 @@ impl ProgressLine {
     }
 }
 
+fn lock_progress_state(shared: &SharedProgressState) -> MutexGuard<'_, ProgressState> {
+    shared
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn progress_ticker(
+    shared: Arc<SharedProgressState>,
+    started: Instant,
+    color: bool,
+    unicode: bool,
+    width: usize,
+) {
+    let mut state = lock_progress_state(&shared);
+    loop {
+        while state.current.is_none() && !state.stopped {
+            state = shared
+                .wake
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if state.stopped {
+            return;
+        }
+        let (next_state, timeout) = shared
+            .wake
+            .wait_timeout(state, TICK_INTERVAL)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state = next_state;
+        if state.stopped {
+            return;
+        }
+        if timeout.timed_out() && state.current.is_some() {
+            if render_progress_state(&mut state, started, color, unicode, width).is_err() {
+                state.stopped = true;
+                return;
+            }
+        }
+    }
+}
+
+fn render_progress_state(
+    state: &mut ProgressState,
+    started: Instant,
+    color: bool,
+    unicode: bool,
+    width: usize,
+) -> io::Result<()> {
+    let Some(current) = state.current.clone() else {
+        return Ok(());
+    };
+    state.frame = state.frame.wrapping_add(1);
+    let frame = state.frame;
+    let spinner = if unicode {
+        SPINNER[frame % SPINNER.len()]
+    } else {
+        '.'
+    };
+    let bar_width = progress_bar_width(width);
+    let bar = current
+        .ratio
+        .map(|ratio| determinate_bar(ratio, bar_width))
+        .unwrap_or_else(|| pulse_bar(frame, bar_width));
+    let elapsed = human_duration(started.elapsed());
+    let detail = current
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.is_empty())
+        .and_then(|detail| non_redundant_detail(&current.label, detail))
+        .map(|detail| format!(" · {detail}"))
+        .unwrap_or_default();
+    let plain = format!(
+        "{spinner}  RYEOS  {:<5}  {bar}  {}{detail} · {elapsed}",
+        current.verb, current.label
+    );
+    let plain = super::clamp_visible(&plain, width.saturating_sub(1).max(1));
+    let rendered = if color {
+        colorize_progress_line(&plain, spinner)
+    } else {
+        plain
+    };
+    let mut err = io::stderr().lock();
+    write!(err, "\r\x1b[2K{rendered}")?;
+    err.flush()?;
+    state.active = true;
+    Ok(())
+}
+
+fn progress_bar_width(terminal_width: usize) -> usize {
+    match terminal_width {
+        0..=47 => 5,
+        48..=79 => 8,
+        80..=99 => 12,
+        _ => MAX_BAR_WIDTH,
+    }
+}
+
+fn non_redundant_detail<'a>(label: &str, detail: &'a str) -> Option<&'a str> {
+    let detail = detail.trim();
+    if detail.eq_ignore_ascii_case(label.trim()) {
+        return None;
+    }
+    if detail.len() >= label.len()
+        && detail
+            .get(..label.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(label))
+    {
+        let remainder = detail[label.len()..]
+            .trim_start_matches(|ch: char| matches!(ch, ' ' | '·' | ':' | '-' | '—'));
+        return (!remainder.is_empty()).then_some(remainder);
+    }
+    Some(detail)
+}
+
 impl Drop for ProgressLine {
     fn drop(&mut self) {
         let _ = self.clear();
     }
-}
-
-pub fn render_gc_summary(report: &OfflineThreadHistoryGcReport) -> io::Result<()> {
-    let color = std::env::var_os("NO_COLOR").is_none();
-    let heading = if report.dry_run {
-        "HISTORY SCAN COMPLETE"
-    } else {
-        "HISTORY CLEAR COMPLETE"
-    };
-    let heading = if color {
-        format!("\x1b[1;38;5;48m{heading}\x1b[0m")
-    } else {
-        heading.to_string()
-    };
-    let mut out = io::stdout().lock();
-    writeln!(out, "◆  RYE/OS  {heading}")?;
-    writeln!(
-        out,
-        "   {} chain heads  ·  {} runtime rows  ·  {} scheduler rows",
-        grouped(report.chain_heads),
-        grouped(report.runtime_rows.total_rows()),
-        grouped(report.scheduler_rows.total_rows()),
-    )?;
-    writeln!(out, "   {}", report.app_root.display())?;
-    out.flush()
 }
 
 fn boot_progress(status: &LifecycleStatus) -> (String, Option<f64>, Option<String>) {
@@ -390,15 +599,9 @@ fn pulse_bar(frame: usize, width: usize) -> String {
 
 fn colorize_progress_line(line: &str, spinner: char) -> String {
     let remainder = line.strip_prefix(spinner).unwrap_or(line);
-    format!("\x1b[38;5;45m{spinner}\x1b[0m\x1b[2m{remainder}\x1b[0m")
-}
-
-fn terminal_supports_progress() -> bool {
-    io::stdout().is_terminal()
-        && io::stderr().is_terminal()
-        && std::env::var("TERM")
-            .map(|term| term != "dumb")
-            .unwrap_or(true)
+    let spinner = super::theme::style(&spinner.to_string(), super::Tone::Active, true);
+    let remainder = super::theme::style(remainder, super::Tone::Secondary, true);
+    format!("{spinner}{remainder}")
 }
 
 fn human_duration(duration: Duration) -> String {
@@ -435,6 +638,10 @@ mod tests {
         assert_eq!(determinate_bar(0.5, 4), "[██░░]");
         assert_eq!(determinate_bar(2.0, 4), "[████]");
         assert_eq!(pulse_bar(3, 8).chars().count(), 10);
+        assert_eq!(progress_bar_width(79), 8);
+        assert_eq!(progress_bar_width(80), 12);
+        assert_eq!(progress_bar_width(120), MAX_BAR_WIDTH);
+        assert_eq!(OperationKind::Fetch.verb(), "FETCH");
     }
 
     #[test]
@@ -443,5 +650,25 @@ mod tests {
         assert_eq!(grouped(999), "999");
         assert_eq!(grouped(1_000), "1,000");
         assert_eq!(grouped(51_886), "51,886");
+    }
+
+    #[test]
+    fn repeated_progress_detail_does_not_consume_width() {
+        assert_eq!(
+            non_redundant_detail("opening thread projection", "opening thread projection"),
+            None
+        );
+        assert_eq!(
+            non_redundant_detail(
+                "opening thread projection",
+                "opening thread projection · /data/state"
+            ),
+            Some("/data/state")
+        );
+    }
+
+    #[test]
+    fn elapsed_seconds_have_one_unit_suffix() {
+        assert_eq!(human_duration(Duration::from_millis(8_300)), "8.3s");
     }
 }

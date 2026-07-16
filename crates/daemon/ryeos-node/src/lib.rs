@@ -17,7 +17,9 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use init::{run_init, InitOptions, InitReport};
+pub use init::{
+    run_init, run_init_with_progress, InitOptions, InitPhase, InitProgress, InitReport,
+};
 pub use init_check::{require_initialized, InitDiagnostics, InitState};
 pub use lifecycle_wire::{
     LifecycleIdentity, LifecycleResponse, LifecycleWireState, StartupPhase, StartupSnapshot,

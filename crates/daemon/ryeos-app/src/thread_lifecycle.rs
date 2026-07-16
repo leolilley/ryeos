@@ -410,6 +410,10 @@ pub struct ThreadListView {
     /// replay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_node: Option<CurrentNode>,
+    /// Compact terminal cause for table expansion. Full structured error data
+    /// remains available from thread inspect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A dashboard-decorated thread row plus its structural position in one
@@ -489,6 +493,38 @@ fn sort_thread_list_items(items: &mut [ThreadListItem], sort: ryeos_state::queri
             items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         }
     }
+}
+
+fn terminal_error_summary(raw: &str) -> Option<String> {
+    fn candidate(value: &Value) -> Option<&str> {
+        match value {
+            Value::String(message) => Some(message),
+            Value::Object(map) => ["result", "message", "error", "reason"]
+                .into_iter()
+                .find_map(|key| map.get(key).and_then(candidate)),
+            _ => None,
+        }
+    }
+
+    let parsed = serde_json::from_str::<Value>(raw).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(candidate)
+        .unwrap_or(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if message.is_empty() {
+        return None;
+    }
+    const MAX_SUMMARY_CHARS: usize = 512;
+    let mut chars = message.chars();
+    let summary = chars.by_ref().take(MAX_SUMMARY_CHARS).collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{summary}…")
+    } else {
+        summary
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3332,6 +3368,7 @@ impl ThreadLifecycleService {
             follow_waiters: waiters,
             mut facets,
             mut current_graph_nodes,
+            mut terminal_error_previews,
         } = enrichment;
         let mut by_parent: std::collections::HashMap<
             &str,
@@ -3377,6 +3414,9 @@ impl ThreadLifecycleService {
                 let current_node = current_graph_nodes
                     .remove(&item.thread_id)
                     .map(|(node, step)| CurrentNode { node, step });
+                let error = terminal_error_previews
+                    .remove(&item.thread_id)
+                    .and_then(|raw| terminal_error_summary(&raw));
                 ThreadListView {
                     item,
                     execution,
@@ -3385,6 +3425,7 @@ impl ThreadLifecycleService {
                     pending,
                     facets,
                     current_node,
+                    error,
                 }
             })
             .collect()
@@ -4218,6 +4259,7 @@ pub fn admit_non_execution_root(
     requested_by: &str,
     caller_scopes: Vec<String>,
     current_site_id: &str,
+    origin_site_id: &str,
     thread_profile: String,
 ) -> Result<NonExecutionRootAdmission> {
     validate_principal_identifier("non-execution root acting principal", requested_by)?;
@@ -4237,7 +4279,7 @@ pub fn admit_non_execution_root(
             })?,
         },
         current_site_id: current_site_id.to_string(),
-        origin_site_id: current_site_id.to_string(),
+        origin_site_id: origin_site_id.to_string(),
         execution_hints: ExecutionHints::default(),
         validate_only: false,
     };
@@ -5093,6 +5135,7 @@ mod tests {
             pending: 0,
             facets: std::collections::BTreeMap::new(),
             current_node: None,
+            error: None,
         };
         let v = serde_json::to_value(&view).unwrap();
         assert!(v.get("follow").is_none(), "absent follow omitted");
@@ -5104,5 +5147,18 @@ mod tests {
         let steered = ThreadListView { pending: 2, ..view };
         let v2 = serde_json::to_value(&steered).unwrap();
         assert_eq!(v2["pending"], json!(2));
+    }
+
+    #[test]
+    fn terminal_error_summary_prefers_runtime_result_and_compacts_lines() {
+        let raw = serde_json::json!({
+            "reason": "runtime_exited_without_callback_finalization",
+            "result": "Error: compile graph\n\nCaused by: bad expression"
+        })
+        .to_string();
+        assert_eq!(
+            terminal_error_summary(&raw).as_deref(),
+            Some("Error: compile graph Caused by: bad expression")
+        );
     }
 }

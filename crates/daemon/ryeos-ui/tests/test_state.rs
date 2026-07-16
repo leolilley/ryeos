@@ -97,8 +97,9 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
 }
 
 /// Build an AppState backed by the live workspace core + standard + RyeOS UI bundles.
-/// Suitable for happy-path topology/session tests that need real kind schemas,
-/// parsers, handlers, runtimes, and bundled items.
+/// Suitable for happy-path topology/session tests that need real kind schemas
+/// and bundled items. These handlers do not execute parser, composer, or runtime
+/// binaries, so the fixture deliberately remains usable in a clean checkout.
 #[allow(dead_code)]
 pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
@@ -204,21 +205,14 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     .expect("load kind registry");
 
     let bundle_roots = vec![core_bundle, std_bundle, ryeos_bundle];
-    let (parser_tools, _) =
-        ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
-            .expect("load parser tools");
-    let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(
-        parser_tools,
-        std::sync::Arc::clone(&native_handlers),
+        ryeos_engine::parsers::ParserRegistry::empty(),
+        Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
     );
-    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
-        .expect("derive composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
-        .with_composers(composers)
 }
 
 // Test fixture: one argument per AppState component under test.

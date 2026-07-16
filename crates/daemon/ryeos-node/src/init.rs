@@ -130,6 +130,26 @@ pub struct InitReport {
     pub next_steps: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitPhase {
+    PreparingLayout,
+    InitializingIdentity,
+    PinningTrust,
+    DiscoveringBundles,
+    VerifyingBundles,
+    InstallingBundles,
+    InitializingVault,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitProgress {
+    pub phase: InitPhase,
+    pub completed: Option<usize>,
+    pub total: Option<usize>,
+    pub detail: Option<String>,
+}
+
 /// Run `ryeos init` end-to-end (Model B).
 ///
 /// Order:
@@ -143,6 +163,22 @@ pub struct InitReport {
 ///   8. Vault X25519 keypair
 ///   9. Post-init trust verification
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
+    run_init_with_progress(opts, |_| Ok(()))
+}
+
+pub fn run_init_with_progress(
+    opts: &InitOptions,
+    mut observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    let mut progress = |phase, completed, total, detail: Option<String>| {
+        observe(&InitProgress {
+            phase,
+            completed,
+            total,
+            detail,
+        })
+    };
+    progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
     if !opts.source_dir.is_dir() {
         bail!(
@@ -172,6 +208,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
     // ── 2. User key ──
+    progress(InitPhase::InitializingIdentity, None, None, None)?;
     let user_key_path = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
@@ -222,6 +259,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
 
     // ── 5. Pin official publisher key ──
+    progress(InitPhase::PinningTrust, None, None, None)?;
     // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
     // ryeos-official`, all release Dockerfiles). The label is informational, but
     // bundle preflight compares it, so a divergence used to brick boot (the
@@ -245,6 +283,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 6. Discover bundles in source_dir ──
+    progress(InitPhase::DiscoveringBundles, None, None, None)?;
     let discovered = discover_bundles(&opts.source_dir)?;
     if discovered.is_empty() {
         bail!(
@@ -316,7 +355,19 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     };
 
     if !opts.skip_preflight {
-        for job in &plan.verification_jobs {
+        progress(
+            InitPhase::VerifyingBundles,
+            Some(0),
+            Some(plan.verification_jobs.len()),
+            None,
+        )?;
+        for (index, job) in plan.verification_jobs.iter().enumerate() {
+            progress(
+                InitPhase::VerifyingBundles,
+                Some(index),
+                Some(plan.verification_jobs.len()),
+                Some(job.subject.clone()),
+            )?;
             ryeos_bundle::preflight::preflight_verify_bundle_in_context(
                 &job.subject_root,
                 &job.dependency_roots,
@@ -336,7 +387,13 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let bundle_registry_lock =
         ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&opts.app_root)?;
     let mut bundles_installed = Vec::new();
-    for name in &plan.install_order {
+    for (index, name) in plan.install_order.iter().enumerate() {
+        progress(
+            InitPhase::InstallingBundles,
+            Some(index),
+            Some(plan.install_order.len()),
+            Some(name.clone()),
+        )?;
         let planned = plan
             .bundles
             .get(name)
@@ -447,6 +504,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     drop(bundle_registry_lock);
 
     // ── 8. Vault X25519 keypair ──
+    progress(InitPhase::InitializingVault, None, None, None)?;
     let vault_dir = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
@@ -475,6 +533,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     materialize_node_defaults(&opts.app_root)?;
 
     // ── 9. Post-init trust verification ──
+    progress(InitPhase::Finalizing, None, None, None)?;
     let post_trust =
         TrustStore::load(None, &operator_config_root).context("load post-init trust store")?;
     if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {

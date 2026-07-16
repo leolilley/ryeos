@@ -82,6 +82,12 @@ jobs:
       - name: Check canonical naming
         run: ./scripts/lint-naming.sh
 
+      - name: Check CLI presentation boundaries
+        run: ./scripts/lint-cli-presentation.sh
+
+      - name: Check shell terminal presentation
+        run: ./scripts/pkg/test-ryeos-terminal.sh
+
       - name: Check removed compatibility vocabulary
         run: ./scripts/lint-no-content-wrap.sh
 

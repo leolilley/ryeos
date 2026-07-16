@@ -44,6 +44,9 @@ EOF
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$repo_root/scripts/lib/ryeos-terminal.sh"
+ryeos_term_init
 asset_dir="$repo_root/crates/clients/web/pkg"
 port=7411
 upstream="http://127.0.0.1:7400"
@@ -60,12 +63,12 @@ project_path=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)
-            [[ $# -ge 2 ]] || { echo "--port requires PORT" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { ryeos_term_fail "--port requires PORT"; exit 2; }
             port="$2"
             shift 2
             ;;
         --upstream)
-            [[ $# -ge 2 ]] || { echo "--upstream requires URL" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { ryeos_term_fail "--upstream requires URL"; exit 2; }
             upstream="${2%/}"
             shift 2
             ;;
@@ -79,17 +82,17 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --surface)
-            [[ $# -ge 2 ]] || { echo "--surface requires REF" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { ryeos_term_fail "--surface requires REF"; exit 2; }
             surface_ref="$2"
             shift 2
             ;;
         --project)
-            [[ $# -ge 2 ]] || { echo "--project requires PATH" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { ryeos_term_fail "--project requires PATH"; exit 2; }
             project_path="$2"
             shift 2
             ;;
         --pid-file)
-            [[ $# -ge 2 ]] || { echo "--pid-file requires PATH" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { ryeos_term_fail "--pid-file requires PATH"; exit 2; }
             pid_file="$2"
             shift 2
             ;;
@@ -110,7 +113,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --asset-dir)
-            [[ $# -ge 2 ]] || { echo "--asset-dir requires DIR" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { ryeos_term_fail "--asset-dir requires DIR"; exit 2; }
             asset_dir="$2"
             shift 2
             ;;
@@ -119,7 +122,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            echo "dev-ui-assets.sh: unknown argument: $1" >&2
+            ryeos_term_fail "unknown argument: $1"
             usage >&2
             exit 2
             ;;
@@ -131,11 +134,11 @@ if [[ $stop -eq 1 ]]; then
         pid="$(cat "$pid_file")"
         if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid"
-            echo "[dev-ui-assets] stopped background proxy pid $pid"
+            ryeos_term_info "stopped background UI proxy · pid $pid"
         fi
         rm -f "$pid_file"
     else
-        echo "[dev-ui-assets] no pid file: $pid_file"
+        ryeos_term_note "no UI proxy pid file at $pid_file"
     fi
     exit 0
 fi
@@ -160,18 +163,18 @@ netloc = f"127.0.0.1:{port}"
 print(urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)))
 PY
 )"
-    echo "[dev-ui-assets] opening: $dev_launch_url"
+    ryeos_term_info "opening $dev_launch_url"
     if command -v xdg-open >/dev/null 2>&1; then
         xdg-open "$dev_launch_url" >/dev/null 2>&1 &
     else
-        echo "$dev_launch_url"
+        ryeos_term_row "url" "$dev_launch_url"
     fi
 }
 
 PYTHON_BIN="${PYTHON:-python}"
 
 if [[ ! -d "$asset_dir" ]]; then
-    echo "dev-ui-assets.sh: asset dir does not exist: $asset_dir" >&2
+    ryeos_term_fail "asset directory does not exist: $asset_dir"
     exit 1
 fi
 
@@ -185,7 +188,7 @@ if [[ $direct_start -eq 1 && $restart -eq 1 ]]; then
 fi
 
 if [[ $direct_start -eq 1 ]]; then
-    echo "[dev-ui-assets] starting ryeos with RYEOS_UI_ASSET_DIR=$asset_dir"
+    ryeos_term_info "starting RyeOS with UI assets from $asset_dir"
     RYEOS_UI_ASSET_DIR="$asset_dir" ryeos start
     exit 0
 fi
@@ -309,15 +312,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(message)
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[dev-ui-assets] " + fmt % args + "\n")
+        sys.stderr.write("•  RYE/OS  proxy " + fmt % args + "\n")
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-print(f"[dev-ui-assets] serving UI assets from: {asset_dir}")
-print(f"[dev-ui-assets] proxying API/session requests to: {upstream}")
-print(f"[dev-ui-assets] open: http://127.0.0.1:{port}/ui")
 Server(("127.0.0.1", port), Handler).serve_forever()
 PY
 }
@@ -326,8 +326,9 @@ if [[ $background -eq 1 ]]; then
     if [[ -f "$pid_file" ]]; then
         old_pid="$(cat "$pid_file")"
         if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
-            echo "[dev-ui-assets] already running pid $old_pid (pid file: $pid_file)"
-            echo "[dev-ui-assets] open: http://127.0.0.1:$port/ui"
+            ryeos_term_info "UI asset proxy already running · pid $old_pid"
+            ryeos_term_row "open" "http://127.0.0.1:$port/ui"
+            ryeos_term_row "pid file" "$pid_file"
             if [[ $open_ui -eq 1 ]]; then
                 open_dev_ui
             fi
@@ -336,15 +337,22 @@ if [[ $background -eq 1 ]]; then
         rm -f "$pid_file"
     fi
     log_file="${pid_file%.pid}.log"
+    ryeos_term_begin RUN "starting UI asset proxy"
     run_proxy >"$log_file" 2>&1 &
     pid=$!
     echo "$pid" >"$pid_file"
-    echo "[dev-ui-assets] background proxy pid $pid"
-    echo "[dev-ui-assets] log: $log_file"
-    echo "[dev-ui-assets] open: http://127.0.0.1:$port/ui"
+    ryeos_term_end success "UI PROXY ONLINE" "pid $pid"
+    ryeos_term_section "development UI"
+    ryeos_term_row "log" "$log_file"
+    ryeos_term_row "open" "http://127.0.0.1:$port/ui"
     if [[ $open_ui -eq 1 ]]; then
         open_dev_ui
     fi
 else
+    ryeos_term_section "development UI"
+    ryeos_term_row "assets" "$asset_dir"
+    ryeos_term_row "upstream" "$upstream"
+    ryeos_term_row "open" "http://127.0.0.1:$port/ui"
+    ryeos_term_info "UI asset proxy running in foreground"
     run_proxy
 fi
