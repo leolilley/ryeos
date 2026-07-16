@@ -268,15 +268,15 @@ ryeos_term_begin() {
     _RYEOS_TERM_STARTED="$(_ryeos_term_now)"
     _RYEOS_TERM_ACTIVE=1
     if [[ "$_RYEOS_TERM_MODE" == tty && "$_RYEOS_TERM_WIDTH" -le 30 ]]; then
-        printf '\r\033[2K%s RYE/OS %s %s' \
+        printf '\r\033[2K%s RYEOS %s %s' \
             "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
             "$verb" "$label" >&2
     elif [[ "$_RYEOS_TERM_MODE" == tty ]]; then
-        printf '\r\033[2K%s  RYE/OS  %-7s  %s' \
+        printf '\r\033[2K%s  RYEOS  %-7s  %s' \
             "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
             "$verb" "$label" >&2
     else
-        printf 'RYE/OS %s %s\n' "$verb" "$label" >&2
+        printf 'RYEOS %s %s\n' "$verb" "$label" >&2
     fi
 }
 
@@ -289,17 +289,17 @@ ryeos_term_update() {
     message="$(_ryeos_term_clamp "$label$suffix" "$message_limit")"
     _RYEOS_TERM_LABEL="$label"
     if [[ "$_RYEOS_TERM_MODE" == tty && "$_RYEOS_TERM_WIDTH" -le 30 ]]; then
-        printf '\r\033[2K%s RYE/OS %s %s' \
+        printf '\r\033[2K%s RYEOS %s %s' \
             "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
             "$_RYEOS_TERM_VERB" "$message" >&2
         _RYEOS_TERM_ACTIVE=1
     elif [[ "$_RYEOS_TERM_MODE" == tty ]]; then
-        printf '\r\033[2K%s  RYE/OS  %-7s  %s  ·  %s' \
+        printf '\r\033[2K%s  RYEOS  %-7s  %s  ·  %s' \
             "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
             "$_RYEOS_TERM_VERB" "$message" "$elapsed" >&2
         _RYEOS_TERM_ACTIVE=1
     else
-        printf 'RYE/OS %s %s\n' "$_RYEOS_TERM_VERB" "$message" >&2
+        printf 'RYEOS %s %s\n' "$_RYEOS_TERM_VERB" "$message" >&2
     fi
 }
 
@@ -320,9 +320,9 @@ ryeos_term_end() {
     esac
     glyph="$(_ryeos_term_tone "$tone" "$(_ryeos_term_glyph "$status")")"
     if [[ "$_RYEOS_TERM_WIDTH" -le 30 ]]; then
-        printf '%s RYE/OS %s\n' "$glyph" "$message" >&2
+        printf '%s RYEOS %s\n' "$glyph" "$message" >&2
     else
-        printf '%s  RYE/OS  %s  ·  %s\n' "$glyph" "$message" "$elapsed" >&2
+        printf '%s  RYEOS  %s  ·  %s\n' "$glyph" "$message" "$elapsed" >&2
     fi
     if (( _RYEOS_TERM_DEPTH > 0 )); then
         parent_index=$(( _RYEOS_TERM_DEPTH - 1 ))
@@ -360,7 +360,7 @@ ryeos_term_info() {
     local message was_active="$_RYEOS_TERM_ACTIVE" was_suspended="$_RYEOS_TERM_SUSPENDED"
     _ryeos_term_clear
     message="$(_ryeos_term_clamp "$1" "$(( _RYEOS_TERM_WIDTH - 14 ))")"
-    printf '%s  RYE/OS  %s\n' \
+    printf '%s  RYEOS  %s\n' \
         "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_NEUTRAL" "$(_ryeos_term_glyph info)")" \
         "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_NEUTRAL" "$message")" >&2
     _ryeos_term_restore_message_state "$was_active" "$was_suspended"
@@ -373,7 +373,7 @@ ryeos_term_note() {
     if [[ "$_RYEOS_TERM_COLOR" == 1 ]]; then
         message="$(_ryeos_term_tone "$_RYEOS_TERM_TONE_SECONDARY" "$message")"
     fi
-    printf '%s  RYE/OS  %s\n' \
+    printf '%s  RYEOS  %s\n' \
         "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_NEUTRAL" "$(_ryeos_term_glyph info)")" \
         "$message" >&2
     _ryeos_term_restore_message_state "$was_active" "$was_suspended"
@@ -382,7 +382,7 @@ ryeos_term_note() {
 ryeos_term_warn() {
     local was_active="$_RYEOS_TERM_ACTIVE" was_suspended="$_RYEOS_TERM_SUSPENDED"
     _ryeos_term_clear
-    printf '%s  RYE/OS  %s\n' \
+    printf '%s  RYEOS  %s\n' \
         "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_WARNING" "$(_ryeos_term_glyph warning)")" \
         "$(_ryeos_term_clamp "$1" "$(( _RYEOS_TERM_WIDTH - 14 ))")" >&2
     _ryeos_term_restore_message_state "$was_active" "$was_suspended"
@@ -391,7 +391,7 @@ ryeos_term_warn() {
 ryeos_term_fail() {
     local was_active="$_RYEOS_TERM_ACTIVE" was_suspended="$_RYEOS_TERM_SUSPENDED"
     _ryeos_term_clear
-    printf '%s  RYE/OS  %s\n' \
+    printf '%s  RYEOS  %s\n' \
         "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_FAILURE" "$(_ryeos_term_glyph failure)")" \
         "$(_ryeos_term_clamp "$1" "$(( _RYEOS_TERM_WIDTH - 14 ))")" >&2
     _ryeos_term_restore_message_state "$was_active" "$was_suspended"

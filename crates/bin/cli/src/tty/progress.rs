@@ -110,7 +110,7 @@ impl LifecycleProgress {
         };
         let mut out = io::stdout().lock();
         let summary = format!(
-            "{}  RYE/OS  {}  {} · {elapsed}",
+            "{}  RYEOS  {}  {} · {elapsed}",
             self.line.success_glyph(),
             self.line.success("NODE ONLINE"),
             self.line.dim(qualifier),
@@ -153,7 +153,7 @@ impl LifecycleProgress {
         };
         let mut out = io::stdout().lock();
         let summary = format!(
-            "{}  RYE/OS  {}  {} · {elapsed}",
+            "{}  RYEOS  {}  {} · {elapsed}",
             self.line.success_glyph(),
             self.line.success("NODE OFFLINE"),
             self.line.dim(qualifier),
@@ -271,7 +271,7 @@ impl ProgressLine {
             .and_then(|detail| non_redundant_detail(label, detail))
             .map(|detail| format!(" · {detail}"))
             .unwrap_or_default();
-        let plain = format!("{spinner}  RYE/OS  {verb:<5}  {bar}  {label}{detail} · {elapsed}");
+        let plain = format!("{spinner}  RYEOS  {verb:<5}  {bar}  {label}{detail} · {elapsed}");
         let plain = super::clamp_visible(&plain, self.width.saturating_sub(1).max(1));
         let rendered = if self.color {
             colorize_progress_line(&plain, spinner)

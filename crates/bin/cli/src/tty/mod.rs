@@ -85,7 +85,7 @@ impl Console {
                 .as_deref()
                 .map(|value| format!("  ·  {value}"))
                 .unwrap_or_default();
-            lines.push(format!("{glyph}  RYE/OS  {heading}{detail}"));
+            lines.push(format!("{glyph}  RYEOS  {heading}{detail}"));
         } else {
             let detail = status
                 .detail
@@ -131,7 +131,7 @@ impl Console {
                     DiagnosticLevel::Error => "COMMAND FAILED",
                 });
             let heading = theme::style(heading, tone, self.capabilities.color);
-            lines.push(format!("{glyph}  RYE/OS  {heading}"));
+            lines.push(format!("{glyph}  RYEOS  {heading}"));
             lines.push(format!("   {}", diagnostic.message));
             for value in &diagnostic.context {
                 lines.push(format!("   {value}"));
@@ -163,7 +163,7 @@ impl Console {
         let mut lines = Vec::new();
         if let Some(title) = &document.title {
             lines.push(if self.capabilities.tty() {
-                format!("RYE/OS  {title}")
+                format!("RYEOS  {title}")
             } else {
                 title.clone()
             });
@@ -824,7 +824,7 @@ pub fn render_command_result(
         .map(|(label, value)| (label.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     let lines = command_frame_lines(CommandFrame {
-        title: "RYE/OS COMMAND",
+        title: "RYEOS COMMAND",
         phase: "live",
         command,
         status,
@@ -963,7 +963,7 @@ impl TtyStreamPresenter {
             .map(|(label, value)| (label.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         let lines = command_frame_lines(CommandFrame {
-            title: "RYE/OS STREAM",
+            title: "RYEOS STREAM",
             phase: "live",
             command: &self.command,
             status: &self.status,
@@ -1215,8 +1215,8 @@ fn render(console: &Console, home: &TtyHomeFile, previous_lines: usize) -> io::R
 fn render_lines(home: &TtyHomeFile) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(match home.screen {
-        TtyScreen::Home => "RYE/OS".to_string(),
-        TtyScreen::Help => "RYE/OS HELP".to_string(),
+        TtyScreen::Home => "RYEOS".to_string(),
+        TtyScreen::Help => "RYEOS HELP".to_string(),
     });
     lines.push(match home.screen {
         TtyScreen::Home => "portable verified execution".to_string(),
@@ -1348,7 +1348,7 @@ mod tests {
             .map(|(label, value)| (label.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         let lines = command_frame_lines(CommandFrame {
-            title: "RYE/OS COMMAND",
+            title: "RYEOS COMMAND",
             phase: "live",
             command: "execute",
             status: "complete",

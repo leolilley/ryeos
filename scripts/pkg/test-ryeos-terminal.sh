@@ -34,7 +34,7 @@ if grep -q $'\033' "$tmp/plain"; then
     printf 'plain output contained ANSI bytes\n' >&2
     exit 1
 fi
-grep -q 'RYE/OS VERIFY plain phase' "$tmp/plain"
+grep -q 'RYEOS VERIFY plain phase' "$tmp/plain"
 grep -q 'plain update' "$tmp/plain"
 
 status=0
@@ -70,7 +70,7 @@ if grep -q $'\033' "$tmp/dumb"; then
     printf 'TERM=dumb output contained ANSI bytes\n' >&2
     exit 1
 fi
-grep -q '^RYE/OS RUN dumb$' "$tmp/dumb"
+grep -q '^RYEOS RUN dumb$' "$tmp/dumb"
 
 status=0
 TERM=xterm RYEOS_TTY=always bash -c \

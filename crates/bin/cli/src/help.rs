@@ -37,7 +37,7 @@ fn build_top_level_help(
     app_root: &Path,
     snapshot: &anyhow::Result<NodeConfigSnapshot>,
 ) -> (crate::tty::Document, Option<crate::tty::Diagnostic>) {
-    let mut document = crate::tty::Document::titled("CLI FOR RYE/OS");
+    let mut document = crate::tty::Document::titled("CLI FOR RYEOS");
     let mut usage = crate::tty::Section::named("usage");
     usage.rows.push(crate::tty::Row::text(
         "ryeos [-p PROJECT] [--debug] <command...> [args...]",
