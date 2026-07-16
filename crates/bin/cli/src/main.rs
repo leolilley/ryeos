@@ -1,22 +1,5 @@
 use clap::Parser;
-
-mod arg_bind;
-mod daemon_preflight;
-mod dispatcher;
-mod effective_metadata;
-mod error;
-mod exec_stream;
-mod exit;
-mod help;
-mod lifecycle_commands;
-mod node_descriptors;
-mod offline_dispatch;
-mod presenter;
-mod project_resolve;
-#[cfg(test)]
-mod test_env;
-mod transport;
-mod tty;
+use ryeos_cli::{dispatcher, error, tty};
 
 fn init_tracing(debug: bool) {
     if debug {

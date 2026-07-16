@@ -287,7 +287,7 @@ fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
     stdout_is_tty && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
 }
 
-pub(crate) fn forces_plain_output(rest: &[String]) -> bool {
+pub fn forces_plain_output(rest: &[String]) -> bool {
     rest.iter().any(|token| plain_output_flag_is_on(token))
 }
 

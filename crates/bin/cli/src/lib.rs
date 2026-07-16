@@ -4,6 +4,7 @@
 
 pub mod arg_bind;
 pub mod daemon_preflight;
+pub mod dispatcher;
 pub mod effective_metadata;
 pub mod error;
 pub mod exec_stream;
