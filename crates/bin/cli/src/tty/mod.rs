@@ -83,7 +83,13 @@ impl Console {
             let detail = status
                 .detail
                 .as_deref()
-                .map(|value| format!("  ·  {value}"))
+                .map(|value| {
+                    theme::style(
+                        &format!("  ·  {value}"),
+                        Tone::Secondary,
+                        self.capabilities.color,
+                    )
+                })
                 .unwrap_or_default();
             lines.push(format!("{glyph}  RYEOS  {heading}{detail}"));
         } else {
@@ -132,13 +138,55 @@ impl Console {
                 });
             let heading = theme::style(heading, tone, self.capabilities.color);
             lines.push(format!("{glyph}  RYEOS  {heading}"));
-            lines.push(format!("   {}", diagnostic.message));
+            lines.extend(
+                wrap_words(
+                    &diagnostic.message,
+                    self.capabilities.width.saturating_sub(4).max(8),
+                )
+                .into_iter()
+                .map(|value| {
+                    format!(
+                        "   {}",
+                        theme::style(&value, Tone::Neutral, self.capabilities.color)
+                    )
+                }),
+            );
             for value in &diagnostic.context {
-                lines.push(format!("   {value}"));
+                lines.extend(
+                    wrap_words(value, self.capabilities.width.saturating_sub(4).max(8))
+                        .into_iter()
+                        .map(|value| {
+                            format!(
+                                "   {}",
+                                theme::style(
+                                    &value,
+                                    Tone::Secondary,
+                                    self.capabilities.color,
+                                )
+                            )
+                        }),
+                );
             }
             if let Some(hint) = &diagnostic.hint {
                 lines.push(String::new());
-                lines.push(format!("   hint  {}", hint.0));
+                let prefix = "   hint  ";
+                let available = self
+                    .capabilities
+                    .width
+                    .saturating_sub(visible_width(prefix) + 1)
+                    .max(8);
+                for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
+                    let value = theme::style(
+                        &value,
+                        Tone::Secondary,
+                        self.capabilities.color,
+                    );
+                    lines.push(if index == 0 {
+                        format!("{prefix}{value}")
+                    } else {
+                        format!("{}{value}", " ".repeat(visible_width(prefix)))
+                    });
+                }
             }
         } else {
             let prefix = match diagnostic.level {
@@ -163,7 +211,11 @@ impl Console {
         let mut lines = Vec::new();
         if let Some(title) = &document.title {
             lines.push(if self.capabilities.tty() {
-                format!("RYEOS  {title}")
+                theme::style(
+                    &format!("RYEOS  {title}"),
+                    Tone::Neutral,
+                    self.capabilities.color,
+                )
             } else {
                 title.clone()
             });
@@ -174,7 +226,11 @@ impl Console {
             }
             if let Some(heading) = &section.heading {
                 lines.push(if self.capabilities.tty() {
-                    heading.to_ascii_lowercase()
+                    theme::style(
+                        &heading.to_ascii_lowercase(),
+                        Tone::Neutral,
+                        self.capabilities.color,
+                    )
                 } else {
                     heading.to_ascii_uppercase()
                 });
@@ -183,13 +239,30 @@ impl Console {
         }
         if !document.hints.is_empty() {
             lines.push(String::new());
-            lines.extend(document.hints.iter().map(|hint| {
-                if self.capabilities.tty() {
-                    format!("hint  {}", hint.0)
-                } else {
-                    hint.0.clone()
+            for hint in &document.hints {
+                if !self.capabilities.tty() {
+                    lines.push(hint.0.clone());
+                    continue;
                 }
-            }));
+                let prefix = "hint  ";
+                let available = self
+                    .capabilities
+                    .width
+                    .saturating_sub(visible_width(prefix) + 1)
+                    .max(8);
+                for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
+                    let line = if index == 0 {
+                        format!("{prefix}{value}")
+                    } else {
+                        format!("{}{value}", " ".repeat(visible_width(prefix)))
+                    };
+                    lines.push(theme::style(
+                        &line,
+                        Tone::Secondary,
+                        self.capabilities.color,
+                    ));
+                }
+            }
         }
         lines
     }
@@ -215,6 +288,21 @@ fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapa
     for row in rows {
         match &row.key {
             Some(key) if capabilities.tty() => {
+                if visible_width(key) > key_width {
+                    lines.push(format!(
+                        "  {}",
+                        theme::style(key, Tone::Secondary, capabilities.color)
+                    ));
+                    for value in
+                        wrap_words(&row.value, capabilities.width.saturating_sub(5).max(8))
+                    {
+                        lines.push(format!(
+                            "    {}",
+                            theme::style(&value, row.tone, capabilities.color)
+                        ));
+                    }
+                    continue;
+                }
                 let marker = if row.tone == Tone::Neutral {
                     " ".to_string()
                 } else {
@@ -224,7 +312,12 @@ fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapa
                         capabilities.color,
                     )
                 };
-                let prefix = format!("{marker} {key:key_width$}  ");
+                let key = theme::style(
+                    &format!("{key:key_width$}"),
+                    Tone::Secondary,
+                    capabilities.color,
+                );
+                let prefix = format!("{marker} {key}  ");
                 let available = capabilities
                     .width
                     .saturating_sub(visible_width(&prefix) + 1)
@@ -823,14 +916,17 @@ pub fn render_command_result(
         .iter()
         .map(|(label, value)| (label.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    let lines = command_frame_lines(CommandFrame {
-        title: "RYEOS COMMAND",
-        phase: "live",
-        command,
-        status,
-        detail: None,
-        payload: &row_refs,
-    });
+    let lines = command_frame_lines(
+        CommandFrame {
+            title: "RYEOS COMMAND",
+            phase: "live",
+            command,
+            status,
+            detail: None,
+            payload: &row_refs,
+        },
+        console.capabilities(),
+    );
     render_command_frame(console, &lines, previous_lines)
 }
 
@@ -962,14 +1058,17 @@ impl TtyStreamPresenter {
             .iter()
             .map(|(label, value)| (label.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        let lines = command_frame_lines(CommandFrame {
-            title: "RYEOS STREAM",
-            phase: "live",
-            command: &self.command,
-            status: &self.status,
-            detail: None,
-            payload: &refs,
-        });
+        let lines = command_frame_lines(
+            CommandFrame {
+                title: "RYEOS STREAM",
+                phase: "live",
+                command: &self.command,
+                status: &self.status,
+                detail: None,
+                payload: &refs,
+            },
+            self.console.capabilities(),
+        );
         self.previous_lines = render_command_frame(&self.console, &lines, self.previous_lines)?;
         self.last_render = Some(std::time::Instant::now());
         Ok(())
@@ -985,23 +1084,98 @@ struct CommandFrame<'a> {
     payload: &'a [(&'a str, &'a str)],
 }
 
-fn command_frame_lines(frame: CommandFrame<'_>) -> Vec<String> {
+fn command_frame_lines(
+    frame: CommandFrame<'_>,
+    capabilities: TerminalCapabilities,
+) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(frame.title.to_string());
-    lines.push(format!("{:<9} {}", "phase", frame.phase));
-    lines.push(format!("{:<9} {}", "command", empty_dash(frame.command)));
-    lines.push(format!("{:<9} {}", "status", frame.status));
+    lines.push(theme::style(
+        frame.title,
+        Tone::Neutral,
+        capabilities.color,
+    ));
+    append_frame_row(
+        &mut lines,
+        "phase",
+        frame.phase,
+        Tone::Secondary,
+        capabilities,
+    );
+    append_frame_row(
+        &mut lines,
+        "command",
+        empty_dash(frame.command),
+        Tone::Neutral,
+        capabilities,
+    );
+    append_frame_row(
+        &mut lines,
+        "status",
+        frame.status,
+        frame_status_tone(frame.status),
+        capabilities,
+    );
     if let Some(detail) = frame.detail {
-        lines.push(format!("{:<9} {}", "detail", detail));
+        append_frame_row(
+            &mut lines,
+            "detail",
+            detail,
+            Tone::Secondary,
+            capabilities,
+        );
     }
     if !frame.payload.is_empty() {
         lines.push(String::new());
         for (label, value) in frame.payload {
-            lines.push(format!("{:<13} {}", label, value));
+            let tone = match *label {
+                "error" => Tone::Failure,
+                "hint" => Tone::Secondary,
+                _ => Tone::Neutral,
+            };
+            append_frame_row(&mut lines, label, value, tone, capabilities);
         }
     }
     lines.push(String::new());
     lines
+}
+
+fn append_frame_row(
+    lines: &mut Vec<String>,
+    label: &str,
+    value: &str,
+    tone: Tone,
+    capabilities: TerminalCapabilities,
+) {
+    const KEY_WIDTH: usize = 13;
+    let label = clamp_visible(label, KEY_WIDTH);
+    let label = format!("{label:<width$}", width = KEY_WIDTH);
+    let key = theme::style(
+        &label,
+        Tone::Secondary,
+        capabilities.color,
+    );
+    let prefix = format!("  {key} ");
+    let available = capabilities
+        .width
+        .saturating_sub(visible_width(&prefix) + 1)
+        .max(8);
+    for (index, value) in wrap_words(value, available).into_iter().enumerate() {
+        let value = theme::style(&value, tone, capabilities.color);
+        lines.push(if index == 0 {
+            format!("{prefix}{value}")
+        } else {
+            format!("{}{value}", " ".repeat(visible_width(&prefix)))
+        });
+    }
+}
+
+fn frame_status_tone(status: &str) -> Tone {
+    match status {
+        "complete" | "completed" | "success" => Tone::Success,
+        "error" | "failed" | "cancelled" => Tone::Failure,
+        "opening stream" | "streaming" | "running" => Tone::Active,
+        _ => Tone::Neutral,
+    }
 }
 
 fn render_command_frame(
@@ -1203,8 +1377,9 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
 }
 
 fn render(console: &Console, home: &TtyHomeFile, previous_lines: usize) -> io::Result<usize> {
-    let width = console.capabilities().width;
-    let lines = render_lines(home)
+    let capabilities = console.capabilities();
+    let width = capabilities.width;
+    let lines = render_lines(home, capabilities)
         .into_iter()
         .map(|line| clamp_visible(&line, width.saturating_sub(1).max(1)))
         .collect::<Vec<_>>();
@@ -1212,29 +1387,44 @@ fn render(console: &Console, home: &TtyHomeFile, previous_lines: usize) -> io::R
     Ok(lines.len())
 }
 
-fn render_lines(home: &TtyHomeFile) -> Vec<String> {
+fn render_lines(home: &TtyHomeFile, capabilities: TerminalCapabilities) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(match home.screen {
+    let title = match home.screen {
         TtyScreen::Home => "RYEOS".to_string(),
         TtyScreen::Help => "RYEOS HELP".to_string(),
-    });
-    lines.push(match home.screen {
+    };
+    lines.push(theme::style(
+        &title,
+        Tone::Neutral,
+        capabilities.color,
+    ));
+    let subtitle = match home.screen {
         TtyScreen::Home => "portable verified execution".to_string(),
         TtyScreen::Help => "verified command surface".to_string(),
-    });
-    lines.push(String::new());
-    lines.push(format!(
-        "{:<9} {}{}",
-        "node",
-        home.sections.node.status,
-        detail_suffix(home.sections.node.detail.as_deref())
+    };
+    lines.push(theme::style(
+        &subtitle,
+        Tone::Secondary,
+        capabilities.color,
     ));
+    lines.push(String::new());
+    let mut summary = vec![Row::key_value(
+        "node",
+        format!(
+            "{}{}",
+            home.sections.node.status,
+            detail_suffix(home.sections.node.detail.as_deref())
+        ),
+    )
+    .with_tone(node_status_tone(&home.sections.node.status))];
     if let Some(project) = &home.sections.project {
-        lines.push(format!(
-            "{:<9} {}{}",
+        summary.push(Row::key_value(
             "project",
-            project.label,
-            detail_suffix(project.detail.as_deref().or(project.root.as_deref()))
+            format!(
+                "{}{}",
+                project.label,
+                detail_suffix(project.detail.as_deref().or(project.root.as_deref()))
+            ),
         ));
     }
     let command_label = home
@@ -1243,50 +1433,90 @@ fn render_lines(home: &TtyHomeFile) -> Vec<String> {
         .count
         .map(|count| format!("{count} available"))
         .unwrap_or_else(|| "unavailable".to_string());
-    lines.push(format!(
-        "{:<9} {}{}",
+    summary.push(Row::key_value(
         "commands",
-        command_label,
-        detail_suffix(home.sections.commands.detail.as_deref())
+        format!(
+            "{}{}",
+            command_label,
+            detail_suffix(home.sections.commands.detail.as_deref())
+        ),
     ));
+    append_rows(&mut lines, &summary, capabilities);
     lines.push(String::new());
     match home.screen {
-        TtyScreen::Home => render_home_items(&home.sections.items, &mut lines),
-        TtyScreen::Help => render_help_items(&home.sections.items, &mut lines),
+        TtyScreen::Home => render_home_items(&home.sections.items, &mut lines, capabilities),
+        TtyScreen::Help => render_help_items(&home.sections.items, &mut lines, capabilities),
     }
     lines.push(String::new());
     lines
 }
 
-fn render_home_items(items: &[TtyItem], lines: &mut Vec<String>) {
-    lines.push("items".to_string());
-    for item in items {
-        lines.push(format!(
-            "  {:<24} {}",
-            item.label,
-            item.detail.as_deref().unwrap_or_default()
-        ));
+fn node_status_tone(status: &str) -> Tone {
+    match status {
+        "running" => Tone::Success,
+        "loading" | "starting" | "remote override" => Tone::Active,
+        "stale" | "unresponsive" | "not initialized" => Tone::Warning,
+        "failed" | "config error" | "status error" => Tone::Failure,
+        _ => Tone::Neutral,
     }
 }
 
-fn render_help_items(items: &[TtyItem], lines: &mut Vec<String>) {
-    lines.push("commands".to_string());
+fn render_home_items(
+    items: &[TtyItem],
+    lines: &mut Vec<String>,
+    capabilities: TerminalCapabilities,
+) {
+    lines.push(theme::style("items", Tone::Neutral, capabilities.color));
+    let rows = items
+        .iter()
+        .map(|item| {
+            Row::key_value(
+                &item.label,
+                item.detail.as_deref().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    append_rows(lines, &rows, capabilities);
+}
+
+fn render_help_items(
+    items: &[TtyItem],
+    lines: &mut Vec<String>,
+    capabilities: TerminalCapabilities,
+) {
+    lines.push(theme::style(
+        "commands",
+        Tone::Neutral,
+        capabilities.color,
+    ));
     let visible = items.iter().take(24).collect::<Vec<_>>();
     if visible.is_empty() {
-        lines.push("  no commands available".to_string());
+        append_rows(
+            lines,
+            &[Row::text("no commands available")],
+            capabilities,
+        );
     } else {
-        for item in visible {
-            lines.push(format!(
-                "  {:<28} {}",
-                item.label,
-                item.detail.as_deref().unwrap_or_default()
-            ));
-        }
+        let rows = visible
+            .into_iter()
+            .map(|item| {
+                Row::key_value(
+                    &item.label,
+                    item.detail.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        append_rows(lines, &rows, capabilities);
         let remaining = items.len().saturating_sub(24);
         if remaining > 0 {
-            lines.push(format!(
-                "  ... {remaining} more · use `ryeos commands` for the full reference"
-            ));
+            append_rows(
+                lines,
+                &[Row::text(format!(
+                    "… {remaining} more · use `ryeos commands` for the full reference"
+                ))
+                .with_tone(Tone::Secondary)],
+                capabilities,
+            );
         }
     }
 }
@@ -1347,15 +1577,64 @@ mod tests {
             .iter()
             .map(|(label, value)| (label.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        let lines = command_frame_lines(CommandFrame {
-            title: "RYEOS COMMAND",
-            phase: "live",
-            command: "execute",
-            status: "complete",
-            detail: None,
-            payload: &refs,
-        });
+        let lines = command_frame_lines(
+            CommandFrame {
+                title: "RYEOS COMMAND",
+                phase: "live",
+                command: "execute",
+                status: "complete",
+                detail: None,
+                payload: &refs,
+            },
+            TerminalCapabilities::plain(80),
+        );
         assert!(lines.iter().any(|line| line.contains("follow this thread")));
+    }
+
+    #[test]
+    fn compact_help_wraps_descriptions_instead_of_truncating_them() {
+        let capabilities = TerminalCapabilities {
+            mode: capabilities::HumanOutputMode::Tty,
+            color: false,
+            unicode: true,
+            width: 60,
+        };
+        let home = TtyHomeFile {
+            screen: TtyScreen::Help,
+            sections: TtyHomeSections {
+                node: TtyNodeSummary {
+                    status: "running".to_string(),
+                    detail: None,
+                },
+                project: None,
+                commands: TtyCommandSummary {
+                    count: Some(1),
+                    detail: None,
+                },
+                items: vec![TtyItem {
+                    label: "bundle install".to_string(),
+                    detail: Some(
+                        "Install or replace a downstream bundle while preserving verified metadata"
+                            .to_string(),
+                    ),
+                }],
+            },
+        };
+
+        let lines = render_lines(&home, capabilities);
+        assert!(lines.iter().any(|line| line.contains("preserving")));
+        assert!(lines.iter().any(|line| line.contains("metadata")));
+        assert!(!lines.iter().any(|line| line.contains("pack...")));
+        assert!(lines.iter().all(|line| visible_width(line) < 60));
+    }
+
+    #[test]
+    fn command_frame_status_uses_semantic_gruvbox_tone() {
+        assert_eq!(frame_status_tone("complete"), Tone::Success);
+        assert_eq!(frame_status_tone("streaming"), Tone::Active);
+        assert_eq!(frame_status_tone("error"), Tone::Failure);
+        assert_eq!(node_status_tone("running"), Tone::Success);
+        assert_eq!(node_status_tone("unresponsive"), Tone::Warning);
     }
 
     #[test]
