@@ -527,6 +527,28 @@ fn operator_hooks_path(trusted_keys_dir: &Path) -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    fn sign_and_trust(yaml_body: &str, trust_dir: &Path) -> String {
+        use base64::Engine;
+        use ed25519_dalek::SigningKey;
+        use lillux::signature::{compute_fingerprint, sign_content_at};
+
+        let signing_key = SigningKey::from_bytes(&[73u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let fingerprint = compute_fingerprint(&verifying_key);
+        let signed = sign_content_at(yaml_body, &signing_key, "#", None, "2026-01-01T00:00:00Z");
+
+        std::fs::create_dir_all(trust_dir).unwrap();
+        let public_key = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
+        std::fs::write(
+            trust_dir.join("hooks-test.toml"),
+            format!(
+                "fingerprint = \"{fingerprint}\"\npem = \"ed25519:{public_key}\"\nowner = \"test\"\n"
+            ),
+        )
+        .unwrap();
+        signed
+    }
+
     #[test]
     fn hook_layer_has_closed_named_wire_values() {
         assert_eq!(
@@ -564,23 +586,26 @@ mod tests {
         ] {
             std::fs::create_dir_all(directory).unwrap();
         }
+        let runtime_conditions = r#"
+builtin_hooks: [{id: builtin, event: after_step, action: {item_id: tool:test/noop, ref_bindings: {}}}]
+infra_hooks: [{id: infra, event: after_step, action: {item_id: tool:test/noop, ref_bindings: {}}}]
+context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noop, ref_bindings: {}}}]
+"#;
         std::fs::write(
             runtime_config.join("hook_conditions.yaml"),
-            r#"
-builtin_hooks: [{id: builtin, event: after_step, action: {item_id: tool:test/noop}}]
-infra_hooks: [{id: infra, event: after_step, action: {item_id: tool:test/noop}}]
-context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noop}}]
-"#,
+            sign_and_trust(runtime_conditions, &trusted_keys),
         )
         .unwrap();
+        let project_config = "hooks: [{id: project, event: after_step, action: {item_id: 'tool:test/noop', ref_bindings: {}}}]\n";
         std::fs::write(
             project_hooks.join("hooks.yaml"),
-            "hooks: [{id: project, event: after_step, action: {item_id: 'tool:test/noop'}}]\n",
+            sign_and_trust(project_config, &trusted_keys),
         )
         .unwrap();
+        let operator_config = "hooks: [{id: operator, event: after_step, action: {item_id: 'tool:test/noop', ref_bindings: {}}}]\n";
         std::fs::write(
             operator_hooks.join("hooks.yaml"),
-            "hooks: [{id: operator, event: after_step, action: {item_id: 'tool:test/noop'}}]\n",
+            sign_and_trust(operator_config, &trusted_keys),
         )
         .unwrap();
 

@@ -62,10 +62,9 @@ impl KindProfileRegistry {
             }
         }
 
-        // Daemon-internal profile for child threads spawned by
-        // launch augmentations (e.g. compose_context_positions).
-        // These threads use the target kind's thread_profile when
-        // available, falling back to "system_task" otherwise.
+        // Add the small set of non-schema daemon bookkeeping profiles. Actual
+        // executable workers, including launch augmentations, cross root
+        // admission under their verified runtime kind's declared profile.
         Self::insert_internal_profiles(&mut profiles);
 
         tracing::info!(
@@ -78,9 +77,8 @@ impl KindProfileRegistry {
     }
 
     fn insert_internal_profiles(profiles: &mut HashMap<String, ThreadKindProfile>) {
-        // system_task: non-root, non-interruptible, non-continuable.
-        // Used for daemon-internal maintenance threads (e.g. launch
-        // augmentation child threads when no target kind profile exists).
+        // system_task: non-root, non-interruptible, non-continuable. Reserved
+        // for daemon-internal bookkeeping rows that do not execute an item.
         profiles.insert(
             "system_task".to_string(),
             ThreadKindProfile {

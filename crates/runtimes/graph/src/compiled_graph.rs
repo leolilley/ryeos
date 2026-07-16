@@ -520,14 +520,16 @@ config:
     choose:
       node_type: gate
       next:
+        type: conditional
         branches:
           - {when: "1", to: done}
     done: {node_type: return}
 "#;
 
         let error = crate::model::GraphDefinition::from_yaml(raw, None).unwrap_err();
+        let error = format!("{error:#}");
 
-        assert!(error.to_string().contains("expected bool"));
+        assert!(error.contains("expected bool"));
     }
 
     #[test]
@@ -548,6 +550,7 @@ config:
     choose:
       node_type: gate
       next:
+        type: conditional
         branches:
           - when: '{expression}'
             to: done
@@ -556,8 +559,9 @@ config:
             );
 
             let error = crate::model::GraphDefinition::from_yaml(&raw, None).unwrap_err();
+            let error = format!("{error:#}");
             assert!(
-                error.to_string().contains("cannot be indexed by number"),
+                error.contains("cannot be indexed by number"),
                 "{expression}: {error}"
             );
         }

@@ -327,7 +327,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -433,7 +433,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -481,7 +481,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
-            "ref_bindings": {},
+            "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
             "launch_mode": "detached"
@@ -506,7 +506,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
-            "ref_bindings": {},
+            "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
             "validate_only": true
@@ -531,7 +531,7 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
-            "ref_bindings": {},
+            "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
             "target_site_id": "site:not-local"
@@ -577,7 +577,7 @@ fn sse_dispatch_launch_collision() {
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
     let write_barrier = WriteBarrier::new();
     let state_store = StateStore::new_with_head_trust(
@@ -686,6 +686,8 @@ fn new_thread_id_format_and_uniqueness() {
 async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR))
+        .expect("initialize project root");
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
@@ -732,7 +734,7 @@ async fn sse_dispatch_launch_rejects_relative_project_path() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": "relative/path",
         "parameters": {},
     });

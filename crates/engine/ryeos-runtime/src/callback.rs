@@ -188,9 +188,25 @@ pub struct TerminalCompletion {
     pub warnings: Vec<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(transparent)]
 struct RequiredNullable<T>(Option<T>);
+
+impl<'de, T> Deserialize<'de> for RequiredNullable<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize through `Value` first. Unlike `Option<T>`, `Value`
+        // rejects an absent struct field while still representing an explicit
+        // JSON null, preserving the required-but-nullable wire distinction.
+        let value = Value::deserialize(deserializer)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -503,7 +503,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             let mut head_trust = ryeos_state::refs::TrustStore::new();
             head_trust.insert(
                 identity.fingerprint().to_string(),
-                identity.verifying_key().clone(),
+                *identity.verifying_key(),
             );
             let head_trust = Arc::new(head_trust);
 
@@ -1091,11 +1091,13 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             }
         }
 
-        if let Some(state) = shutdown_drain_state
-            .lock()
-            .expect("shutdown drain state mutex poisoned")
-            .take()
-        {
+        let shutdown_state = {
+            let mut guard = shutdown_drain_state
+                .lock()
+                .expect("shutdown drain state mutex poisoned");
+            guard.take()
+        };
+        if let Some(state) = shutdown_state {
             if !drain_running_threads(&state).await && result.is_ok() {
                 result = Err(anyhow::anyhow!(
                     "shutdown could not prove every attached process terminated"
@@ -1964,7 +1966,7 @@ async fn run_service_standalone(
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let head_trust = Arc::new(head_trust);
@@ -2145,10 +2147,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn graceful_mode_uses_declared_grace() {
+    fn graceful_mode_is_capped_by_node_policy() {
         assert_eq!(
             resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 11 })),
-            ShutdownAction::Graceful(Duration::from_secs(11))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+            ))
         );
     }
 

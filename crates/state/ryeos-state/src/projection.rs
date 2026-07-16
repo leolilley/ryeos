@@ -33,7 +33,7 @@ pub use threads::{
 };
 mod schema;
 mod transaction;
-pub(crate) use chain_commit::project_committed_chain;
+pub(crate) use chain_commit::{project_committed_chain, project_initial_root_committed_chain};
 pub use cursor::ProjectionMeta;
 #[cfg(test)]
 use schema::schema_spec_fingerprint;

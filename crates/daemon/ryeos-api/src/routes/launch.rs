@@ -192,8 +192,8 @@ pub(crate) fn preflight_dispatch_launch(
 // Execution plumbing: each argument is a distinct leg of the launch's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
-/// Spawn an acknowledged managed launch. The receiver resolves only after the
-/// durable launch authority has been handed to the scheduled spawn task.
+/// Spawn an acknowledged subprocess launch. The receiver resolves only after
+/// durable execution authority has been handed to the scheduled task.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_dispatch_launch_with_handoff(
     state: &AppState,

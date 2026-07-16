@@ -1,9 +1,10 @@
 //! Shared test state builder for handler tests.
 //!
 //! Provides two modes:
-//! - `build_test_state()`: empty engine (fast, for error-path tests)
-//! - `build_test_state_with_live_bundles()`: metadata engine over the workspace
-//!   bundles (for item-resolution and topology tests; no built binaries needed)
+//! - `build_test_state()`: empty engine for paths that reject before item
+//!   resolution;
+//! - `build_test_state_with_live_bundles()`: full engine with signed workspace
+//!   bundles for paths that resolve or execute canonical item refs.
 
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
 
 /// Build a minimal AppState with an empty engine.
-/// Suitable for testing error paths (not found, wrong kind, etc.).
+/// Suitable only for paths that reject before canonical item resolution.
 #[allow(dead_code)]
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
@@ -38,7 +39,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
@@ -124,7 +125,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
@@ -139,7 +140,9 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         .unwrap(),
     );
     let engine = Arc::new(build_live_bundle_engine());
-    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
+    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));

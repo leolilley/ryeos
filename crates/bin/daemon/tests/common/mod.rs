@@ -25,6 +25,31 @@ use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
+const DEFAULT_DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn daemon_startup_deadline() -> anyhow::Result<Instant> {
+    let timeout = match std::env::var("RYEOSD_TEST_STARTUP_TIMEOUT_SECS") {
+        Ok(raw) => {
+            let seconds = raw.parse::<u64>().with_context(|| {
+                format!("parse RYEOSD_TEST_STARTUP_TIMEOUT_SECS value `{raw}` as seconds")
+            })?;
+            anyhow::ensure!(
+                seconds > 0,
+                "RYEOSD_TEST_STARTUP_TIMEOUT_SECS must be greater than zero"
+            );
+            Duration::from_secs(seconds)
+        }
+        Err(std::env::VarError::NotPresent) => DEFAULT_DAEMON_STARTUP_TIMEOUT,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "read RYEOSD_TEST_STARTUP_TIMEOUT_SECS: {error}"
+            ));
+        }
+    };
+    Ok(Instant::now() + timeout)
+}
+
 /// Path to the built `ryeosd` binary (set by Cargo for integration tests
 /// in this crate).
 pub fn ryeosd_binary() -> PathBuf {
@@ -59,6 +84,122 @@ pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
     })?;
     s.parse()
         .with_context(|| format!("parse 'bind' value '{s}' from daemon.json"))
+}
+
+fn daemon_stderr_log_path(harness_id: u64) -> Option<PathBuf> {
+    std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+        .map(|dir| PathBuf::from(dir).join(format!("daemon-{harness_id}.stderr.log")))
+}
+
+async fn stop_and_collect_daemon_stderr(child: &mut Child, harness_id: u64) -> String {
+    child.start_kill().ok();
+
+    let mut stderr = String::new();
+    if tokio::time::timeout(Duration::from_secs(2), child.wait())
+        .await
+        .is_err()
+    {
+        stderr.push_str("<daemon did not exit within 2s after kill>\n");
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        match tokio::time::timeout(Duration::from_millis(500), pipe.read_to_string(&mut stderr))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                stderr.push_str(&format!("<failed to read daemon stderr: {error}>\n"));
+            }
+            Err(_) => {
+                stderr.push_str("<daemon stderr remained open after 500ms; drain abandoned>\n");
+            }
+        }
+    }
+
+    if let Some(path) = daemon_stderr_log_path(harness_id) {
+        if let Ok(log) = std::fs::read_to_string(path) {
+            if !stderr.is_empty() && !log.is_empty() {
+                stderr.push_str("<daemon stderr log>\n");
+            }
+            stderr.push_str(&log);
+        }
+    }
+    stderr
+}
+
+async fn wait_for_daemon_ready(
+    child: &mut Child,
+    bind: SocketAddr,
+    harness_id: u64,
+    context: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("http://{bind}/_ryeos/ready");
+
+    loop {
+        let detail = match client
+            .get(&url)
+            .timeout(Duration::from_millis(200))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+                if body.contains("node_startup_failed") {
+                    let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+                    anyhow::bail!(
+                        "{context} reported a terminal startup failure at {url}: HTTP {status}: \
+                         {body}\ndaemon stderr:\n{stderr}"
+                    );
+                }
+                format!("HTTP {status}: {body}")
+            }
+            Err(error) => error.to_string(),
+        };
+
+        if Instant::now() > deadline {
+            let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+            anyhow::bail!(
+                "{context} never became ready at {url}; last probe: {detail}\n\
+                 daemon stderr:\n{stderr}"
+            );
+        }
+        tokio::time::sleep(DAEMON_STARTUP_POLL_INTERVAL).await;
+    }
+}
+
+async fn wait_for_daemon_discovery(
+    child: &mut Child,
+    daemon_json: &Path,
+    harness_id: u64,
+    context: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    loop {
+        if daemon_json.exists() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+            anyhow::bail!(
+                "{context} exited with {status} before publishing {} — daemon stderr:\n{stderr}",
+                daemon_json.display()
+            );
+        }
+        if Instant::now() > deadline {
+            let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+            anyhow::bail!(
+                "{context} never published {} — daemon stderr:\n{stderr}",
+                daemon_json.display()
+            );
+        }
+        tokio::time::sleep(DAEMON_STARTUP_POLL_INTERVAL).await;
+    }
 }
 
 /// Resolve the projection instance selected by the current recovery
@@ -439,60 +580,30 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
-        let child = cmd.spawn()?;
+        let startup_deadline = daemon_startup_deadline()?;
+        let mut child = cmd.spawn()?;
 
         let daemon_json = app_root.join("daemon.json");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                // Drain stderr so the failure message includes the
-                // daemon's own diagnostics. Stderr may be either a
-                // piped handle or the on-disk log file.
-                let mut child = child;
-                child.start_kill().ok();
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{harness_id}.stderr.log"));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    stderr.read_to_string(&mut buf).await.ok();
-                }
-                anyhow::bail!(
-                    "daemon.json never appeared at {} — daemon stderr:\n{}",
-                    daemon_json.display(),
-                    buf
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut child,
+            &daemon_json,
+            harness_id,
+            "daemon",
+            startup_deadline,
+        )
+        .await?;
 
         // Read the actual bound address — required when we passed :0.
         let actual_bind = read_actual_bind(&daemon_json)?;
 
-        // Best-effort: also wait for the HTTP listener to actually accept.
-        let client = reqwest::Client::new();
-        let url = format!("http://{actual_bind}/health");
-        let connect_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                anyhow::bail!("daemon /health never became reachable at {url}");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut child,
+            actual_bind,
+            harness_id,
+            "daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(Self {
             _state_dir_outer: state_dir_outer,
@@ -612,55 +723,29 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
-        let child = cmd.spawn()?;
+        let startup_deadline = daemon_startup_deadline()?;
+        let mut child = cmd.spawn()?;
 
         let daemon_json = state_path.join("daemon.json");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                let mut child = child;
-                child.start_kill().ok();
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{harness_id}.stderr.log"));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    stderr.read_to_string(&mut buf).await.ok();
-                }
-                anyhow::bail!(
-                    "daemon.json never appeared at {} (fast fixture path) — daemon stderr:\n{}",
-                    daemon_json.display(),
-                    buf
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut child,
+            &daemon_json,
+            harness_id,
+            "daemon (fast fixture path)",
+            startup_deadline,
+        )
+        .await?;
 
         let actual_bind = read_actual_bind(&daemon_json)?;
 
-        let client = reqwest::Client::new();
-        let url = format!("http://{actual_bind}/health");
-        let connect_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                anyhow::bail!("daemon /health never became reachable at {url} (fast fixture path)");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut child,
+            actual_bind,
+            harness_id,
+            "daemon (fast fixture path)",
+            startup_deadline,
+        )
+        .await?;
 
         let harness = Self {
             _state_dir_outer: state_dir_outer,
@@ -688,9 +773,25 @@ impl DaemonHarness {
         project_path: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+        // The live HTTP contract does not accept relative project paths.
+        // Historical tests used `.` merely to mean "no project overlay";
+        // represent that intent with the current omitted-project shape so the
+        // daemon creates its isolated execution workspace. Tests exercising a
+        // real project pass its absolute tempdir path instead.
+        let project_path = (project_path != ".").then_some(project_path);
+
+        // The directive runtime's signed launch contract requires an explicit
+        // model identity. These fixtures keep model configuration on the
+        // directive itself, so the correct binding is the independently
+        // authorized directive ref repeated in the `model` slot.
+        let ref_bindings = if item_ref.starts_with("directive:") {
+            serde_json::json!({ "model": item_ref })
+        } else {
+            serde_json::json!({})
+        };
         let body = serde_json::json!({
             "item_ref": item_ref,
-            "ref_bindings": {},
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": params,
         });
@@ -814,49 +915,27 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
 
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                anyhow::bail!(
-                    "respawned daemon.json never appeared at {}",
-                    daemon_json.display()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut self.child,
+            &daemon_json,
+            harness_id,
+            "respawned daemon",
+            startup_deadline,
+        )
+        .await?;
         self.bind = read_actual_bind(&daemon_json)?;
 
-        let client = reqwest::Client::new();
-        let url = format!("http://{}/health", self.bind);
-        let connect_deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{harness_id}.stderr.log"));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                anyhow::bail!(
-                    "restarted daemon /health never became reachable at {url} — stderr:\n{buf}"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            harness_id,
+            "respawned daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(())
     }
@@ -938,54 +1017,29 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
 
         // Wait for the restarted daemon to publish daemon.json with
         // its newly-bound address.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                anyhow::bail!(
-                    "restarted daemon.json never appeared at {}",
-                    daemon_json.display()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut self.child,
+            &daemon_json,
+            harness_id,
+            "restarted daemon",
+            startup_deadline,
+        )
+        .await?;
         self.bind = read_actual_bind(&daemon_json)?;
 
-        // 5. Wait for the daemon to be responsive (deadline is generous
-        //    because the reconciler runs before the HTTP listener binds).
-        let client = reqwest::Client::new();
-        let url = format!("http://{}/health", self.bind);
-        let connect_deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                // Drain stderr for diagnostics.
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{}.stderr.log", self.bind.port()));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                anyhow::bail!(
-                    "restarted daemon /health never became reachable at {url} — stderr:\n{buf}"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            harness_id,
+            "restarted daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(())
     }
@@ -1162,6 +1216,9 @@ pub async fn run_service_standalone(
     let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
     fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
     fast_fixture::register_standard_bundle(&state_path, &fixture)?;
+    drop(ryeos_app::runtime_db::RuntimeDb::open(
+        &state_path.join(".ai/state/runtime.sqlite3"),
+    )?);
 
     let mut cmd = Command::new(ryeosd_binary());
     cmd.arg("--app-root")

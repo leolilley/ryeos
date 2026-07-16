@@ -36,6 +36,23 @@ struct WriteBarrierResume {
     barrier: Arc<ryeos_app::write_barrier::WriteBarrier>,
 }
 
+struct GcRunInput<'a> {
+    state_authority: &'a ryeos_state::PinnedStateAuthority,
+    cas_guard: &'a ryeos_state::CasMutationGuard,
+    signer: &'a NodeIdentitySigner,
+    params: &'a GcParams,
+    state_store: &'a ryeos_app::state_store::StateStore,
+    scheduler_db: &'a ryeos_scheduler::SchedulerDb,
+    fire_retention: Option<gc::retention::FireRetentionPolicy>,
+    reaped_seats: usize,
+    terminal_chain_candidates: usize,
+    retired_terminal_chains: usize,
+    deleted_thread_projection_rows: usize,
+    deleted_thread_runtime_rows: usize,
+    deleted_thread_runtime_files: usize,
+    pending_retirements_recovered: usize,
+}
+
 impl Drop for WriteBarrierResume {
     fn drop(&mut self) {
         self.barrier.resume();
@@ -144,8 +161,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     }
     if !params.dry_run {
         if let Some(grace_ms) = seat_lease_grace_ms {
-            let now_ms = i64::try_from(lillux::time::timestamp_millis())
-                .context("current timestamp does not fit seat-lease storage")?;
+            let now_ms = lillux::time::timestamp_millis();
             let cutoff = now_ms.saturating_sub(grace_ms);
             for thread_id in state.state_store.expired_seat_leases(cutoff)? {
                 if !state
@@ -216,13 +232,13 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         }
         let _ = guard_ready_tx.send(Ok(()));
         match command_rx.recv() {
-            Ok(GcWorkerCommand::Run(_write_barrier_resume)) => run_gc_and_log(
-                &state_authority,
-                &cas_guard,
-                &signer,
-                &params_clone,
-                &state_store,
-                &scheduler_db,
+            Ok(GcWorkerCommand::Run(_write_barrier_resume)) => run_gc_and_log(GcRunInput {
+                state_authority: &state_authority,
+                cas_guard: &cas_guard,
+                signer: &signer,
+                params: &params_clone,
+                state_store: &state_store,
+                scheduler_db: &scheduler_db,
                 fire_retention,
                 reaped_seats,
                 terminal_chain_candidates,
@@ -231,7 +247,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
                 deleted_thread_runtime_rows,
                 deleted_thread_runtime_files,
                 pending_retirements_recovered,
-            )
+            })
             .map(Some),
             Ok(GcWorkerCommand::Abort) | Err(_) => Ok(None),
         }
@@ -297,22 +313,23 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
 }
 
 /// Run GC and append event log. Called inside `spawn_blocking`.
-fn run_gc_and_log(
-    state_authority: &ryeos_state::PinnedStateAuthority,
-    cas_guard: &ryeos_state::CasMutationGuard,
-    signer: &NodeIdentitySigner,
-    params: &GcParams,
-    state_store: &ryeos_app::state_store::StateStore,
-    scheduler_db: &ryeos_scheduler::SchedulerDb,
-    fire_retention: Option<gc::retention::FireRetentionPolicy>,
-    reaped_seats: usize,
-    terminal_chain_candidates: usize,
-    retired_terminal_chains: usize,
-    deleted_thread_projection_rows: usize,
-    deleted_thread_runtime_rows: usize,
-    deleted_thread_runtime_files: usize,
-    pending_retirements_recovered: usize,
-) -> Result<GcResult> {
+fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
+    let GcRunInput {
+        state_authority,
+        cas_guard,
+        signer,
+        params,
+        state_store,
+        scheduler_db,
+        fire_retention,
+        reaped_seats,
+        terminal_chain_candidates,
+        retired_terminal_chains,
+        deleted_thread_projection_rows,
+        deleted_thread_runtime_rows,
+        deleted_thread_runtime_files,
+        pending_retirements_recovered,
+    } = input;
     let runtime_directory = state_authority.runtime_directory();
     // The worker already owns the exclusive cross-process guard and the daemon
     // write barrier is quiesced. Every unresolved Set/Remove closure remains a

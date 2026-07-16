@@ -322,7 +322,7 @@ async fn open_gateway_stream(
 ) -> (reqwest::Response, String) {
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/live_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/live_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -395,7 +395,7 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/live_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/live_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });

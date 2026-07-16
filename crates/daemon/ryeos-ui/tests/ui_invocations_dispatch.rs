@@ -1,7 +1,7 @@
 // Tests for `ui.invocations.dispatch` handler.
 
 mod test_state;
-use test_state::build_test_state;
+use test_state::{build_test_state, build_test_state_with_live_bundles};
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::browser_session::LaunchContext;
@@ -23,7 +23,10 @@ fn read_only_context() -> LaunchContext {
         surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         read_only: true,
-        granted_caps: vec!["ui.read".into()],
+        granted_caps: vec![
+            "ui.read".into(),
+            "ryeos.execute.service.commands/submit".into(),
+        ],
         user_principal_id: None,
     }
 }
@@ -62,7 +65,7 @@ async fn arbitrary_event_targets_are_rejected() {
 
 #[tokio::test]
 async fn read_only_session_rejects_nonlocal_invocation() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -70,7 +73,10 @@ async fn read_only_session_rejects_nonlocal_invocation() {
 
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
-        vec!["ui.read".into()],
+        vec![
+            "ui.read".into(),
+            "ryeos.execute.service.commands/submit".into(),
+        ],
         false,
     );
 
@@ -120,7 +126,7 @@ async fn session_cookie_required() {
 
 #[tokio::test]
 async fn session_local_invocation_publishes_to_session_bus() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions

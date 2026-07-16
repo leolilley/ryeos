@@ -4,10 +4,9 @@
 //! `ryeos_tracing::test::capture_traces` subscriber is the only
 //! subscriber active on the test thread.
 //!
-//! Asserts that a create_thread → mark_thread_running →
-//! attach_thread_process → finalize_thread sequence emits the
-//! corresponding `state:*` spans we instrumented in
-//! `crates/bin/daemon/src/state_store.rs`.
+//! Asserts that root creation followed by mark_thread_running →
+//! attach_thread_process → finalize_thread emits the complete current
+//! state-write span sequence and preserves the expected wrapper nesting.
 
 use std::sync::Arc;
 
@@ -20,7 +19,7 @@ fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = "a".repeat(64);
     ryeos_state::objects::CapturedThreadHistoryPolicy {
         retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
-        canonical_item_ref: "test/directive".to_string(),
+        canonical_item_ref: "directive:test/directive".to_string(),
         item_content_hash: hash.clone(),
         item_signer_fingerprint: Some(hash.clone()),
         item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
@@ -45,7 +44,7 @@ fn setup_state_store() -> (TempDir, Arc<StateStore>) {
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
 
     let write_barrier = WriteBarrier::new();
@@ -68,7 +67,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         kind: "directive".to_string(),
-        item_ref: "test/directive".to_string(),
+        item_ref: "directive:test/directive".to_string(),
         executor_ref: "test/executor".to_string(),
         launch_mode: "inline".to_string(),
         current_site_id: "site:test".to_string(),
@@ -138,14 +137,34 @@ fn state_store_write_path_emits_state_spans() {
         collect_names(s, &mut names);
     }
 
-    let create = ryeos_tracing::test::find_span(&spans, "state:create_thread")
-        .unwrap_or_else(|| panic!("expected state:create_thread; got {:?}", names));
-    assert_eq!(create.field("thread_id"), Some("T-trace-1"));
-    assert_eq!(create.field("chain_root_id"), Some("T-trace-1"));
+    assert_eq!(
+        names,
+        [
+            "state:project_event",
+            "state:mark_thread_running",
+            "state:project_event",
+            "state:attach_thread_process",
+            "state:thread_attach",
+            "state:finalize_thread",
+            "state:project_event",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        "state lifecycle span ordering drifted"
+    );
+
+    let created = ryeos_tracing::test::find_span(&spans, "state:project_event")
+        .expect("root creation must project thread_created");
+    assert_eq!(created.field("thread_id"), Some("T-trace-1"));
+    assert_eq!(created.field("event_type"), Some("thread_created"));
 
     let running = ryeos_tracing::test::find_span(&spans, "state:mark_thread_running")
         .unwrap_or_else(|| panic!("expected state:mark_thread_running; got {:?}", names));
     assert_eq!(running.field("thread_id"), Some("T-trace-1"));
+    let started = ryeos_tracing::test::find_child(running, "state:project_event")
+        .expect("mark_thread_running must project thread_started");
+    assert_eq!(started.field("thread_id"), Some("T-trace-1"));
+    assert_eq!(started.field("event_type"), Some("thread_started"));
 
     let attach = ryeos_tracing::test::find_span(&spans, "state:attach_thread_process")
         .unwrap_or_else(|| panic!("expected state:attach_thread_process; got {:?}", names));
@@ -156,16 +175,14 @@ fn state_store_write_path_emits_state_spans() {
         .unwrap_or_else(|| panic!("expected state:finalize_thread; got {:?}", names));
     assert_eq!(finalize.field("thread_id"), Some("T-trace-1"));
     assert_eq!(finalize.field("status"), Some("completed"));
+    let completed = ryeos_tracing::test::find_child(finalize, "state:project_event")
+        .expect("finalize_thread must project thread_completed");
+    assert_eq!(completed.field("thread_id"), Some("T-trace-1"));
+    assert_eq!(completed.field("event_type"), Some("thread_completed"));
 
-    // The state_store wrappers must nest the inner ryeos-state +
-    // runtime_db spans as descendants:
-    //   state:create_thread → state:chain_create + state:chain_append
-    //   state:attach_thread_process → state:thread_attach (runtime_db)
-    assert!(
-        ryeos_tracing::test::find_child(create, "state:chain_create").is_some(),
-        "expected state:chain_create under state:create_thread; got {:?}",
-        names
-    );
+    // The state_store process wrapper must retain the runtime-db attachment as
+    // a descendant; lifecycle event projections are asserted above as children
+    // of the transition that authored them.
     assert!(
         ryeos_tracing::test::find_child(attach, "state:thread_attach").is_some(),
         "expected state:thread_attach under state:attach_thread_process; got {:?}",

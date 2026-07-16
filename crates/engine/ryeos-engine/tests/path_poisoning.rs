@@ -32,6 +32,7 @@ fn malicious_path_binary_not_resolved() {
         "content_blob_hash": "aa".repeat(32),
         "mode": 0o755,
         "integrity": format!("sha256:{}", "aa".repeat(32)),
+        "signature_info": null,
     });
     let is_hash = lillux::cas::sha256_hex(
         lillux::cas::canonical_json(&item_source)
@@ -73,6 +74,7 @@ fn wrong_triple_not_found() {
         "content_blob_hash": "aa".repeat(32),
         "mode": 0o755,
         "integrity": format!("sha256:{}", "aa".repeat(32)),
+        "signature_info": null,
     });
     let is_hash = lillux::cas::sha256_hex(
         lillux::cas::canonical_json(&item_source)

@@ -1125,9 +1125,8 @@ config:
         item_id: tool:test/noop
         params: {secret: "${secrets.token}"}
 "#;
-        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
-            .unwrap_err()
-            .to_string();
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        let error = format!("{error:#}");
         assert!(error.contains("secrets"), "unexpected error: {error}");
         assert!(error.contains("allowed roots"), "unexpected error: {error}");
     }
@@ -1150,9 +1149,8 @@ config:
           - to: done
     done: {node_type: return}
 "#;
-        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
-            .unwrap_err()
-            .to_string();
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        let error = format!("{error:#}");
         assert!(error.contains("result"), "unexpected error: {error}");
     }
 
@@ -1195,9 +1193,8 @@ config:
         item_id: tool:test/noop
         params: {value: "${inputs.missing}"}
 "#;
-        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
-            .unwrap_err()
-            .to_string();
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        let error = format!("{error:#}");
         assert!(error.contains("inputs.missing") || error.contains("input `missing`"));
         assert!(error.contains("config_schema.properties"));
     }
@@ -1246,9 +1243,8 @@ config:
           - {to: done}
     done: {node_type: return}
 "#;
-        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml"))
-            .unwrap_err()
-            .to_string();
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        let error = format!("{error:#}");
         assert!(
             error.contains("more than one default"),
             "unexpected error: {error}"

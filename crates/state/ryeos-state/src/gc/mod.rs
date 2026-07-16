@@ -1014,9 +1014,10 @@ mod tests {
             "item_source_hashes": {"different": pending_hash},
         }));
 
+        let recovery =
+            crate::recovery::RecoveryStore::from_runtime_state_dir(&runtime_state_dir).unwrap();
         let cas_guard =
             crate::recovery::CasMutationGuard::acquire_shared(&runtime_state_dir).unwrap();
-        let recovery = crate::recovery::RecoveryStore::from_refs_root(&refs_root).unwrap();
         let chain_lock = crate::chain::ChainLock::acquire(&refs_root, "T-pending").unwrap();
         recovery
             .prepare_set(&chain_lock, "T-pending", None, &pending_hash)

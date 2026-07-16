@@ -605,16 +605,7 @@ fn exec_tool(
         })?;
 
     if inherit_stdio {
-        return exec_inherited(InheritedExecRequest {
-            tool_ref: tool_ref_str,
-            cmd: Path::new(&request.cmd),
-            args: &request.args,
-            cwd: request.cwd.as_deref(),
-            envs: &request.envs,
-            limits: request.limits.as_ref(),
-            inherited_fds: &request.inherited_fds,
-            inherit_env: false,
-        });
+        return exec_inherited(tool_ref_str, request, false);
     }
 
     let result = lillux::run(request);
@@ -855,37 +846,20 @@ fn resolve_offline_cwd(
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-struct InheritedExecRequest<'a> {
-    tool_ref: &'a str,
-    cmd: &'a Path,
-    args: &'a [String],
-    cwd: Option<&'a str>,
-    envs: &'a [(String, String)],
-    limits: Option<&'a lillux::SubprocessLimits>,
-    inherited_fds: &'a [std::sync::Arc<std::fs::File>],
+fn exec_inherited(
+    tool_ref: &str,
+    request: lillux::SubprocessRequest,
     inherit_env: bool,
-}
-
-fn exec_inherited(request: InheritedExecRequest<'_>) -> Result<Option<Value>, CliError> {
-    let InheritedExecRequest {
-        tool_ref,
-        cmd,
-        args,
-        cwd,
-        envs,
-        limits,
-        inherited_fds,
-        inherit_env,
-    } = request;
-    let mut command = std::process::Command::new(cmd);
-    command.args(args);
+) -> Result<Option<Value>, CliError> {
+    let mut command = std::process::Command::new(&request.cmd);
+    command.args(&request.args);
     if !inherit_env {
         command.env_clear();
     }
-    for (key, value) in envs {
+    for (key, value) in &request.envs {
         command.env(key, value);
     }
-    if let Some(dir) = cwd {
+    if let Some(dir) = request.cwd.as_deref() {
         command.current_dir(dir);
     }
     command
@@ -893,12 +867,14 @@ fn exec_inherited(request: InheritedExecRequest<'_>) -> Result<Option<Value>, Cl
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
 
-    lillux::configure_subprocess_limits(&mut command, limits).map_err(|error| CliError::Local {
-        detail: format!(
-            "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
-        ),
-    })?;
-    lillux::configure_inherited_fds(&mut command, inherited_fds).map_err(|error| {
+    lillux::configure_subprocess_limits(&mut command, request.limits.as_ref()).map_err(
+        |error| CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref}` has invalid or unsupported resource limits: {error}"
+            ),
+        },
+    )?;
+    lillux::configure_inherited_fds(&mut command, &request.inherited_fds).map_err(|error| {
         CliError::Local {
             detail: format!(
                 "offline tool `{tool_ref}` could not retain sandbox descriptors: {error}"
@@ -928,7 +904,7 @@ fn exec_inherited(request: InheritedExecRequest<'_>) -> Result<Option<Value>, Cl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use lillux::crypto::{DecodePrivateKey, EncodePrivateKey, SigningKey};
     use rand::rngs::OsRng;
 
     #[test]
@@ -938,16 +914,21 @@ mod tests {
             ..lillux::SubprocessLimits::default()
         };
 
-        let error = exec_inherited(InheritedExecRequest {
-            tool_ref: "tool:test/inherited",
-            cmd: Path::new("unused"),
-            args: &[],
-            cwd: None,
-            envs: &[],
-            limits: Some(&limits),
-            inherited_fds: &[],
-            inherit_env: false,
-        })
+        let error = exec_inherited(
+            "tool:test/inherited",
+            lillux::SubprocessRequest {
+                cmd: "unused".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: Some(limits),
+                inherited_fds: Vec::new(),
+                supervised_status: None,
+            },
+            false,
+        )
         .unwrap_err();
 
         assert!(error.to_string().contains("resource limits"));
@@ -1056,6 +1037,16 @@ mod tests {
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();
             let dev_key = dev_trust.decode_verifying_key().unwrap();
             ryeos_engine::trust::pin_key(&dev_key, "ryeos-dev", &trust_dir, None).unwrap();
+            let core_key_pem = std::fs::read_to_string(
+                workspace_root().join(".dev-keys").join("PUBLISHER_DEV.pem"),
+            )
+            .unwrap();
+            let core_key = SigningKey::from_pkcs8_pem(&core_key_pem).unwrap();
+            assert_eq!(
+                core_key.verifying_key(),
+                dev_key,
+                "fixture core signer must match the copied bundle's pinned publisher"
+            );
             std::env::set_var("RYEOS_APP_ROOT", &system);
 
             let bundle = system
@@ -1077,8 +1068,8 @@ mod tests {
                 bundle,
                 key,
             };
-            this.resign_node_commands(&core_bundle);
-            this.write_signed(
+            this.resign_node_commands(&core_bundle, &core_key);
+            this.write_signed_with(
                 &core_bundle
                     .join(ryeos_engine::AI_DIR)
                     .join("protocols")
@@ -1086,6 +1077,7 @@ mod tests {
                     .join("core")
                     .join("cli_exec.yaml"),
                 "kind: protocol\nname: cli_exec\ncategory: ryeos/core\nabi_version: v1\ndescription: Direct exec with argv flags and inherited stdio.\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - { name: RYEOS_PROJECT_PATH, source: project_path }\ncapabilities:\n  allows_pushed_head: false\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: none\n",
+                &core_key,
             );
             this.write_manifest();
             this.write_command_registration_policy();
@@ -1101,6 +1093,7 @@ mod tests {
                     &core_bundle,
                     handler_bin,
                     fixture_handler_script().as_bytes(),
+                    &core_key,
                 );
             }
             this.write_echo_bin();
@@ -1108,7 +1101,7 @@ mod tests {
             this
         }
 
-        fn resign_node_commands(&self, bundle: &Path) {
+        fn resign_node_commands(&self, bundle: &Path, signer: &SigningKey) {
             let root = bundle
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
@@ -1126,7 +1119,7 @@ mod tests {
                     } else if path.extension().and_then(|ext| ext.to_str()) == Some("yaml") {
                         let content = std::fs::read_to_string(&path).unwrap();
                         let body = lillux::signature::strip_signature_lines(&content);
-                        self.write_signed(&path, &body);
+                        self.write_signed_with(&path, &body, signer);
                     }
                 }
             }
@@ -1243,10 +1236,16 @@ mod tests {
         }
 
         fn write_bin(&self, name: &str, script: &[u8]) {
-            self.write_bin_in_bundle(&self.bundle, name, script);
+            self.write_bin_in_bundle(&self.bundle, name, script, &self.key);
         }
 
-        fn write_bin_in_bundle(&self, bundle: &Path, name: &str, script: &[u8]) {
+        fn write_bin_in_bundle(
+            &self,
+            bundle: &Path,
+            name: &str,
+            script: &[u8],
+            signer: &SigningKey,
+        ) {
             let triple = host_triple();
             let ai_dir = bundle.join(ryeos_engine::AI_DIR);
             let bin_path = ai_dir.join("bin").join(triple).join(name);
@@ -1261,19 +1260,22 @@ mod tests {
 
             let cas = lillux::CasStore::new(ai_dir.join("objects"));
             let content_blob_hash = lillux::sha256_hex(script);
+            let stored_blob_hash = cas.store_blob(script).unwrap();
+            assert_eq!(
+                stored_blob_hash, content_blob_hash,
+                "fixture CAS must address the exact installed binary bytes"
+            );
             let item_ref = format!("bin/{triple}/{name}");
             let item_source = serde_json::json!({
                 "kind": "item_source",
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
                 "integrity": format!("sha256:{content_blob_hash}"),
-                "signature_info": {
-                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
-                },
+                "signature_info": null,
                 "mode": 0o755,
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
-            let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
+            let sidecar = lillux::signature::sign_content(&sidecar_body, signer, "#", None);
             std::fs::write(
                 bin_path.with_file_name(format!("{name}.item_source.json")),
                 sidecar,
@@ -1283,27 +1285,40 @@ mod tests {
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
                 let signed_ref = std::fs::read_to_string(&ref_path).unwrap();
-                let fingerprint = lillux::signature::compute_fingerprint(&self.key.verifying_key());
+                let trust_store = ryeos_engine::trust::TrustStore::load(
+                    None,
+                    &self.system.join(ryeos_engine::AI_DIR).join("config"),
+                )
+                .unwrap();
                 let verified_ref =
                     ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
                         &signed_ref,
                         |candidate| {
-                            (candidate == fingerprint.as_str()).then(|| self.key.verifying_key())
+                            trust_store
+                                .get(candidate)
+                                .map(|signer| signer.verifying_key)
                         },
                         ryeos_engine::resolution::TrustClass::TrustedBundle,
                     )
                     .unwrap();
-                cas.get_object(&verified_ref.manifest_hash)
+                assert_eq!(
+                    verified_ref.signer_fingerprint,
+                    lillux::signature::compute_fingerprint(&signer.verifying_key()),
+                    "fixture must not extend an executor manifest owned by another signer"
+                );
+                let manifest = cas
+                    .get_object(&verified_ref.manifest_hash)
                     .unwrap()
-                    .and_then(|manifest| manifest.get("item_source_hashes").cloned())
-                    .and_then(|value| {
-                        serde_json::from_value::<serde_json::Map<String, Value>>(value).ok()
-                    })
-                    .unwrap_or_default()
+                    .expect("fixture executor manifest object must exist in CAS");
+                ryeos_engine::executor_resolution::verify_executor_manifest_object(
+                    &manifest,
+                    &verified_ref.manifest_hash,
+                )
+                .unwrap()
             } else {
-                serde_json::Map::new()
+                HashMap::new()
             };
-            item_source_hashes.insert(item_ref, Value::String(item_source_hash));
+            item_source_hashes.insert(item_ref, item_source_hash);
             let manifest = serde_json::json!({
                 "kind": "source_manifest",
                 "item_source_hashes": item_source_hashes,
@@ -1315,7 +1330,7 @@ mod tests {
                     "{}\n{manifest_hash}\n",
                     ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
                 ),
-                &self.key,
+                signer,
                 "#",
                 None,
             );
@@ -1354,8 +1369,12 @@ mod tests {
         }
 
         fn write_signed(&self, path: &Path, body: &str) {
+            self.write_signed_with(path, body, &self.key);
+        }
+
+        fn write_signed_with(&self, path: &Path, body: &str, signer: &SigningKey) {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let signed = lillux::signature::sign_content(body, &self.key, "#", None);
+            let signed = lillux::signature::sign_content(body, signer, "#", None);
             std::fs::write(path, signed).unwrap();
         }
 

@@ -739,7 +739,7 @@ mod tests {
 
         let error = rebuild_specs_from_dir(&schedules_dir, &test_db(), &test_trust_store(TEST_KEY))
             .unwrap_err();
-        assert!(error.to_string().contains("declares schedule_id"));
+        assert!(format!("{error:#}").contains("declares schedule_id"));
     }
 
     #[test]
@@ -753,7 +753,7 @@ mod tests {
 
         let error = rebuild_specs_from_dir(&schedules_dir, &test_db(), &test_trust_store(TEST_KEY))
             .unwrap_err();
-        assert!(error.to_string().contains("missing field"));
+        assert!(format!("{error:#}").contains("missing field"));
     }
 
     #[test]

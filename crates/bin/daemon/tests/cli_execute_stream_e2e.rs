@@ -163,6 +163,8 @@ async fn cli_execute_stream_success_exits_zero_and_prints_result() {
             &project,
             "execute",
             "directive:test/cli_stream",
+            "--ref-binding",
+            "model=directive:test/cli_stream",
             "--stream",
         ],
     );
@@ -198,6 +200,8 @@ async fn cli_execute_stream_failure_exits_nonzero() {
             &project,
             "execute",
             "directive:test/cli_stream",
+            "--ref-binding",
+            "model=directive:test/cli_stream",
             "--stream",
         ],
     );
@@ -224,6 +228,8 @@ async fn cli_execute_json_flag_prints_buffered_json() {
             &project,
             "execute",
             "directive:test/cli_stream",
+            "--ref-binding",
+            "model=directive:test/cli_stream",
             "--json",
         ],
     );

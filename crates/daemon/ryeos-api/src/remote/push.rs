@@ -983,14 +983,21 @@ mod refuse_walking_root_tests {
     }
 
     #[test]
-    fn nonexistent_path_does_not_short_circuit() {
-        // Canonicalisation fails for nonexistent paths; the guard
-        // must skip rather than spuriously refuse — the downstream
-        // walk will produce a clearer "not found" error.
+    fn nonexistent_path_fails_closed_before_walk() {
+        // Recursive ingestion needs an exact path identity before any walk.
+        // A path that cannot be canonicalised must fail at this authority
+        // boundary instead of bypassing the protected-root checks.
         let sys = TempDir::new().unwrap();
-        let missing = std::path::Path::new("/this/does/not/exist/anywhere");
-        refuse_walking_root(missing, sys.path())
-            .expect("missing path must pass the guard (fail elsewhere)");
+        let project_parent = TempDir::new().unwrap();
+        let missing = project_parent.path().join("missing-project");
+        let err = refuse_walking_root(&missing, sys.path())
+            .expect_err("unidentifiable project paths must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("canonicalize project path")
+                && msg.contains(&missing.display().to_string()),
+            "error must identify the failed project-path canonicalisation, got: {msg}"
+        );
     }
 
     // ── Item 9: missing refuse_walking_root coverage ──

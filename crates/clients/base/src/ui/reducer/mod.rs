@@ -2182,8 +2182,13 @@ mod tests {
             panic!("submit emits an Invoke, got {:?}", effect.kind);
         };
         assert_eq!(
-            params["thread"], "T-failed",
+            params["target"],
+            serde_json::json!({ "kind": "thread", "thread_id": "T-failed" }),
             "the resubmit continues the selected failed thread"
+        );
+        assert!(
+            params.get("thread").is_none(),
+            "continuations use only the structured target contract"
         );
         assert_eq!(params["input"], "retry me");
     }

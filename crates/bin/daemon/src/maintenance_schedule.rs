@@ -554,7 +554,7 @@ mod tests {
     fn trust_store(identity: &NodeIdentity) -> ryeos_engine::trust::TrustStore {
         ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
             fingerprint: identity.fingerprint().to_string(),
-            verifying_key: identity.verifying_key().clone(),
+            verifying_key: *identity.verifying_key(),
             label: Some("test".into()),
         }])
     }
@@ -581,6 +581,7 @@ mod tests {
                 "spec_version": 1,
                 "schedule_id": schedule_id,
                 "item_ref": "service:operator/task",
+                "ref_bindings": {},
                 "schedule_type": "cron",
                 "expression": "0 0 1 * * *",
                 "timezone": "UTC",
@@ -606,6 +607,7 @@ mod tests {
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"
     timezone: UTC
@@ -683,7 +685,7 @@ schedules:
         let existing = node_dir.join("schedules/maintenance-gc.yaml");
         let mut paused = read_schedule_body(&existing);
         paused["enabled"] = Value::Bool(false);
-        paused["expression"] = Value::String("stale-expression".into());
+        paused["expression"] = Value::String("0 0 3 * * *".into());
         paused["params"]["deep"] = Value::Bool(false);
         let anchor = paused["registered_at"].as_i64().unwrap();
         writer::write_signed_node_item(&node_dir, "schedules", "maintenance-gc", &paused, &id)
@@ -771,7 +773,7 @@ schedules:
         let id = identity();
         let duplicated = DECL.replace(
             "schedules:\n",
-            "schedules:\n  - schedule_id: maintenance-gc\n    item_ref: \"service:maintenance/gc\"\n    schedule_type: cron\n    expression: \"0 0 3 * * *\"\n    timezone: UTC\n    misfire_policy: skip\n    overlap_policy: skip\n    lateness_grace_secs: 60\n    enabled: true\n    params: {}\n    capabilities:\n      - \"ryeos.execute.service.maintenance/gc\"\n",
+            "schedules:\n  - schedule_id: maintenance-gc\n    item_ref: \"service:maintenance/gc\"\n    ref_bindings: {}\n    schedule_type: cron\n    expression: \"0 0 3 * * *\"\n    timezone: UTC\n    misfire_policy: skip\n    overlap_policy: skip\n    lateness_grace_secs: 60\n    enabled: true\n    params: {}\n    capabilities:\n      - \"ryeos.execute.service.maintenance/gc\"\n",
         );
         write_declaration(&node_dir, &duplicated, &id);
         let trust = trust_store(&id);
@@ -828,6 +830,7 @@ schedules:
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"
     timezone: UTC

@@ -174,7 +174,7 @@ pub enum DispatchError {
         message: String,
         classification: String,
         binding: Option<String>,
-        details: BTreeMap<String, LaunchDiagnosticScalarWire>,
+        details: Box<BTreeMap<String, LaunchDiagnosticScalarWire>>,
     },
     #[error("launch policy rejected request ({code}): {message}")]
     LaunchPolicyForbidden {

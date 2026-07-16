@@ -634,7 +634,14 @@ fn collect_object_closure_from_source(
         for blob in links.blob_hashes {
             check()?;
             if is_canonical_hash(&blob) {
-                match cas.read("blobs", &blob, "", limits.max_blob_bytes)? {
+                match cas
+                    .read("blobs", &blob, "", limits.max_blob_bytes)
+                    .with_context(|| {
+                        format!(
+                            "enforce max_blob_bytes={} for referenced blob {blob}",
+                            limits.max_blob_bytes
+                        )
+                    })? {
                     Some(bytes) => {
                         if !report.blob_hashes.contains(&blob) {
                             if report.blob_hashes.len() + 1 > limits.max_blobs {

@@ -40,6 +40,7 @@ fn make_item_source_value(blob_hash: &str, mode: u32) -> Value {
         "content_blob_hash": blob_hash,
         "mode": mode,
         "integrity": format!("sha256:{blob_hash}"),
+        "signature_info": null,
     })
 }
 
@@ -196,6 +197,7 @@ fn missing_mode_errors() {
         "item_ref": "bin/x86_64-unknown-linux-gnu/directive-runtime",
         "content_blob_hash": "aa".repeat(32),
         "integrity": format!("sha256:{}", "aa".repeat(32)),
+        "signature_info": null,
     });
     let is_hash = cas.store_object(item_source);
 
@@ -232,10 +234,9 @@ fn not_native_executor_errors() {
     )
     .unwrap_err();
 
-    let msg = format!("{err}");
     assert!(
-        msg.contains("not a native executor"),
-        "expected NotNativeExecutor error, got: {msg}"
+        matches!(&err, ExecutorResolutionError::NotNativeExecutor),
+        "expected NotNativeExecutor error, got: {err:?}"
     );
 }
 
@@ -251,10 +252,9 @@ fn empty_native_prefix_errors() {
     )
     .unwrap_err();
 
-    let msg = format!("{err}");
     assert!(
-        msg.contains("not a native executor"),
-        "expected NotNativeExecutor error for empty prefix, got: {msg}"
+        matches!(&err, ExecutorResolutionError::NotNativeExecutor),
+        "expected NotNativeExecutor error for empty prefix, got: {err:?}"
     );
 }
 

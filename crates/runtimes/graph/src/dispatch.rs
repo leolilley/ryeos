@@ -340,9 +340,20 @@ struct NativeResultEnvelope {
     cost: Value,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug)]
 struct RequiredNullableString(Option<String>);
+
+impl<'de> Deserialize<'de> for RequiredNullableString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Exact daemon execute result consumed for subprocess leaves. The marker is
 /// authoritative and every nullable field must still be present on the wire.
@@ -1174,7 +1185,7 @@ mod tests {
             })],
             "T-child-failed",
         );
-        let action = json!({"item_id": "directive:test/child"});
+        let action = json!({"item_id": "directive:test/child", "ref_bindings": {}});
         let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
             .await
             .expect("dispatch response");
@@ -1400,7 +1411,7 @@ mod tests {
             "warnings": []
         });
         let failure = expect_action_failure(classify_envelope(envelope));
-        assert!(failure.diagnostic.contains("error"));
+        assert!(failure.diagnostic.contains("model refused"));
         let cost = failure.cost.expect("failed child cost should be preserved");
         assert_eq!(cost.input_tokens, 80);
     }

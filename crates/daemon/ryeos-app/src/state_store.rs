@@ -2960,7 +2960,9 @@ impl StateStore {
         )
     }
 
-    #[allow(clippy::too_many_arguments)] // Atomic continuation handoff inputs stay explicit.
+    // Source lineage, resume proof, launch metadata, and initial durable events
+    // stay explicit because each is validated under the same write permit.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_machine_continuation_with_events(
         &self,
         successor: &NewThreadRecord,
@@ -3017,7 +3019,7 @@ impl StateStore {
     /// first), then settle the source `continued`. A race or seed failure aborts
     /// with the source still running — never `continued` behind an unlaunchable
     /// successor.
-    #[allow(clippy::too_many_arguments)] // Shared atomic continuation transaction boundary.
+    #[allow(clippy::too_many_arguments)]
     fn create_running_continuation_successor(
         &self,
         successor: &NewThreadRecord,
@@ -3262,7 +3264,9 @@ impl StateStore {
     /// even if the daemon crashes before the runtime emits anything. A terminal
     /// (completed/failed) source keeps its status; a running source is settled
     /// `continued` (same as `create_continuation`).
-    #[allow(clippy::too_many_arguments)] // Idempotent continuation identity inputs stay explicit.
+    // Idempotency identity, source lineage, launch metadata, and initial events
+    // remain explicit at this atomic admission boundary.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_or_get_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
@@ -5062,7 +5066,9 @@ impl StateStore {
         g.runtime_db.reserve_follow(seed)
     }
 
-    #[allow(clippy::too_many_arguments)] // Mirrors one atomic runtime-db follow-child record.
+    // Slot identity, item/spec identity, child lineage, and sealed authority
+    // stay explicit because each is independently verified under the store lock.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,

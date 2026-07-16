@@ -3302,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_apply_skips_confinement_but_applies_node_resource_bounds() {
+    fn disabled_apply_skips_confinement_and_bounds_output_without_adding_an_rlimit() {
         let runtime = SandboxRuntime::default();
         let project = tempfile::tempdir().unwrap();
         let original = request(project.path());
@@ -3327,10 +3327,7 @@ mod tests {
         assert_eq!(applied.cmd, "/bin/sh");
         assert_eq!(applied.args, ["-c", "true"]);
         let limits = applied.limits.expect("disabled mode still bounds output");
-        assert_eq!(
-            limits.max_open_files,
-            runtime.inspection().limits.open_files
-        );
+        assert_eq!(limits.max_open_files, None);
         assert_eq!(
             limits.max_stdout_bytes,
             Some(runtime.inspection().limits.stdout_bytes)
@@ -3677,7 +3674,11 @@ mod tests {
             )
             .err()
             .expect("runtime workspace outside the execution root should be rejected");
-        assert!(error.to_string().contains("protected app root"));
+        assert!(
+            matches!(&error, EngineError::SandboxPolicyRefused { reason }
+                if reason.contains("is not a direct child")),
+            "unexpected runtime-workspace refusal: {error}"
+        );
     }
 
     #[test]
@@ -3757,7 +3758,11 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("regular non-symlink file"));
+        assert!(
+            matches!(&error, EngineError::SandboxPolicyRefused { reason }
+                if reason.contains("node public identity cannot be opened")),
+            "unexpected public-identity refusal: {error}"
+        );
     }
 
     #[test]
@@ -3849,7 +3854,11 @@ mod tests {
 
         let error = SandboxRuntime::load(app_root.path()).unwrap_err();
 
-        assert!(error.to_string().contains("regular non-symlink file"));
+        assert!(
+            matches!(&error, EngineError::SandboxPolicyRefused { reason }
+                if reason.contains("node sandbox policy cannot be opened")),
+            "unexpected sandbox-policy refusal: {error}"
+        );
     }
 
     #[test]

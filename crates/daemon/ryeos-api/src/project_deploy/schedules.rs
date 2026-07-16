@@ -386,13 +386,12 @@ fn load_project_managed_schedule_yaml(
         let Some(managed) = parse_project_managed_by(&body) else {
             continue;
         };
-        if managed.project_key == project_key {
-            if out.insert(schedule_id.to_string(), body).is_some() {
-                anyhow::bail!(
-                    "multiple project-managed schedule sources declare schedule_id '{}'",
-                    schedule_id
-                );
-            }
+        if managed.project_key == project_key && out.insert(schedule_id.to_string(), body).is_some()
+        {
+            anyhow::bail!(
+                "multiple project-managed schedule sources declare schedule_id '{}'",
+                schedule_id
+            );
         }
     }
     Ok(out)
@@ -609,7 +608,7 @@ fn load_desired_schedules(
         validate_schedule_declaration_file(&file, &rel_path)?;
         let source_body_hash = lillux::cas::sha256_hex(body.as_bytes());
         for schedule in file.schedules {
-            validate_schedule_declaration(&schedule, &rel_path, &canonical_project_path)?;
+            validate_schedule_declaration(&schedule, &rel_path, canonical_project_path)?;
             if !seen.insert(schedule.schedule_id.clone()) {
                 anyhow::bail!(
                     "duplicate schedule_id '{}' across project schedule declarations",

@@ -38,7 +38,7 @@ impl SchedulerContext for AppSchedulerContext {
         self.0.scheduler_runtime_gate.clone()
     }
 
-    fn trust_store(&self) -> &ryeos_engine::trust::TrustStore {
+    fn schedule_trust_store(&self) -> &ryeos_engine::trust::TrustStore {
         &self.0.engine.node_trust_store
     }
 

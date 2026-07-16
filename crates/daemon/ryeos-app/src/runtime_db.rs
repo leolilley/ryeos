@@ -3543,7 +3543,9 @@ impl RuntimeDb {
     /// Record the spawned child's identities. Allowed only when unset (first
     /// write) or already equal (idempotent retry); never overwrites a different
     /// child, which would strand the original.
-    #[allow(clippy::too_many_arguments)] // One atomic persisted follow-child record.
+    // Slot identity, item/spec identity, child lineage, and sealed authority
+    // stay explicit because each is independently compared before publication.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,
@@ -5261,10 +5263,11 @@ mod tests {
 
     #[test]
     fn open_is_idempotent() {
-        let (tmp, _db) = fresh_db();
+        let (tmp, db) = fresh_db();
         let path = tmp.path().join("runtime.db");
-        let _ = RuntimeDb::open(&path).unwrap();
-        let _ = RuntimeDb::open(&path).unwrap();
+        drop(db);
+        drop(RuntimeDb::open(&path).unwrap());
+        drop(RuntimeDb::open(&path).unwrap());
     }
 
     #[test]
@@ -5858,7 +5861,9 @@ mod tests {
         // not silently degrade to None.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
-        let payload = serde_json::json!({ "schema_version": 999 }).to_string();
+        let mut payload = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
+        payload["schema_version"] = serde_json::json!(999);
+        let payload = serde_json::to_string(&payload).unwrap();
         db.conn
             .execute(
                 "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4

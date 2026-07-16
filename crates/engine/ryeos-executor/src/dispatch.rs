@@ -294,8 +294,8 @@ pub struct DispatchRequest<'a> {
     /// be persisted; leaves reject any identity or schema mismatch.
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     /// Trusted parent context for callback-dispatched child executions. This is
-    /// consumed only if schema-driven dispatch reaches a managed runtime launch;
-    /// in-process services and terminal tools ignore it.
+    /// consumed only if schema-driven dispatch reaches a managed, method, or
+    /// terminal subprocess launch; in-process services ignore it.
     pub parent_execution_context: Option<ParentExecutionContext>,
 }
 
@@ -1026,6 +1026,9 @@ fn project_corpus(
 /// corpus build). Callers run it either as `validate_only` validation (no
 /// thread minted) or inside the post-mint guard, so a projection failure
 /// finalizes the created thread instead of orphaning the returned id.
+// Method declaration, verified hop/root evidence, resolution roots, and request
+// context remain explicit at the projection boundary.
+#[allow(clippy::too_many_arguments)]
 fn project_method_payload(
     method_decl: &MethodDecl,
     canonical_ref: &CanonicalRef,
@@ -1085,8 +1088,7 @@ fn project_method_payload(
                 resolution_output.effective_trust_class,
                 &canonical_ref.to_string(),
                 kind,
-            )
-            .map_err(|e| DispatchError::InvalidRef(canonical_ref.to_string(), e.to_string()))?;
+            )?;
 
             let single_root = project_single_root(&resolution_output)?;
             serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?
@@ -1106,17 +1108,17 @@ fn project_method_payload(
                         .to_string(),
                 )
             })?;
-            // Mirror spawn trust policy (`enforce_effective_trust`): refuse
-            // an unauthenticated root.
+            // Corpus scope changes the projected payload, not the trust
+            // boundary: the invoked root remains executable authority and
+            // receives the same typed unsigned-policy rejection as every
+            // other subprocess launch.
             if matches!(
                 root.trust_class,
                 ryeos_engine::contracts::TrustClass::Unsigned
             ) {
-                return Err(DispatchError::InvalidRef(
-                    canonical_ref.to_string(),
-                    "requested ref is Unsigned; refusing to run a corpus method on an \
-                     unauthenticated root"
-                        .to_string(),
+                return Err(crate::execution::launch::effective_trust_unsigned_error(
+                    &canonical_ref.to_string(),
+                    kind,
                 ));
             }
 
@@ -1217,6 +1219,7 @@ pub(crate) async fn dispatch_method(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     // 1. Validate args against the method's spec. Args come from the single
     // source of truth (`ctx.requested_call`), same as the preflight below.
@@ -1643,7 +1646,7 @@ pub(crate) async fn dispatch_method(
             &engine_roots,
             &state.config.app_root,
         )
-        .map_err(|error| DispatchError::Internal(error.into()))?;
+        .map_err(DispatchError::Internal)?;
         let callback_socket_requested = runtime_protocol
             .descriptor
             .env_injections
@@ -1762,14 +1765,24 @@ pub(crate) async fn dispatch_method(
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = thread_id.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let process_handle = tokio::task::spawn_blocking(move || {
             crate::execution::process_attachment::run_lillux_attached(
                 &process_state,
                 &process_thread_id,
                 subprocess_request,
                 workspace_lifeline,
             )
-        })
+        });
+
+        // The durable method row and its complete subprocess request are now
+        // owned by the scheduled blocking task. This is the method-runtime
+        // equivalent of the managed LaunchEnvelope handoff: accepted callers
+        // may expose the pre-minted id without waiting for method completion.
+        if let Some(handoff) = launch_handoff {
+            handoff.publish(thread_id.clone());
+        }
+
+        let result = process_handle
         .await
         .map_err(|e| DispatchError::Internal(e.into()))?
         .map_err(DispatchError::Internal)?;
@@ -2355,6 +2368,7 @@ async fn dispatch_via_method_executor(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let wrapper_ref = resolved.item_ref.as_str();
 
@@ -2424,9 +2438,19 @@ async fn dispatch_via_method_executor(
         parent_execution_context: request.parent_execution_context.clone(),
     };
 
-    // Re-enter dispatch on the target ref. Boxed: this closes a recursion cycle
-    // (`dispatch` → … → `dispatch_via_method_executor` → `dispatch`).
-    Box::pin(dispatch(&target_ref, &dispatch_req, &exec_ctx, state)).await
+    // Re-enter the shared dispatch loop on the target ref. Boxed: this closes
+    // the recursion cycle while preserving accepted-launch handoff authority
+    // through an inert method wrapper to the actual method-runtime leaf.
+    Box::pin(dispatch_inner(
+        &target_ref,
+        None,
+        None,
+        &dispatch_req,
+        &exec_ctx,
+        state,
+        launch_handoff,
+    ))
+    .await
 }
 
 /// Mint the manifest-backed callback caps an item is entitled to.
@@ -2864,10 +2888,10 @@ pub async fn dispatch(
     dispatch_inner(item_ref, None, None, request, ctx, state, None).await
 }
 
-/// Dispatch a launch whose caller needs proof that the durable managed launch
-/// has been handed to the spawn task before exposing its thread ID. The signal
-/// is published only by a managed LaunchEnvelope leaf; non-envelope paths never
-/// publish it.
+/// Dispatch a launch whose caller needs proof that durable execution authority
+/// has been handed to a scheduled subprocess task before exposing its thread
+/// ID. Managed LaunchEnvelope, method-runtime, and terminal-subprocess leaves
+/// publish the signal; unsupported in-process paths never do.
 pub async fn dispatch_with_launch_handoff(
     item_ref: &str,
     request: &DispatchRequest<'_>,
@@ -2888,8 +2912,8 @@ pub async fn dispatch_with_launch_handoff(
     match &result {
         Err(error) => launch_handoff.publish_dispatch_failure(error),
         Ok(_) if launch_handoff.is_pending() => launch_handoff.publish_failure(
-            "managed_launch_handoff_missing",
-            "dispatch completed without reaching a managed LaunchEnvelope handoff",
+            "launch_handoff_missing",
+            "dispatch completed without reaching a handoff-capable subprocess leaf",
             500,
             false,
         ),
@@ -3146,6 +3170,7 @@ async fn dispatch_inner(
                     request,
                     ctx,
                     state,
+                    launch_handoff,
                 )
                 .await;
             }
@@ -3179,7 +3204,7 @@ pub enum RootDispatchClass {
 
 #[derive(Debug, Clone)]
 pub enum LaunchContractApplicability {
-    ManagedEnvelope { runtime: VerifiedRuntime },
+    ManagedEnvelope { runtime: Box<VerifiedRuntime> },
     NonEnvelope { class: RootDispatchClass },
 }
 
@@ -3252,7 +3277,9 @@ pub fn launch_contract_applicability(
                             "managed envelope path `{current}` has no selected runtime"
                         ),
                     })?;
-                return Ok(LaunchContractApplicability::ManagedEnvelope { runtime });
+                return Ok(LaunchContractApplicability::ManagedEnvelope {
+                    runtime: Box::new(runtime),
+                });
             }
         }
     }
@@ -3315,7 +3342,7 @@ pub fn admit_launch_contract(
                 message: error.to_string(),
                 classification: "internal".to_owned(),
                 binding: None,
-                details: BTreeMap::new(),
+                details: Box::new(BTreeMap::new()),
             }
         }
     })
@@ -3353,7 +3380,7 @@ pub fn prepare_launch_contract(
             message: error.to_string(),
             classification: "configuration".to_owned(),
             binding: None,
-            details: BTreeMap::new(),
+            details: Box::new(BTreeMap::new()),
         })?;
     let resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &primary.canonical_ref,
@@ -3368,7 +3395,7 @@ pub fn prepare_launch_contract(
         message: error.to_string(),
         classification: "caller".to_owned(),
         binding: None,
-        details: BTreeMap::new(),
+        details: Box::new(BTreeMap::new()),
     })?;
     crate::execution::launch_preparation::prepare_runtime_launch(
         crate::execution::launch_preparation::PrepareRuntimeLaunchRequest {
@@ -3419,6 +3446,9 @@ pub struct RootDispatchPreflight {
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
 }
 
+// Route class, requested/root evidence, usage attribution, bindings, and daemon
+// policy context remain explicit at this admission boundary.
+#[allow(clippy::too_many_arguments)]
 fn finish_root_dispatch_preflight(
     class: RootDispatchClass,
     requested_subject: VerifiedItem,
@@ -3467,6 +3497,9 @@ fn finish_root_dispatch_preflight(
 ///
 /// Synchronous: classification touches verified resolution/composition, schema,
 /// and the authorizer only — never the executing leaf dispatchers.
+// Caller route identity, payload/bindings, usage attribution, and daemon policy
+// context remain explicit so synchronous admission checks cannot omit them.
+#[allow(clippy::too_many_arguments)]
 pub fn preflight_root_dispatch(
     item_ref: &str,
     original_root_kind: &str,
@@ -4494,7 +4527,8 @@ runtime_authority:
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
             .unwrap_err();
         assert!(
-            err.to_string().contains("no signed bundle manifest"),
+            err.to_string()
+                .contains("required signed bundle manifest is missing"),
             "got: {err}"
         );
     }

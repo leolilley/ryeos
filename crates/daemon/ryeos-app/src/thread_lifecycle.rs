@@ -615,7 +615,9 @@ pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
 /// `thread_continued` edge, not re-derived from runtime-emitted input. Not
 /// canonical JSON: identical requests serialize identically, which is all dedup
 /// needs; scopes are sorted so ordering is not significant.
-#[allow(clippy::too_many_arguments)] // Every launch-significant field is hashed explicitly.
+// Every launch-significant input is deliberately explicit so callers cannot
+// accidentally omit a field from the persisted idempotency identity.
+#[allow(clippy::too_many_arguments)]
 pub fn continuation_request_fingerprint(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
@@ -1011,7 +1013,8 @@ impl SealedResolvedItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-// This durable, internally-tagged representation must retain its exact shape.
+// This exact durable wire shape keeps delegated-principal fields flattened.
+// Adding indirection would change the sealed request representation.
 #[allow(clippy::large_enum_variant)]
 enum SealedPrincipal {
     Local {
@@ -1198,6 +1201,13 @@ impl SealedRootExecutionRequest {
 
     pub fn item_ref(&self) -> &str {
         &self.item_ref
+    }
+
+    /// Exact captured policy carried by the synthetic storage fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn captured_history_policy(&self) -> &ryeos_state::objects::CapturedThreadHistoryPolicy {
+        &self.captured_history_policy
     }
 
     /// Structurally complete current-format value for storage-boundary tests.
@@ -4138,7 +4148,7 @@ pub fn resolve_thread_history_policy(
     let parsers = engine
         .effective_parser_dispatcher(project_root)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
-    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+    let resolution = ryeos_engine::resolution::run_effective_item_pipeline(
         &resolved_item.canonical_ref,
         &engine.kinds,
         &parsers,
@@ -4163,7 +4173,9 @@ pub fn resolve_thread_history_policy(
 /// composition pass is bound to the verified root digest by
 /// `resolve_launch_policy_from_resolution`; an in-place edit between verify
 /// and compose therefore fails instead of producing a mixed admission.
-#[allow(clippy::too_many_arguments)] // Root admission authority inputs stay explicit.
+// Verified subject, node policy, usage attribution, bindings, and thread
+// profile remain explicit at the root admission trust boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn admit_verified_root_execution(
     engine: &Engine,
     plan_context: &PlanContext,
@@ -4236,7 +4248,9 @@ pub fn admit_verified_root_execution(
 /// subject is still a verified item (for example a UI seat presenting a
 /// surface). This uses the same kind/composition/trust pipeline as execution;
 /// callers never synthesize Durable policy or branch on the subject kind.
-#[allow(clippy::too_many_arguments)] // Non-execution admission authority inputs stay explicit.
+// Subject identity, project authority, acting principal, site, and profile are
+// independent admission facts and remain explicit at this boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn admit_non_execution_root(
     engine: &Engine,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,

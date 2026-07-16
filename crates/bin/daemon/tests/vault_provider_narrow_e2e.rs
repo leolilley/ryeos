@@ -480,8 +480,11 @@ description: "native_resume test tool"
     Ok(())
 }
 
-/// Read the PID from the runtime DB for a given thread.
-fn read_pid_from_runtime_db(state_path: &Path, thread_id: &str) -> Option<i64> {
+/// Read the exact persisted process attachment from the runtime DB.
+fn read_process_attachment(
+    state_path: &Path,
+    thread_id: &str,
+) -> Option<(i64, ryeos_app::process::ExecutionProcessIdentity)> {
     let db_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
@@ -489,11 +492,14 @@ fn read_pid_from_runtime_db(state_path: &Path, thread_id: &str) -> Option<i64> {
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
     let mut stmt = conn
-        .prepare("SELECT pid FROM thread_runtime WHERE thread_id = ?1")
+        .prepare("SELECT pid, process_identity FROM thread_runtime WHERE thread_id = ?1")
         .ok()?;
-    stmt.query_row(rusqlite::params![thread_id], |row| row.get(0))
-        .ok()
-        .flatten()
+    let (pid, identity): (Option<i64>, Option<String>) = stmt
+        .query_row(rusqlite::params![thread_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .ok()?;
+    Some((pid?, serde_json::from_str(identity?.as_str()).ok()?))
 }
 
 /// Read thread status + outcome_code from the projection DB.
@@ -611,9 +617,9 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // projection DB for early finalization (engine error, etc.)
     // so we get a useful diagnostic instead of a timeout.
     let pid_deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let pid = loop {
-        if let Some(pid) = read_pid_from_runtime_db(&h.state_path, &thread_id) {
-            break pid;
+    let (pid, process_identity) = loop {
+        if let Some(attachment) = read_process_attachment(&h.state_path, &thread_id) {
+            break attachment;
         }
         // Check if the thread was already finalized (spawn failure).
         if let Some((status, outcome, full_error)) =
@@ -644,21 +650,18 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    // ── Phase 2b: Kill daemon FIRST (so it can't observe subprocess death) ──
+    // ── Phase 2b: Kill only the daemon, retaining an exact live orphan ──
     //
-    // The daemon must be killed before the subprocess so the daemon
-    // doesn't see the subprocess exit and finalize the thread as
-    // "failed" with an exit-code error. We want the reconciler (on
-    // restart) to see a "running" thread with a dead PGID and decide
-    // to resume via `run_existing_detached`.
+    // Startup recovery may terminate and clear an exact still-live orphan
+    // group before collecting a resume intent. Killing the group leader while
+    // the daemon is absent would create a same-boot dead identity whose
+    // descendant-group emptiness cannot be proven; that state must remain
+    // quarantined rather than being used as a resume fixture.
     h.kill_daemon().await.expect("kill daemon");
-
-    // Kill the orphaned subprocess AFTER daemon is dead, so the
-    // reconciler sees a dead PGID at startup.
-    unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        ryeos_app::process::execution_group_alive(&process_identity),
+        "resume fixture requires the exact orphan process group to remain live and pin-able"
+    );
 
     // ── Phase 2c: Re-spawn daemon (reconciler runs at startup) ──
     h.respawn_with(|cmd| {
@@ -677,7 +680,7 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // leave the thread running, not fail with required_secret_missing.
     let outcome_deadline = std::time::Instant::now() + Duration::from_secs(15);
     let resumed_pid = loop {
-        if let Some(new_pid) = read_pid_from_runtime_db(&h.state_path, &thread_id) {
+        if let Some((new_pid, _)) = read_process_attachment(&h.state_path, &thread_id) {
             if new_pid != pid {
                 break new_pid;
             }
@@ -799,7 +802,7 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     // The route requires ryeos_signed auth.
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/sse_secret",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/sse_secret" },
         "project_path": project.path().to_str().unwrap(),
         "parameters": {"name": "World"},
     });

@@ -601,7 +601,7 @@ config:
                     "step_count": 4,
                     "graph_run_id": "run-1",
                 }),
-                "missing non-empty `follow_node`",
+                "missing non-empty `pending_follow.follow_node`",
             ),
             (
                 json!({
@@ -632,7 +632,7 @@ config:
                     "step_count": 4,
                     "graph_run_id": "",
                 }),
-                "missing non-empty `graph_run_id`",
+                "missing non-empty `pending_follow.graph_run_id`",
             ),
             (
                 json!({

@@ -123,7 +123,13 @@ fn store_blob_rehashes_and_rejects_a_corrupt_existing_entry() {
         .store_blob(data)
         .expect_err("path existence must not satisfy a CAS write");
 
-    assert!(error.to_string().contains("integrity failure"), "{error:#}");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("CAS corruption"), "{diagnostic}");
+    assert!(diagnostic.contains(&hash), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&sha256_hex(b"substituted bytes")),
+        "{diagnostic}"
+    );
     assert_eq!(
         fs::read(&path).expect("read corrupt entry"),
         b"substituted bytes",
@@ -146,7 +152,13 @@ fn store_object_rehashes_and_rejects_a_corrupt_existing_entry() {
         .store_object(&value)
         .expect_err("path existence must not satisfy a CAS object write");
 
-    assert!(error.to_string().contains("integrity failure"), "{error:#}");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("CAS corruption"), "{diagnostic}");
+    assert!(diagnostic.contains(&hash), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&sha256_hex(br#"{"kind":"substituted"}"#)),
+        "{diagnostic}"
+    );
 }
 
 #[test]

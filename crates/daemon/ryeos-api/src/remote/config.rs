@@ -308,14 +308,14 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
                     name, cfg.name,
                 )));
             }
-            cfg.validate()
-                .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
             if matches!(scope, RemoteConfigScope::Project { .. }) && !cfg.project_bindings.is_empty()
             {
                 return Err(serde_yaml::Error::custom(
                     "project remotes must not contain project_bindings; run `ryeos remote bind-project` to create operator-local bindings",
                 ));
             }
+            cfg.validate()
+                .map_err(|e| serde_yaml::Error::custom(e.to_string()))?;
             Ok(cfg)
         }) {
             Ok(cfg) => {

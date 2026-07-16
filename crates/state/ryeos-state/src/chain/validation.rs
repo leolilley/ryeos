@@ -1440,6 +1440,11 @@ mod tests {
         let root_entry = target.threads.get("T-root").unwrap().clone();
         let mut snapshot = load_hashed_snapshot(&cas, &root_entry.snapshot_hash).unwrap();
         snapshot.item_ref = "directive:rewritten".into();
+        snapshot
+            .captured_history_policy
+            .as_mut()
+            .expect("root snapshot has captured history policy")
+            .canonical_item_ref = "directive:rewritten".into();
         let rewritten_snapshot_hash = write_value(temp.path(), snapshot.to_value());
         target.threads.get_mut("T-root").unwrap().snapshot_hash = rewritten_snapshot_hash;
         let rewritten_target_hash = write_value(temp.path(), target.to_value());

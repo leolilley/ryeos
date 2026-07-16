@@ -220,7 +220,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
                 let projection = common::selected_projection_path(&state).ok();
                 let projection_dump = if projection.as_ref().is_some_and(|path| path.exists()) {
                     let projection = projection.as_ref().expect("checked selected projection");
-                    match ryeos_state::projection::ProjectionDb::open(&projection) {
+                    match ryeos_state::projection::ProjectionDb::open(projection) {
                         Ok(db) => format!(
                             "threads = {:#?}",
                             ryeos_state::queries::list_threads(&db, 10).ok()
