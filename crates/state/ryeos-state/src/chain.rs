@@ -978,6 +978,7 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
         &mut initial_snapshot,
         chain_root_id,
         &initial_floor,
+        None,
     )?;
     lock.ensure_protects(refs_root, chain_root_id)?;
     verify_expected_current_head(lock, chain_root_id, None, trust_store)?;
