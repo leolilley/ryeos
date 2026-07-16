@@ -891,6 +891,11 @@ if [[ $run_init -eq 1 ]]; then
         for name in "${bundle_names[@]}"; do
             if [[ "$invoking_user" != "$(id -un)" ]]; then
                 doctor_status=0
+                # The installer owns the capture file; only the doctor process
+                # drops to the invoking user. The root shell must perform this
+                # redirection so the unprivileged child never needs write
+                # authority over the installer-created temporary file.
+                # shellcheck disable=SC2024
                 sudo -H -u "$invoking_user" env RYEOS_APP_ROOT="$state_root" \
                     "$core_tools_bin" doctor "$share_dir/$name" --strict >"$doctor_output" || doctor_status=$?
                 if (( doctor_status != 0 )); then

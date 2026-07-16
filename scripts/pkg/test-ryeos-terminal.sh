@@ -55,7 +55,7 @@ if grep -q $'\033\[[0-9;]*m' "$tmp/no-color"; then
     exit 1
 fi
 
-NO_COLOR= TERM=xterm RYEOS_TTY=always bash -c \
+NO_COLOR='' TERM=xterm RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_begin RUN empty-no-color; ryeos_term_cleanup' \
     _ "$helper" 2>"$tmp/empty-no-color"
 if grep -q $'\033\[[0-9;]*m' "$tmp/empty-no-color"; then
