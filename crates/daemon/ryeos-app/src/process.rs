@@ -1182,11 +1182,12 @@ mod tests {
         let ready = tmp.path().join("term_ready");
         let marker_str = marker.display().to_string();
         let ready_str = ready.display().to_string();
-        // Keep the signalable shell itself in the loop. A shell blocked on an
-        // infinite foreground subshell defers its trap until that child exits,
-        // which does not model a runtime handling a signal on the exact PID.
+        // Keep the signalable shell itself blocked in a builtin. A shell waiting
+        // on a foreground `sleep` defers its trap until that child exits, while a
+        // busy loop wastes a runner core. `Child` retains the piped stdin writer,
+        // so `read` blocks without a subprocess and the exact target handles TERM.
         let script = format!(
-            r#"trap 'echo term > "{m}"; exit 0' TERM; : > "{r}"; while true; do sleep 0.05; done"#,
+            r#"trap 'echo term > "{m}"; exit 0' TERM; : > "{r}"; while read -r _; do :; done"#,
             m = marker_str,
             r = ready_str,
         );
@@ -1196,7 +1197,7 @@ mod tests {
             Command::new("sh")
                 .arg("-c")
                 .arg(&script)
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .pre_exec(|| {
@@ -1479,11 +1480,11 @@ mod tests {
         let ready = tmp.path().join("usr1_ready");
         let marker_str = marker.display().to_string();
         let ready_str = ready.display().to_string();
-        // As above, the exact target must own the loop so its trap can run;
-        // an infinite foreground subshell would cause the parent shell to
-        // defer SIGUSR1 indefinitely.
+        // As above, the exact target blocks in its own builtin over the retained
+        // stdin pipe, so there is no foreground child to defer SIGUSR1 and no
+        // polling loop consuming a runner core.
         let script = format!(
-            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; : > "{r}"; while true; do sleep 0.05; done"#,
+            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; : > "{r}"; while read -r _; do :; done"#,
             m = marker_str,
             r = ready_str,
         );
@@ -1491,7 +1492,7 @@ mod tests {
             Command::new("sh")
                 .arg("-c")
                 .arg(&script)
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .pre_exec(|| {
