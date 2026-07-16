@@ -4100,7 +4100,7 @@ pub fn resolve_thread_history_policy(
     let parsers = engine
         .effective_parser_dispatcher(project_root)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
-    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+    let resolution = ryeos_engine::resolution::run_effective_item_pipeline(
         &resolved_item.canonical_ref,
         &engine.kinds,
         &parsers,

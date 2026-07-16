@@ -1242,6 +1242,11 @@ mod tests {
 
             let cas = lillux::CasStore::new(ai_dir.join("objects"));
             let content_blob_hash = lillux::sha256_hex(script);
+            let stored_blob_hash = cas.store_blob(script).unwrap();
+            assert_eq!(
+                stored_blob_hash, content_blob_hash,
+                "fixture CAS must address the exact installed binary bytes"
+            );
             let item_ref = format!("bin/{triple}/{name}");
             let item_source = serde_json::json!({
                 "kind": "item_source",

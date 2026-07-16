@@ -29,8 +29,8 @@ use crate::operational::{
     SyncJobState, SyncJobUpdate,
 };
 use crate::projection::{
-    self, project_committed_chain, ChainRetentionProjection, DueTerminalChain,
-    DueTerminalChainCursor, ProjectionDb,
+    self, project_committed_chain, project_initial_root_committed_chain, ChainRetentionProjection,
+    DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
 };
 use crate::queries;
 use crate::recovery::{
@@ -3267,7 +3267,7 @@ impl StateDb {
             self.note_pending_transition_error(chain_root_id, "create_chain_with_events", &error);
             return Err(error);
         }
-        let projected = project_committed_chain(
+        let projected = project_initial_root_committed_chain(
             &self.projection,
             &cache,
             chain_root_id,
@@ -5530,6 +5530,7 @@ mod tests {
     #[test]
     fn removal_mutations_reject_same_chain_lock_from_another_refs_root() {
         let (_dir, db) = open_temp();
+        drop(crate::chain::ChainLock::acquire(db.refs_root(), "T-root").unwrap());
         let other = tempfile::tempdir().unwrap();
         let wrong_root_lock =
             crate::chain::ChainLock::acquire(&other.path().join("refs"), "T-root").unwrap();
@@ -5544,7 +5545,7 @@ mod tests {
             db.delete_chain_projection("T-root", &wrong_root_lock)
                 .unwrap_err(),
         ] {
-            assert!(format!("{error:#}").contains("different refs root"));
+            assert!(format!("{error:#}").contains("chain lock directory for T-root was replaced"));
         }
     }
 
@@ -6334,6 +6335,7 @@ mod tests {
             crate::sync::stage_chain_import(target.cas_root().parent().unwrap(), &first).unwrap();
         let guard = crate::CasMutationGuard::shared_from_cas_root(target.cas_root()).unwrap();
         crate::sync::finalize_import(&target, staged, &signer, &guard).unwrap();
+        drop(guard);
 
         let event =
             crate::objects::thread_event::NewEvent::new("T-root", "T-root", "import_advance_test")
@@ -6351,6 +6353,7 @@ mod tests {
         .unwrap();
         let staged =
             crate::sync::stage_chain_import(target.cas_root().parent().unwrap(), &second).unwrap();
+        let guard = crate::CasMutationGuard::shared_from_cas_root(target.cas_root()).unwrap();
         crate::sync::finalize_import(&target, staged, &signer, &guard).unwrap();
 
         let imported = target

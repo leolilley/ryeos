@@ -119,6 +119,124 @@ impl FastFixture {
     }
 }
 
+/// Install one executable into a synthetic test bundle with the same complete
+/// provenance chain required from published bundles: installed bytes, CAS
+/// blob, canonical ItemSource object and signed sidecar, source-manifest
+/// object, and signed manifest ref. Repeated calls extend the existing
+/// manifest only when it is signed by the same fixture authority.
+///
+/// Returns the canonical path-style binary ref for use in runtime or handler
+/// descriptors.
+pub fn install_signed_bundle_binary(
+    bundle_root: &Path,
+    binary_name: &str,
+    bytes: &[u8],
+    signer: &SigningKey,
+) -> Result<String> {
+    anyhow::ensure!(
+        !binary_name.is_empty()
+            && Path::new(binary_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(binary_name),
+        "synthetic bundle binary name must be one safe path segment"
+    );
+
+    let triple = env!("RYEOSD_HOST_TRIPLE");
+    let ai_dir = bundle_root.join(AI_DIR);
+    let binary_path = ai_dir.join("bin").join(triple).join(binary_name);
+    fs::create_dir_all(
+        binary_path
+            .parent()
+            .context("synthetic binary path has no parent")?,
+    )?;
+    fs::write(&binary_path, bytes)
+        .with_context(|| format!("write synthetic binary {}", binary_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&binary_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    let cas = lillux::cas::CasStore::new(ai_dir.join("objects"));
+    let expected_content_hash = lillux::sha256_hex(bytes);
+    let content_blob_hash = cas.store_blob(bytes)?;
+    anyhow::ensure!(
+        content_blob_hash == expected_content_hash,
+        "fixture CAS returned {content_blob_hash} for bytes hashing to {expected_content_hash}"
+    );
+
+    let item_ref = format!("bin/{triple}/{binary_name}");
+    let item_source = serde_json::json!({
+        "kind": "item_source",
+        "item_ref": item_ref,
+        "content_blob_hash": content_blob_hash,
+        "integrity": format!("sha256:{content_blob_hash}"),
+        "signature_info": null,
+        "mode": 0o755,
+    });
+    let item_source_hash = cas.store_object(&item_source)?;
+    let sidecar_body = lillux::cas::canonical_json(&item_source)?;
+    let signed_sidecar =
+        lillux::signature::sign_content_at(&sidecar_body, signer, "#", None, FAST_FIXTURE_TIME);
+    fs::write(
+        binary_path.with_file_name(format!("{binary_name}.item_source.json")),
+        signed_sidecar,
+    )?;
+
+    let manifest_ref_path = ai_dir.join("refs").join("bundles").join("manifest");
+    let signer_key = signer.verifying_key();
+    let signer_fingerprint = lillux::signature::compute_fingerprint(&signer_key);
+    let mut item_source_hashes = match fs::read_to_string(&manifest_ref_path) {
+        Ok(signed_ref) => {
+            let verified = ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+                &signed_ref,
+                |candidate| (candidate == signer_fingerprint.as_str()).then_some(signer_key),
+                ryeos_engine::resolution::TrustClass::TrustedBundle,
+            )?;
+            anyhow::ensure!(
+                verified.signer_fingerprint == signer_fingerprint,
+                "existing synthetic executor manifest has the wrong signer"
+            );
+            let manifest = cas.get_object(&verified.manifest_hash)?.with_context(|| {
+                format!(
+                    "synthetic source manifest {} is missing from CAS",
+                    verified.manifest_hash
+                )
+            })?;
+            ryeos_engine::executor_resolution::verify_executor_manifest_object(
+                &manifest,
+                &verified.manifest_hash,
+            )?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::collections::HashMap::new()
+        }
+        Err(error) => return Err(error.into()),
+    };
+    item_source_hashes.insert(item_ref.clone(), item_source_hash);
+
+    let manifest = serde_json::json!({
+        "kind": "source_manifest",
+        "item_source_hashes": item_source_hashes,
+    });
+    let manifest_hash = cas.store_object(&manifest)?;
+    let ref_body = format!(
+        "{}\n{manifest_hash}\n",
+        ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+    );
+    let signed_ref =
+        lillux::signature::sign_content_at(&ref_body, signer, "#", None, FAST_FIXTURE_TIME);
+    fs::create_dir_all(
+        manifest_ref_path
+            .parent()
+            .context("synthetic manifest ref has no parent")?,
+    )?;
+    fs::write(&manifest_ref_path, signed_ref)?;
+
+    Ok(item_ref)
+}
+
 /// Pre-populate `state_path` with everything
 /// `bootstrap::init` would produce, using deterministic keys.
 ///
@@ -345,6 +463,36 @@ fn node_bundle_record_body(bundle_name: &str, path: &Path) -> Result<String> {
         }
     }
     Ok(body)
+}
+
+/// Register a synthetic bundle root using the exact current signed node-bundle
+/// record. Tests that author runtime or handler descriptors must register the
+/// bundle containing those descriptors rather than adding them to the copied
+/// core bundle (whose executor manifest belongs to a different authority).
+pub fn register_fixture_bundle(
+    state_path: &Path,
+    bundle_name: &str,
+    bundle_root: &Path,
+    fixture: &FastFixture,
+) -> Result<()> {
+    anyhow::ensure!(
+        !bundle_name.is_empty()
+            && Path::new(bundle_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(bundle_name),
+        "synthetic bundle name must be one safe path segment"
+    );
+    let abs = bundle_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize synthetic bundle {}", bundle_root.display()))?;
+    let dir = state_path.join(AI_DIR).join("node").join("bundles");
+    fs::create_dir_all(&dir)?;
+    let body = node_bundle_record_body(bundle_name, &abs)?;
+    let signed =
+        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+    fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
+    Ok(())
 }
 
 /// Write a `kind: node` bundle record pointing at

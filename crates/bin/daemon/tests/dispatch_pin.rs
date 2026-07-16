@@ -78,10 +78,10 @@ pem = "ed25519:{key_b64}"
 /// user space. The synthetic `serves` kind avoids colliding with any
 /// default runtime served from a real bundle.
 ///
-/// The binary need not exist on disk — every native pin test reaches
-/// only the `ProtocolCapabilities` resolution in
-/// `dispatch_managed_subprocess`, which fires BEFORE
-/// `launch::build_and_launch` materializes anything.
+/// The runtime still carries complete current bundle provenance even though
+/// every native pin test rejects before launch. Boot admission is allowed to
+/// validate the entire installed bundle graph; an intentionally unreachable
+/// binary is not an excuse for an invalid fixture.
 fn install_pin_runtime(
     state_path: &Path,
     fixture: &common::fast_fixture::FastFixture,
@@ -91,6 +91,7 @@ fn install_pin_runtime(
     write_trusted_signer(state_path, &vk)?;
 
     let bundle_root = state_path.join(".ai/bundles/pin-fixture");
+    std::fs::create_dir_all(&bundle_root)?;
 
     // ε.2: synth runtimes serve a kind that must be registered. Install
     // a minimal `pin_fake_kind` schema delegating to the runtime registry.
@@ -126,28 +127,39 @@ metadata:
 
     let runtimes_dir = bundle_root.join(".ai/runtimes");
     std::fs::create_dir_all(&runtimes_dir)?;
-    let body = r#"kind: runtime
+    let binary_ref = common::fast_fixture::install_signed_bundle_binary(
+        &bundle_root,
+        "pin-fake-runtime",
+        b"#!/bin/sh\nexit 70\n",
+        &sk,
+    )?;
+    let body = format!(
+        r#"kind: runtime
 serves: pin_fake_kind
-binary_ref: bin/x86_64-unknown-linux-gnu/pin-fake-runtime
+binary_ref: {binary_ref}
 abi_version: "v1"
 required_caps:
   - runtime.execute
+launch_contract:
+  primary_allowed_kinds: [pin_fake_kind]
+  primary_allowed_spaces: [bundle, project]
+  primary_allowed_trust: [trusted_bundle, trusted_project]
+  ref_bindings: {{}}
+  preparation:
+    kind: none
+  config_inputs: {{}}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {{}}
 description: "synth runtime for V5.3 dispatch_pin capability tests"
-"#;
-    let signed = lillux::signature::sign_content(body, &sk, "#", None);
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, &sk, "#", None);
     std::fs::write(runtimes_dir.join("pin-fake-runtime.yaml"), signed)?;
 
-    // Register the fixture bundle so engine init includes it in the
-    // effective bundle roots (mirrors register_core_bundle_at_state).
-    let abs = bundle_root
-        .canonicalize()
-        .unwrap_or_else(|_| bundle_root.clone());
-    let reg_dir = state_path.join(".ai/node/bundles");
-    std::fs::create_dir_all(&reg_dir)?;
-    let reg_body = format!("kind: node\npath: {}\n", abs.display());
-    let signed_reg = lillux::signature::sign_content(&reg_body, &fixture.publisher, "#", None);
-    std::fs::write(reg_dir.join("pin-fixture.yaml"), signed_reg)?;
-    Ok(())
+    common::fast_fixture::register_fixture_bundle(state_path, "pin-fixture", &bundle_root, fixture)
 }
 
 /// POST /execute with arbitrary extra top-level fields (validate_only,

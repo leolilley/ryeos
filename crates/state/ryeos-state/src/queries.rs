@@ -990,6 +990,8 @@ pub fn execution_tree(
             t.item_ref, t.executor_ref, t.launch_mode,
             t.current_site_id, t.origin_site_id, t.upstream_thread_id,
             t.requested_by, t.project_root,
+            t.base_project_snapshot_hash, t.result_project_snapshot_hash,
+            t.captured_history_policy_json,
             t.created_at, t.updated_at, t.started_at, t.finished_at,
             walk.parent_thread_id AS tree_parent_thread_id,
             walk.relation AS tree_relation,

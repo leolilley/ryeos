@@ -91,6 +91,24 @@ mod integration_tests {
         }
     }
 
+    fn make_project_thread(
+        thread_id: &str,
+        chain_root_id: &str,
+        kind: &str,
+        item_ref: &str,
+        upstream: Option<&str>,
+    ) -> NewThreadRecord {
+        let mut thread = make_thread(thread_id, chain_root_id, kind, item_ref, upstream);
+        thread.project_root = Some("/tmp/p".to_string());
+        thread
+    }
+
+    fn seed_follow_parent(store: &StateStore) {
+        store
+            .create_thread_for_test(&make_thread("P", "P", "graph", "graph:test/graph", None))
+            .expect("seed authoritative follow parent");
+    }
+
     fn follow_seed(follow_key: &str) -> ryeos_app::runtime_db::NewFollowWaiter {
         ryeos_app::runtime_db::NewFollowWaiter {
             follow_key: follow_key.to_string(),
@@ -124,6 +142,7 @@ mod integration_tests {
     #[test]
     fn follow_reserve_is_idempotent_and_rejects_seed_conflict() {
         let (_tmp, store) = setup_state_store();
+        seed_follow_parent(&store);
         let seed = follow_seed("P/gr-1/node-a/0");
         let w = store.reserve_follow(&seed).unwrap();
         assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::RESERVED);
@@ -140,6 +159,7 @@ mod integration_tests {
     #[test]
     fn follow_reserve_rejects_cohort_size_conflict() {
         let (_tmp, store) = setup_state_store();
+        seed_follow_parent(&store);
         store.reserve_follow(&follow_seed("size-conflict")).unwrap();
 
         let mut conflicting = follow_seed("size-conflict");
@@ -158,6 +178,7 @@ mod integration_tests {
     #[test]
     fn follow_set_child_refuses_overwrite() {
         let (_tmp, store) = setup_state_store();
+        seed_follow_parent(&store);
         store.reserve_follow(&follow_seed("k1")).unwrap();
         set_follow_child(&store, "k1", "C", "C");
         // Idempotent: the identical child is a no-op.
@@ -184,6 +205,7 @@ mod integration_tests {
     #[test]
     fn follow_set_parent_successor_refuses_overwrite() {
         let (_tmp, store) = setup_state_store();
+        seed_follow_parent(&store);
         store.reserve_follow(&follow_seed("k2")).unwrap();
         store.set_follow_parent_successor("k2", "S").unwrap();
         store.set_follow_parent_successor("k2", "S").unwrap(); // idempotent
@@ -193,6 +215,7 @@ mod integration_tests {
     #[test]
     fn follow_mark_waiting_requires_child_and_successor() {
         let (_tmp, store) = setup_state_store();
+        seed_follow_parent(&store);
         store.reserve_follow(&follow_seed("k3")).unwrap();
         // Neither child nor successor recorded → cannot mark waiting.
         assert!(store.mark_follow_waiting("k3").is_err());
@@ -212,6 +235,7 @@ mod integration_tests {
     #[test]
     fn follow_child_terminal_transitions_waiting_to_ready_once() {
         let (_tmp, store) = setup_state_store();
+        seed_follow_parent(&store);
         store.reserve_follow(&follow_seed("k4")).unwrap();
         set_follow_child(&store, "k4", "C", "Croot");
         store.set_follow_parent_successor("k4", "S").unwrap();
@@ -285,7 +309,13 @@ mod integration_tests {
         let (_tmp, store) = setup_state_store();
         // Running parent with captured launch identity.
         store
-            .create_thread_for_test(&make_thread("P", "P", "graph", "graph:test/graph", None))
+            .create_thread_for_test(&make_project_thread(
+                "P",
+                "P",
+                "graph",
+                "graph:test/graph",
+                None,
+            ))
             .unwrap();
         seed_continuable(&store, "P", "graph");
 
@@ -301,7 +331,7 @@ mod integration_tests {
         // Parent follow-resume successor: created (not launched), settles parent.
         store
             .create_follow_resume_successor(
-                &make_thread("S", "P", "graph", "graph:test/graph", Some("P")),
+                &make_project_thread("S", "P", "graph", "graph:test/graph", Some("P")),
                 "P",
                 "P",
             )
@@ -337,7 +367,13 @@ mod integration_tests {
     fn follow_adopts_existing_successor_when_waiter_missing_it() {
         let (_tmp, store) = setup_state_store();
         store
-            .create_thread_for_test(&make_thread("P", "P", "graph", "graph:test/graph", None))
+            .create_thread_for_test(&make_project_thread(
+                "P",
+                "P",
+                "graph",
+                "graph:test/graph",
+                None,
+            ))
             .unwrap();
         seed_continuable(&store, "P", "graph");
         store.reserve_follow(&follow_seed("k")).unwrap();
@@ -346,7 +382,7 @@ mod integration_tests {
         // continued) but crashed before recording it on the waiter.
         store
             .create_follow_resume_successor(
-                &make_thread("S", "P", "graph", "graph:test/graph", Some("P")),
+                &make_project_thread("S", "P", "graph", "graph:test/graph", Some("P")),
                 "P",
                 "P",
             )
@@ -1198,7 +1234,7 @@ mod integration_tests {
                 .expect("seed launch metadata");
         };
 
-        let root = make_thread("D0", "D0", "directive", "directive:test/item", None);
+        let root = make_project_thread("D0", "D0", "directive", "directive:test/item", None);
         store.create_thread_for_test(&root).expect("create root");
         make_continuable("D0");
 
@@ -1206,7 +1242,8 @@ mod integration_tests {
         let mut source = "D0".to_string();
         for i in 1..=max {
             let id = format!("D{i}");
-            let succ = make_thread(&id, "D0", "directive", "directive:test/item", Some(&source));
+            let succ =
+                make_project_thread(&id, "D0", "directive", "directive:test/item", Some(&source));
             store
                 .create_machine_continuation(&succ, &source, "D0", Some("turn_limit"))
                 .unwrap_or_else(|e| panic!("machine link #{i} must be allowed: {e}"));
@@ -1217,7 +1254,7 @@ mod integration_tests {
         // The next machine continuation (link #max+1) is refused — the chain is at
         // the cap. No successor is persisted; the source stays running so the
         // runtime fails terminal.
-        let over = make_thread(
+        let over = make_project_thread(
             "D-over",
             "D0",
             "directive",
@@ -1244,7 +1281,7 @@ mod integration_tests {
         // A follow-resume successor IS allowed at the machine-depth cap: it is
         // structural progress, not an autonomous segment-cut, so the cap does not
         // apply. It is created (not launched) and settles the source `continued`.
-        let follow_succ = make_thread(
+        let follow_succ = make_project_thread(
             "D-follow",
             "D0",
             "directive",
@@ -1329,7 +1366,7 @@ mod integration_tests {
         for spoof in ["operator_follow_up", "graph_follow_resume"] {
             let src = format!("M-{spoof}");
             store
-                .create_thread_for_test(&make_thread(
+                .create_thread_for_test(&make_project_thread(
                     &src,
                     &src,
                     "directive",
@@ -1341,7 +1378,13 @@ mod integration_tests {
             let succ = format!("M-{spoof}-s");
             store
                 .create_machine_continuation(
-                    &make_thread(&succ, &src, "directive", "directive:test/item", Some(&src)),
+                    &make_project_thread(
+                        &succ,
+                        &src,
+                        "directive",
+                        "directive:test/item",
+                        Some(&src),
+                    ),
                     &src,
                     &src,
                     Some(spoof),
@@ -1356,7 +1399,7 @@ mod integration_tests {
 
         // Follow-resume successor invariants.
         store
-            .create_thread_for_test(&make_thread(
+            .create_thread_for_test(&make_project_thread(
                 "F-root",
                 "F-root",
                 "directive",
@@ -1367,7 +1410,7 @@ mod integration_tests {
         make_continuable("F-root");
         store
             .create_follow_resume_successor(
-                &make_thread(
+                &make_project_thread(
                     "F-succ",
                     "F-root",
                     "directive",
@@ -1434,7 +1477,7 @@ mod integration_tests {
         assert!(
             store
                 .create_follow_resume_successor(
-                    &make_thread(
+                    &make_project_thread(
                         "F-dup",
                         "F-root",
                         "directive",
@@ -1450,7 +1493,7 @@ mod integration_tests {
 
         // Source must be running.
         store
-            .create_thread_for_test(&make_thread(
+            .create_thread_for_test(&make_project_thread(
                 "R-cr",
                 "R-cr",
                 "directive",
@@ -1461,7 +1504,7 @@ mod integration_tests {
         assert!(
             store
                 .create_machine_continuation(
-                    &make_thread(
+                    &make_project_thread(
                         "R-cr-s",
                         "R-cr",
                         "directive",
@@ -1492,7 +1535,7 @@ mod integration_tests {
         assert!(
             store
                 .create_machine_continuation(
-                    &make_thread(
+                    &make_project_thread(
                         "R-nr-s",
                         "R-nr",
                         "directive",
@@ -1515,7 +1558,7 @@ mod integration_tests {
         // Successor preconditions are checked BEFORE any runtime-db write, so a
         // rejection leaves no orphan row and the source untouched.
         store
-            .create_thread_for_test(&make_thread(
+            .create_thread_for_test(&make_project_thread(
                 "G-root",
                 "G-root",
                 "directive",
@@ -1528,7 +1571,7 @@ mod integration_tests {
         assert!(
             store
                 .create_follow_resume_successor(
-                    &make_thread(
+                    &make_project_thread(
                         "G-bad-chain",
                         "OTHER",
                         "directive",
@@ -1550,7 +1593,7 @@ mod integration_tests {
         assert!(
             store
                 .create_follow_resume_successor(
-                    &make_thread(
+                    &make_project_thread(
                         "G-bad-up",
                         "G-root",
                         "directive",

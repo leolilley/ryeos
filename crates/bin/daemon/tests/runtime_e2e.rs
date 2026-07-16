@@ -23,8 +23,6 @@
 mod common;
 
 use std::path::Path;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
 
 use common::fast_fixture::FastFixture;
 use common::DaemonHarness;
@@ -32,13 +30,11 @@ use lillux::crypto::SigningKey;
 
 // ── Helpers (signing setup uses the fast fixture's publisher key) ──────
 
-/// Install one signed runtime YAML at `<root>/.ai/runtimes/<name>.yaml`
-/// with a default well-formed `binary_ref: bin/<host_triple>/<name>`.
-/// `root` must be a registered bundle root (the harness state path) so
-/// `RuntimeRegistry::build_from_bundles` picks it up. For tests that
-/// need to exercise post-B1 gates (notably P1.5 below) use
-/// [`install_runtime_with_binary_ref`] instead so a deliberately
-/// malformed shape can drive `strip_binary_ref_prefix`.
+/// Install one signed runtime YAML and its complete signed binary provenance
+/// at `<root>/.ai/runtimes/<name>.yaml`. `root` must be a registered bundle
+/// root so `RuntimeRegistry::build_from_bundles` picks it up. Admission tests
+/// that intentionally author a malformed ref use
+/// [`install_runtime_with_binary_ref`] directly.
 fn install_runtime(
     root: &Path,
     name: &str,
@@ -47,22 +43,27 @@ fn install_runtime(
     abi_version: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
+    let binary_ref = common::fast_fixture::install_signed_bundle_binary(
+        root,
+        name,
+        b"#!/bin/sh\nexit 70\n",
+        signer,
+    )?;
     install_runtime_with_binary_ref(
         root,
         name,
         serves,
         default,
         abi_version,
-        &format!("bin/x86_64-unknown-linux-gnu/{name}"),
+        &binary_ref,
         signer,
     )
 }
 
 /// Install one signed runtime YAML with an explicit `binary_ref`.
-/// Lets a test feed deliberately malformed shapes (e.g. `"badshape"`)
-/// so the dispatcher progresses past B1 / the cap gate and the
-/// failure mode is unambiguously `strip_binary_ref_prefix` rejecting
-/// the YAML.
+/// This is reserved for admission tests that deliberately author malformed
+/// descriptor data; runnable fixtures use [`install_runtime`] so they cannot
+/// accidentally omit the installed binary's provenance chain.
 fn install_runtime_with_binary_ref(
     root: &Path,
     name: &str,
@@ -82,6 +83,19 @@ binary_ref: {binary_ref}
 abi_version: "{abi_version}"
 required_caps:
   - runtime.execute
+launch_contract:
+  primary_allowed_kinds: [{serves}]
+  primary_allowed_spaces: [bundle, project]
+  primary_allowed_trust: [trusted_bundle, trusted_project]
+  ref_bindings: {{}}
+  preparation:
+    kind: none
+  config_inputs: {{}}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {{}}
 description: "synth runtime for runtime_e2e"
 "#
     );
@@ -93,8 +107,8 @@ description: "synth runtime for runtime_e2e"
 /// Install a minimal kind schema for `kind` at
 /// `<root>/.ai/node/engine/kinds/<kind>/` so the engine's
 /// RuntimeRegistry boot validation (ε.2) accepts a runtime that serves
-/// it. `root` must be a registered bundle root (the harness state
-/// path). The schema declares an executable kind that delegates to the
+/// it. `root` must be a registered bundle root. The schema declares an
+/// executable kind that delegates to the
 /// runtime registry — exactly the contract a synth `install_runtime`
 /// line implies.
 fn install_kind_schema(root: &Path, kind: &str, signer: &SigningKey) -> anyhow::Result<()> {
@@ -192,35 +206,40 @@ async fn e2e_knowledge_ref_returns_501_in_v53() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_direct_runtime_routes_through_native_dispatch() {
-    // Plant a synth runtime in app root; auth-disabled wildcard
+    // Plant a synth runtime in its own registered bundle; auth-disabled wildcard
     // scope satisfies `runtime.execute`, so dispatch_managed_subprocess
-    // proceeds past the cap gate and reaches the binary materialization
-    // step. The binary doesn't exist, so we expect an error mentioning
-    // `native:` (the executor_ref dispatch_managed_subprocess synthesizes)
-    // OR the bundle manifest. The KEY assertion: the error path is
-    // taken, NOT a 200 silently fallthrough or a 500 generic.
+    // proceeds past the cap gate and reaches its exact manifest-anchored stub.
+    // The stub exits non-zero, so we expect either a real thread envelope or a
+    // runtime error, never a silent dispatch fallthrough.
     //
     // The plant below registers the standard bundle alongside core via
     // `common::fast_fixture::register_standard_bundle` — the signed
     // `.ai/node/bundles/standard.yaml` registration writer that closes the
     // former blocker — so the engine walks both `bundles/core` (kinds) and
     // `bundles/standard` (binaries). This case deliberately plants a
-    // *synthetic* runtime whose `binary_ref` names a binary absent from
-    // `bundles/standard/bin`, so it pins the clean-lookup-error path: the
-    // dispatch loop reaches the binary materialization step and surfaces a
-    // named lookup error rather than a silent fallthrough. Resolution
+    // *synthetic* runtime whose binary and executor manifest live in a separate
+    // synthetic bundle so its provenance cannot mutate or impersonate the
+    // copied core bundle's manifest authority. Resolution
     // through the standard bundle's *real* directive/graph runtimes,
     // end-to-end, is covered by tests 5 / 5c / 5d below.
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         common::fast_fixture::register_standard_bundle(state, fixture)?;
-        install_kind_schema(state, "e2e_kind", &fixture.publisher)?;
+        let bundle_root = state.join(".ai/bundles/runtime-e2e-direct");
+        std::fs::create_dir_all(&bundle_root)?;
+        install_kind_schema(&bundle_root, "e2e_kind", &fixture.publisher)?;
         install_runtime(
-            state,
+            &bundle_root,
             "e2e-direct-runtime",
             "e2e_kind",
             true,
             "v1",
             &fixture.publisher,
+        )?;
+        common::fast_fixture::register_fixture_bundle(
+            state,
+            "runtime-e2e-direct",
+            &bundle_root,
+            fixture,
         )
     };
 
@@ -238,9 +257,8 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
         .await
         .expect("post /execute");
 
-    // Either a clear materialization/manifest error (no binary present)
-    // OR success if a stub somehow ran — only the FALLBACK case fails
-    // this test.
+    // Either a clear runtime/protocol error from the signed stub OR a real
+    // thread envelope is acceptable; only a dispatch fallthrough fails.
     assert!(
         !status.is_success() || body.get("thread").is_some(),
         "must either error cleanly OR return a real thread envelope; got {status}: {body}"
@@ -268,120 +286,54 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_multi_default_conflict_aborts_startup() {
-    use std::process::Command;
-
     // Plant TWO runtimes both declaring `serves: dup_kind, default: true`.
     // RuntimeRegistry::build_from_bundles must error; engine_init.rs
-    // propagates the error; daemon child exits non-zero.
-    //
-    // The app_root must contain real kind schemas so the daemon
-    // can parse the planted runtime YAMLs as kind=runtime items. We copy
-    // the workspace core bundle to a writable tempdir and use that as
-    // both --app-root AND the location to drop additional state
-    // (post-config resolution unifies CLI --app-root with the
-    // daemon's writable system_data_dir).
-    let user_space = tempfile::tempdir().expect("app root");
-    let (_core_tmp, state_path) = common::copy_core_to_temp();
+    // propagates a terminal readiness failure. `daemon.json` is only an early
+    // discovery hint and is expected to exist before verified boot finishes.
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        let bundle_root = state.join(".ai/bundles/runtime-e2e-default-conflict");
+        std::fs::create_dir_all(&bundle_root)?;
+        install_kind_schema(&bundle_root, "dup_kind", &fixture.publisher)?;
+        install_runtime(
+            &bundle_root,
+            "dup-runtime-a",
+            "dup_kind",
+            true,
+            "v1",
+            &fixture.publisher,
+        )?;
+        install_runtime(
+            &bundle_root,
+            "dup-runtime-b",
+            "dup_kind",
+            true,
+            "v1",
+            &fixture.publisher,
+        )?;
+        common::fast_fixture::register_fixture_bundle(
+            state,
+            "runtime-e2e-default-conflict",
+            &bundle_root,
+            fixture,
+        )
+    };
 
-    // Pre-populate via fast fixture (no  on the daemon
-    // command below). populate_initialized_state writes the deterministic
-    // node identity, vault keypair, user identity, and trust docs, plus
-    // imports the system-bundle signer trust.
-    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
-        .expect("fast fixture populate");
-    common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
-        .expect("register core bundle");
-    common::fast_fixture::register_standard_bundle(&state_path, &fixture)
-        .expect("register standard bundle");
-
-    install_runtime(
-        &state_path,
-        "dup-runtime-a",
-        "dup_kind",
-        true,
-        "v1",
-        &fixture.publisher,
-    )
-    .expect("plant dup-runtime-a");
-    install_runtime(
-        &state_path,
-        "dup-runtime-b",
-        "dup_kind",
-        true,
-        "v1",
-        &fixture.publisher,
-    )
-    .expect("plant dup-runtime-b");
-
-    // Test expects daemon to fail-fast before binding; `:0` is fine.
-    let bind = "127.0.0.1:0".to_string();
-    let uds_path = state_path.join("ryeosd.sock");
-
-    let mut cmd = Command::new(common::ryeosd_binary());
-    cmd.arg("--app-root")
-        .arg(&state_path)
-        .arg("--bind")
-        .arg(&bind)
-        .arg("--uds-path")
-        .arg(&uds_path)
-        .env("HOSTNAME", "testhost")
-        .env("RYEOS_APP_ROOT", &state_path)
-        .env("HOME", user_space.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().expect("spawn ryeosd");
-
-    // Wait up to 10s for either daemon.json (would be a bug) or the
-    // process to exit (expected).
-    let daemon_json = state_path.join("daemon.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut exit_status = None;
-    while Instant::now() < deadline {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => {
-                exit_status = Some(status);
-                break;
-            }
-            None => {
-                if daemon_json.exists() {
-                    // Daemon shouldn't have started — kill and reap.
-                    child.kill().ok();
-                    let _ = child.wait();
-                    panic!(
-                        "daemon started despite multi-default runtime conflict at {}",
-                        daemon_json.display()
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-
-    let status = exit_status.unwrap_or_else(|| {
-        child.kill().ok();
-        let _ = child.wait();
-        panic!("daemon did not exit within 10s on multi-default conflict")
-    });
+    let startup_error = match DaemonHarness::start_fast_with(plant, |_| {}).await {
+        Ok((_h, _fixture)) => panic!("daemon became ready despite multi-default runtime conflict"),
+        Err(error) => format!("{error:#}"),
+    };
     assert!(
-        !status.success(),
-        "daemon must exit non-zero on multi-default runtime conflict, got: {status:?}"
+        startup_error.contains("node_startup_failed"),
+        "multi-default conflict must become a terminal startup failure; got: {startup_error}"
     );
-
-    // Confirm the error message in stderr names the conflict so an
-    // operator can fix it (F4 — error surfaces enumerate alternatives).
-    let mut stderr_buf = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        use std::io::Read;
-        let _ = stderr.read_to_string(&mut stderr_buf);
-    }
-    let mentions_conflict = stderr_buf.contains("default")
-        || stderr_buf.contains("dup_kind")
-        || stderr_buf.contains("multiple")
-        || stderr_buf.contains("conflict");
+    let mentions_conflict = startup_error.contains("default")
+        || startup_error.contains("dup_kind")
+        || startup_error.contains("multiple")
+        || startup_error.contains("conflict");
     assert!(
         mentions_conflict,
-        "stderr must explain the multi-default conflict; got: {stderr_buf}"
+        "startup diagnostics must explain the multi-default conflict; got: {startup_error}"
     );
 }
 
@@ -453,108 +405,63 @@ inputs: []
     drop(project);
 }
 
-// ── 5b. P1.5 — paired B1 e2e: direct vs indirect on a malformed runtime ─
+// ── 5b. Malformed runtime binary refs fail boot admission ─────────────
 //
-// This is a **dispatcher mechanics** test, not a real directive/graph
-// behavior test. It uses a fully synthetic kind ("p15_kind") to avoid
-// colliding with the standard bundle's real directive runtime.
-//
-// The dispatcher's order is:
-//
-//   1. resolve_dispatch_hop attaches VerifiedRuntime         (succeeds)
-//   2. dispatch_managed_subprocess: B1 cap gate (gated on
-//      original_root_kind == "runtime")                       (skipped on indirect)
-//   3. check_dispatch_capabilities                            (succeeds)
-//   4. strip_binary_ref_prefix("badshape")                    (FAILS with
-//      `SchemaMisconfigured { detail: "...unexpected shape..." }` → 400)
-//
-// So an indirect call must surface a 400 whose body contains
-// `"unexpected shape"`. That precise wording is what proves the
-// dispatch loop walked PAST the B1 cap-check site to reach
-// strip_binary_ref_prefix.
-//
-// The "direct must 403 without cap" half of the pair lives in
-// dispatch.rs's unit tests (`enforce_caps_*` — covers the
-// gate-fires-when-cap-missing contract) because the e2e harness has
-// no facility to install a Principal with limited scopes.
+// The installed bundle graph now validates runtime binary provenance before
+// external admission opens. A malformed `binary_ref` is therefore a bundle
+// admission error, not a dispatch-time 400. The B1 cap-gate ordering remains
+// covered by dispatch unit tests with a fully admitted runtime.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
+async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         common::fast_fixture::register_standard_bundle(state, fixture)?;
-        // Synthetic kind + runtime with deliberately malformed binary_ref.
-        // P1.5: the dispatcher must walk past B1's cap-gate site and
-        // hit strip_binary_ref_prefix. Both load from bundle roots at
-        // engine boot, so they go into the state path.
-        install_kind_schema(state, "p15_kind", &fixture.publisher)?;
+        let bundle_root = state.join(".ai/bundles/runtime-e2e-malformed-ref");
+        std::fs::create_dir_all(&bundle_root)?;
+        install_kind_schema(&bundle_root, "p15_kind", &fixture.publisher)?;
+        // Keep every other executor-provenance link valid so `badshape` is the
+        // fixture's sole admission defect.
+        common::fast_fixture::install_signed_bundle_binary(
+            &bundle_root,
+            "p15-bad-runtime",
+            b"#!/bin/sh\nexit 70\n",
+            &fixture.publisher,
+        )?;
         install_runtime_with_binary_ref(
-            state,
+            &bundle_root,
             "p15-bad-runtime",
             "p15_kind",
             true,
             "v1",
             "badshape",
             &fixture.publisher,
+        )?;
+        common::fast_fixture::register_fixture_bundle(
+            state,
+            "runtime-e2e-malformed-ref",
+            &bundle_root,
+            fixture,
         )
     };
 
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
-        .await
-        .expect("start daemon with synth bad-binary-ref runtime");
-
-    // Synth item planted in the PROJECT tier under the synthetic
-    // kind's directory so the dispatch resolves it as kind "p15_kind",
-    // delegates to runtime_registry, and finds the synth runtime with
-    // bad binary_ref.
-    let project = tempfile::tempdir().expect("project tempdir");
-    let dir = project.path().join(".ai/p15_kind_items/p15");
-    std::fs::create_dir_all(&dir).expect("create project p15_kind dir");
-    let body = r#"---
-name: flow
-category: "p15"
-description: "P1.5 reach-past-B1 e2e"
-inputs: []
----
-# P1.5
-"#;
-    let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
-    std::fs::write(dir.join("flow.md"), signed).expect("write project p15 item");
-
-    let (status, body) = h
-        .post_execute(
-            "p15_kind:p15/flow",
-            project.path().to_str().unwrap(),
-            serde_json::json!({}),
-        )
-        .await
-        .expect("post /execute");
-
-    // Must be 400 (SchemaMisconfigured → BAD_REQUEST), NOT 403
-    // (which would mean B1 fired) and NOT 502 (which would mean
-    // materialization failed before strip_binary_ref_prefix).
-    assert_eq!(
-        status,
-        reqwest::StatusCode::BAD_REQUEST,
-        "indirect path with malformed binary_ref must return 400 from \
-         strip_binary_ref_prefix; got {status}: {body}"
-    );
-
-    // The body MUST mention "unexpected shape" — that string is
-    // emitted only by `strip_binary_ref_prefix` rejecting the
-    // `binary_ref` shape. Its presence proves the dispatch loop walked
-    // past the B1 cap-gate location (B1 fires earlier in
-    // dispatch_managed_subprocess than strip_binary_ref_prefix).
-    let err_str = body
-        .get("error")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let startup_error = match DaemonHarness::start_fast_with(plant, |_| {}).await {
+        Ok((_h, _fixture)) => panic!("daemon became ready with a malformed runtime binary_ref"),
+        Err(error) => format!("{error:#}"),
+    };
     assert!(
-        err_str.contains("unexpected shape"),
-        "body must contain 'unexpected shape' from strip_binary_ref_prefix \
-         to prove dispatch reached past B1; got: {body}"
+        startup_error.contains("node_startup_failed"),
+        "malformed runtime binary_ref must fail terminal boot admission; got: {startup_error}"
     );
-
-    drop(project);
+    assert!(
+        startup_error.contains("installed bundle graph admission failed"),
+        "malformed runtime must be rejected by installed bundle admission; got: {startup_error}"
+    );
+    assert!(
+        startup_error.contains("badshape")
+            || startup_error.contains("binary_ref")
+            || startup_error.contains("unexpected shape"),
+        "startup diagnostics must identify the malformed binary ref; got: {startup_error}"
+    );
 }
 
 // ── 5c. P1.6 — root/runtime split pin: subject identity wins audit ─────

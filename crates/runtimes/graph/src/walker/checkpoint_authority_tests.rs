@@ -818,7 +818,7 @@ config:
 
     assert!(result.success, "numeric resume failed: {result:?}");
     assert_eq!(result.status, GraphRunStatus::Completed);
-    assert_eq!(result.steps, 10);
+    assert_eq!(result.steps, 11);
     assert_eq!(result.state["count"], json!(42));
     assert_eq!(result.result, Some(json!(42)));
 }

@@ -744,7 +744,7 @@ impl StartupCoordinator {
         state.snapshot = response.startup.clone();
         drop(state);
         tracing::error!(
-            error = %error,
+            error = %format_args!("{error:#}"),
             previous_phase = previous_phase.as_str(),
             previous_duration_ms = previous_duration.as_millis() as u64,
             "daemon startup failed"

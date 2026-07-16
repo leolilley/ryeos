@@ -688,7 +688,8 @@ config:
         vec![json!({
             "outcome_code": "exit:1",
             "result": null,
-            "error": {"exit_code": 1, "stderr": "Traceback: boom"}
+            "error": {"exit_code": 1, "stderr": "Traceback: boom"},
+            "artifacts": []
         })],
     );
     let result = w.execute(json!({}), None).await;
@@ -726,7 +727,8 @@ config:
         vec![json!({
             "outcome_code": "exit:1",
             "result": null,
-            "error": {"exit_code": 1, "stderr": "boom"}
+            "error": {"exit_code": 1, "stderr": "boom"},
+            "artifacts": []
         })],
     );
     let result = w.execute(json!({}), None).await;
@@ -765,7 +767,12 @@ config:
     let graph = make_graph(yaml);
     let w = make_walker(
         graph,
-        vec![json!({"status": "error", "message": "not found"})],
+        vec![json!({
+            "outcome_code": null,
+            "result": {"status": "error", "message": "not found"},
+            "error": null,
+            "artifacts": []
+        })],
     );
     let result = w.execute(json!({}), None).await;
 
@@ -1802,7 +1809,8 @@ async fn foreach_item_failure_on_error_fail_fails_run() {
                 json!({"value": "a"}),
                 json!({
                     "outcome_code": "exit:1", "result": null,
-                    "error": {"exit_code": 1, "stderr": "boom"}
+                    "error": {"exit_code": 1, "stderr": "boom"},
+                    "artifacts": []
                 }),
             ],
         );
@@ -1827,7 +1835,8 @@ async fn foreach_item_failure_on_error_continue_records_errors() {
                 json!({"value": "a"}),
                 json!({
                     "outcome_code": "exit:1", "result": null,
-                    "error": {"exit_code": 1, "stderr": "boom"}
+                    "error": {"exit_code": 1, "stderr": "boom"},
+                    "artifacts": []
                 }),
             ],
         );
@@ -2002,6 +2011,7 @@ config:
                 "outcome_code": "exit:1",
                 "result": null,
                 "error": {"exit_code": 1, "stderr": "boom"},
+                "artifacts": [],
             }),
             json!({"value": 3}),
         ],
@@ -2088,7 +2098,8 @@ config:
         graph,
         vec![json!({
             "outcome_code": "exit:1", "result": null,
-            "error": {"exit_code": 1, "stderr": "boom"}
+            "error": {"exit_code": 1, "stderr": "boom"},
+            "artifacts": []
         })],
     );
     let result = w
@@ -2135,6 +2146,7 @@ config:
                 "outcome_code": "exit:1",
                 "result": null,
                 "error": {"exit_code": 1, "stderr": "boom"},
+                "artifacts": [],
             }),
         ],
     )
@@ -2208,9 +2220,12 @@ config:
     let graph = make_graph(yaml);
     let w = make_walker(
         graph,
-        vec![
-            json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced failure"}}),
-        ],
+        vec![json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "forced failure"},
+            "artifacts": []
+        })],
     );
     let result = w.execute(json!({}), None).await;
     assert!(result.success);
@@ -3070,10 +3085,9 @@ async fn malformed_hook_cost_fails_terminal_accounting() {
 
     assert_eq!(result.status, GraphRunStatus::Error);
     assert!(!result.success);
-    assert!(result
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("accounting is incomplete")));
+    let error = result.error.as_deref().unwrap_or_default();
+    assert!(error.contains("graph run history rejected"), "{error}");
+    assert!(error.contains("malformed native runtime cost"), "{error}");
 }
 
 #[tokio::test]
@@ -3117,10 +3131,9 @@ config:
 
     assert_eq!(result.status, GraphRunStatus::Error);
     assert!(!result.success);
-    assert!(result
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("accounting is incomplete")));
+    let error = result.error.as_deref().unwrap_or_default();
+    assert!(error.contains("graph run history rejected"), "{error}");
+    assert!(error.contains("cost accumulation failed"), "{error}");
     assert_eq!(result.cost.unwrap().input_tokens, i64::MAX as u64);
 }
 
@@ -3873,8 +3886,10 @@ config:
       node_type: return
 "#;
     let (walker, recorder) = make_recording_walker(make_graph(yaml), Vec::new(), None);
-    let jobs = (0..20).map(|index| json!(index)).collect::<Vec<_>>();
-    let shared = "x".repeat(256 * 1024);
+    let jobs = (0..70).map(|index| json!(index)).collect::<Vec<_>>();
+    // Keep every rendered child comfortably inside the per-value limit while
+    // making the ordered cohort exceed the aggregate result-byte ceiling.
+    let shared = "x".repeat(64 * 1024);
 
     let result = walker
         .execute(
@@ -4515,9 +4530,12 @@ config:
     let graph = make_graph(yaml);
     let (w, recorder) = make_recording_walker(
         graph,
-        vec![
-            json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}}),
-        ],
+        vec![json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "forced"},
+            "artifacts": []
+        })],
         None,
     );
 
@@ -4622,9 +4640,12 @@ config:
     let tmp = tempfile::tempdir().unwrap();
     let (w, _recorder) = make_recording_walker(
         graph,
-        vec![
-            json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}}),
-        ],
+        vec![json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "forced"},
+            "artifacts": []
+        })],
         Some(tmp.path()),
     );
 
@@ -4696,9 +4717,12 @@ config:
     let graph_err = make_graph(yaml_err);
     let (w_err, recorder_err) = make_recording_walker(
         graph_err,
-        vec![
-            json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}}),
-        ],
+        vec![json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "forced"},
+            "artifacts": []
+        })],
         None,
     );
 

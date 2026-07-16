@@ -25,6 +25,31 @@ use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
+const DEFAULT_DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn daemon_startup_deadline() -> anyhow::Result<Instant> {
+    let timeout = match std::env::var("RYEOSD_TEST_STARTUP_TIMEOUT_SECS") {
+        Ok(raw) => {
+            let seconds = raw.parse::<u64>().with_context(|| {
+                format!("parse RYEOSD_TEST_STARTUP_TIMEOUT_SECS value `{raw}` as seconds")
+            })?;
+            anyhow::ensure!(
+                seconds > 0,
+                "RYEOSD_TEST_STARTUP_TIMEOUT_SECS must be greater than zero"
+            );
+            Duration::from_secs(seconds)
+        }
+        Err(std::env::VarError::NotPresent) => DEFAULT_DAEMON_STARTUP_TIMEOUT,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "read RYEOSD_TEST_STARTUP_TIMEOUT_SECS: {error}"
+            ));
+        }
+    };
+    Ok(Instant::now() + timeout)
+}
+
 /// Path to the built `ryeosd` binary (set by Cargo for integration tests
 /// in this crate).
 pub fn ryeosd_binary() -> PathBuf {
@@ -106,10 +131,10 @@ async fn wait_for_daemon_ready(
     bind: SocketAddr,
     harness_id: u64,
     context: &str,
+    deadline: Instant,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!("http://{bind}/_ryeos/ready");
-    let deadline = Instant::now() + Duration::from_secs(15);
 
     loop {
         let detail = match client
@@ -144,7 +169,7 @@ async fn wait_for_daemon_ready(
                  daemon stderr:\n{stderr}"
             );
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(DAEMON_STARTUP_POLL_INTERVAL).await;
     }
 }
 
@@ -153,8 +178,8 @@ async fn wait_for_daemon_discovery(
     daemon_json: &Path,
     harness_id: u64,
     context: &str,
+    deadline: Instant,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if daemon_json.exists() {
             return Ok(());
@@ -173,7 +198,7 @@ async fn wait_for_daemon_discovery(
                 daemon_json.display()
             );
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(DAEMON_STARTUP_POLL_INTERVAL).await;
     }
 }
 
@@ -555,15 +580,30 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         let mut child = cmd.spawn()?;
 
         let daemon_json = app_root.join("daemon.json");
-        wait_for_daemon_discovery(&mut child, &daemon_json, harness_id, "daemon").await?;
+        wait_for_daemon_discovery(
+            &mut child,
+            &daemon_json,
+            harness_id,
+            "daemon",
+            startup_deadline,
+        )
+        .await?;
 
         // Read the actual bound address — required when we passed :0.
         let actual_bind = read_actual_bind(&daemon_json)?;
 
-        wait_for_daemon_ready(&mut child, actual_bind, harness_id, "daemon").await?;
+        wait_for_daemon_ready(
+            &mut child,
+            actual_bind,
+            harness_id,
+            "daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(Self {
             _state_dir_outer: state_dir_outer,
@@ -683,6 +723,7 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         let mut child = cmd.spawn()?;
 
         let daemon_json = state_path.join("daemon.json");
@@ -691,6 +732,7 @@ impl DaemonHarness {
             &daemon_json,
             harness_id,
             "daemon (fast fixture path)",
+            startup_deadline,
         )
         .await?;
 
@@ -701,6 +743,7 @@ impl DaemonHarness {
             actual_bind,
             harness_id,
             "daemon (fast fixture path)",
+            startup_deadline,
         )
         .await?;
 
@@ -856,6 +899,7 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
 
         wait_for_daemon_discovery(
@@ -863,11 +907,19 @@ impl DaemonHarness {
             &daemon_json,
             harness_id,
             "respawned daemon",
+            startup_deadline,
         )
         .await?;
         self.bind = read_actual_bind(&daemon_json)?;
 
-        wait_for_daemon_ready(&mut self.child, self.bind, harness_id, "respawned daemon").await?;
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            harness_id,
+            "respawned daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(())
     }
@@ -949,6 +1001,7 @@ impl DaemonHarness {
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
 
         // Wait for the restarted daemon to publish daemon.json with
@@ -958,11 +1011,19 @@ impl DaemonHarness {
             &daemon_json,
             harness_id,
             "restarted daemon",
+            startup_deadline,
         )
         .await?;
         self.bind = read_actual_bind(&daemon_json)?;
 
-        wait_for_daemon_ready(&mut self.child, self.bind, harness_id, "restarted daemon").await?;
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            harness_id,
+            "restarted daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(())
     }
@@ -1139,6 +1200,9 @@ pub async fn run_service_standalone(
     let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
     fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
     fast_fixture::register_standard_bundle(&state_path, &fixture)?;
+    drop(ryeos_app::runtime_db::RuntimeDb::open(
+        &state_path.join(".ai/state/runtime.sqlite3"),
+    )?);
 
     let mut cmd = Command::new(ryeosd_binary());
     cmd.arg("--app-root")

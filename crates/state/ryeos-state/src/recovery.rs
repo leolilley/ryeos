@@ -2668,8 +2668,10 @@ mod tests {
     fn nested_cas_mutation_guard_rejects_a_different_runtime_root() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let _shared = CasMutationGuard::acquire_shared(first.path()).unwrap();
-        let error = match CasMutationGuard::acquire_shared(second.path()) {
+        CasMutationGuard::ensure_anchor(first.path()).unwrap();
+        CasMutationGuard::ensure_anchor(second.path()).unwrap();
+        let _shared = CasMutationGuard::acquire_existing_shared(first.path()).unwrap();
+        let error = match CasMutationGuard::acquire_existing_shared(second.path()) {
             Ok(_) => panic!("cross-root nested guard unexpectedly succeeded"),
             Err(error) => error,
         };

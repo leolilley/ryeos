@@ -1559,6 +1559,23 @@ mod tests {
         }
     }
 
+    fn ensure_test_root(state: &AppState, thread_id: &str) {
+        if state.threads.get_thread(thread_id).unwrap().is_none() {
+            state
+                .threads
+                .create_thread_for_test(&make_create_params(thread_id, thread_id))
+                .unwrap();
+        }
+    }
+
+    fn create_running_test_thread(state: &AppState, thread_id: &str) {
+        state
+            .threads
+            .create_thread_for_test(&make_create_params(thread_id, thread_id))
+            .unwrap();
+        state.threads.mark_running(thread_id).unwrap();
+    }
+
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
         RpcRequest {
             request_id: 1,
@@ -1947,6 +1964,7 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
+        state.threads.mark_running("P").unwrap();
         state
             .state_store
             .seed_launch_metadata(
@@ -1990,8 +2008,11 @@ mod tests {
             "graph_run_id": "gr-1",
             "follow_node": "node-a",
             "step_count": 0,
-            "child_item_ref": child,
-            "child_parameters": {},
+            "children": [{
+                "item_ref": child,
+                "ref_bindings": {},
+                "parameters": {},
+            }],
             "completion": {
                 "status": "continued",
                 "outcome_code": "continued",
@@ -2051,7 +2072,7 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
-            project_root: None,
+            project_root: Some(std::path::PathBuf::from("/tmp/p")),
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -2066,10 +2087,9 @@ mod tests {
         use ryeos_engine::contracts::{
             EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
         };
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("P", "P"))
-            .unwrap();
+        let mut parent = make_create_params("P", "P");
+        parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        state.threads.create_thread_for_test(&parent).unwrap();
         state.threads.mark_running("P").unwrap();
         state
             .state_store
@@ -2116,6 +2136,10 @@ mod tests {
     /// a single test arms MORE than one waiter — `follow_waiter.parent_successor_thread_id`
     /// is UNIQUE (a successor belongs to exactly one follow), so each must differ.
     fn arm_waiting_follow_succ(state: &AppState, wk: &str, child: &str, successor: &str) {
+        // Follow mutations pin the authoritative parent chain. Model the real
+        // suspended-parent shape instead of relying on runtime rows without a
+        // signed state head.
+        ensure_test_root(state, "P");
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -2607,6 +2631,7 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("Cres", "Cres"))
             .unwrap();
+        ensure_test_root(&state, "P");
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -2662,6 +2687,7 @@ mod tests {
         // Reserved, child recorded, but no successor and parent not continued → the
         // parent's own native resume re-drives spawn_follow_child; leave it.
         let (_tmp, state) = setup_app_state();
+        ensure_test_root(&state, "Pnc");
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -2790,7 +2816,8 @@ mod tests {
         // waiter must be left intact (suspected corruption is for inspection).
         let (_tmp, state) = setup_app_state();
         // "S" links upstream to the parent "P" but carries NO follow-resume edge.
-        let mut params = make_create_params("S", "S");
+        ensure_test_root(&state, "P");
+        let mut params = make_create_params("S", "P");
         params.upstream_thread_id = Some("P".to_string());
         state
             .state_store
@@ -3099,6 +3126,7 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
+        state.threads.mark_running("P").unwrap();
         let cbt = state.callback_tokens.generate(
             "P",
             std::path::PathBuf::from("/proj"),
@@ -3278,8 +3306,9 @@ mod tests {
     // ── events (via runtime.* token-gated) ──────────────────────────
 
     #[tokio::test]
-    async fn runtime_events_replay_after_thread_lifecycle() {
+    async fn runtime_finalize_revokes_callback_but_events_remain_replayable() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-events-1");
         let cbt = state.callback_tokens.generate(
             "T-events-1",
             std::path::PathBuf::from("/test"),
@@ -3288,12 +3317,6 @@ mod tests {
             test_provenance(&state, "/test"),
             "0".repeat(64),
         );
-
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-events-1", "T-events-1"))
-            .unwrap();
-
         let finalize_resp = dispatch(
             rpc(
                 "runtime.finalize_thread",
@@ -3331,12 +3354,23 @@ mod tests {
         )
         .await;
         assert!(
-            replay_resp.error.is_none(),
-            "replay failed: {:?}",
-            replay_resp.error
+            rpc_err(&replay_resp)
+                .message
+                .contains("invalid callback capability"),
+            "terminal finalization must revoke the runtime callback: {:?}",
+            replay_resp.error,
         );
-        let result = rpc_ok(&replay_resp);
-        let events = result["events"].as_array().unwrap();
+
+        let replay = state
+            .events
+            .replay(&EventReplayParams {
+                chain_root_id: None,
+                thread_id: Some("T-events-1".to_string()),
+                after_chain_seq: None,
+                limit: 10,
+            })
+            .unwrap();
+        let events = replay.events;
         assert!(
             events.len() >= 2,
             "expected >= 2 events, got {}",
@@ -3344,7 +3378,7 @@ mod tests {
         );
         let types: Vec<&str> = events
             .iter()
-            .map(|e| e["event_type"].as_str().unwrap())
+            .map(|event| event.event_type.as_str())
             .collect();
         assert!(types.contains(&"thread_created"));
         assert!(types.contains(&"thread_completed"));
@@ -3357,6 +3391,7 @@ mod tests {
         // publish the same PersistedEventRecord into the per-thread
         // hub so SSE subscribers tail in real time.
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-stream-1");
         let cbt = state.callback_tokens.generate(
             "T-stream-1",
             std::path::PathBuf::from("/test"),
@@ -3365,11 +3400,6 @@ mod tests {
             test_provenance(&state, "/test"),
             "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-stream-1", "T-stream-1"))
-            .unwrap();
-
         // Subscribe BEFORE the callback fires so the event lands in
         // the live broadcast.
         let mut rx = state.event_streams.subscribe("T-stream-1");
@@ -3408,6 +3438,7 @@ mod tests {
     #[tokio::test]
     async fn ephemeral_append_event_bridges_without_replay_persistence() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ephemeral-1");
         let cbt = state.callback_tokens.generate(
             "T-ephemeral-1",
             std::path::PathBuf::from("/test"),
@@ -3416,10 +3447,6 @@ mod tests {
             test_provenance(&state, "/test"),
             "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-ephemeral-1", "T-ephemeral-1"))
-            .unwrap();
         let mut rx = state.event_streams.subscribe("T-ephemeral-1");
 
         let resp = dispatch(
@@ -3471,6 +3498,7 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_event_cannot_be_ephemeral() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ephemeral-bad");
         let cbt = state.callback_tokens.generate(
             "T-ephemeral-bad",
             std::path::PathBuf::from("/test"),
@@ -3479,11 +3507,6 @@ mod tests {
             test_provenance(&state, "/test"),
             "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-ephemeral-bad", "T-ephemeral-bad"))
-            .unwrap();
-
         let resp = dispatch(
             rpc(
                 "runtime.append_event",
@@ -3515,6 +3538,7 @@ mod tests {
         // persisted (chain_seq) order so SSE consumers reconstruct
         // the runtime's emission sequence verbatim.
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-stream-2");
         let cbt = state.callback_tokens.generate(
             "T-stream-2",
             std::path::PathBuf::from("/test"),
@@ -3523,10 +3547,6 @@ mod tests {
             test_provenance(&state, "/test"),
             "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-stream-2", "T-stream-2"))
-            .unwrap();
         let mut rx = state.event_streams.subscribe("T-stream-2");
 
         let resp = dispatch(rpc("runtime.append_events", json!({
@@ -3577,6 +3597,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_bundle_events_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-bundle-1");
         let cbt = state.callback_tokens.generate_with_context(
             "T-bundle-1",
             std::path::PathBuf::from("/test"),
@@ -3638,6 +3659,8 @@ mod tests {
     #[tokio::test]
     async fn runtime_bundle_events_reject_bundle_id_input_and_missing_cap() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-bundle-deny");
+        create_running_test_thread(&state, "T-bundle-deny-2");
         let cbt = state.callback_tokens.generate_with_context(
             "T-bundle-deny",
             std::path::PathBuf::from("/test"),
@@ -3714,6 +3737,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-vault-1");
         let cbt = state.callback_tokens.generate_with_context(
             "T-vault-1",
             std::path::PathBuf::from("/test"),
@@ -3806,6 +3830,9 @@ mod tests {
     #[tokio::test]
     async fn runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-vault-deny");
+        create_running_test_thread(&state, "T-vault-deny-2");
+        create_running_test_thread(&state, "T-vault-deny-3");
         let cbt = state.callback_tokens.generate_with_context(
             "T-vault-deny",
             std::path::PathBuf::from("/test"),
@@ -4075,10 +4102,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_action_with_correct_token_uses_server_side_principal() {
         let (_tmp, state) = setup_app_state();
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-tat-ok", "T-tat-ok"))
-            .unwrap();
+        create_running_test_thread(&state, "T-tat-ok");
         let cbt = state.callback_tokens.generate(
             "T-tat-ok",
             std::path::PathBuf::from("/p"),
@@ -4164,10 +4188,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
         let (_tmp, state) = setup_app_state();
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-caps-empty", "T-caps-empty"))
-            .unwrap();
+        create_running_test_thread(&state, "T-caps-empty");
         let cbt = state.callback_tokens.generate(
             "T-caps-empty",
             std::path::PathBuf::from("/p"),
@@ -4213,10 +4234,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
         let (_tmp, state) = setup_app_state();
-        state
-            .threads
-            .create_thread_for_test(&make_create_params("T-caps-wild", "T-caps-wild"))
-            .unwrap();
+        create_running_test_thread(&state, "T-caps-wild");
         let cbt = state.callback_tokens.generate(
             "T-caps-wild",
             std::path::PathBuf::from("/p"),

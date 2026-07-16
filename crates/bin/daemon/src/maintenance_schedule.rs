@@ -581,6 +581,7 @@ mod tests {
                 "spec_version": 1,
                 "schedule_id": schedule_id,
                 "item_ref": "service:operator/task",
+                "ref_bindings": {},
                 "schedule_type": "cron",
                 "expression": "0 0 1 * * *",
                 "timezone": "UTC",
@@ -684,7 +685,7 @@ schedules:
         let existing = node_dir.join("schedules/maintenance-gc.yaml");
         let mut paused = read_schedule_body(&existing);
         paused["enabled"] = Value::Bool(false);
-        paused["expression"] = Value::String("stale-expression".into());
+        paused["expression"] = Value::String("0 0 3 * * *".into());
         paused["params"]["deep"] = Value::Bool(false);
         let anchor = paused["registered_at"].as_i64().unwrap();
         writer::write_signed_node_item(&node_dir, "schedules", "maintenance-gc", &paused, &id)
