@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:0a2b25d415332b323a812871fc3e13b162c7df8cba1e7d38a9351bf8d36cceeb:MzM0zcjjIn7abg2yBu0xFVXyAtISC4DPme9lmBJy5rW2wPdve09JGHQOyB5Fyi6zNnwek/aQ6ORXWzqAMnLtBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T23:50:34Z:e1f3a0ba24b2b90a9fc2764b09ea4b241bc817a7ec729fada003898968cd846d:FzxTr/TxRpVHy7U/SV3xOxmbm6QA6kpEavFKRyKjFTJPiOKlIplxnyuTN4lZ64kmnFBKFoZOIaxpaqzMBADAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.2.0"
+version: "3.3.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -13,8 +13,8 @@ description: >
 The `ryeos` CLI has two execution paths:
 
 1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
-   `node status`, `trust pin`, `authorize-key`, `publish`, and local vault
-   maintenance verbs.
+   `node status`, `node doctor`, `node gc`, `trust pin`, `authorize-key`,
+   `publish`, and local vault maintenance verbs.
 2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
    HTTP to a running daemon.
 
@@ -43,8 +43,10 @@ ryeos start [--app-root <dir>]
 ```
 
 Starts the local daemon. Fails if not initialized, succeeds immediately
-if already running, and uses the lifecycle start flock. Default readiness
-timeout is 15 seconds.
+if already running, and uses the lifecycle start flock. The readiness timeout
+is 15 minutes so verified projection recovery can finish. Interactive terminals
+show the daemon's typed startup phases and counters in one redrawn boot line;
+redirected output remains plain and deterministic.
 
 ### `ryeos stop`
 
@@ -78,6 +80,17 @@ Runs the offline node checklist. Its sandbox row uses the production strict load
 disabled is a healthy inactive opt-out, while enforced mode validates the
 backend and resource limit. Policy edits require a daemon restart; see
 [Execution Sandbox](execution-sandbox.md).
+
+### `ryeos node gc`
+
+```bash
+ryeos node gc --discard-thread-history [--dry-run | --confirm-discard-thread-history] [--sweep-cas] [--json] [--app-root <dir>]
+```
+
+Runs the explicit offline all-thread-history retirement while the daemon is
+stopped. Mutation requires the confirmation flag. Interactive terminals show
+typed maintenance phases and exact retired-head counts; `--json` and redirected
+calls emit no terminal control sequences. See [Maintenance GC](../services/maintenance-gc.md).
 
 ## Other local operator verbs
 

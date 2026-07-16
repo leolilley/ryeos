@@ -1432,14 +1432,14 @@ impl ThreadRuntimeAuthority {
 fn count_runtime_tree_entries(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut count = 1usize;
     for name in directory.entry_names()? {
-        let child_count = if let Some(child) = directory.open_child_directory(&name)? {
-            count_runtime_tree_entries(&child)?
-        } else if directory.open_regular(&name, false)?.is_some() {
-            1
-        } else {
-            // An entry removed after enumeration is already absent. A link or
-            // special file fails in the no-follow regular-file open above.
-            continue;
+        let child_count = match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                count_runtime_tree_entries(&child)?
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) => 1,
+            // An entry removed after enumeration is already absent. Links and
+            // special files fail in the no-follow mixed-entry open above.
+            None => continue,
         };
         count = count
             .checked_add(child_count)
@@ -1487,24 +1487,28 @@ fn inspect_thread_runtime_files(
 fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut deleted = 0usize;
     for name in directory.entry_names()? {
-        if let Some(child) = directory.open_child_directory(&name)? {
-            deleted = deleted
-                .checked_add(delete_runtime_tree_contents(&child)?)
-                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
-            if !directory.remove_empty_child_if_same(&name, &child)? {
-                bail!(
-                    "thread runtime directory changed during cleanup: {}",
-                    child.path().display()
-                );
+        match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                deleted = deleted
+                    .checked_add(delete_runtime_tree_contents(&child)?)
+                    .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+                if !directory.remove_empty_child_if_same(&name, &child)? {
+                    bail!(
+                        "thread runtime directory changed during cleanup: {}",
+                        child.path().display()
+                    );
+                }
+                deleted = deleted
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
             }
-            deleted = deleted
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
-        } else if let Some(file) = directory.open_regular(&name, false)? {
-            directory.remove_if_same(&name, &file)?;
-            deleted = deleted
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+            Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
+                directory.remove_if_same(&name, &file)?;
+                deleted = deleted
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+            }
+            None => {}
         }
     }
     Ok(deleted)
@@ -1530,6 +1534,25 @@ fn delete_thread_runtime_files(paths: &[ThreadRuntimeRemoval]) -> Result<usize> 
             .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
     }
     Ok(deleted)
+}
+
+/// Inspect or clear the complete per-thread runtime directory for the explicit
+/// offline all-history GC path. The `threads/` root itself remains as the
+/// current empty runtime namespace.
+pub(crate) fn discard_all_thread_runtime_files(
+    app_root: &Path,
+    runtime_state: &lillux::PinnedDirectory,
+    dry_run: bool,
+) -> Result<usize> {
+    let authority = ThreadRuntimeAuthority::capture(app_root, runtime_state, false)?;
+    authority.ensure_current_binding()?;
+    let Some(threads_root) = authority.threads_root.as_ref() else {
+        return Ok(0);
+    };
+    if dry_run {
+        return count_runtime_tree_entries(threads_root).map(|count| count.saturating_sub(1));
+    }
+    delete_runtime_tree_contents(threads_root)
 }
 
 impl StateStore {
@@ -5840,7 +5863,7 @@ mod tests {
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
             identity.fingerprint().to_string(),
-            identity.verifying_key().clone(),
+            *identity.verifying_key(),
         );
         StateStore::new_with_head_trust(
             tmp.clone(),

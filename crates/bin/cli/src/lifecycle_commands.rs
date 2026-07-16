@@ -8,6 +8,7 @@
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
 //!   - `ryeos node doctor` — offline "why won't it start" checklist
+//!   - `ryeos node gc` — explicit offline recovery/GC that must work when boot fails
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -65,6 +66,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "gc"],
+        summary: "Run explicit offline node garbage collection",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["help"],
         summary: "Open the compact TTY help screen",
         category: "meta",
@@ -114,6 +120,10 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
                 .map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("gc")) => {
+            run_node_gc_command(&argv[2..]).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("start", _) => {
             run_start_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
@@ -124,6 +134,149 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
         }
         _ => Ok(false),
     }
+}
+
+// ── ryeos node gc ──────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node gc",
+    about = "Run bootstrap-safe offline node garbage collection",
+    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, project heads, operational sync/admission state, and independently retained logs/caches are preserved.",
+    no_binary_name = true
+)]
+struct NodeGcArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Retire every local thread chain and its execution recovery history.
+    #[arg(long)]
+    discard_thread_history: bool,
+
+    /// Required acknowledgement for destructive thread-history retirement.
+    #[arg(long)]
+    confirm_discard_thread_history: bool,
+
+    /// Inspect and report without mutating any store.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Physically sweep newly unreachable CAS objects after retiring roots.
+    /// Omit for the fast startup-recovery path; normal maintenance can sweep later.
+    #[arg(long)]
+    sweep_cas: bool,
+
+    /// Emit structured JSON instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+}
+
+impl NodeGcArgs {
+    fn validate(&self) -> Result<()> {
+        if !self.discard_thread_history {
+            anyhow::bail!(
+                "no offline GC operation selected; pass --discard-thread-history (use --dry-run to inspect first)"
+            );
+        }
+        if !self.dry_run && !self.confirm_discard_thread_history {
+            anyhow::bail!(
+                "discarding all thread history requires --confirm-discard-thread-history"
+            );
+        }
+        if self.dry_run && self.sweep_cas {
+            anyhow::bail!(
+                "--sweep-cas cannot be combined with --dry-run; inspect history first, then sweep only with the confirmed discard"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn run_node_gc_command(argv: &[String]) -> Result<()> {
+    let args = parse_or_handle_help::<NodeGcArgs>(argv)?;
+    args.validate()?;
+
+    let options = ryeos_app::offline_gc::OfflineThreadHistoryGcOptions {
+        app_root: args.app_root,
+        dry_run: args.dry_run,
+        sweep_cas: args.sweep_cas,
+    };
+    let mut progress = crate::tty::OfflineGcProgress::new(!args.json);
+    let report = match progress.as_mut() {
+        Some(progress) => {
+            let mut observer = |event: &ryeos_app::offline_gc::OfflineThreadHistoryGcProgress| {
+                progress.observe(event);
+            };
+            ryeos_app::offline_gc::run_offline_thread_history_gc_with_progress(
+                &options,
+                &mut observer,
+            )
+        }
+        None => ryeos_app::offline_gc::run_offline_thread_history_gc(&options),
+    }
+    .context("offline node GC failed")?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    if let Some(progress) = progress {
+        progress.finish()?;
+        crate::tty::render_gc_summary(&report)?;
+        println!(
+            "   {} chain/recovery artifacts  ·  {} thread runtime artifacts",
+            report.chain_ref_artifacts + report.pending_transitions,
+            report.thread_runtime_artifacts,
+        );
+        if let Some(sweep) = report.cas_sweep.as_ref() {
+            println!(
+                "   CAS reclaimed {} objects  ·  {} blobs  ·  {} bytes",
+                sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
+            );
+        } else if !report.dry_run {
+            println!("   CAS sweep deferred to normal maintenance");
+        }
+        return Ok(());
+    }
+
+    println!(
+        "{} thread-history GC — {}",
+        if report.dry_run {
+            "would discard"
+        } else {
+            "discarded"
+        },
+        report.app_root.display()
+    );
+    println!("chain heads: {}", report.chain_heads);
+    println!(
+        "chain/recovery artifacts: {}",
+        report.chain_ref_artifacts + report.pending_transitions
+    );
+    println!("runtime rows: {}", report.runtime_rows.total_rows());
+    println!(
+        "thread runtime artifacts: {}",
+        report.thread_runtime_artifacts
+    );
+    println!("scheduler rows: {}", report.scheduler_rows.total_rows());
+    println!(
+        "scheduler journal artifacts: {}",
+        report.scheduler_journal_artifacts
+    );
+    println!(
+        "old projection stores: {}",
+        report.projection.superseded_instances_deleted
+    );
+    if let Some(sweep) = report.cas_sweep.as_ref() {
+        println!(
+            "CAS swept: {} objects, {} blobs ({} bytes)",
+            sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
+        );
+    } else if !report.dry_run {
+        println!("CAS sweep: deferred (run normal maintenance GC later)");
+    }
+    Ok(())
 }
 
 fn map_local_err(e: anyhow::Error) -> CliError {
@@ -801,7 +954,18 @@ async fn run_start_command(argv: &[String]) -> Result<()> {
     let env =
         LocalLifecycleEnv::load_with_overrides(args.app_root, args.bind, args.uds_path, true)?;
     let controller = LifecycleController::from_env(env);
-    let report = controller.start().await.context("ryeos start failed")?;
+    let mut progress =
+        crate::tty::LifecycleProgress::new(crate::tty::LifecycleProgressAction::Boot);
+    let report = match progress.as_mut() {
+        Some(progress) => controller.start_with_progress(progress).await,
+        None => controller.start().await,
+    }
+    .context("ryeos start failed")?;
+    if let Some(progress) = progress {
+        progress.finish_start(&report)?;
+        warn_if_stale_daemon(&report.status);
+        return Ok(());
+    }
     if report.already_running {
         println!("running");
         warn_if_stale_daemon(&report.status);
@@ -902,13 +1066,21 @@ struct StopArgs {
 async fn run_stop_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StopArgs>(argv)?;
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
-    let report = controller
-        .stop(StopOptions {
-            force: args.force,
-            ..StopOptions::default()
-        })
-        .await
-        .context("ryeos stop failed")?;
+    let options = StopOptions {
+        force: args.force,
+        ..StopOptions::default()
+    };
+    let mut progress =
+        crate::tty::LifecycleProgress::new(crate::tty::LifecycleProgressAction::Shutdown);
+    let report = match progress.as_mut() {
+        Some(progress) => controller.stop_with_progress(options, progress).await,
+        None => controller.stop(options).await,
+    }
+    .context("ryeos stop failed")?;
+    if let Some(progress) = progress {
+        progress.finish_stop(&report)?;
+        return Ok(());
+    }
     if report.already_stopped {
         println!("already stopped");
     } else {
@@ -1032,6 +1204,29 @@ fn default_app_root() -> PathBuf {
 mod tests {
     use super::*;
     use ryeos_core_tools::actions::doctor::{NA, OK};
+
+    fn node_gc_args(dry_run: bool, confirm: bool, sweep_cas: bool) -> NodeGcArgs {
+        NodeGcArgs {
+            app_root: None,
+            discard_thread_history: true,
+            confirm_discard_thread_history: confirm,
+            dry_run,
+            sweep_cas,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn node_gc_requires_an_explicit_operation_and_destructive_confirmation() {
+        let mut args = node_gc_args(true, false, false);
+        args.discard_thread_history = false;
+        assert!(args.validate().is_err());
+
+        assert!(node_gc_args(true, false, false).validate().is_ok());
+        assert!(node_gc_args(false, false, false).validate().is_err());
+        assert!(node_gc_args(false, true, false).validate().is_ok());
+        assert!(node_gc_args(true, false, true).validate().is_err());
+    }
 
     fn sandbox_policy(backend: &std::path::Path, mode: &str, open_files: Option<u64>) -> String {
         let open_files = open_files

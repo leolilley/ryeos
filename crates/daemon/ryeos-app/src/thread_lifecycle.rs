@@ -1786,7 +1786,11 @@ fn verified_item_signer(verified: &VerifiedItem) -> Result<Option<String>> {
                     "signed admitted subject `{canonical}` has conflicting verified and header signers"
                 );
             }
-            if header.content_hash != verified.resolved.content_hash {
+            // The signature authenticates the signature-stripped body. The
+            // resolved `content_hash` binds the complete source file,
+            // including its signature envelope, so those two digests are
+            // intentionally different for every signed item.
+            if header.content_hash != verified.resolved.raw_content_digest {
                 bail!(
                     "signed admitted subject `{canonical}` has conflicting verified and header content hashes"
                 );
@@ -4771,6 +4775,62 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_verified_item(
+        body_hash: &str,
+        source_hash: &str,
+        signer_fingerprint: &str,
+    ) -> VerifiedItem {
+        VerifiedItem {
+            resolved: ResolvedItem {
+                canonical_ref: CanonicalRef::parse("service:items/effective").unwrap(),
+                kind: "service".to_string(),
+                source_path: PathBuf::from("/bundle/.ai/services/items/effective.yaml"),
+                source_space: ItemSpace::Bundle,
+                resolved_from: "bundle:standard".to_string(),
+                shadowed: Vec::new(),
+                materialized_project_root: None,
+                raw_content_digest: body_hash.to_string(),
+                content_hash: source_hash.to_string(),
+                signature_header: Some(SignatureHeader {
+                    timestamp: "2026-07-16T00:00:00Z".to_string(),
+                    content_hash: body_hash.to_string(),
+                    signature_b64: "signature".to_string(),
+                    signer_fingerprint: signer_fingerprint.to_string(),
+                }),
+                source_format: ResolvedSourceFormat {
+                    extension: ".yaml".to_string(),
+                    parser: "parser:yaml".to_string(),
+                    signature: SignatureEnvelope {
+                        prefix: "# ".to_string(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+                metadata: ItemMetadata::default(),
+            },
+            signer: Some(SignerFingerprint(signer_fingerprint.to_string())),
+            trust_class: TrustClass::Trusted,
+            pinned_version: None,
+        }
+    }
+
+    #[test]
+    fn signed_admission_compares_header_to_signature_stripped_body_hash() {
+        let signer = "22".repeat(32);
+        let body_hash = "33".repeat(32);
+        let source_hash = "44".repeat(32);
+        let verified = signed_verified_item(&body_hash, &source_hash, &signer);
+
+        assert_eq!(verified_item_signer(&verified).unwrap(), Some(signer));
+
+        let mut inconsistent = verified;
+        inconsistent.resolved.raw_content_digest = "55".repeat(32);
+        assert!(verified_item_signer(&inconsistent)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting verified and header content hashes"));
+    }
 
     #[test]
     fn canonical_principal_identifier_is_structured_but_scheme_agnostic() {

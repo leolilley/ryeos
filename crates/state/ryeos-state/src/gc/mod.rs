@@ -578,18 +578,17 @@ fn sweep_sharded_directory(
             })?;
 
             for file_name in shard2.entry_names()? {
-                if shard2.open_child_directory(&file_name)?.is_some() {
-                    anyhow::bail!(
+                let file = match shard2.open_entry(&file_name, false)? {
+                    Some(lillux::PinnedDirectoryEntry::Directory(_)) => anyhow::bail!(
                         "CAS leaf contains unexpected directory: {}",
                         shard2.path().join(&file_name).display()
-                    );
-                }
-                let file = shard2.open_regular(&file_name, false)?.ok_or_else(|| {
-                    anyhow::anyhow!(
+                    ),
+                    Some(lillux::PinnedDirectoryEntry::Regular(file)) => file,
+                    None => anyhow::bail!(
                         "CAS leaf entry disappeared: {}",
                         shard2.path().join(&file_name).display()
-                    )
-                })?;
+                    ),
+                };
                 let filename = file_name.to_str().ok_or_else(|| {
                     anyhow::anyhow!("non-UTF8 CAS filename under {}", shard2.path().display())
                 })?;
@@ -703,32 +702,32 @@ fn remove_directory_contents(
     result: &mut GcResult,
 ) -> Result<()> {
     for name in directory.entry_names()? {
-        if let Some(child) = directory.open_child_directory(&name)? {
-            remove_directory_contents(&child, dry_run, result)?;
-            if !dry_run {
-                let removed = directory.remove_empty_child_if_same(&name, &child)?;
-                if !removed {
-                    anyhow::bail!(
-                        "runtime directory changed while being purged: {}",
-                        child.path().display()
-                    );
+        match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                remove_directory_contents(&child, dry_run, result)?;
+                if !dry_run {
+                    let removed = directory.remove_empty_child_if_same(&name, &child)?;
+                    if !removed {
+                        anyhow::bail!(
+                            "runtime directory changed while being purged: {}",
+                            child.path().display()
+                        );
+                    }
                 }
             }
-            continue;
-        }
-
-        let file = directory.open_regular(&name, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
+            Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
+                let file_size = file.metadata()?.len();
+                if !dry_run {
+                    directory.remove_if_same(&name, &file)?;
+                }
+                result.deleted_runtime_files += 1;
+                result.freed_bytes += file_size;
+            }
+            None => anyhow::bail!(
                 "runtime purge entry disappeared: {}",
                 directory.path().join(&name).display()
-            )
-        })?;
-        let file_size = file.metadata()?.len();
-        if !dry_run {
-            directory.remove_if_same(&name, &file)?;
+            ),
         }
-        result.deleted_runtime_files += 1;
-        result.freed_bytes += file_size;
     }
     Ok(())
 }
@@ -750,30 +749,31 @@ fn remove_rebuildable_cache_directory(
         if matches!(name.to_str(), Some("executions" | "verified-code")) {
             continue;
         }
-        if let Some(child) = cache_directory.open_child_directory(&name)? {
-            remove_directory_contents(&child, dry_run, result)?;
-            if !dry_run {
-                if !cache_directory.remove_empty_child_if_same(&name, &child)? {
-                    anyhow::bail!(
-                        "runtime cache directory changed while being purged: {}",
-                        child.path().display()
-                    );
+        match cache_directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                remove_directory_contents(&child, dry_run, result)?;
+                if !dry_run {
+                    if !cache_directory.remove_empty_child_if_same(&name, &child)? {
+                        anyhow::bail!(
+                            "runtime cache directory changed while being purged: {}",
+                            child.path().display()
+                        );
+                    }
                 }
             }
-            continue;
-        }
-        let file = cache_directory.open_regular(&name, false)?.ok_or_else(|| {
-            anyhow::anyhow!(
+            Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
+                let file_size = file.metadata()?.len();
+                if !dry_run {
+                    cache_directory.remove_if_same(&name, &file)?;
+                }
+                result.deleted_runtime_files += 1;
+                result.freed_bytes += file_size;
+            }
+            None => anyhow::bail!(
                 "runtime cache entry disappeared: {}",
                 cache_directory.path().join(&name).display()
-            )
-        })?;
-        let file_size = file.metadata()?.len();
-        if !dry_run {
-            cache_directory.remove_if_same(&name, &file)?;
+            ),
         }
-        result.deleted_runtime_files += 1;
-        result.freed_bytes += file_size;
     }
     Ok(())
 }

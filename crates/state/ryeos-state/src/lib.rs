@@ -77,9 +77,11 @@ pub use recovery::{
 pub use refs::{verify_signed_ref, GenericHeadRef, SignedRef, TrustStore};
 pub use signer::Signer;
 pub use state_db::{
-    AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain, CommittedWrite,
-    PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority, ProjectionRecoveryObserver,
-    ProjectionRecoveryProgress, ProjectionRecoveryStage, ProjectionRepairRequest,
-    ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector, StateDb,
+    AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
+    AuthoritativeThreadHistoryDiscardProgress, AuthoritativeThreadHistoryDiscardReport,
+    CommittedWrite, PendingRemoveHeadState, PendingReplayReport, PinnedStateAuthority,
+    ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
+    ProjectionRepairRequest, ProjectionRepairSink, ProjectionStatus, RuntimeLivenessInspector,
+    StateDb,
 };
 pub use sync::ImportAttribution;

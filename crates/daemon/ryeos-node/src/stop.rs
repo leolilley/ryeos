@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::status::LifecycleStatus;
-use crate::LocalLifecycleEnv;
+use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StopOptions {
@@ -28,7 +28,16 @@ pub struct StopReport {
 }
 
 pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopReport> {
+    stop_with_progress(env, opts, None).await
+}
+
+pub async fn stop_with_progress(
+    env: &LocalLifecycleEnv,
+    opts: StopOptions,
+    mut observer: Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<StopReport> {
     let initial = crate::status::status(env).await?;
+    observe(&mut observer, &initial);
     match initial {
         LifecycleStatus::NotInitialized { .. } => {
             bail!("RyeOS is not initialized. Run: ryeos init")
@@ -73,6 +82,7 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
     let mut forced = false;
     loop {
         let status = crate::status::status(env).await?;
+        observe(&mut observer, &status);
         match status {
             status @ LifecycleStatus::Stopped { .. } | status @ LifecycleStatus::Stale { .. } => {
                 return Ok(StopReport {
@@ -107,6 +117,12 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
             bail!("timed out waiting for graceful shutdown; try: ryeos stop --force");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn observe(observer: &mut Option<&mut dyn LifecycleProgressObserver>, status: &LifecycleStatus) {
+    if let Some(observer) = observer.as_deref_mut() {
+        observer.observe(status);
     }
 }
 

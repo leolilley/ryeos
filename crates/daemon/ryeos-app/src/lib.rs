@@ -30,6 +30,7 @@ pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod live_input_queue;
 pub mod node_config;
+pub mod offline_gc;
 pub mod principal;
 pub mod process;
 pub mod projection_health;

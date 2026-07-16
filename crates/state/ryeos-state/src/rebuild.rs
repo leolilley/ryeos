@@ -1990,7 +1990,7 @@ mod tests {
         );
         let mut snapshot = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": thread_id,
             "chain_root_id": chain_root_id,
             "status": status,

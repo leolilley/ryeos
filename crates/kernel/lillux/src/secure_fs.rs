@@ -248,6 +248,15 @@ pub struct PinnedDirectory {
     directory: File,
 }
 
+/// One direct child opened without following links. Mixed-tree walkers use
+/// this instead of probing a directory-only API and treating a regular file
+/// as a structural error.
+#[derive(Debug)]
+pub enum PinnedDirectoryEntry {
+    Directory(PinnedDirectory),
+    Regular(File),
+}
+
 /// One regular entry opened from a [`PinnedDirectory`].
 pub struct PinnedRegularFile {
     pub path: PathBuf,
@@ -592,6 +601,41 @@ impl PinnedDirectory {
                 );
             }
             Ok(None)
+        }
+    }
+
+    /// Open one direct child as either a pinned directory or regular file.
+    /// Missing entries return `None`; links and special files fail closed.
+    pub fn open_entry(&self, name: &OsStr, writable: bool) -> Result<Option<PinnedDirectoryEntry>> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, writable);
+            anyhow::bail!("secure mixed-entry opening is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(name)?;
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let path = self.path.join(name);
+            if let Some(directory) = open_child_directory(&self.directory, &name_c, &path)? {
+                return Ok(Some(PinnedDirectoryEntry::Directory(Self {
+                    path,
+                    directory,
+                })));
+            }
+            open_regular_at_flags(
+                &self.directory,
+                &name_c,
+                &path,
+                if writable {
+                    libc::O_RDWR
+                } else {
+                    libc::O_RDONLY
+                },
+                0,
+                0,
+            )
+            .map(|file| file.map(PinnedDirectoryEntry::Regular))
         }
     }
 
@@ -1346,6 +1390,28 @@ mod tests {
 
         assert!(read_regular_file_no_follow(&linked.join("value.yaml")).is_err());
         assert!(collect_regular_files_no_follow(&linked, true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_mixed_entry_open_distinguishes_files_and_directories_and_rejects_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("child")).unwrap();
+        std::fs::write(dir.path().join("value"), b"value").unwrap();
+        symlink(dir.path().join("value"), dir.path().join("linked")).unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+
+        assert!(matches!(
+            pinned.open_entry(OsStr::new("child"), false).unwrap(),
+            Some(PinnedDirectoryEntry::Directory(_))
+        ));
+        assert!(matches!(
+            pinned.open_entry(OsStr::new("value"), false).unwrap(),
+            Some(PinnedDirectoryEntry::Regular(_))
+        ));
+        assert!(pinned.open_entry(OsStr::new("linked"), false).is_err());
     }
 
     #[cfg(unix)]

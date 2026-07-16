@@ -17,6 +17,11 @@ use crate::exec_stream::StreamOutcome;
 use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
+mod progress;
+pub use progress::{
+    render_gc_summary, LifecycleProgress, LifecycleProgressAction, OfflineGcProgress,
+};
+
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

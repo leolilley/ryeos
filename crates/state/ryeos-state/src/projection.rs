@@ -35,9 +35,9 @@ mod schema;
 mod transaction;
 pub(crate) use chain_commit::project_committed_chain;
 pub use cursor::ProjectionMeta;
-use schema::{projection_schema_epoch, projection_schema_spec, SCHEMA_SQL};
 #[cfg(test)]
-use schema::{schema_spec_fingerprint, PROJECTION_APP_ID};
+use schema::schema_spec_fingerprint;
+use schema::{projection_schema_epoch, projection_schema_spec, PROJECTION_APP_ID, SCHEMA_SQL};
 
 /// Projection database connection wrapper.
 pub struct ProjectionDb {
@@ -94,6 +94,37 @@ fn classify_projection_db(
         app_id,
         user_tables,
     })
+}
+
+/// Prove that an obsolete projection-path file still belongs to RyeOS before
+/// an explicit history-discard path removes it. Stale schema epochs are
+/// acceptable here; an empty, foreign, or rebound file is not.
+pub(crate) fn assert_owned_projection_file_in_directory(
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    expected: &fs::File,
+) -> anyhow::Result<()> {
+    let descriptor_path = directory.descriptor_child_path(name)?;
+    let conn = Connection::open_with_flags(
+        descriptor_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    ensure_pinned_projection_file(directory, name, expected)?;
+    ensure_sqlite_retains_projection_file(expected, "obsolete projection database")?;
+    match classify_projection_db(&conn, PROJECTION_APP_ID)? {
+        ProjectionOwnershipState::Owned => Ok(()),
+        ProjectionOwnershipState::Empty => anyhow::bail!(
+            "obsolete projection path is empty and has no RyeOS ownership stamp: {}",
+            directory.path().join(name).display()
+        ),
+        ProjectionOwnershipState::Foreign {
+            app_id,
+            user_tables,
+        } => anyhow::bail!(
+            "obsolete projection path is foreign and will not be removed: {} (application_id={app_id}, user_tables={user_tables})",
+            directory.path().join(name).display()
+        ),
+    }
 }
 
 fn user_table_count(conn: &Connection) -> anyhow::Result<i64> {
