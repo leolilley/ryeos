@@ -173,6 +173,7 @@ pub struct LaunchSecretPolicyDecl {
 pub struct RuntimeFactDecl {
     pub required: bool,
     pub kind: RuntimeFactKind,
+    /// Maximum length of the fact's canonical JSON representation, in bytes.
     pub max_bytes: u32,
 }
 

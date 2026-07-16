@@ -5736,9 +5736,10 @@ impl StateStore {
     }
 
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
-    /// lineage for cancel/kill cascade). Idempotent on the child. If the parent
-    /// was already stop-tombstoned, atomically inherit that monotonic intent on
-    /// the child before releasing the store lock, closing the late-link race.
+    /// lineage for cancel/kill cascade). An exact replay is idempotent;
+    /// conflicting parent or relation authority is rejected. If the parent was
+    /// already stop-tombstoned, atomically inherit that monotonic intent on the
+    /// child before releasing the store lock, closing the late-link race.
     pub fn record_child_link(
         &self,
         parent_thread_id: &str,
@@ -5787,24 +5788,31 @@ impl StateStore {
         for chain_root_id in chain_roots {
             _admissions.push(g.state_db.authorize_runtime_pin(&chain_root_id)?);
         }
-        let mut inherited_stop = g
+        let inherited_stop = g
             .runtime_db
             .get_runtime_info(parent_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("parent runtime row missing: {parent_thread_id}"))?
             .stop_intent;
         // A dispatch admitted immediately before its parent finalized may reach
-        // this atomic linkage point afterward. Preserve the lineage, but stop
-        // the freshly-created child before it can attach. Continuations are
-        // different: their predecessor is intentionally terminal/continued.
-        if relation == "dispatch" && is_terminal_status(&parent.status) {
-            inherited_stop = Some(StopIntent::Cancel);
-        }
-        g.runtime_db
-            .record_child_link(parent_thread_id, child_thread_id, relation)?;
-        if let Some(intent) = inherited_stop {
-            g.runtime_db.request_thread_stop(child_thread_id, intent)?;
-        }
-        Ok(inherited_stop)
+        // this linkage point afterward. Preserve the lineage and tombstone the
+        // newly-created child in the same runtime-DB transaction. An exact
+        // replay is not a late child and must not synthesize a new stop merely
+        // because the parent has since continued. Continuations are different:
+        // their predecessor is intentionally terminal/continued.
+        let stop_policy = if let Some(intent) = inherited_stop {
+            runtime_db::ChildLinkStopPolicy::Always(intent)
+        } else if relation == "dispatch" && is_terminal_status(&parent.status) {
+            runtime_db::ChildLinkStopPolicy::IfInserted(StopIntent::Cancel)
+        } else {
+            runtime_db::ChildLinkStopPolicy::None
+        };
+        let (_, effective_stop) = g.runtime_db.record_child_link_with_stop_policy(
+            parent_thread_id,
+            child_thread_id,
+            relation,
+            stop_policy,
+        )?;
+        Ok(effective_stop)
     }
 
     /// Every transitive descendant thread id of `root_thread_id`, breadth-first
@@ -6170,6 +6178,116 @@ mod tests {
         let persisted = authoritative_snapshot_for_transition(&inner, "T-root", "T-successor")
             .expect("read authoritative successor snapshot");
         assert_eq!(persisted.base_project_snapshot_hash, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn exact_child_link_replay_after_parent_continues_does_not_cancel_child() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-parent", "T-parent"))
+            .expect("parent thread");
+        store
+            .create_thread_for_test(&thread_record("T-child", "T-child"))
+            .expect("child thread");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("initial child link"),
+            None
+        );
+        store
+            .finalize_thread(
+                "T-parent",
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Continued.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Continued.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                },
+            )
+            .expect("continue parent");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("exact link replay"),
+            None
+        );
+        let child = store
+            .get_thread("T-child")
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.runtime.stop_intent, None);
+    }
+
+    #[test]
+    fn fresh_dispatch_link_after_parent_terminal_atomically_cancels_child() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-parent", "T-parent"))
+            .expect("parent thread");
+        store
+            .create_thread_for_test(&thread_record("T-child", "T-child"))
+            .expect("child thread");
+        store
+            .finalize_thread(
+                "T-parent",
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Completed.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                },
+            )
+            .expect("complete parent");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("late child link"),
+            Some(StopIntent::Cancel)
+        );
+        let child = store
+            .get_thread("T-child")
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.runtime.stop_intent, Some(StopIntent::Cancel));
+    }
+
+    #[test]
+    fn exact_child_link_replay_propagates_durable_parent_kill() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-parent", "T-parent"))
+            .expect("parent thread");
+        store
+            .create_thread_for_test(&thread_record("T-child", "T-child"))
+            .expect("child thread");
+        store
+            .record_child_link("T-parent", "T-child", "dispatch")
+            .expect("initial child link");
+        store
+            .request_thread_stop("T-parent", StopIntent::Kill)
+            .expect("kill parent");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("exact link replay"),
+            Some(StopIntent::Kill)
+        );
+        let child = store
+            .get_thread("T-child")
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.runtime.stop_intent, Some(StopIntent::Kill));
     }
 
     #[test]

@@ -22,6 +22,28 @@ pub enum StopIntent {
     Kill,
 }
 
+/// Result of recording one operational parent/child lineage edge.
+///
+/// Exact replays are expected when a durable launch is re-driven. A child is
+/// nevertheless allowed to have only one operational parent and relation, so a
+/// conflicting replay is an integrity error rather than another idempotent hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildLinkInsertOutcome {
+    Inserted,
+    AlreadyPresent,
+}
+
+/// Durable stop behavior coupled to a child-link write.
+///
+/// Keeping this policy inside the runtime database transaction closes the
+/// crash window between making a late child reachable and tombstoning it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildLinkStopPolicy {
+    None,
+    Always(StopIntent),
+    IfInserted(StopIntent),
+}
+
 impl StopIntent {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -3430,20 +3452,42 @@ impl RuntimeDb {
     // attaches/updates after thread creation, so the cascade resolves each
     // descendant's CURRENT pgid at signal time rather than trusting a stale copy.
 
-    /// Record that `parent_thread_id` spawned `child_thread_id`. Idempotent on
-    /// the child (a re-driven launch does not error or duplicate the link).
+    /// Record that `parent_thread_id` spawned `child_thread_id`. An exact
+    /// re-drive is idempotent; a different parent or relation for an existing
+    /// child is rejected as an authority conflict.
     ///
     /// `relation` is a descriptive tag only — the cascade walks every descendant
-    /// regardless. The sole production caller records `"dispatch"` for both
-    /// inline and follow children (they share one launch path); the value is
-    /// reserved for a finer distinction if a consumer ever needs one.
+    /// regardless. Child launches use `"dispatch"`; machine-continuation
+    /// successors use `"continuation"`.
     pub fn record_child_link(
         &self,
         parent_thread_id: &str,
         child_thread_id: &str,
         relation: &str,
-    ) -> Result<()> {
-        self.conn.execute(
+    ) -> Result<ChildLinkInsertOutcome> {
+        self.record_child_link_with_stop_policy(
+            parent_thread_id,
+            child_thread_id,
+            relation,
+            ChildLinkStopPolicy::None,
+        )
+        .map(|(outcome, _)| outcome)
+    }
+
+    /// Record a child link and apply its stop policy in one SQLite transaction.
+    ///
+    /// Conflicting lineage is rejected before any stop tombstone is written.
+    /// `IfInserted` therefore means exactly one newly-authorized child, while
+    /// `Always` also repairs an exact replay after an interrupted propagation.
+    pub fn record_child_link_with_stop_policy(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+        stop_policy: ChildLinkStopPolicy,
+    ) -> Result<(ChildLinkInsertOutcome, Option<StopIntent>)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let inserted = tx.execute(
             "INSERT INTO thread_child_link (child_thread_id, parent_thread_id, relation, created_at_ms)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(child_thread_id) DO NOTHING",
@@ -3454,7 +3498,71 @@ impl RuntimeDb {
                 lillux::time::timestamp_millis()
             ],
         )?;
-        Ok(())
+        let outcome = if inserted == 1 {
+            ChildLinkInsertOutcome::Inserted
+        } else {
+            let existing = tx
+                .query_row(
+                "SELECT parent_thread_id, relation FROM thread_child_link
+                 WHERE child_thread_id = ?1",
+                params![child_thread_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "child link insert for {child_thread_id} conflicted but no existing row was found"
+                )
+            })?;
+            if existing.0 != parent_thread_id || existing.1 != relation {
+                bail!(
+                    "child {child_thread_id} is already linked to parent {} with relation {}; refusing conflicting parent {parent_thread_id} relation {relation}",
+                    existing.0,
+                    existing.1
+                );
+            }
+            ChildLinkInsertOutcome::AlreadyPresent
+        };
+
+        let requested_stop = match stop_policy {
+            ChildLinkStopPolicy::None => None,
+            ChildLinkStopPolicy::Always(intent) => Some(intent),
+            ChildLinkStopPolicy::IfInserted(intent)
+                if outcome == ChildLinkInsertOutcome::Inserted =>
+            {
+                Some(intent)
+            }
+            ChildLinkStopPolicy::IfInserted(_) => None,
+        };
+        let effective_stop = if let Some(intent) = requested_stop {
+            let updated = tx.execute(
+                "UPDATE thread_runtime
+                    SET stop_requested_at_ms = COALESCE(stop_requested_at_ms, ?2),
+                        stop_intent = CASE
+                            WHEN stop_intent = 'kill' OR ?3 = 'kill' THEN 'kill'
+                            ELSE 'cancel'
+                        END
+                  WHERE thread_id = ?1",
+                params![
+                    child_thread_id,
+                    lillux::time::timestamp_millis(),
+                    intent.as_str()
+                ],
+            )?;
+            if updated == 0 {
+                bail!("thread_runtime row missing for thread_id: {child_thread_id}");
+            }
+            let persisted: String = tx.query_row(
+                "SELECT stop_intent FROM thread_runtime WHERE thread_id = ?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )?;
+            Some(StopIntent::parse(&persisted)?)
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok((outcome, effective_stop))
     }
 
     /// Every transitive descendant of `root_thread_id`, breadth-first in spawn
@@ -4919,10 +5027,97 @@ mod tests {
     #[test]
     fn record_child_link_is_idempotent_on_the_child() {
         let (_tmp, db) = fresh_db();
-        db.record_child_link("parent", "child", "inline").unwrap();
+        assert_eq!(
+            db.record_child_link("parent", "child", "inline").unwrap(),
+            ChildLinkInsertOutcome::Inserted
+        );
         // A re-driven launch of the same child must not error or duplicate.
-        db.record_child_link("parent", "child", "inline").unwrap();
+        assert_eq!(
+            db.record_child_link("parent", "child", "inline").unwrap(),
+            ChildLinkInsertOutcome::AlreadyPresent
+        );
         assert_eq!(db.descendant_thread_ids("parent").unwrap(), vec!["child"]);
+    }
+
+    #[test]
+    fn record_child_link_rejects_conflicting_parent_or_relation() {
+        let (_tmp, db) = fresh_db();
+        db.record_child_link("parent", "child", "dispatch").unwrap();
+
+        for (parent, relation) in [("other", "dispatch"), ("parent", "continuation")] {
+            let error = db
+                .record_child_link(parent, "child", relation)
+                .expect_err("conflicting child authority must fail");
+            assert!(error.to_string().contains("refusing conflicting"));
+        }
+        assert_eq!(db.descendant_thread_ids("parent").unwrap(), vec!["child"]);
+        assert!(db.descendant_thread_ids("other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn child_link_and_new_child_stop_commit_together() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("child", "child").unwrap();
+
+        let (outcome, stop) = db
+            .record_child_link_with_stop_policy(
+                "parent",
+                "child",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+            )
+            .unwrap();
+        assert_eq!(outcome, ChildLinkInsertOutcome::Inserted);
+        assert_eq!(stop, Some(StopIntent::Cancel));
+        assert_eq!(
+            db.get_runtime_info("child").unwrap().unwrap().stop_intent,
+            Some(StopIntent::Cancel)
+        );
+
+        let (outcome, stop) = db
+            .record_child_link_with_stop_policy(
+                "parent",
+                "child",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Kill),
+            )
+            .unwrap();
+        assert_eq!(outcome, ChildLinkInsertOutcome::AlreadyPresent);
+        assert_eq!(stop, None);
+    }
+
+    #[test]
+    fn child_link_rolls_back_when_atomic_stop_cannot_be_written() {
+        let (_tmp, db) = fresh_db();
+        let error = db
+            .record_child_link_with_stop_policy(
+                "parent",
+                "missing-child-runtime",
+                "dispatch",
+                ChildLinkStopPolicy::IfInserted(StopIntent::Cancel),
+            )
+            .expect_err("missing stop target must roll back lineage");
+        assert!(error.to_string().contains("thread_runtime row missing"));
+        assert!(db.descendant_thread_ids("parent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn conflicting_child_link_is_rejected_before_stop_policy() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("child", "child").unwrap();
+        db.record_child_link("parent", "child", "dispatch").unwrap();
+
+        db.record_child_link_with_stop_policy(
+            "other",
+            "child",
+            "dispatch",
+            ChildLinkStopPolicy::Always(StopIntent::Kill),
+        )
+        .expect_err("conflicting authority must fail before tombstoning child");
+        assert_eq!(
+            db.get_runtime_info("child").unwrap().unwrap().stop_intent,
+            None
+        );
     }
 
     #[test]

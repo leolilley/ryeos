@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T00:27:46Z:c2ad1aa1813840bc061de0f37ed6921a399925a7c946e2777b4b802a0c232968:unKuQoYm2lX3REGJHYfaoTnTs+nowornEwkUxUgDJk4kd+zv37VNuILfDkYZEuwwU/pGl1B00Y1DiK/ULcRsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T09:08:17Z:147aa624bd479e3bb86b7bca4adad99b58307785427895bc95619c9ce5b8eed9:yxhTxdKllu69N5V+2p10HP8T7VMQEKRJWbiCZHIBDjvRb0lkgAb3ZhexkjwaCN7KfmKEDhQgQfdq3yeHcUSlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -66,7 +66,8 @@ launch_contract:
     context_window: {required: true, kind: integer, max_bytes: 32}
     sampling: {required: true, kind: json, max_bytes: 4096}
     matched_profile: {required: false, kind: string, max_bytes: 128}
-    config_hash: {required: true, kind: string, max_bytes: 64}
-    config_value_digest: {required: true, kind: string, max_bytes: 64}
+    # Limits cover canonical JSON, including the two quotes around each 64-byte digest.
+    config_hash: {required: true, kind: string, max_bytes: 66}
+    config_value_digest: {required: true, kind: string, max_bytes: 66}
     config_sources: {required: true, kind: json, max_bytes: 4096}
 description: "Interprets directive workflows by orchestrating LLM threads"

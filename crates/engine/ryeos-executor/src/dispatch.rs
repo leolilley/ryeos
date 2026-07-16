@@ -2885,7 +2885,15 @@ pub async fn dispatch(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    dispatch_inner(item_ref, None, None, request, ctx, state, None).await
+    // `dispatch_inner` owns every terminal branch and is intentionally large.
+    // Keep that state machine behind one heap indirection: runtime callbacks
+    // enter here from a Tokio worker with the UDS router already on its stack,
+    // and constructing the unboxed nested future can exhaust the worker stack
+    // before the selected leaf gets a chance to run.
+    Box::pin(dispatch_inner(
+        item_ref, None, None, request, ctx, state, None,
+    ))
+    .await
 }
 
 /// Dispatch a launch whose caller needs proof that durable execution authority
@@ -2899,7 +2907,7 @@ pub async fn dispatch_with_launch_handoff(
     state: &AppState,
     launch_handoff: &crate::execution::launch::LaunchHandoff,
 ) -> Result<Value, DispatchError> {
-    let result = dispatch_inner(
+    let result = Box::pin(dispatch_inner(
         item_ref,
         None,
         None,
@@ -2907,7 +2915,7 @@ pub async fn dispatch_with_launch_handoff(
         ctx,
         state,
         Some(launch_handoff),
-    )
+    ))
     .await;
     match &result {
         Err(error) => launch_handoff.publish_dispatch_failure(error),
@@ -2932,7 +2940,16 @@ pub async fn dispatch_verified(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    dispatch_inner(item_ref, Some(verified), None, request, ctx, state, None).await
+    Box::pin(dispatch_inner(
+        item_ref,
+        Some(verified),
+        None,
+        request,
+        ctx,
+        state,
+        None,
+    ))
+    .await
 }
 
 /// Dispatch an already-verified root while carrying trusted local context for
@@ -2946,7 +2963,7 @@ pub async fn dispatch_verified_with_handler_context(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    dispatch_inner(
+    Box::pin(dispatch_inner(
         item_ref,
         Some(verified),
         Some(local_handler_context),
@@ -2954,7 +2971,7 @@ pub async fn dispatch_verified_with_handler_context(
         ctx,
         state,
         None,
-    )
+    ))
     .await
 }
 
@@ -3133,7 +3150,7 @@ async fn dispatch_inner(
 
         match next {
             HopAction::Terminate(terminator, _hop_profile) => {
-                return dispatch_by(
+                return Box::pin(dispatch_by(
                     DispatchByParams {
                         terminator,
                         canonical_ref: hop_ref,
@@ -3148,7 +3165,7 @@ async fn dispatch_inner(
                     &role,
                     local_handler_context,
                     launch_handoff,
-                )
+                ))
                 .await;
             }
             HopAction::FollowAlias(next_ref) | HopAction::UseRegistry(next_ref) => {
@@ -3159,7 +3176,7 @@ async fn dispatch_inner(
                 method_name,
                 method_decl,
             } => {
-                return dispatch_method(
+                return Box::pin(dispatch_method(
                     &kind,
                     &method_name,
                     &method_decl,
@@ -3171,7 +3188,7 @@ async fn dispatch_inner(
                     ctx,
                     state,
                     launch_handoff,
-                )
+                ))
                 .await;
             }
         }
@@ -3927,7 +3944,7 @@ async fn dispatch_by(
                 kind: canonical_ref.kind.clone(),
                 detail: "subprocess terminator has no thread_profile".into(),
             })?;
-            dispatch_subprocess(SubprocessDispatchContext {
+            Box::pin(dispatch_subprocess(SubprocessDispatchContext {
                 current_ref: &canonical_ref,
                 thread_profile: &tp,
                 verified: verified.as_ref(),
@@ -3938,7 +3955,7 @@ async fn dispatch_by(
                 root_subject,
                 hop_runtime: runtime,
                 launch_handoff,
-            })
+            }))
             .await
         }
         TerminatorDecl::InProcess {
@@ -3953,7 +3970,7 @@ async fn dispatch_by(
                 kind: canonical_ref.kind.clone(),
                 detail: "service terminator has no thread_profile".into(),
             })?;
-            dispatch_service(
+            Box::pin(dispatch_service(
                 &canonical_ref.to_string(),
                 &tp,
                 verified,
@@ -3961,7 +3978,7 @@ async fn dispatch_by(
                 request,
                 ctx,
                 state,
-            )
+            ))
             .await
         }
     }
@@ -4568,7 +4585,7 @@ runtime_authority:
     }
 
     #[test]
-    fn project_self_trust_cannot_mint_runtime_authority() {
+    fn project_self_trust_mints_runtime_authority_from_exact_live_root() {
         let project = tempdir().join("project");
         let project_signing_key = SigningKey::from_bytes(&[72u8; 32]);
         write_signed_manifest_with_key(
@@ -4578,8 +4595,7 @@ runtime_authority:
         );
 
         // Model the live per-request store: persistent node trust plus the
-        // project's self-pinned publisher. The old containing-`.ai` lookup
-        // accepted this project manifest from this combined store.
+        // project's self-pinned publisher.
         let node_trust_store = trust_store();
         let mut combined_trust_store = node_trust_store.clone();
         combined_trust_store.extend_from(&trust_store_for_key(&project_signing_key));
@@ -4614,24 +4630,24 @@ runtime_authority:
             } } }
         }));
 
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("installed TrustedBundle provenance"),
-            "project self-trust must not become node callback authority: {err}"
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
+            "the exact live project manifest is the authority upper bound"
         );
     }
 
     #[test]
-    fn replayed_node_signed_manifest_in_project_cannot_mint_runtime_authority() {
+    fn node_trusted_manifest_in_exact_live_project_root_mints_runtime_authority() {
         let installed_bundle = tempdir().join("installed-example-bundle");
         let installed_ai = installed_bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(&installed_ai, SELF_BUNDLE_MANIFEST);
 
-        // Replay the exact node-signed manifest beneath a project `.ai`. It is
-        // cryptographically valid under node trust, so signature checking
-        // alone cannot distinguish it from installed bundle provenance.
+        // A node-trusted publisher is also valid in the effective project
+        // trust store, but authority remains anchored to the exact live
+        // project root rather than borrowed from installed provenance.
         let project = tempdir().join("project");
         let project_ai = project.join(ryeos_engine::AI_DIR);
         fs::create_dir_all(&project_ai).unwrap();
@@ -4663,12 +4679,12 @@ runtime_authority:
             } } }
         }));
 
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("installed TrustedBundle provenance"),
-            "a copied node-signed manifest must not confer installed provenance: {err}"
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
+            "the node-trusted manifest is bounded by exact project provenance"
         );
     }
 

@@ -1219,6 +1219,14 @@ pub async fn run_service_standalone(
     drop(ryeos_app::runtime_db::RuntimeDb::open(
         &state_path.join(".ai/state/runtime.sqlite3"),
     )?);
+    let runtime_state_dir = state_path.join(".ai/state");
+    let scheduler_db =
+        ryeos_scheduler::db::SchedulerDb::open(&runtime_state_dir.join("scheduler.sqlite3"))?;
+    ryeos_scheduler::projection::rebuild_fires_from_dir(
+        &runtime_state_dir.join("schedules"),
+        &scheduler_db,
+    )?;
+    drop(scheduler_db);
 
     let mut cmd = Command::new(ryeosd_binary());
     cmd.arg("--app-root")

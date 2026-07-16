@@ -278,7 +278,7 @@ async fn secret_injection_with_custom_header_and_prefix() {
     // NOTE: vault key names must not start with `RYEOS_` — that prefix
     // is on the vault's OS-protected blocked list
     // (`ryeos_vault::policy::BLOCKED_PREFIXES`).
-    let env_var = "E2E_TEST_PROVIDER_SECRET_CUSTOM";
+    let env_var = "OPENAI_API_KEY";
     let secret = "sk-test-custom-9f8e7d6c5b4a3210";
     let header_name = "X-Provider-Auth";
     let prefix = "Token ";
@@ -323,7 +323,7 @@ async fn secret_injection_with_custom_header_and_prefix() {
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_injection_with_default_authorization_bearer() {
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
-    let env_var = "E2E_TEST_PROVIDER_SECRET_DEFAULT";
+    let env_var = "ANTHROPIC_API_KEY";
     let secret = "sk-test-default-deadbeefcafebabe";
 
     // Omit header_name + prefix → adapter defaults to
@@ -491,7 +491,7 @@ async fn vault_secret_reaches_provider_with_default_bearer() {
     //   Command::env() → directive-runtime subprocess →
     //   std::env::var(provider.auth.env_var) → outbound auth header.
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
-    let env_var = "E2E_TEST_VAULT_DEFAULT";
+    let env_var = "ZEN_API_KEY";
     let secret = "sk-vault-default-cafef00dbaadf00d";
 
     let headers = run_directive_with_vault_secret(env_var, secret, None, None).await;
@@ -522,7 +522,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     // `vault_bindings` → spec.env → directive-runtime subprocess →
     // outbound auth header.
     // `RYEOS_`-prefixed keys are vault-blocked; use a neutral name.
-    let env_var = "E2E_TEST_DOTENV_AUTH";
+    let env_var = "OPENROUTER_API_KEY";
     let secret = "sk-dotenv-only-feedfacefeedface";
 
     let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
@@ -540,6 +540,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env_remove(env_var);
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG")
@@ -644,24 +645,15 @@ async fn vault_blocked_name_fails_request_loud() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
-        register_mock_provider_bundle(
-            state_path,
-            &mock_url,
-            "E2E_TEST_VAULT_BLOCKED",
-            None,
-            None,
-            fixture,
-        )?;
+        register_mock_provider_bundle(state_path, &mock_url, "ZEN_API_KEY", None, None, fixture)?;
         // Poisoned sealed store: PATH is on the blocked list, but we
         // bypass write-time validation by sealing the plaintext
         // directly. The declared secret is included so the test
         // isolates the blocked-name failure rather than a "missing
-        // required" error. (`E2E_TEST_VAULT_BLOCKED` itself is NOT a
-        // blocked name — PATH must be the only key that trips.)
-        plant_poisoned_sealed_store(
-            state_path,
-            "E2E_TEST_VAULT_BLOCKED = \"ok\"\nPATH = \"/evil:/path\"\n",
-        )?;
+        // required" error. (`ZEN_API_KEY` is in the runtime's signed
+        // provider-secret allow-list and is not blocked — PATH must be
+        // the only key that trips.)
+        plant_poisoned_sealed_store(state_path, "ZEN_API_KEY = \"ok\"\nPATH = \"/evil:/path\"\n")?;
         Ok(())
     };
 
@@ -685,7 +677,7 @@ async fn vault_blocked_name_fails_request_loud() {
         project.path(),
         "test/vault_blocked",
         "noop",
-        &["E2E_TEST_VAULT_BLOCKED"],
+        &["ZEN_API_KEY"],
         &fixture.publisher,
     )
     .expect("plant directive");
