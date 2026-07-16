@@ -82,12 +82,12 @@ async fn effect_data(
             client.get_json(&path).await
         }
         RyeOsEffectKind::FetchSource { source_ref, params, .. } => {
-            // ONE generic source mechanism: any service ref through the
-            // same execute path; result keyed to the subscribing tile. A
-            // view OPTS INTO project scoping by declaring an (empty)
-            // `project_path` param — this client fills it from the seat's
-            // project. Sources that don't declare it never receive it, so
-            // substrate ops that reject the field don't break.
+            // Polling sources must not enter the generic `/execute` admission
+            // lane.  That path pins a project snapshot before it can inspect a
+            // service's `record_thread: false` contract, so a live threads
+            // view can otherwise starve real work with snapshot/store churn.
+            // The UI invocation lane enforces the resolved service's
+            // read-only policy without admitting a service thread.
             let mut params = params.clone();
             if let (Some(project), Some(slot)) = (
                 project_path,
@@ -100,12 +100,19 @@ async fn effect_data(
                 }
             }
             let body = serde_json::json!({
-                "item_ref": source_ref,
+                "target": { "kind": "ref", "ref": source_ref },
                 "ref_bindings": {},
-                "parameters": params,
+                "read_only": true,
+                "params": params,
             });
-            let envelope = client.signed_post("/execute", &body).await?;
-            Ok(envelope.get("result").cloned().unwrap_or(envelope))
+            let envelope = client
+                .signed_post("/ui/api/invocations/dispatch", &body)
+                .await?;
+            Ok(envelope
+                .pointer("/result/result")
+                .or_else(|| envelope.get("result"))
+                .cloned()
+                .unwrap_or(envelope))
         }
         RyeOsEffectKind::AddProject { root } => client.signed_post("/ui/api/ryeos-ui/projects/add", &serde_json::json!({ "root": root })).await,
         RyeOsEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/ryeos-ui/projects/open", &serde_json::json!({ "local_id": local_id })).await,

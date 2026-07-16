@@ -17,7 +17,9 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use init::{run_init, InitOptions, InitReport};
+pub use init::{
+    run_init, run_init_with_progress, InitOptions, InitPhase, InitProgress, InitReport,
+};
 pub use init_check::{require_initialized, InitDiagnostics, InitState};
 pub use lifecycle_wire::{
     LifecycleIdentity, LifecycleResponse, LifecycleWireState, StartupPhase, StartupSnapshot,
@@ -27,6 +29,22 @@ pub use metadata::DaemonMetadata;
 pub use start::{LifecycleStartLock, StartReport};
 pub use status::{is_ready, LifecycleStatus, StaleDiagnostics};
 pub use stop::{StopOptions, StopReport};
+
+/// Synchronous observer for local lifecycle transitions. Implementations must
+/// return quickly: startup and shutdown publish their latest authoritative
+/// status after each lifecycle probe on the command's own task.
+pub trait LifecycleProgressObserver {
+    fn observe(&mut self, status: &LifecycleStatus);
+}
+
+impl<F> LifecycleProgressObserver for F
+where
+    F: FnMut(&LifecycleStatus),
+{
+    fn observe(&mut self, status: &LifecycleStatus) {
+        self(status);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -238,7 +256,26 @@ impl LifecycleController {
         start::start(&self.env, Duration::from_secs(900)).await
     }
 
+    /// Start the node while publishing every observed lifecycle state to a
+    /// caller-owned presentation surface.
+    pub async fn start_with_progress(
+        &self,
+        observer: &mut dyn LifecycleProgressObserver,
+    ) -> Result<StartReport> {
+        start::start_with_progress(&self.env, Duration::from_secs(900), Some(observer)).await
+    }
+
     pub async fn stop(&self, opts: StopOptions) -> Result<StopReport> {
         stop::stop(&self.env, opts).await
+    }
+
+    /// Stop the node while publishing every observed lifecycle state to a
+    /// caller-owned presentation surface.
+    pub async fn stop_with_progress(
+        &self,
+        opts: StopOptions,
+        observer: &mut dyn LifecycleProgressObserver,
+    ) -> Result<StopReport> {
+        stop::stop_with_progress(&self.env, opts, Some(observer)).await
     }
 }

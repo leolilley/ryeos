@@ -513,6 +513,19 @@ pub struct SchedulerDb {
     outbox_drain: std::sync::Mutex<()>,
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SchedulerFireHistoryDiscardReport {
+    pub fires: usize,
+    pub outbox_snapshots: usize,
+    pub cursors: usize,
+}
+
+impl SchedulerFireHistoryDiscardReport {
+    pub fn total_rows(&self) -> usize {
+        self.fires + self.outbox_snapshots + self.cursors
+    }
+}
+
 impl SchedulerDb {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -596,6 +609,43 @@ impl SchedulerDb {
             inner: std::sync::Mutex::new(conn),
             outbox_drain: std::sync::Mutex::new(()),
         })
+    }
+
+    /// Clear only execution-derived scheduler history. Signed schedule YAML
+    /// remains authoritative, and `schedule_specs` is deliberately preserved.
+    /// The projection marker is published current and empty in the same
+    /// transaction so a crash cannot expose a partially cleared fire view.
+    pub fn discard_fire_history(&self, dry_run: bool) -> Result<SchedulerFireHistoryDiscardReport> {
+        let mut conn = self.lock()?;
+        fn count(conn: &Connection, table: &str) -> Result<usize> {
+            let rows: i64 =
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            usize::try_from(rows).context("scheduler fire-history row count is invalid")
+        }
+        if dry_run {
+            return Ok(SchedulerFireHistoryDiscardReport {
+                fires: count(&conn, "schedule_fires")?,
+                outbox_snapshots: count(&conn, "schedule_fire_outbox")?,
+                cursors: count(&conn, "schedule_cursors")?,
+            });
+        }
+
+        let tx = conn.transaction()?;
+        let report = SchedulerFireHistoryDiscardReport {
+            outbox_snapshots: tx.execute("DELETE FROM schedule_fire_outbox", [])?,
+            fires: tx.execute("DELETE FROM schedule_fires", [])?,
+            cursors: tx.execute("DELETE FROM schedule_cursors", [])?,
+        };
+        tx.execute("DELETE FROM scheduler_projection_state", [])?;
+        tx.execute(
+            "INSERT INTO scheduler_projection_state
+                (projection_name, rebuild_complete) VALUES ('fires', 1)",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(report)
     }
 
     /// Open an already-existing scheduler store without creating or migrating
@@ -1940,6 +1990,28 @@ mod tests {
     }
 
     #[test]
+    fn all_fire_history_discard_preserves_signed_schedule_projection() {
+        let db = test_db();
+        db.upsert_spec(&make_spec("sched")).unwrap();
+        db.upsert_fire(&make_fire("sched", 1_000, "completed"))
+            .unwrap();
+
+        let preview = db.discard_fire_history(true).unwrap();
+        assert_eq!(preview.fires, 1);
+        assert_eq!(preview.outbox_snapshots, 1);
+        assert_eq!(preview.cursors, 1);
+        assert_eq!(db.discard_fire_history(true).unwrap().total_rows(), 3);
+
+        let removed = db.discard_fire_history(false).unwrap();
+        assert_eq!(removed.total_rows(), 3);
+        assert!(db.get_spec("sched").unwrap().is_some());
+        assert!(db.get_fire("sched@1000").unwrap().is_none());
+        assert!(db.get_cursor("sched").unwrap().is_none());
+        assert_eq!(db.pending_fire_outbox().unwrap(), 0);
+        assert!(db.fire_projection_is_current().unwrap());
+    }
+
+    #[test]
     fn cursor_reconcile_repairs_only_projection_mismatches() {
         let db = test_db();
         let spec = make_spec("sched");
@@ -1948,7 +2020,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            db.reconcile_cursors_for_specs(&[spec.clone()], 2_000)
+            db.reconcile_cursors_for_specs(std::slice::from_ref(&spec), 2_000)
                 .unwrap(),
             0
         );

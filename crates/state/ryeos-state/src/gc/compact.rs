@@ -131,6 +131,9 @@ struct ProjectCompactionResult {
 }
 
 /// Compact a single project's snapshot DAG.
+// Pinned storage authority, signed-ref authority, identity, and retention
+// policy remain explicit at this maintenance boundary.
+#[allow(clippy::too_many_arguments)]
 fn compact_single_project(
     cas: &lillux::CasStore,
     refs_directory: &lillux::PinnedDirectory,

@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
 
-/// The single current thread-snapshot format. Every chain root carries a
-/// concrete captured history policy; unsupported shapes fail closed.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// Clean-cut current thread-snapshot format. Schema 2 requires every chain
+/// root to carry a concrete captured history policy. Schema identifiers are
+/// immutable CAS wire identities, so the deployed schema-1 shape must never be
+/// reused for different bytes; there is deliberately no schema-1 reader.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,7 +145,7 @@ pub(crate) fn validate_canonical_hash(label: &str, value: &str) -> anyhow::Resul
 
 /// Deserialize a nullable field while still requiring its key to be present.
 /// Serde otherwise treats a missing `Option<T>` as `None`, which would make
-/// current-schema objects silently accept incomplete wire shapes.
+/// schema-2 objects silently accept incomplete older wire shapes.
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -562,7 +564,7 @@ impl std::fmt::Display for ThreadStatus {
 /// Matches the JSON schema from ARCHITECTURE.md §3:
 /// ```json
 /// {
-///   "schema": 1,
+///   "schema": 2,
 ///   "kind": "thread_snapshot",
 ///   "thread_id": "T-root",
 ///   "chain_root_id": "T-root",
@@ -634,7 +636,9 @@ pub struct ThreadSnapshot {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     /// The project snapshot hash at the start of execution.
-    /// Set when execution begins against a specific project state.
+    /// Set when execution begins against a specific project state. A
+    /// continuation successor may inherit its captured launch pin while still
+    /// in `created` state so its project identity is durable at handoff.
     /// Immutable for this thread. Null for non-CS executions.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub base_project_snapshot_hash: Option<String>,
@@ -1151,7 +1155,7 @@ mod tests {
             .remove("item_signer_fingerprint");
         assert!(
             serde_json::from_value::<CapturedThreadHistoryPolicy>(missing_signer).is_err(),
-            "nullable signer must remain an explicit current wire field"
+            "nullable signer must remain an explicit schema-2 wire field"
         );
 
         for malformed in [
@@ -1310,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_requires_nullable_wire_fields() {
+    fn schema_2_requires_current_nullable_wire_fields() {
         for field in [
             "upstream_thread_id",
             "requested_by",

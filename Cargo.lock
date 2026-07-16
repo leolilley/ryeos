@@ -2473,6 +2473,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "libc",
  "lillux",
  "rand 0.8.6",
  "reqwest",
@@ -2491,6 +2492,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2544,6 +2546,7 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "reqwest",
+ "ryeos-cli",
  "ryeos-client-base",
  "ryeos-engine",
  "serde",

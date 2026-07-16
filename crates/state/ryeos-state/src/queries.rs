@@ -403,8 +403,7 @@ pub fn get_threads_many(
 ) -> anyhow::Result<Vec<ThreadRow>> {
     let mut threads = Vec::new();
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         if placeholders.is_empty() {
@@ -1242,6 +1241,61 @@ pub fn continuation_successor_payloads(
     )
 }
 
+/// Load bounded terminal-error previews for a thread-list page.
+///
+/// SQLite applies the size guard before returning text, so one pathological
+/// terminal payload cannot make a lightweight dashboard poll allocate the full
+/// result. Oversized errors receive a stable inspect hint instead.
+pub fn thread_result_error_previews(
+    db: &ProjectionDb,
+    thread_ids: &[String],
+    max_items: usize,
+    max_error_bytes: usize,
+) -> anyhow::Result<HashMap<String, String>> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    if thread_ids.len() > max_items {
+        anyhow::bail!(
+            "thread error preview requested {} threads; maximum is {max_items}",
+            thread_ids.len()
+        );
+    }
+    let sql_max = i64::try_from(max_error_bytes)
+        .context("thread error preview byte maximum exceeds SQLite i64")?;
+    let mut previews = HashMap::new();
+    for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT thread_id, CASE \
+                 WHEN length(CAST(error AS BLOB)) <= ? THEN error \
+                 ELSE '\"terminal error exceeds list preview limit; inspect thread for full error\"' \
+             END \
+             FROM thread_results \
+             WHERE error IS NOT NULL AND thread_id IN ({placeholders})"
+        );
+        let mut params = Vec::with_capacity(batch.len() + 1);
+        params.push(rusqlite::types::Value::Integer(sql_max));
+        params.extend(batch.iter().cloned().map(rusqlite::types::Value::Text));
+        let mut stmt = db
+            .connection()
+            .prepare(&sql)
+            .context("prepare bounded thread error previews")?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .context("query bounded thread error previews")?;
+        for row in rows {
+            let (thread_id, error) = row.context("read bounded thread error preview")?;
+            previews.insert(thread_id, error);
+        }
+    }
+    Ok(previews)
+}
+
 /// Return the latest payload of one event type for each selected thread.
 /// Aggregate/count-only queries prove the full page fits before a second pass
 /// selects any BLOB. The guarded CASE remains a defense against drift or a
@@ -1264,8 +1318,7 @@ fn latest_event_payloads_bounded(
     let mut total_items = 0usize;
     let mut total_bytes = 0usize;
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -1316,8 +1369,7 @@ fn latest_event_payloads_bounded(
 
     let mut payloads = HashMap::with_capacity(total_items);
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -1754,8 +1806,7 @@ pub fn thread_facet_stats_many(
     }
     let mut stats = Vec::new();
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -2511,6 +2562,33 @@ mod tests {
         let error = get_thread_result(&db, "T-large").unwrap_err();
         assert!(error.to_string().contains("result is"));
         assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn thread_result_error_previews_bound_oversized_errors() {
+        let db = test_db();
+        db.connection()
+            .execute(
+                "INSERT INTO thread_results \
+                 (thread_id, chain_root_id, status, error, updated_at) \
+                 VALUES ('T-small', 'T-small', 'failed', ?1, 'now'), \
+                        ('T-large', 'T-large', 'failed', ?2, 'now')",
+                rusqlite::params![
+                    r#"{"result":"use ?? for fallback"}"#,
+                    serde_json::json!({ "result": "x".repeat(128) }).to_string(),
+                ],
+            )
+            .unwrap();
+
+        let previews = thread_result_error_previews(
+            &db,
+            &["T-small".to_string(), "T-large".to_string()],
+            2,
+            64,
+        )
+        .unwrap();
+        assert_eq!(previews["T-small"], r#"{"result":"use ?? for fallback"}"#);
+        assert!(previews["T-large"].contains("inspect thread"));
     }
 
     #[test]

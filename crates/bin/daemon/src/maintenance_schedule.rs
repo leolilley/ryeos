@@ -310,15 +310,14 @@ fn scan_schedule_files(
 ) -> Result<BTreeMap<String, Vec<PathBuf>>> {
     let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for name in schedules_dir.entry_names()? {
-        if schedules_dir.open_child_directory(&name)?.is_some() {
-            bail!(
+        match schedules_dir.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(_)) => bail!(
                 "schedule directory contains unsupported child directory {}",
                 schedules_dir.path().join(&name).display()
-            );
+            ),
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) => {}
+            None => bail!("schedule directory entry disappeared"),
         }
-        schedules_dir
-            .open_regular(&name, false)?
-            .ok_or_else(|| anyhow::anyhow!("schedule directory entry disappeared"))?;
         let path = schedules_dir.path().join(&name);
         if path.extension().and_then(|extension| extension.to_str()) != Some("yaml") {
             bail!(

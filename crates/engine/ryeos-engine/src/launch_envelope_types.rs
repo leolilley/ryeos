@@ -83,8 +83,8 @@ pub struct LaunchEnvelope {
 ///     EnvelopePolicy::new(caps, limits),
 ///     EnvelopeCallback::new(socket, token),
 ///     resolution,
-///     runtime_data,
 /// )
+/// .runtime_data(runtime_data)
 /// .inventory(inv)
 /// .build();
 /// ```
@@ -111,7 +111,6 @@ impl LaunchEnvelopeBuilder {
         policy: EnvelopePolicy,
         callback: EnvelopeCallback,
         resolution: ResolutionOutput,
-        runtime_data: BTreeMap<String, Value>,
     ) -> Self {
         Self {
             invocation_id,
@@ -122,8 +121,14 @@ impl LaunchEnvelopeBuilder {
             callback,
             resolution,
             inventory: HashMap::new(),
-            runtime_data,
+            runtime_data: BTreeMap::new(),
         }
+    }
+
+    /// Set runtime-owned data prepared for the serving runtime.
+    pub fn runtime_data(mut self, runtime_data: BTreeMap<String, Value>) -> Self {
+        self.runtime_data = runtime_data;
+        self
     }
 
     /// Set the pre-baked inventory map.
@@ -801,7 +806,6 @@ cost:
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),
             EnvelopeCallback::new(PathBuf::from("/tmp/ryeosd.sock"), "token-abc".to_string()),
             resolution,
-            BTreeMap::new(),
         )
         .build();
 

@@ -6,8 +6,6 @@
 //! the terminal event. Deliberately NOT the TUI timeline widget — this is a
 //! plain stdout log for the CLI.
 
-use std::io::Write;
-
 use ryeos_state::event_types::{thread_terminal_outcome, ThreadOutcomeKind};
 use serde_json::Value;
 
@@ -24,14 +22,17 @@ pub enum StreamOutcome {
 }
 
 /// Render one streamed event to stdout and report the run outcome.
-pub fn render_event(ev: &SseEvent) -> StreamOutcome {
+pub fn render_event(
+    console: &crate::tty::Console,
+    ev: &SseEvent,
+) -> std::io::Result<StreamOutcome> {
     let data: Value = serde_json::from_str(&ev.data).unwrap_or(Value::Null);
     match ev.event.as_str() {
         "stream_started" => {
             if let Some(tid) = data.get("thread_id").and_then(|v| v.as_str()) {
-                println!("▶ {tid}");
+                console.text(&format!("thread: {tid}"))?;
             }
-            StreamOutcome::Continue
+            Ok(StreamOutcome::Continue)
         }
         "stream_error" => {
             let code = data
@@ -39,24 +40,24 @@ pub fn render_event(ev: &SseEvent) -> StreamOutcome {
                 .and_then(|v| v.as_str())
                 .unwrap_or("stream_error");
             let msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("");
-            eprintln!("\n✗ {code}: {msg}");
-            StreamOutcome::Failed(format!("{code}: {msg}"))
+            console.error(&crate::tty::Diagnostic::error(format!("{code}: {msg}")))?;
+            Ok(StreamOutcome::Failed(format!("{code}: {msg}")))
         }
         event => match thread_terminal_outcome(event) {
             Some(ThreadOutcomeKind::Success) => {
-                println!("\n● {event}");
-                StreamOutcome::Done
+                console.text(&format!("\n{event}"))?;
+                Ok(StreamOutcome::Done)
             }
             Some(ThreadOutcomeKind::Failure) => {
                 // Persisted lifecycle events wrap the real payload under `payload`.
                 let inner = data.get("payload").unwrap_or(&data);
                 let reason = failure_reason(inner);
                 if reason.is_empty() {
-                    eprintln!("\n✗ {event}");
-                    StreamOutcome::Failed(event.to_string())
+                    console.error(&crate::tty::Diagnostic::error(event))?;
+                    Ok(StreamOutcome::Failed(event.to_string()))
                 } else {
-                    eprintln!("\n✗ {event}: {reason}");
-                    StreamOutcome::Failed(format!("{event}: {reason}"))
+                    console.error(&crate::tty::Diagnostic::error(format!("{event}: {reason}")))?;
+                    Ok(StreamOutcome::Failed(format!("{event}: {reason}")))
                 }
             }
             None => {
@@ -65,8 +66,7 @@ pub fn render_event(ev: &SseEvent) -> StreamOutcome {
                 // synthetic envelopes (stream_started/error already handled above).
                 let inner = data.get("payload").unwrap_or(&data);
                 if let Some(text) = human_text(inner) {
-                    print!("{text}");
-                    let _ = std::io::stdout().flush();
+                    console.stream_fragment(&text)?;
                 } else {
                     // The event already carries a rich payload; surface it instead
                     // of dropping it. `payload_summary` reflects whatever fields are
@@ -75,12 +75,12 @@ pub fn render_event(ev: &SseEvent) -> StreamOutcome {
                     // not this binary).
                     let summary = payload_summary(inner);
                     if summary.is_empty() {
-                        println!("· {}", ev.event);
+                        console.text(&format!("- {}", ev.event))?;
                     } else {
-                        println!("· {}  {summary}", ev.event);
+                        console.text(&format!("- {}  {summary}", ev.event))?;
                     }
                 }
-                StreamOutcome::Continue
+                Ok(StreamOutcome::Continue)
             }
         },
     }
@@ -195,14 +195,19 @@ mod tests {
         }
     }
 
+    fn render(ev: &SseEvent) -> StreamOutcome {
+        let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
+        render_event(&console, ev).unwrap()
+    }
+
     #[test]
     fn success_terminals_are_done() {
         assert!(matches!(
-            render_event(&ev("thread_completed", "{}")),
+            render(&ev("thread_completed", "{}")),
             StreamOutcome::Done
         ));
         assert!(matches!(
-            render_event(&ev("thread_continued", "{}")),
+            render(&ev("thread_continued", "{}")),
             StreamOutcome::Done
         ));
     }
@@ -210,15 +215,15 @@ mod tests {
     #[test]
     fn failure_terminals_and_stream_error_fail() {
         assert!(matches!(
-            render_event(&ev("thread_failed", "{\"payload\":{\"error\":\"boom\"}}")),
+            render(&ev("thread_failed", "{\"payload\":{\"error\":\"boom\"}}")),
             StreamOutcome::Failed(d) if d.contains("boom")
         ));
         assert!(matches!(
-            render_event(&ev("thread_cancelled", "{}")),
+            render(&ev("thread_cancelled", "{}")),
             StreamOutcome::Failed(_)
         ));
         assert!(matches!(
-            render_event(&ev("stream_error", "{\"code\":\"x\",\"error\":\"y\"}")),
+            render(&ev("stream_error", "{\"code\":\"x\",\"error\":\"y\"}")),
             StreamOutcome::Failed(d) if d.contains("x")
         ));
     }
@@ -226,11 +231,11 @@ mod tests {
     #[test]
     fn non_terminal_events_continue() {
         assert!(matches!(
-            render_event(&ev("stream_started", "{\"thread_id\":\"T-1\"}")),
+            render(&ev("stream_started", "{\"thread_id\":\"T-1\"}")),
             StreamOutcome::Continue
         ));
         assert!(matches!(
-            render_event(&ev("cognition_out", "{\"delta\":\"hi\"}")),
+            render(&ev("cognition_out", "{\"delta\":\"hi\"}")),
             StreamOutcome::Continue
         ));
     }
@@ -288,7 +293,7 @@ mod tests {
         // A tool_call_start with no human_text field surfaces its payload
         // fields generically instead of the bare `· event` line.
         assert!(matches!(
-            render_event(&ev(
+            render(&ev(
                 "tool_call_start",
                 "{\"payload\":{\"call_id\":\"abc\",\"tool\":\"bash\"}}"
             )),
@@ -301,7 +306,7 @@ mod tests {
         // cognition_out wraps the delta under `payload` (PersistedEventRecord);
         // render must treat it as a continue (text), not a `· event` line.
         assert!(matches!(
-            render_event(&ev("cognition_out", "{\"payload\":{\"delta\":\"hi\"}}")),
+            render(&ev("cognition_out", "{\"payload\":{\"delta\":\"hi\"}}")),
             StreamOutcome::Continue
         ));
     }

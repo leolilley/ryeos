@@ -44,7 +44,7 @@ pub(crate) fn derive_terminal_retention(
                 member.timestamp
             )
         })?;
-        if latest.as_ref().map_or(true, |current| timestamp > *current) {
+        if latest.as_ref().is_none_or(|current| timestamp > *current) {
             latest = Some(timestamp);
         }
     }

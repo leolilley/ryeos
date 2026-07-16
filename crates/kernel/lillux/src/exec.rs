@@ -1633,10 +1633,13 @@ fn validated_max_open_files(
     let Some(max_open_files) = limits.and_then(|limits| limits.max_open_files) else {
         return Ok(None);
     };
-    let max_open_files: libc::rlim_t = max_open_files.try_into().map_err(|_| {
-        format!("max_open_files {max_open_files} cannot be represented on this platform")
-    })?;
-    if max_open_files == libc::RLIM_INFINITY {
+    let platform_limit = max_open_files as libc::rlim_t;
+    if platform_limit as u128 != max_open_files as u128 {
+        return Err(format!(
+            "max_open_files {max_open_files} cannot be represented on this platform"
+        ));
+    }
+    if platform_limit == libc::RLIM_INFINITY {
         return Err("max_open_files must be finite".to_string());
     }
 
@@ -1650,14 +1653,14 @@ fn validated_max_open_files(
             std::io::Error::last_os_error()
         ));
     }
-    if parent_limit.rlim_max != libc::RLIM_INFINITY && max_open_files > parent_limit.rlim_max {
+    if parent_limit.rlim_max != libc::RLIM_INFINITY && platform_limit > parent_limit.rlim_max {
         return Err(format!(
             "max_open_files {max_open_files} exceeds parent hard limit {}",
             parent_limit.rlim_max
         ));
     }
 
-    Ok(Some(max_open_files))
+    Ok(Some(platform_limit))
 }
 
 #[cfg(all(test, not(unix)))]

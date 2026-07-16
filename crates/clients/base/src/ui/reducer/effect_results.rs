@@ -1148,7 +1148,7 @@ mod tests {
 
         deliver(&mut core, pre_write.id, "old-subject");
         assert!(
-            core.data.sources.get(&key).is_none(),
+            !core.data.sources.contains_key(&key),
             "pre-write straggler must be refused by the floor"
         );
         let fresh = refetch.last().expect("refetch effect");

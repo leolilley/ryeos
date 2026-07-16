@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-14T23:18:43Z:f993fac311d2944877ccd109febacc978d8a963197c86b98fcbb437d3f052c7b:QGHT7MRo6NBOErx1U+0PcbxVXusbWroBxt0MusYFBKlp5s+97GY0hoNi8BfCGNMo6lvYlq/WHkkgBG549tydBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T23:50:35Z:c3f327866b152bd1820414f9cd119684700dba1499b7afc65c14d5290aeb4bd5:LYzFX6eyT6Flr/LxUJgUqGXYN12rR+JwYSD9pRbt+d4o0v8o9bXN7J3qkx1b9AZSkWuwoL/+ECQWVPk+JqSTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
 tags: [service, maintenance, gc, cas, compact, sweep]
-version: "2.1.0"
+version: "2.2.0"
 description: >
   The two-phase garbage collector — compact (retention-based DAG
   pruning with topological rewrite) and sweep (mark-and-sweep of
@@ -62,6 +62,42 @@ Durable upload stages are GC roots until they are explicitly retired. There is
 no compiled-in upload timeout: omission preserves them indefinitely. A recurring
 schedule authors an age rather than a fixed timestamp so each invocation derives
 a fresh canonical cutoff while holding the exclusive CAS mutation guard.
+
+## Offline Full Thread-History Retirement
+
+Normal maintenance GC never deletes the chain-head namespace as a bulk
+operation. When an operator explicitly chooses to discard the entire local
+thread-history epoch, use the bootstrap-local command while the daemon is
+stopped:
+
+```bash
+# Inspect every participating store without deleting history.
+ryeos node gc --discard-thread-history --dry-run
+
+# Retire all thread history and publish empty current projections.
+ryeos node gc --discard-thread-history --confirm-discard-thread-history
+```
+
+This clears authoritative thread-chain heads and pending transitions, daemon
+execution rows, per-thread runtime files, scheduler fire journals/rows, and all
+superseded thread-projection databases. It preserves node identity and trust,
+node configuration, installed bundles, vault data, signed schedule definitions,
+project and bundle-event heads, and stable operational admission/sync state.
+Independently retained trace/log/cache data remains governed by the normal
+maintenance GC parameters; this recovery command does not silently broaden its
+deletion scope to those stores.
+
+The command publishes a durable discard marker before its first destructive
+step. Ordinary startup refuses while that marker exists; rerunning the same
+confirmed command resumes the idempotent cleanup. Physical CAS reclamation is
+separate: add `--sweep-cas` to the confirmed run, or allow normal maintenance GC
+to reclaim the now-unreachable objects later.
+
+On an interactive terminal the command renders its typed maintenance phases in
+one redrawn line. Head retirement reports the exact verified-head count and is
+throttled to terminal refresh speed rather than writing once per deletion.
+`--json` and redirected invocations remain stable, plain output and never emit
+ANSI cursor controls.
 
 ## Phase 1: Compact
 

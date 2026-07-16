@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-14T02:18:23Z:9f1b907259cd584158d9752103f210d2b8f84b84277349af687774442ba9c653:jlFoApgSoY1J21Wf41seB7CrpeEHxDnFQ1J953o+CouxEgylo/56Fj12O/3UIwVOAP0IAHjfy8NPyhDQG6M8DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T00:17:45Z:daa8e9ba2d426469137f454ee82778a98f8897980f91fa53dc2f456a8d95a2e0:gYoBXtPWQgAb0mEFAkzrvJEpkcOzee1JaxVPl+VyoAAn84bKaHL84iNr/lLHsrAhErjARA4jcg+zzPf8L0CBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: projects/list
 version: "1.0.0"
 description: List registered project roots for the current operator.
 endpoint: projects.list
 ui_read_only: true
+record_thread: false
 availability: daemon_only

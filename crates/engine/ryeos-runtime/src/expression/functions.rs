@@ -453,7 +453,7 @@ pub(crate) fn canonical_json(
             )?;
             let mut entries: Vec<_> = values.iter().collect();
             charge_elements(entries.len(), evaluator, span)?;
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             for (index, (key, value)) in entries.into_iter().enumerate() {
                 if index > 0 {
                     push_bounded(output, ",", evaluator, span)?;

@@ -356,7 +356,8 @@ impl Engine {
 
     /// Verify trust and integrity on a resolved item.
     ///
-    /// Trust store is system + user only — no project widening.
+    /// Trust is the configured store plus keys explicitly declared by this
+    /// request's project root.
     pub fn verify(
         &self,
         ctx: &PlanContext,

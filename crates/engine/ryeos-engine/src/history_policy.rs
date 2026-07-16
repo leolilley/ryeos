@@ -721,7 +721,7 @@ mod tests {
                 content_hash: "item-hash".to_string(),
                 signature_header: Some(SignatureHeader {
                     timestamp: "2026-01-01T00:00:00Z".to_string(),
-                    content_hash: "item-hash".to_string(),
+                    content_hash: "raw-item-hash".to_string(),
                     signature_b64: "signature".to_string(),
                     signer_fingerprint: "22".repeat(32),
                 }),

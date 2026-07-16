@@ -26,7 +26,12 @@ use crate::state::get_ui_state;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub target: InvocationTarget,
+    #[serde(default)]
     pub ref_bindings: std::collections::BTreeMap<String, String>,
+    /// Source refreshes set this bit so the daemon, rather than the client,
+    /// proves the resolved descriptor is safe for the read-only lane.
+    #[serde(default)]
+    pub read_only: bool,
     #[serde(default)]
     pub params: Value,
 }
@@ -137,6 +142,12 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     if session.read_only && !policy.read_only {
         return Err(HandlerError::Forbidden(
             "read-only session cannot dispatch protected invocations".into(),
+        )
+        .into());
+    }
+    if req.read_only && !policy.read_only {
+        return Err(HandlerError::Forbidden(
+            "source fetch target is not declared ui_read_only".into(),
         )
         .into());
     }
@@ -321,5 +332,29 @@ mod tests {
         assert_eq!(invocation_ctx.fingerprint, "session:session-1");
         assert!(!invocation_ctx.verified);
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
+    }
+
+    #[test]
+    fn source_fetch_request_declares_read_only_lane() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "target": { "kind": "ref", "ref": "service:threads/list" },
+            "read_only": true,
+            "params": { "limit": 20 }
+        }))
+        .unwrap();
+
+        assert!(request.read_only);
+        assert!(request.ref_bindings.is_empty());
+    }
+
+    #[test]
+    fn ordinary_invocation_does_not_claim_read_only_lane() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "target": { "kind": "ref", "ref": "service:commands/submit" }
+        }))
+        .unwrap();
+
+        assert!(!request.read_only);
+        assert!(request.ref_bindings.is_empty());
     }
 }

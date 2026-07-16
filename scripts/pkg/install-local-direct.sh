@@ -15,6 +15,10 @@
 
 set -euo pipefail
 
+_install_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$_install_script_dir/../lib/ryeos-terminal.sh"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/pkg/install-local-direct.sh [options]
@@ -64,7 +68,11 @@ EOF
 }
 
 die() {
-    echo "install-local-direct.sh: $*" >&2
+    if declare -F ryeos_term_fail >/dev/null 2>&1; then
+        ryeos_term_fail "$*"
+    else
+        printf 'install-local-direct.sh: %s\n' "$*" >&2
+    fi
     exit 1
 }
 
@@ -108,7 +116,7 @@ ryeos_user() {
 }
 
 ryeos_status_quick() {
-    ryeos_user 10 node status 2>/dev/null || true
+    RYEOS_TTY=never ryeos_user 10 node status 2>/dev/null || true
 }
 
 bundle_payload_bins() {
@@ -160,7 +168,7 @@ validate_source_publisher_trust() {
     local -a encoded_public_keys=()
 
     if [[ ! -f "$trust_file" ]]; then
-        echo "source publisher trust document not found: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document not found: $trust_file"
         return 1
     fi
 
@@ -171,44 +179,44 @@ validate_source_publisher_trust() {
         sed -n 's/^[[:space:]]*public_key[[:space:]]*=[[:space:]]*"ed25519:\([^"]*\)"[[:space:]]*$/\1/p' "$trust_file"
     )
     if [[ ${#declared_fingerprints[@]} -ne 1 ]]; then
-        echo "source publisher trust document must contain exactly one fingerprint: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document must contain exactly one fingerprint: $trust_file"
         return 1
     fi
     if [[ ! "${declared_fingerprints[0]}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "source publisher trust document has an invalid fingerprint: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document has an invalid fingerprint: $trust_file"
         return 1
     fi
     if [[ ${#encoded_public_keys[@]} -ne 1 ]]; then
-        echo "source publisher trust document must contain exactly one ed25519 public_key: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document must contain exactly one ed25519 public_key: $trust_file"
         return 1
     fi
     if ! decoded_len="$(printf '%s' "${encoded_public_keys[0]}" | base64 --decode 2>/dev/null | wc -c)"; then
-        echo "source publisher trust document has invalid base64 public_key: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document has invalid base64 public_key: $trust_file"
         return 1
     fi
     if [[ "$decoded_len" -ne 32 ]]; then
-        echo "source publisher trust document public_key is not 32-byte Ed25519 material: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document public_key is not 32-byte Ed25519 material: $trust_file"
         return 1
     fi
     if ! computed_fingerprint="$(printf '%s' "${encoded_public_keys[0]}" | base64 --decode 2>/dev/null | sha256sum | cut -d' ' -f1)"; then
-        echo "could not fingerprint source publisher public_key: $trust_file" >&2
+        ryeos_term_fail "could not fingerprint source publisher public_key: $trust_file"
         return 1
     fi
     if [[ "$computed_fingerprint" != "${declared_fingerprints[0]}" ]]; then
-        echo "source publisher trust document fingerprint does not match its public_key: $trust_file" >&2
+        ryeos_term_fail "source publisher trust document fingerprint does not match its public_key: $trust_file"
         return 1
     fi
     if [[ "$computed_fingerprint" == "$official_fingerprint" ]]; then
         return 0
     fi
     if [[ "$allow_source_publishers" == "1" ]]; then
-        echo "[install-local-direct] explicitly trusting source publisher $computed_fingerprint"
+        ryeos_term_info "explicitly trusting source publisher $computed_fingerprint"
         return 0
     fi
 
-    echo "source bundles are signed by non-official publisher $computed_fingerprint" >&2
-    echo "refusing to pin trust from $trust_file automatically" >&2
-    echo "rerun with --trust-source-publishers to make this development/custom trust decision explicit, or use --no-init to install files only" >&2
+    ryeos_term_fail "source bundles are signed by non-official publisher $computed_fingerprint"
+    ryeos_term_fail "refusing to pin trust from $trust_file automatically"
+    ryeos_term_info "rerun with --trust-source-publishers to make this development/custom trust decision explicit, or use --no-init to install files only"
     return 1
 }
 
@@ -222,7 +230,7 @@ collect_selected_source_trust_args() {
     local root_trust_file="$installed_share_dir/.ai/PUBLISHER_TRUST.toml"
 
     if [[ ! -f "$root_trust_file" ]]; then
-        echo "installed source-root trust document not found: $root_trust_file" >&2
+        ryeos_term_fail "installed source-root trust document not found: $root_trust_file"
         return 1
     fi
 
@@ -263,11 +271,11 @@ refresh_installed_bundle_payload() {
     trust_fp="$(publisher_fingerprint_from_trust_doc "$dest/PUBLISHER_TRUST.toml")"
     operator_fp="$(operator_fingerprint || true)"
     if [[ -z "$operator_fp" || "$trust_fp" != "$operator_fp" ]]; then
-        echo "[install-local-direct] skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
+        ryeos_term_note "skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
         return 0
     fi
 
-    echo "[install-local-direct] refreshing $name bundle payload"
+    ryeos_term_info "refreshing $name bundle payload"
     sudo mkdir -p "$bin_dest"
     for b in "${bins[@]}"; do
         [[ -x "$target_dir/$b" ]] || die "bundle payload binary missing: $target_dir/$b"
@@ -344,29 +352,48 @@ verified_local_ryeosd_pid() {
 }
 
 stop_daemon_for_install() {
-    local status_out pid final_status
+    local status_out pid final_status stop_succeeded=1
 
     status_out="$(ryeos_status_quick)"
     if ! status_has_live_daemon <<<"$status_out"; then
         return 1
     fi
 
-    echo "[install-local-direct] stopping live daemon before replacing binaries"
-    if ! ryeos_user 30 stop --force >/dev/null; then
-        echo "[install-local-direct] ryeos stop timed out or failed; falling back to direct process kill" >&2
-        pid="$(pid_from_status <<<"$status_out")"
-        if verified_local_ryeosd_pid "$pid"; then
-            kill "$pid" 2>/dev/null || true
-            for _ in {1..30}; do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.2
-            done
-            if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        else
-            die "refusing direct stop because lifecycle PID '${pid:-missing}' is not a verified ryeosd owned by $invoking_user"
+    pid="$(pid_from_status <<<"$status_out")"
+    verified_local_ryeosd_pid "$pid" || \
+        die "refusing stop because lifecycle PID '${pid:-missing}' is not a verified ryeosd owned by $invoking_user"
+
+    ryeos_term_info "stopping live daemon before replacing binaries"
+    ryeos_term_suspend
+    if ! ryeos_user 30 stop --force; then
+        stop_succeeded=0
+        ryeos_term_warn "ryeos stop timed out or failed; falling back to direct process kill"
+    fi
+
+    # Older installed clients can report success as soon as daemon metadata and
+    # sockets disappear even though the process is still draining uncancellable
+    # blocking work. The installer must gate replacement on the original PID,
+    # not lifecycle presentation state.
+    if kill -0 "$pid" 2>/dev/null; then
+        if [[ $stop_succeeded -eq 1 ]]; then
+            ryeos_term_warn "stop returned before daemon pid $pid exited; forcing stale process"
         fi
+        verified_local_ryeosd_pid "$pid" || \
+            die "refusing direct stop because pid $pid changed identity before exit"
+        kill "$pid" 2>/dev/null || true
+        for _ in {1..30}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        for _ in {1..10}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -0 "$pid" 2>/dev/null && \
+            die "daemon pid $pid remained live after forced stop"
     fi
 
     final_status="$(ryeos_status_quick)"
@@ -384,6 +411,10 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+
+ryeos_term_init
+install_started="$(_ryeos_term_now)"
+verification_skipped=0
 
 # Shared bundle-set definition (one source of truth with populate-bundles.sh).
 # shellcheck source=scripts/pkg/bundle-sets.sh
@@ -471,10 +502,10 @@ done < <(ryeos_bundle_set_names "$bundle_set") || true
 if [[ ${#bundle_names[@]} -eq 0 ]]; then
     die "--bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
 fi
-bundle_names_csv=$(IFS=,; echo "${bundle_names[*]}")
+bundle_names_csv=$(IFS=,; printf '%s\n' "${bundle_names[*]}")
 
 if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
-    echo "[install-local-direct] warning: --no-init installs lean sources only; existing local initialized state is not rewritten" >&2
+    ryeos_term_warn "--no-init installs lean sources only; existing local initialized state is not rewritten"
 fi
 
 bin_dir="/usr/bin"
@@ -503,7 +534,7 @@ if [[ $run_populate -eq 1 ]]; then
     if [[ -z "$crates" && $populate_all -eq 0 ]]; then
         die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools), or --all to rebuild the whole '$bundle_set' set"
     fi
-    echo "[install-local-direct] populating bundles"
+    ryeos_term_begin INSTALL "populating bundles"
     populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")
     [[ -n "$jobs" ]] && populate_args+=(--jobs "$jobs")
     [[ -n "$crates" ]] && populate_args+=(--crates "$crates")
@@ -519,16 +550,24 @@ if [[ $run_populate -eq 1 ]]; then
     # root-owned artifacts in the checkout that break later user-run
     # cargo/tests. Same reasoning as the `ryeos init` drop below.
     populate_user="${SUDO_USER:-$(id -un)}"
+    populate_status=0
     if [[ "$populate_user" != "$(id -un)" ]]; then
         populate_shell="$(getent passwd "$populate_user" | cut -d: -f7)"
         [[ -x "$populate_shell" ]] || populate_shell="/bin/sh"
         printf -v populate_cmd 'cd %q && exec %q' "$repo_root" "$repo_root/scripts/populate-bundles.sh"
         for a in "${populate_args[@]}"; do printf -v populate_cmd '%s %q' "$populate_cmd" "$a"; done
-        echo "[install-local-direct] populating bundles as $populate_user (build runs as the invoking user, not root)"
-        sudo -H -u "$populate_user" "$populate_shell" -lc "$populate_cmd"
+        ryeos_term_note "running bundle population as $populate_user"
+        ryeos_term_suspend
+        sudo -H -u "$populate_user" "$populate_shell" -lc "$populate_cmd" || populate_status=$?
     else
-        "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}"
+        ryeos_term_suspend
+        "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}" || populate_status=$?
     fi
+    if (( populate_status != 0 )); then
+        ryeos_term_end failure "INSTALL FAILED" "populating bundles · exit status $populate_status"
+        exit "$populate_status"
+    fi
+    ryeos_term_end success "INSTALL" "bundles populated"
 fi
 
 source_root_trust_doc="$repo_root/bundles/.ai/PUBLISHER_TRUST.toml"
@@ -577,7 +616,7 @@ stale_bins=(
 )
 for b in "${stale_bins[@]}"; do
     if [[ -e "$bin_dir/$b" ]]; then
-        echo "[install-local-direct] removing stale bundle binary: $bin_dir/$b"
+        ryeos_term_note "removing stale bundle binary: $bin_dir/$b"
         sudo rm -f "$bin_dir/$b"
     fi
 done
@@ -593,7 +632,7 @@ done
 [[ -f "$repo_root/bundles/.ai/node/init/bundle-registration-grants/default.yaml" ]] || \
     die "missing source-root bundle-registration-grants seed: bundles/.ai/node/init/bundle-registration-grants/default.yaml"
 
-echo "[install-local-direct] installing binaries -> $bin_dir"
+ryeos_term_begin INSTALL "installing binaries"
 for b in "${required_bins[@]}"; do
     sudo install -Dm755 "$target_dir/$b" "$bin_dir/$b"
 done
@@ -601,11 +640,11 @@ for b in "${optional_bins[@]}"; do
     if [[ -x "$target_dir/$b" ]]; then
         sudo install -Dm755 "$target_dir/$b" "$bin_dir/$b"
     else
-        echo "[install-local-direct] optional binary not built, skipping: $b"
+        ryeos_term_note "optional binary not built, skipping: $b"
     fi
 done
 
-echo "[install-local-direct] installing bundle sources -> $share_dir"
+ryeos_term_update "installing bundle sources" "$share_dir"
 sudo mkdir -p "$share_dir"
 sudo rm -rf "$share_dir/.ai"
 sudo cp -a "$repo_root/bundles/.ai" "$share_dir/.ai"
@@ -620,7 +659,7 @@ for path in "$share_dir"/*; do
         fi
     done
     if [[ $keep -eq 0 ]]; then
-        echo "[install-local-direct] removing stale bundle source: $path"
+        ryeos_term_note "removing stale bundle source: $path"
         sudo rm -rf "$path"
     fi
 done
@@ -647,7 +686,7 @@ done
 sudo chown -R root:root "$share_dir"
 
 if [[ $cleanup_shadows -eq 1 ]]; then
-    echo "[install-local-direct] moving PATH shadows aside"
+    ryeos_term_update "moving PATH shadows" "preserving stale entries"
     stamp="$(date +%Y%m%d%H%M%S)"
     user_backup_dir="$invoking_user_home/.local/bin/ryeos-shadow-backups-$stamp"
     made_user_backup=0
@@ -680,7 +719,8 @@ if [[ $run_init -eq 1 ]]; then
     # /root and XDG would be scrubbed — that is what silently sent the node to /root.
     init_as=()
     [[ "$invoking_user" != "$(id -un)" ]] && init_as=(sudo -H -u "$invoking_user")
-    echo "[install-local-direct] running ryeos init as $invoking_user"
+    ryeos_term_update "initializing node state" "user $invoking_user"
+    ryeos_term_suspend
     state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     for path in "$state_root/.ai/bundles"/*; do
         [[ -d "$path/.ai" ]] || continue
@@ -693,7 +733,7 @@ if [[ $run_init -eq 1 ]]; then
             fi
         done
         if [[ $keep -eq 0 ]]; then
-            echo "[install-local-direct] removing stale initialized bundle: $path"
+            ryeos_term_note "removing stale initialized bundle: $path"
             rm -rf "$path"
         fi
     done
@@ -708,7 +748,7 @@ if [[ $run_init -eq 1 ]]; then
             fi
         done
         if [[ $keep -eq 0 ]]; then
-            echo "[install-local-direct] removing stale initialized bundle registration: $path"
+            ryeos_term_note "removing stale initialized bundle registration: $path"
             rm -f "$path"
         fi
     done
@@ -725,9 +765,15 @@ if [[ $run_init -eq 1 ]]; then
     if [[ -n "$init_app_root" ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
-    "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}"
+    init_status=0
+    "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}" || init_status=$?
+    if (( init_status != 0 )); then
+        ryeos_term_end failure "INSTALL FAILED" "initializing node state · exit status $init_status"
+        exit "$init_status"
+    fi
 
-    echo "[install-local-direct] verifying initialized bundle state"
+    ryeos_term_end success INSTALL "node state initialized"
+    ryeos_term_begin VERIFY "initialized bundle state"
     state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     for name in "${bundle_names[@]}"; do
         test -d "$state_root/.ai/bundles/$name/.ai" || \
@@ -771,43 +817,77 @@ if [[ $run_init -eq 1 ]]; then
     # installed bundle and fail the install on any red check. Offline, no daemon.
     core_tools_bin="$share_dir/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools"
     if [[ -x "$core_tools_bin" ]]; then
-        echo "[install-local-direct] verifying installed bundle signatures (doctor --strict)"
-        verify_failed=0
+        ryeos_term_update "installed bundle signatures" "doctor --strict"
+        verify_status=0
+        doctor_output="$(mktemp)"
         for name in "${bundle_names[@]}"; do
             if [[ "$invoking_user" != "$(id -un)" ]]; then
+                doctor_status=0
                 sudo -H -u "$invoking_user" env RYEOS_APP_ROOT="$state_root" \
-                    "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
-                    || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
+                    "$core_tools_bin" doctor "$share_dir/$name" --strict >"$doctor_output" || doctor_status=$?
+                if (( doctor_status != 0 )); then
+                    ryeos_term_fail "doctor failed for bundle: $name"
+                    sed 's/^/   /' "$doctor_output" >&2
+                    (( verify_status == 0 )) && verify_status="$doctor_status"
+                fi
             else
+                doctor_status=0
                 RYEOS_APP_ROOT="$state_root" \
-                    "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
-                    || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
+                    "$core_tools_bin" doctor "$share_dir/$name" --strict >"$doctor_output" || doctor_status=$?
+                if (( doctor_status != 0 )); then
+                    ryeos_term_fail "doctor failed for bundle: $name"
+                    sed 's/^/   /' "$doctor_output" >&2
+                    (( verify_status == 0 )) && verify_status="$doctor_status"
+                fi
             fi
         done
-        [[ $verify_failed -eq 0 ]] || \
-            die "installed bundle verification failed — re-run with --populate to re-sign, or investigate the stale signature above"
+        rm -f "$doctor_output"
+        if (( verify_status != 0 )); then
+            ryeos_term_end failure "INSTALL FAILED" "bundle verification · exit status $verify_status"
+            exit "$verify_status"
+        fi
     else
-        echo "[install-local-direct] skipping bundle verification: core-tools binary not found at $core_tools_bin" >&2
+        ryeos_term_warn "skipping bundle verification: core-tools binary not found at $core_tools_bin"
+        verification_skipped=1
     fi
 fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
-    echo "[install-local-direct] restarting daemon"
+    if [[ $run_init -eq 1 ]]; then
+        ryeos_term_end success VERIFY "installed bundle state"
+    fi
+    ryeos_term_info "restarting daemon"
     # `ryeos start` consumes the daemon's lifecycle stream directly, including
     # current-generation rebuild and journal-replay progress. Keep its output
     # visible and retain a small wrapper margin above the CLI's own wait.
-    if ! ryeos_user 930 start; then
-        die "daemon did not restart cleanly"
+    ryeos_term_suspend
+    restart_status=0
+    ryeos_user 930 start || restart_status=$?
+    if (( restart_status != 0 )); then
+        ryeos_term_end failure "INSTALL FAILED" "daemon restart · exit status $restart_status"
+        exit "$restart_status"
     fi
-    ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
+    daemon_verify_status=0
+    ryeos_status_quick | grep -qx "running" || daemon_verify_status=$?
+    if (( daemon_verify_status != 0 )); then
+        ryeos_term_end failure "INSTALL FAILED" "daemon verification · exit status $daemon_verify_status"
+        exit "$daemon_verify_status"
+    fi
 fi
 
-echo
-echo "[install-local-direct] complete"
-echo "  ryeos:        $(command -v ryeos)"
-echo "  bundle set:   $bundle_set"
-echo "  bundle src:   $share_dir/{$bundle_names_csv}"
-echo "  app root:     ${init_app_root:-$invoking_user_home/.local/share/ryeos}"
+if [[ $run_init -eq 1 && $daemon_was_running -eq 0 ]]; then
+    ryeos_term_end success VERIFY "installed bundle state"
+fi
+if (( verification_skipped == 1 )); then
+    ryeos_term_end warning "INSTALL COMPLETE" "local package layout ready · verification skipped" "$install_started"
+else
+    ryeos_term_end success "INSTALL COMPLETE" "local package layout ready" "$install_started"
+fi
+ryeos_term_section "installation"
+ryeos_term_row "ryeos" "$(command -v ryeos)"
+ryeos_term_row "bundle set" "$bundle_set"
+ryeos_term_row "bundle src" "$share_dir/{$bundle_names_csv}"
+ryeos_term_row "app root" "${init_app_root:-$invoking_user_home/.local/share/ryeos}"
 if [[ $daemon_was_running -eq 1 ]]; then
-    echo "  daemon:       restarted"
+    ryeos_term_row "daemon" "restarted"
 fi

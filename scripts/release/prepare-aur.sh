@@ -7,9 +7,13 @@
 
 set -euo pipefail
 export LC_ALL=C
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$root/scripts/lib/ryeos-terminal.sh"
+ryeos_term_init
 
 usage() {
-    echo "usage: $0 --tag vX.Y.Z --archive PATH --bundle-archive PATH --output DIR --signer-fingerprint HEX --expected-sha256 HEX --expected-bundle-sha256 HEX" >&2
+    ryeos_term_fail "usage: $0 --tag vX.Y.Z --archive PATH --bundle-archive PATH --output DIR --signer-fingerprint HEX --expected-sha256 HEX --expected-bundle-sha256 HEX"
     exit 2
 }
 
@@ -34,76 +38,86 @@ while (($#)); do
 done
 
 [[ -n "$tag" && -n "$archive" && -n "$bundle_archive" && -n "$output" && -n "$signer_fingerprint" && -n "$expected_sha256" && -n "$expected_bundle_sha256" ]] || usage
-[[ -f "$archive" ]] || { echo "AUR release: archive not found: $archive" >&2; exit 2; }
-[[ -f "$bundle_archive" ]] || { echo "AUR release: bundle archive not found: $bundle_archive" >&2; exit 2; }
+[[ -f "$archive" ]] || { ryeos_term_fail "archive not found: $archive"; exit 2; }
+[[ -f "$bundle_archive" ]] || { ryeos_term_fail "bundle archive not found: $bundle_archive"; exit 2; }
 [[ "$signer_fingerprint" =~ ^[0-9A-Fa-f]{40,64}$ ]] || {
-    echo "AUR release: signer fingerprint must be 40-64 hexadecimal characters" >&2
+    ryeos_term_fail "signer fingerprint must be 40-64 hexadecimal characters"
     exit 2
 }
 signer_fingerprint="${signer_fingerprint^^}"
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
 version="$("$root"/scripts/release/resolve-version.sh push "$tag" "")"
 expected_bundle_name="ryeos-bundles-${version}-x86_64.tar.gz"
+ryeos_term_begin PUBLISH "preparing AUR metadata"
 [[ "$(basename "$bundle_archive")" == "$expected_bundle_name" ]] || {
-    echo "AUR release: bundle archive must be named $expected_bundle_name" >&2
+    ryeos_term_fail "bundle archive must be named $expected_bundle_name"
     exit 2
 }
 
 [[ "$(git -C "$root" cat-file -t "refs/tags/$tag" 2>/dev/null)" == tag ]] || {
-    echo "AUR release: $tag must be an annotated signed tag" >&2
+    ryeos_term_fail "$tag must be an annotated signed tag"
     exit 2
 }
 tag_commit="$(git -C "$root" rev-parse "$tag^{}")"
 head_commit="$(git -C "$root" rev-parse HEAD)"
 [[ "$tag_commit" == "$head_commit" ]] || {
-    echo "AUR release: $tag resolves to $tag_commit, but release checkout is $head_commit" >&2
+    ryeos_term_fail "$tag resolves to $tag_commit, but release checkout is $head_commit"
     exit 2
 }
 
 verify_status="$(mktemp)"
-trap 'rm -f "$verify_status"' EXIT
+archive_entries=""
+archive_listing=""
+cleanup_aur() {
+    local status="$1"
+    ryeos_term_handle_exit "$status"
+    [[ -z "$verify_status" ]] || rm -f "$verify_status"
+    [[ -z "$archive_entries" ]] || rm -f "$archive_entries"
+    [[ -z "$archive_listing" ]] || rm -f "$archive_listing"
+    return "$status"
+}
+trap 'cleanup_aur "$?"' EXIT
 if ! git -C "$root" verify-tag --raw "$tag" > /dev/null 2>"$verify_status"; then
-    echo "AUR release: tag signature verification failed for $tag" >&2
+    ryeos_term_fail "tag signature verification failed for $tag"
     exit 2
 fi
 actual_signer="$(awk '/^\[GNUPG:\] VALIDSIG / { print toupper($3); exit }' "$verify_status")"
 [[ -n "$actual_signer" ]] || {
-    echo "AUR release: verified tag did not report a GPG signing fingerprint" >&2
+    ryeos_term_fail "verified tag did not report a GPG signing fingerprint"
     exit 2
 }
 [[ "$actual_signer" == "$signer_fingerprint" ]] || {
-    echo "AUR release: tag signer $actual_signer does not match required signer $signer_fingerprint" >&2
+    ryeos_term_fail "tag signer $actual_signer does not match required signer $signer_fingerprint"
     exit 2
 }
 
 archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
 [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "AUR release: failed to compute archive SHA-256" >&2
+    ryeos_term_fail "failed to compute archive SHA-256"
     exit 2
 }
 expected_sha256="${expected_sha256,,}"
 [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "AUR release: expected SHA-256 is not 64 hexadecimal characters" >&2
+    ryeos_term_fail "expected SHA-256 is not 64 hexadecimal characters"
     exit 2
 }
 [[ "$archive_sha256" == "$expected_sha256" ]] || {
-    echo "AUR release: source archive SHA-256 mismatch" >&2
+    ryeos_term_fail "source archive SHA-256 mismatch"
     exit 2
 }
 
 bundle_archive_sha256="$(sha256sum "$bundle_archive" | awk '{print $1}')"
 [[ "$bundle_archive_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "AUR release: failed to compute bundle archive SHA-256" >&2
+    ryeos_term_fail "failed to compute bundle archive SHA-256"
     exit 2
 }
 expected_bundle_sha256="${expected_bundle_sha256,,}"
 [[ "$expected_bundle_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "AUR release: expected bundle SHA-256 is not 64 hexadecimal characters" >&2
+    ryeos_term_fail "expected bundle SHA-256 is not 64 hexadecimal characters"
     exit 2
 }
 [[ "$bundle_archive_sha256" == "$expected_bundle_sha256" ]] || {
-    echo "AUR release: bundle archive SHA-256 mismatch" >&2
+    ryeos_term_fail "bundle archive SHA-256 mismatch"
     exit 2
 }
 
@@ -113,7 +127,6 @@ expected_bundle_sha256="${expected_bundle_sha256,,}"
 bundle_root="ryeos-bundles-${version}-x86_64"
 archive_entries="$(mktemp)"
 archive_listing="$(mktemp)"
-trap 'rm -f "$verify_status" "$archive_entries" "$archive_listing"' EXIT
 tar --absolute-names -tzf "$bundle_archive" > "$archive_entries"
 tar --absolute-names -tvzf "$bundle_archive" > "$archive_listing"
 if awk -v root="$bundle_root" '
@@ -121,16 +134,16 @@ if awk -v root="$bundle_root" '
     /(^|\/)\.\.($|\/)/ || /^\// { bad = 1 }
     END { exit !bad }
 ' "$archive_entries"; then
-    echo "AUR release: bundle archive contains a path outside $bundle_root" >&2
+    ryeos_term_fail "bundle archive contains a path outside $bundle_root"
     exit 2
 fi
 if awk 'substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" { bad = 1 }
         END { exit !bad }' "$archive_listing"; then
-    echo "AUR release: bundle archive contains a link or special file" >&2
+    ryeos_term_fail "bundle archive contains a link or special file"
     exit 2
 fi
 grep -qx "$bundle_root/.ai/PUBLISHER_TRUST.toml" "$archive_entries" || {
-    echo "AUR release: bundle archive is missing source-root publisher metadata" >&2
+    ryeos_term_fail "bundle archive is missing source-root publisher metadata"
     exit 2
 }
 
@@ -138,11 +151,11 @@ grep -qx "$bundle_root/.ai/PUBLISHER_TRUST.toml" "$archive_entries" || {
 source "$root/scripts/pkg/bundle-sets.sh"
 while IFS= read -r bundle; do
     grep -qx "$bundle_root/$bundle/PUBLISHER_TRUST.toml" "$archive_entries" || {
-        echo "AUR release: bundle archive is missing $bundle publisher metadata" >&2
+        ryeos_term_fail "bundle archive is missing $bundle publisher metadata"
         exit 2
     }
     grep -qx "$bundle_root/$bundle/.ai/" "$archive_entries" || {
-        echo "AUR release: bundle archive is missing $bundle/.ai/" >&2
+        ryeos_term_fail "bundle archive is missing $bundle/.ai/"
         exit 2
     }
 done < <(ryeos_bundle_set_names full)
@@ -152,12 +165,12 @@ root_trust_doc="$(tar -xOzf "$bundle_archive" "$bundle_root/.ai/PUBLISHER_TRUST.
 artifact_fp="$(printf '%s\n' "$root_trust_doc" | sed -n 's/^[[:space:]]*fingerprint[[:space:]]*=[[:space:]]*"\([0-9A-Fa-f]\{64\}\)"[[:space:]]*$/\1/p')"
 artifact_owner="$(printf '%s\n' "$root_trust_doc" | sed -n 's/^[[:space:]]*owner[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p')"
 [[ "${artifact_fp,,}" == "$official_fp" && "$artifact_owner" == "ryeos-official" ]] || {
-    echo "AUR release: bundle artifact does not identify the compiled-in official publisher" >&2
+    ryeos_term_fail "bundle artifact does not identify the compiled-in official publisher"
     exit 2
 }
 
 if [[ -d "$output" && -n "$(find "$output" -mindepth 1 -print -quit)" ]]; then
-    echo "AUR release: output directory must be empty: $output" >&2
+    ryeos_term_fail "output directory must be empty: $output"
     exit 2
 fi
 mkdir -p "$output"
@@ -170,7 +183,7 @@ for package in ryeos ryeos-mcp; do
         -e "s/RELEASE_BUNDLE_ARCHIVE_SHA256/$bundle_archive_sha256/g" \
         "$root/deploy/aur/$package/PKGBUILD" > "$package_output/PKGBUILD"
     if grep -Eq 'RELEASE_(VERSION|ARCHIVE_SHA256|BUNDLE_ARCHIVE_SHA256)|SKIP' "$package_output/PKGBUILD"; then
-        echo "AUR release: unresolved or unsafe checksum placeholder in $package" >&2
+        ryeos_term_fail "unresolved or unsafe checksum placeholder in $package"
         exit 2
     fi
     if [[ -f "$root/deploy/aur/$package/$package.install" ]]; then
@@ -186,8 +199,10 @@ for package in ryeos ryeos-mcp; do
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck "$root/scripts/release/prepare-aur.sh"
+    (cd "$root" && shellcheck -x scripts/release/prepare-aur.sh scripts/pkg/bundle-sets.sh)
 fi
 
-printf 'prepared AUR metadata for %s (source %s, bundles %s)\n' \
-    "$tag" "$archive_sha256" "$bundle_archive_sha256"
+ryeos_term_end success "PUBLISH COMPLETE" "$tag"
+ryeos_term_section "release"
+ryeos_term_row "source" "$archive_sha256"
+ryeos_term_row "bundles" "$bundle_archive_sha256"

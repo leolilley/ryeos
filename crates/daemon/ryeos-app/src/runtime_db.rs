@@ -58,6 +58,33 @@ pub struct RuntimeInfo {
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RuntimeThreadHistoryDiscardReport {
+    pub thread_runtime: usize,
+    pub thread_commands: usize,
+    pub hook_dispatch_ledger: usize,
+    pub thread_launch_claims: usize,
+    pub follow_waiters: usize,
+    pub follow_waiter_children: usize,
+    pub thread_child_links: usize,
+    pub launch_windows: usize,
+    pub seat_leases: usize,
+}
+
+impl RuntimeThreadHistoryDiscardReport {
+    pub fn total_rows(&self) -> usize {
+        self.thread_runtime
+            + self.thread_commands
+            + self.hook_dispatch_ledger
+            + self.thread_launch_claims
+            + self.follow_waiters
+            + self.follow_waiter_children
+            + self.thread_child_links
+            + self.launch_windows
+            + self.seat_leases
+    }
+}
+
 /// Runtime-owned facts which can make an otherwise terminal chain unsafe to
 /// retire.  This is deliberately structural: retention callers never infer
 /// safety from an item kind or ref, and a failed inspection propagates as an
@@ -1725,6 +1752,56 @@ impl RuntimeDb {
         })
     }
 
+    /// Clear the complete daemon-owned execution runtime store for an
+    /// explicitly authorized offline all-thread-history discard. The database
+    /// and its exact current schema remain in place; node configuration and
+    /// every non-thread store live elsewhere.
+    pub fn discard_all_thread_history(
+        &self,
+        dry_run: bool,
+    ) -> Result<RuntimeThreadHistoryDiscardReport> {
+        fn count(conn: &Connection, table: &str) -> Result<usize> {
+            let rows: i64 =
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            usize::try_from(rows).context("runtime thread-history row count is invalid")
+        }
+
+        if dry_run {
+            return Ok(RuntimeThreadHistoryDiscardReport {
+                thread_runtime: count(&self.conn, "thread_runtime")?,
+                thread_commands: count(&self.conn, "thread_commands")?,
+                hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
+                thread_launch_claims: count(&self.conn, "thread_launch_claim")?,
+                follow_waiters: count(&self.conn, "follow_waiter")?,
+                follow_waiter_children: count(&self.conn, "follow_waiter_child")?,
+                thread_child_links: count(&self.conn, "thread_child_link")?,
+                launch_windows: count(&self.conn, "launch_window")?,
+                seat_leases: count(&self.conn, "seat_lease")?,
+            });
+        }
+
+        let conn = self.conn.unchecked_transaction()?;
+        let report = RuntimeThreadHistoryDiscardReport {
+            follow_waiter_children: conn.execute("DELETE FROM follow_waiter_child", [])?,
+            follow_waiters: conn.execute("DELETE FROM follow_waiter", [])?,
+            thread_commands: conn.execute("DELETE FROM thread_commands", [])?,
+            thread_launch_claims: conn.execute("DELETE FROM thread_launch_claim", [])?,
+            thread_child_links: conn.execute("DELETE FROM thread_child_link", [])?,
+            launch_windows: conn.execute("DELETE FROM launch_window", [])?,
+            seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
+            hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
+            thread_runtime: conn.execute("DELETE FROM thread_runtime", [])?,
+        };
+        conn.execute(
+            "DELETE FROM sqlite_sequence WHERE name = 'thread_commands'",
+            [],
+        )?;
+        conn.commit()?;
+        Ok(report)
+    }
+
     /// Atomically reserve the only permitted execution of a hook occurrence.
     /// A durable pending row is deliberately never reclaimed: after a crash
     /// the daemon cannot prove whether the external action ran, so re-dispatch
@@ -1821,7 +1898,8 @@ impl RuntimeDb {
         let response_hash = lillux::sha256_hex(&response_json);
         let now = lillux::time::timestamp_millis() as i64;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, Option<Vec<u8>>, Option<String>)> = tx
+        type ExistingHookDispatch = (String, String, Option<Vec<u8>>, Option<String>);
+        let existing: Option<ExistingHookDispatch> = tx
             .query_row(
                 "SELECT request_hash, status, response_json, response_hash
                    FROM hook_dispatch_ledger WHERE dispatch_key=?1",
@@ -1894,6 +1972,16 @@ impl RuntimeDb {
         directory_lock: lillux::PinnedDirectoryLock,
     ) -> Result<Self> {
         Self::open_bound_in_directory(path, true, directory, directory_lock)
+    }
+
+    /// Strict, non-creating counterpart used by offline GC dry-runs while the
+    /// caller retains the runtime-state namespace lock.
+    pub(crate) fn open_existing_current_with_namespace_authority(
+        path: &Path,
+        directory: lillux::PinnedDirectory,
+        directory_lock: lillux::PinnedDirectoryLock,
+    ) -> Result<Self> {
+        Self::open_bound_in_directory(path, false, directory, directory_lock)
     }
 
     fn open_bound(path: &Path, allow_create: bool) -> Result<Self> {
@@ -3456,6 +3544,7 @@ impl RuntimeDb {
     /// Record the spawned child's identities. Allowed only when unset (first
     /// write) or already equal (idempotent retry); never overwrites a different
     /// child, which would strand the original.
+    #[allow(clippy::too_many_arguments)] // One atomic persisted follow-child record.
     pub fn set_follow_child(
         &self,
         follow_key: &str,
@@ -3844,8 +3933,7 @@ impl RuntimeDb {
             i64::try_from(query_limit).context("follow waiter summary limit exceeds SQLite i64")?;
         let mut summaries = std::collections::BTreeMap::new();
         for batch in thread_ids.chunks(FOLLOW_WAITER_SUMMARY_QUERY_BATCH) {
-            let requested_rows = std::iter::repeat("(?)")
-                .take(batch.len())
+            let requested_rows = std::iter::repeat_n("(?)", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
@@ -5441,6 +5529,74 @@ mod tests {
         let current = tmp.path().join("current-runtime.db");
         drop(RuntimeDb::open(&current).unwrap());
         drop(RuntimeDb::open_existing_current(&current).unwrap());
+    }
+
+    #[test]
+    fn all_thread_history_discard_clears_every_runtime_table_and_preserves_schema() {
+        let (tmp, db) = fresh_db();
+        db.conn
+            .execute_batch(
+                "INSERT INTO thread_runtime (thread_id, chain_root_id)
+                     VALUES ('T-root', 'T-root');
+                 INSERT INTO thread_commands
+                     (thread_id, command_type, status, created_at)
+                     VALUES ('T-root', 'cancel', 'pending', '2026-07-15T00:00:00Z');
+                 INSERT INTO hook_dispatch_ledger
+                     (dispatch_key, chain_root_id, caller_thread_id, event, hook_id,
+                      request_hash, status, created_at_ms)
+                     VALUES ('dispatch-1', 'T-root', 'T-root', 'completed', 'hook-1',
+                             'request-1', 'pending', 1);
+                 INSERT INTO thread_launch_claim
+                     (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
+                     VALUES ('T-root', 'claim-1', 1, 2, 'test');
+                 INSERT INTO follow_waiter
+                     (follow_key, parent_thread_id, parent_chain_root_id, follow_node,
+                      graph_run_id, step_count, phase, created_at_ms, updated_at_ms)
+                     VALUES ('follow-1', 'T-root', 'T-root', 'node-1', 'run-1', 1,
+                             'waiting', 1, 1);
+                 INSERT INTO follow_waiter_child
+                     (follow_key, item_index, item_ref, spec_hash, child_thread_id,
+                      child_chain_root_id, sealed_root_request, created_at_ms, updated_at_ms)
+                     VALUES ('follow-1', 0, 'directive:test/child', 'spec-1', 'T-child',
+                             'T-child', '{}', 1, 1);
+                 INSERT INTO thread_child_link
+                     (child_thread_id, parent_thread_id, relation, created_at_ms)
+                     VALUES ('T-child', 'T-root', 'follow', 1);
+                 INSERT INTO launch_window
+                     (child_chain_root_id, window_key, width, created_at_ms)
+                     VALUES ('T-child', 'window-1', 1, 1);
+                 INSERT INTO seat_lease
+                     (seat_thread_id, owner, surface, client_ref, last_seen_at_ms)
+                     VALUES ('T-seat', 'owner', 'terminal', 'client', 1);",
+            )
+            .unwrap();
+
+        let preview = db.discard_all_thread_history(true).unwrap();
+        assert_eq!(preview.total_rows(), 9);
+        assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 9);
+
+        let removed = db.discard_all_thread_history(false).unwrap();
+        assert_eq!(removed.total_rows(), 9);
+        assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 0);
+        drop(db);
+
+        let path = tmp.path().join("runtime.db");
+        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
+        let command_id = reopened
+            .conn
+            .query_row(
+                "INSERT INTO thread_commands
+                    (thread_id, command_type, status, created_at)
+                 VALUES ('T-new', 'cancel', 'pending', '2026-07-15T00:00:00Z')
+                 RETURNING command_id",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            command_id, 1,
+            "command sequence must restart in the empty store"
+        );
     }
 
     #[test]

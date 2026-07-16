@@ -167,6 +167,10 @@ pub struct RecoveryStore {
     directory: std::sync::Arc<lillux::PinnedDirectory>,
 }
 
+const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
+const THREAD_HISTORY_DISCARD_MARKER_BYTES: &[u8] =
+    br#"{"kind":"thread_history_discard","schema":1}"#;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StagedCasRootsRecord {
@@ -619,7 +623,7 @@ impl PendingTransitionCursor {
             let record = decode_pending_file(file, stem)?;
             if self
                 .operation
-                .map_or(true, |operation| operation == record.operation)
+                .is_none_or(|operation| operation == record.operation)
             {
                 return Ok(Some(record));
             }
@@ -1126,6 +1130,112 @@ impl RecoveryStore {
 
     pub fn generation_path(&self) -> PathBuf {
         self.root.join("generation.json")
+    }
+
+    /// Whether an explicitly requested offline thread-history discard has not
+    /// yet completed. Ordinary startup must refuse while this marker exists;
+    /// rerunning the offline command resumes the idempotent cleanup.
+    pub fn thread_history_discard_in_progress(&self) -> Result<bool> {
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        let Some(mut file) = self.directory.open_regular(name, false)? else {
+            return Ok(false);
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .context("read thread-history discard marker")?;
+        if bytes != THREAD_HISTORY_DISCARD_MARKER_BYTES {
+            anyhow::bail!(
+                "invalid thread-history discard marker: {}",
+                self.directory.path().join(name).display()
+            );
+        }
+        Ok(true)
+    }
+
+    /// Publish the durable intent for an explicit offline discard before its
+    /// first destructive step. Repeating this after interruption is harmless.
+    pub(crate) fn begin_thread_history_discard(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+    ) -> Result<()> {
+        if !cas_mutation_guard.is_exclusive() {
+            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
+        }
+        self.ensure_guard(cas_mutation_guard)?;
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        if self.thread_history_discard_in_progress()? {
+            return Ok(());
+        }
+        self.directory
+            .atomic_create_regular(name, THREAD_HISTORY_DISCARD_MARKER_BYTES, 0o600)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("thread-history discard marker appeared concurrently")
+            })?;
+        Ok(())
+    }
+
+    /// Remove the durable intent only after every participating store has
+    /// reached its empty-current state.
+    pub(crate) fn finish_thread_history_discard(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+    ) -> Result<()> {
+        if !cas_mutation_guard.is_exclusive() {
+            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
+        }
+        self.ensure_guard(cas_mutation_guard)?;
+        let name = std::ffi::OsStr::new(THREAD_HISTORY_DISCARD_MARKER);
+        let Some(file) = self.directory.open_regular(name, false)? else {
+            return Ok(());
+        };
+        if !self.thread_history_discard_in_progress()? {
+            anyhow::bail!("thread-history discard marker disappeared during validation");
+        }
+        self.directory
+            .remove_if_same(name, &file)
+            .context("remove completed thread-history discard marker")
+    }
+
+    /// Drop every chain-head recovery record as one part of an explicitly
+    /// authorized all-history discard. The global state lock and exclusive CAS
+    /// guard replace per-chain recovery semantics for this operation.
+    pub(crate) fn discard_all_pending_transitions(
+        &self,
+        cas_mutation_guard: &CasMutationGuard,
+        dry_run: bool,
+    ) -> Result<usize> {
+        if !cas_mutation_guard.is_exclusive() {
+            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
+        }
+        self.ensure_guard(cas_mutation_guard)?;
+        let Some(directory) = self.open_child_directory("pending")? else {
+            return Ok(0);
+        };
+        let entries = directory.regular_files()?;
+        for entry in &entries {
+            if entry.path.extension().and_then(|value| value.to_str()) != Some("json") {
+                anyhow::bail!(
+                    "unexpected pending transition file: {}",
+                    entry.path.display()
+                );
+            }
+            let chain_root_id = entry
+                .path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 pending transition filename"))?;
+            validate_chain_root_id(chain_root_id)?;
+        }
+        if !dry_run {
+            for entry in &entries {
+                directory
+                    .remove_if_same(&entry.name, &entry.file)
+                    .with_context(|| {
+                        format!("discard pending transition {}", entry.path.display())
+                    })?;
+            }
+        }
+        Ok(entries.len())
     }
 
     fn open_child_directory(&self, name: &str) -> Result<Option<lillux::PinnedDirectory>> {
@@ -2259,6 +2369,23 @@ mod tests {
         )
         .expect("decode current Remove wire");
         decoded.validate().expect("current Remove wire validates");
+    }
+
+    #[test]
+    fn thread_history_discard_marker_is_durable_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::from_runtime_state_dir(temp.path()).unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let guard = CasMutationGuard::acquire_exclusive(temp.path()).unwrap();
+
+        assert!(!store.thread_history_discard_in_progress().unwrap());
+        store.begin_thread_history_discard(&guard).unwrap();
+        store.begin_thread_history_discard(&guard).unwrap();
+        assert!(store.thread_history_discard_in_progress().unwrap());
+
+        store.finish_thread_history_discard(&guard).unwrap();
+        store.finish_thread_history_discard(&guard).unwrap();
+        assert!(!store.thread_history_discard_in_progress().unwrap());
     }
 
     #[test]

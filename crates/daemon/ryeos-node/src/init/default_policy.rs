@@ -29,8 +29,10 @@ impl NodeDefaultPaths {
 }
 
 /// Materialize node-owned default policy files in their established init order.
-/// User-editable isolation/ignore files are create-once; the generated sync view
-/// is overwritten on every init so it tracks the running binary.
+/// The isolation policy is create-once. Ingest defaults are reconciled additively:
+/// operator rules are preserved while newly shipped safety exclusions are
+/// added. The generated sync view is overwritten on every init so it tracks
+/// the running binary.
 pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
     let paths = NodeDefaultPaths::under(app_root);
 
@@ -48,15 +50,28 @@ pub(super) fn materialize_node_defaults(app_root: &Path) -> Result<()> {
         )?;
     }
 
-    if !paths.ignore_config.exists() {
-        fs::create_dir_all(&paths.ingest_dir)
-            .with_context(|| format!("create ingest dir {}", paths.ingest_dir.display()))?;
-        let patterns_yaml = ryeos_app::ignore::builtin_patterns()
-            .iter()
-            .map(|pattern| format!("  - {:?}", pattern))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let content = format!("patterns:\n{}\n", patterns_yaml);
+    fs::create_dir_all(&paths.ingest_dir)
+        .with_context(|| format!("create ingest dir {}", paths.ingest_dir.display()))?;
+    let mut ignore_config = if paths.ignore_config.exists() {
+        let raw = fs::read_to_string(&paths.ignore_config)
+            .with_context(|| format!("read ignore config {}", paths.ignore_config.display()))?;
+        serde_yaml::from_str::<ryeos_app::ignore::IgnoreConfig>(&raw)
+            .with_context(|| format!("parse ignore config {}", paths.ignore_config.display()))?
+    } else {
+        ryeos_app::ignore::IgnoreConfig {
+            patterns: Vec::new(),
+        }
+    };
+    let mut changed = !paths.ignore_config.exists();
+    for pattern in ryeos_app::ignore::builtin_patterns() {
+        if !ignore_config.patterns.iter().any(|entry| entry == pattern) {
+            ignore_config.patterns.push(pattern.to_string());
+            changed = true;
+        }
+    }
+    if changed {
+        let content = serde_yaml::to_string(&ignore_config)
+            .context("serialize reconciled ingest ignore config")?;
         fs::write(&paths.ignore_config, content)
             .with_context(|| format!("write ignore config {}", paths.ignore_config.display()))?;
     }
@@ -129,5 +144,29 @@ mod tests {
         assert_eq!(policy.limits.verified_artifact_file_bytes, 67_108_864);
         assert_eq!(policy.limits.verified_artifact_total_bytes, 268_435_456);
         assert_eq!(policy.limits.verified_artifact_files, 4_096);
+    }
+
+    #[test]
+    fn init_adds_new_snapshot_safety_ignores_without_dropping_operator_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = NodeDefaultPaths::under(root.path());
+        fs::create_dir_all(&paths.ingest_dir).unwrap();
+        fs::write(
+            &paths.ignore_config,
+            "patterns:\n  - custom-build-output/\n  - .git/\n",
+        )
+        .unwrap();
+
+        materialize_node_defaults(root.path()).unwrap();
+
+        let raw = fs::read_to_string(&paths.ignore_config).unwrap();
+        let config: ryeos_app::ignore::IgnoreConfig = serde_yaml::from_str(&raw).unwrap();
+        assert!(config
+            .patterns
+            .iter()
+            .any(|entry| entry == "custom-build-output/"));
+        assert!(config.patterns.iter().any(|entry| entry == ".venv/"));
+        assert!(config.patterns.iter().any(|entry| entry == "/.ai/state/"));
+        assert!(config.patterns.iter().any(|entry| entry == "/.ai/cache/"));
     }
 }

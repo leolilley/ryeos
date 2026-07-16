@@ -548,6 +548,9 @@ pub(crate) fn verify_preverified_projection(
     )
 }
 
+// The verified baseline and both pinned authorities stay separate so recovery
+// cannot accidentally substitute ambient paths for captured storage handles.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_preverified_projection_pinned(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,
@@ -1990,7 +1993,7 @@ mod tests {
         );
         let mut snapshot = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": thread_id,
             "chain_root_id": chain_root_id,
             "status": status,

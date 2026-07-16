@@ -183,8 +183,10 @@ pub fn collect_chain_reachable_from_head(
     chain_root_id: &str,
     chain_head_hash: &str,
 ) -> Result<ReachableSet> {
-    let mut set = ReachableSet::default();
-    set.authoritative_root_count = 1;
+    let mut set = ReachableSet {
+        authoritative_root_count: 1,
+        ..ReachableSet::default()
+    };
     set.chain_root_ids.push(chain_root_id.to_string());
     merge_object_closure(cas_root, vec![chain_head_hash.to_string()], &mut set)?;
     Ok(set)
@@ -195,8 +197,10 @@ pub(crate) fn collect_chain_reachable_from_head_with_cas(
     chain_root_id: &str,
     chain_head_hash: &str,
 ) -> Result<ReachableSet> {
-    let mut set = ReachableSet::default();
-    set.authoritative_root_count = 1;
+    let mut set = ReachableSet {
+        authoritative_root_count: 1,
+        ..ReachableSet::default()
+    };
     set.chain_root_ids.push(chain_root_id.to_string());
     merge_object_closure_with_cas(cas, [chain_head_hash.to_string()], &mut set)?;
     Ok(set)
@@ -349,7 +353,7 @@ mod tests {
         // Create a minimal thread_snapshot
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",
@@ -531,7 +535,7 @@ mod tests {
         // snapshot points to last event
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "running",
@@ -747,7 +751,7 @@ mod tests {
 
         let snap_v1 = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",
@@ -780,7 +784,7 @@ mod tests {
 
         let snap_v2 = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "running",
@@ -873,7 +877,7 @@ mod tests {
 
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
-            "schema": 1,
+            "schema": crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION,
             "thread_id": "T-root",
             "chain_root_id": "T-root",
             "status": "created",

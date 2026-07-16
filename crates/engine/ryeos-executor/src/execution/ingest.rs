@@ -132,6 +132,13 @@ fn ingest_walk(
     };
     for entry in entries {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        // Project snapshots capture source bytes, not filesystem topology.
+        // Never follow a symlink out of (or recursively back into) the live
+        // project. Virtualenv interpreter links are intentionally omitted.
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
         let relative = path.strip_prefix(root).with_context(|| {
             format!(
@@ -160,9 +167,9 @@ fn ingest_walk(
             continue;
         }
 
-        if path.is_dir() {
+        if file_type.is_dir() {
             ingest_walk(authority, guard, staged_roots, root, &path, items, ignore)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             let result = ingest_item(authority, guard, Some(&mut *staged_roots), &rel, &path)?;
             items.insert(rel, result.object_hash);
         }

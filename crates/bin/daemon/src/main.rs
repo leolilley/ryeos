@@ -111,8 +111,25 @@ fn prospective_node_config_validator(
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build daemon async runtime")?;
+    let mut process_state_lock = None;
+    let result = runtime.block_on(run(&mut process_state_lock));
+
+    // Tokio cannot cancel work already admitted to spawn_blocking. Never let
+    // abandoned request work keep a lifecycle-complete daemon alive holding
+    // projection/CAS descriptors indefinitely.
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    // Keep replacement daemons and standalone tools out until every bounded
+    // worker teardown opportunity has finished.
+    drop(process_state_lock);
+    result
+}
+
+async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<()> {
     // Capture process start before any configuration, verification, or state
     // opening so every lifecycle surface reports the same wall/monotonic origin.
     let process_started = Instant::now();
@@ -162,9 +179,10 @@ async fn main() -> Result<()> {
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
     let state_lock_path = state_lock::default_lock_path(&config.app_root);
-    let _state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
+    let state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
+    *process_state_lock = Some(state_lock);
 
     // Initialize tracing with file sink only after init-state passes so direct
     // `ryeosd` startup on a fresh system cannot create runtime state.
@@ -1079,13 +1097,18 @@ async fn main() -> Result<()> {
     };
     let (daemon_result, startup_cancelled, startup_failed) = daemon_result;
 
-    lifecycle_exit.record(if daemon_result.is_ok() || startup_cancelled {
+    let exit_reason = if daemon_result.is_ok() || startup_cancelled {
         "signal"
     } else if startup_failed {
         "startup_failed"
     } else {
         "runtime_error"
-    });
+    };
+    lifecycle_exit.record(exit_reason);
+    match daemon_result.as_ref() {
+        Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
+        Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
+    }
     if startup_cancelled {
         Ok(())
     } else {

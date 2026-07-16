@@ -34,6 +34,13 @@ struct Layer {
     contributor: LaunchConfigContributorWire,
 }
 
+struct LayerLoadPolicy<'a> {
+    allowed_spaces: &'a [LaunchItemSpace],
+    allowed_trust: &'a [TrustClass],
+    parsers: &'a ParserDispatcher,
+    trust_store: &'a TrustStore,
+}
+
 pub fn load_launch_config_snapshots(
     declarations: &BTreeMap<String, LaunchConfigInputDecl>,
     roots: &ResolutionRoots,
@@ -61,22 +68,19 @@ pub fn load_launch_config_snapshots(
             } => {
                 let mut layers = Vec::new();
                 let mut first_match_selected = false;
+                let policy = LayerLoadPolicy {
+                    allowed_spaces,
+                    allowed_trust,
+                    parsers,
+                    trust_store,
+                };
                 for root in &roots.ordered {
                     if let Some((path, extension)) = item_path(root, id, &config_schema.extensions)?
                     {
                         if *merge == ConfigMergeMode::FirstMatch && first_match_selected {
                             continue;
                         }
-                        layers.push(load_layer(
-                            &path,
-                            id,
-                            root,
-                            extension,
-                            allowed_spaces,
-                            allowed_trust,
-                            parsers,
-                            trust_store,
-                        )?);
+                        layers.push(load_layer(&path, id, root, extension, &policy)?);
                         if *merge == ConfigMergeMode::FirstMatch {
                             first_match_selected = true;
                         }
@@ -114,6 +118,12 @@ pub fn load_launch_config_snapshots(
                 allowed_trust,
             } => {
                 let mut grouped: HashMap<String, Vec<Layer>> = HashMap::new();
+                let policy = LayerLoadPolicy {
+                    allowed_spaces,
+                    allowed_trust,
+                    parsers,
+                    trust_store,
+                };
                 for root in &roots.ordered {
                     let catalog_root = root.ai_root.join("config").join(prefix);
                     match std::fs::symlink_metadata(&catalog_root) {
@@ -200,16 +210,7 @@ pub fn load_launch_config_snapshots(
                         {
                             continue;
                         }
-                        let layer = load_layer(
-                            &path,
-                            &canonical_id,
-                            root,
-                            extension,
-                            allowed_spaces,
-                            allowed_trust,
-                            parsers,
-                            trust_store,
-                        )?;
+                        let layer = load_layer(&path, &canonical_id, root, extension, &policy)?;
                         grouped.entry(canonical_id).or_default().push(layer);
                     }
                 }
@@ -288,10 +289,7 @@ fn load_layer(
     canonical_id: &str,
     root: &ResolutionRoot,
     extension: &ExtensionSpec,
-    allowed_spaces: &[LaunchItemSpace],
-    allowed_trust: &[TrustClass],
-    parsers: &ParserDispatcher,
-    trust_store: &TrustStore,
+    policy: &LayerLoadPolicy<'_>,
 ) -> Result<Layer, EngineError> {
     validate_config_path(path, &root.ai_root.join("config"), canonical_id)?;
     if !valid_root_label(&root.label) {
@@ -301,7 +299,7 @@ fn load_layer(
         ));
     }
     let declared_space = launch_space(root.space);
-    if !allowed_spaces.contains(&declared_space) {
+    if !policy.allowed_spaces.contains(&declared_space) {
         return Err(EngineError::LaunchConfigPolicyDenied {
             code: "launch_config_space_not_allowed".to_owned(),
             input: canonical_id.to_owned(),
@@ -327,7 +325,7 @@ fn load_layer(
             )
         })?;
     let (contract_trust, _) =
-        verify_item_signature_with_hash(&content_digest, &header, trust_store).map_err(
+        verify_item_signature_with_hash(&content_digest, &header, policy.trust_store).map_err(
             |error| {
                 invalid(
                     canonical_id,
@@ -341,14 +339,14 @@ fn load_layer(
         (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
         (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
     };
-    if !allowed_trust.contains(&trust_class) {
+    if !policy.allowed_trust.contains(&trust_class) {
         return Err(EngineError::LaunchConfigPolicyDenied {
             code: "launch_config_untrusted".to_owned(),
             input: canonical_id.to_owned(),
             detail: format!("trust class {trust_class:?} is not allowed"),
         });
     }
-    let value = parsers.dispatch(
+    let value = policy.parsers.dispatch(
         &extension.parser,
         &content,
         Some(path),

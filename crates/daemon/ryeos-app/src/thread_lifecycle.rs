@@ -315,7 +315,7 @@ impl FollowFact {
             child_chain_root_id: w.first_child_chain_root_id.clone(),
             child_terminal_status: w.first_child_terminal_status.clone(),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: w.fanout.then(|| FollowCohortProgress {
+            cohort: w.fanout.then_some(FollowCohortProgress {
                 done: w.terminal_child_count,
                 expected: w.expected_children,
             }),
@@ -338,7 +338,7 @@ impl FollowFact {
             child_chain_root_id: w.first_child_chain_root_id.clone(),
             child_terminal_status: w.first_child_terminal_status.clone(),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: w.fanout.then(|| FollowCohortProgress {
+            cohort: w.fanout.then_some(FollowCohortProgress {
                 done: w.terminal_child_count,
                 expected: w.expected_children,
             }),
@@ -410,6 +410,10 @@ pub struct ThreadListView {
     /// replay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_node: Option<CurrentNode>,
+    /// Compact terminal cause for table expansion. Full structured error data
+    /// remains available from thread inspect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A dashboard-decorated thread row plus its structural position in one
@@ -491,6 +495,38 @@ fn sort_thread_list_items(items: &mut [ThreadListItem], sort: ryeos_state::queri
     }
 }
 
+fn terminal_error_summary(raw: &str) -> Option<String> {
+    fn candidate(value: &Value) -> Option<&str> {
+        match value {
+            Value::String(message) => Some(message),
+            Value::Object(map) => ["result", "message", "error", "reason"]
+                .into_iter()
+                .find_map(|key| map.get(key).and_then(candidate)),
+            _ => None,
+        }
+    }
+
+    let parsed = serde_json::from_str::<Value>(raw).ok();
+    let message = parsed
+        .as_ref()
+        .and_then(candidate)
+        .unwrap_or(raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if message.is_empty() {
+        return None;
+    }
+    const MAX_SUMMARY_CHARS: usize = 512;
+    let mut chars = message.chars();
+    let summary = chars.by_ref().take(MAX_SUMMARY_CHARS).collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{summary}…")
+    } else {
+        summary
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactPublishParams {
@@ -547,7 +583,7 @@ impl FinalizeCreatedUnattachedOutcome {
 /// Lifecycle-layer result of an atomic finalize-if-live transition.
 #[derive(Debug)]
 pub enum FinalizeIfNonterminalOutcome {
-    Finalized(ThreadDetail),
+    Finalized(Box<ThreadDetail>),
     AlreadyTerminal { status: String },
     PreservedForShutdown,
 }
@@ -579,6 +615,7 @@ pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
 /// `thread_continued` edge, not re-derived from runtime-emitted input. Not
 /// canonical JSON: identical requests serialize identically, which is all dedup
 /// needs; scopes are sorted so ordering is not significant.
+#[allow(clippy::too_many_arguments)] // Every launch-significant field is hashed explicitly.
 pub fn continuation_request_fingerprint(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
@@ -974,6 +1011,8 @@ impl SealedResolvedItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+// This durable, internally-tagged representation must retain its exact shape.
+#[allow(clippy::large_enum_variant)]
 enum SealedPrincipal {
     Local {
         fingerprint: String,
@@ -1786,9 +1825,15 @@ fn verified_item_signer(verified: &VerifiedItem) -> Result<Option<String>> {
                     "signed admitted subject `{canonical}` has conflicting verified and header signers"
                 );
             }
-            if header.content_hash != verified.resolved.content_hash {
+            // The signature authenticates the signature-stripped body. The
+            // resolved `content_hash` binds the complete source file,
+            // including its signature envelope, so those two digests are
+            // intentionally different for every signed item.
+            if header.content_hash != verified.resolved.raw_content_digest {
                 bail!(
-                    "signed admitted subject `{canonical}` has conflicting verified and header content hashes"
+                    "signed admitted subject `{canonical}` has conflicting verified and header content hashes: header={}, verified_raw={}",
+                    header.content_hash,
+                    verified.resolved.raw_content_digest,
                 );
             }
             Ok(Some(signer.0.clone()))
@@ -2755,7 +2800,7 @@ impl ThreadLifecycleService {
                 persisted,
                 effective,
             } => self
-                .finish_generic_finalization(params, reported_status, persisted, effective)
+                .finish_generic_finalization(params, reported_status, persisted, *effective)
                 .map(FinalizeCreatedUnattachedOutcome::Finalized),
             StoreFinalizeCreatedUnattachedOutcome::AlreadyTerminal => self
                 .get_thread(&params.thread_id)?
@@ -2813,8 +2858,8 @@ impl ThreadLifecycleService {
                 persisted,
                 effective,
             } => self
-                .finish_generic_finalization(params, reported_status, persisted, effective)
-                .map(FinalizeIfNonterminalOutcome::Finalized),
+                .finish_generic_finalization(params, reported_status, persisted, *effective)
+                .map(|thread| FinalizeIfNonterminalOutcome::Finalized(Box::new(thread))),
             StoreFinalizeIfNonterminalOutcome::AlreadyTerminal { status } => {
                 Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal { status })
             }
@@ -3313,6 +3358,7 @@ impl ThreadLifecycleService {
             follow_waiters: waiters,
             mut facets,
             mut current_graph_nodes,
+            mut terminal_error_previews,
         } = enrichment;
         let mut by_parent: std::collections::HashMap<
             &str,
@@ -3358,6 +3404,9 @@ impl ThreadLifecycleService {
                 let current_node = current_graph_nodes
                     .remove(&item.thread_id)
                     .map(|(node, step)| CurrentNode { node, step });
+                let error = terminal_error_previews
+                    .remove(&item.thread_id)
+                    .and_then(|raw| terminal_error_summary(&raw));
                 ThreadListView {
                     item,
                     execution,
@@ -3366,6 +3415,7 @@ impl ThreadLifecycleService {
                     pending,
                     facets,
                     current_node,
+                    error,
                 }
             })
             .collect()
@@ -4113,6 +4163,7 @@ pub fn resolve_thread_history_policy(
 /// composition pass is bound to the verified root digest by
 /// `resolve_launch_policy_from_resolution`; an in-place edit between verify
 /// and compose therefore fails instead of producing a mixed admission.
+#[allow(clippy::too_many_arguments)] // Root admission authority inputs stay explicit.
 pub fn admit_verified_root_execution(
     engine: &Engine,
     plan_context: &PlanContext,
@@ -4185,6 +4236,7 @@ pub fn admit_verified_root_execution(
 /// subject is still a verified item (for example a UI seat presenting a
 /// surface). This uses the same kind/composition/trust pipeline as execution;
 /// callers never synthesize Durable policy or branch on the subject kind.
+#[allow(clippy::too_many_arguments)] // Non-execution admission authority inputs stay explicit.
 pub fn admit_non_execution_root(
     engine: &Engine,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
@@ -4193,6 +4245,7 @@ pub fn admit_non_execution_root(
     requested_by: &str,
     caller_scopes: Vec<String>,
     current_site_id: &str,
+    origin_site_id: &str,
     thread_profile: String,
 ) -> Result<NonExecutionRootAdmission> {
     validate_principal_identifier("non-execution root acting principal", requested_by)?;
@@ -4212,7 +4265,7 @@ pub fn admit_non_execution_root(
             })?,
         },
         current_site_id: current_site_id.to_string(),
-        origin_site_id: current_site_id.to_string(),
+        origin_site_id: origin_site_id.to_string(),
         execution_hints: ExecutionHints::default(),
         validate_only: false,
     };
@@ -4773,6 +4826,63 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
 mod tests {
     use super::*;
 
+    fn signed_verified_item(
+        body_hash: &str,
+        source_hash: &str,
+        signer_fingerprint: &str,
+    ) -> VerifiedItem {
+        VerifiedItem {
+            resolved: ResolvedItem {
+                canonical_ref: CanonicalRef::parse("service:items/effective").unwrap(),
+                kind: "service".to_string(),
+                source_path: PathBuf::from("/bundle/.ai/services/items/effective.yaml"),
+                source_space: ItemSpace::Bundle,
+                resolved_from: "bundle:standard".to_string(),
+                shadowed: Vec::new(),
+                materialized_project_root: None,
+                raw_content_digest: body_hash.to_string(),
+                content_hash: source_hash.to_string(),
+                signature_header: Some(SignatureHeader {
+                    timestamp: "2026-07-16T00:00:00Z".to_string(),
+                    content_hash: body_hash.to_string(),
+                    signature_b64: "signature".to_string(),
+                    signer_fingerprint: signer_fingerprint.to_string(),
+                }),
+                source_format: ResolvedSourceFormat {
+                    extension: ".yaml".to_string(),
+                    parser: "parser:yaml".to_string(),
+                    signature: SignatureEnvelope {
+                        prefix: "# ".to_string(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+                metadata: ItemMetadata::default(),
+            },
+            signer: Some(SignerFingerprint(signer_fingerprint.to_string())),
+            trust_class: TrustClass::Trusted,
+            pinned_version: None,
+        }
+    }
+
+    #[test]
+    fn signed_admission_compares_header_to_signature_stripped_body_hash() {
+        let signer = "22".repeat(32);
+        let body_hash = "33".repeat(32);
+        let source_hash = "44".repeat(32);
+        let verified = signed_verified_item(&body_hash, &source_hash, &signer);
+
+        assert_eq!(verified_item_signer(&verified).unwrap(), Some(signer));
+
+        let mut inconsistent = verified;
+        let verified_raw = "55".repeat(32);
+        inconsistent.resolved.raw_content_digest = verified_raw.clone();
+        let error = verified_item_signer(&inconsistent).unwrap_err().to_string();
+        assert!(error.contains("conflicting verified and header content hashes"));
+        assert!(error.contains(&body_hash));
+        assert!(error.contains(&verified_raw));
+    }
+
     #[test]
     fn canonical_principal_identifier_is_structured_but_scheme_agnostic() {
         assert!(validate_principal_identifier("principal", "session:session-1").is_ok());
@@ -5012,6 +5122,7 @@ mod tests {
             pending: 0,
             facets: std::collections::BTreeMap::new(),
             current_node: None,
+            error: None,
         };
         let v = serde_json::to_value(&view).unwrap();
         assert!(v.get("follow").is_none(), "absent follow omitted");
@@ -5023,5 +5134,18 @@ mod tests {
         let steered = ThreadListView { pending: 2, ..view };
         let v2 = serde_json::to_value(&steered).unwrap();
         assert_eq!(v2["pending"], json!(2));
+    }
+
+    #[test]
+    fn terminal_error_summary_prefers_runtime_result_and_compacts_lines() {
+        let raw = serde_json::json!({
+            "reason": "runtime_exited_without_callback_finalization",
+            "result": "Error: compile graph\n\nCaused by: bad expression"
+        })
+        .to_string();
+        assert_eq!(
+            terminal_error_summary(&raw).as_deref(),
+            Some("Error: compile graph Caused by: bad expression")
+        );
     }
 }

@@ -204,6 +204,9 @@ fn open_recovered_projection(
     .map(|(projection, _)| projection)
 }
 
+// Recovery keeps each pinned/path authority and liveness observer explicit;
+// combining them would make authority substitution easier to miss at callers.
+#[allow(clippy::too_many_arguments)]
 fn rebuild_and_install_projection(
     runtime_state_dir: &Path,
     cas_root: &Path,
@@ -362,6 +365,122 @@ fn cleanup_superseded_projection_instances(
     recovery: &RecoveryStore,
     selected_path: &Path,
 ) -> anyhow::Result<usize> {
+    cleanup_projection_instances(
+        recovery,
+        selected_path,
+        SUPERSEDED_PROJECTION_INSTANCES_TO_KEEP,
+        Some(SUPERSEDED_PROJECTION_DIRECTORY_ENTRIES_PER_PASS),
+        Some(SUPERSEDED_PROJECTION_INSPECTIONS_PER_PASS),
+        Some(SUPERSEDED_PROJECTION_DELETIONS_PER_PASS),
+        false,
+    )
+}
+
+/// Explicit offline history discard has no rollback generation to retain: the
+/// operator has authorized deletion of all prior thread projections. Unlike
+/// ordinary bounded housekeeping, this pass must either remove every
+/// unselected generation or fail while the durable discard marker remains.
+fn cleanup_all_superseded_projection_instances(
+    recovery: &RecoveryStore,
+    selected_path: &Path,
+) -> anyhow::Result<usize> {
+    let generated =
+        cleanup_projection_instances(recovery, selected_path, 0, None, None, None, true)?;
+    let obsolete_fixed = cleanup_obsolete_fixed_projection(recovery)?;
+    generated
+        .checked_add(obsolete_fixed)
+        .ok_or_else(|| anyhow::anyhow!("projection discard count overflow"))
+}
+
+fn ensure_existing_projection_cleanup_lease_available(
+    directory: &lillux::PinnedDirectory,
+    projection_name: &str,
+) -> anyhow::Result<()> {
+    let lease_name = std::ffi::OsString::from(format!("{projection_name}.lease"));
+    let Some(lease) = directory.open_regular(&lease_name, true)? else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                anyhow::bail!(
+                    "thread-history discard cannot remove projection still leased by another process: {}",
+                    directory.path().join(projection_name).display()
+                );
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect projection cleanup lease {}",
+                    directory.path().join(lease_name).display()
+                )
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = lease;
+        anyhow::bail!("projection instance cleanup leasing is unavailable on this platform");
+    }
+    Ok(())
+}
+
+/// Validate every pre-existing projection store before the discard marker is
+/// published. The new empty generation created later is not part of this
+/// count, so the result is also the number of old projection stores retired.
+fn inspect_projection_history_discard(recovery: &RecoveryStore) -> anyhow::Result<usize> {
+    let runtime_directory = recovery.runtime_directory().try_clone()?;
+    let mut instances = 0usize;
+    for entry_name in runtime_directory.entry_names()? {
+        let Some(name) = entry_name.to_str() else {
+            continue;
+        };
+        let Some(instance_id) = name
+            .strip_prefix("projection.")
+            .and_then(|name| name.strip_suffix(".sqlite3"))
+        else {
+            continue;
+        };
+        if instance_id.is_empty()
+            || !instance_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            continue;
+        }
+        runtime_directory
+            .open_regular(&entry_name, false)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "projection discard candidate is not a regular file: {}",
+                    runtime_directory.path().join(&entry_name).display()
+                )
+            })?;
+        inspect_projection_sidecars(&runtime_directory, name)?;
+        ensure_existing_projection_cleanup_lease_available(&runtime_directory, name)?;
+        instances = instances
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("projection discard count overflow"))?;
+    }
+    if validate_obsolete_fixed_projection(&runtime_directory)? {
+        instances = instances
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("projection discard count overflow"))?;
+    }
+    Ok(instances)
+}
+
+fn cleanup_projection_instances(
+    recovery: &RecoveryStore,
+    selected_path: &Path,
+    instances_to_keep: usize,
+    directory_entry_limit: Option<usize>,
+    inspection_limit: Option<usize>,
+    deletion_limit: Option<usize>,
+    require_complete: bool,
+) -> anyhow::Result<usize> {
     let selected_name = selected_path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("selected projection path has no filename"))?;
@@ -370,9 +489,11 @@ fn cleanup_superseded_projection_instances(
         .map(|generation| generation.projection_file);
     let runtime_directory = recovery.runtime_directory().try_clone()?;
     let mut candidates = Vec::new();
-    for entry_name in
-        runtime_directory.entry_names_bounded(SUPERSEDED_PROJECTION_DIRECTORY_ENTRIES_PER_PASS)?
-    {
+    let entry_names = match directory_entry_limit {
+        Some(limit) => runtime_directory.entry_names_bounded(limit)?,
+        None => runtime_directory.entry_names()?,
+    };
+    for entry_name in entry_names {
         let name = match entry_name.clone().into_string() {
             Ok(name) => name,
             Err(_) => continue,
@@ -411,23 +532,26 @@ fn cleanup_superseded_projection_instances(
         candidates.push((modified, name, entry_name, candidate_file));
         // Cap candidate discovery itself. Applying the cap only after this
         // loop would make every normal open stat and sort the full orphan set.
-        if candidates.len() >= SUPERSEDED_PROJECTION_INSPECTIONS_PER_PASS {
+        if inspection_limit.is_some_and(|limit| candidates.len() >= limit) {
             break;
         }
     }
     candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
 
     let mut deleted = 0usize;
-    for (_, name, entry_name, instance_file) in candidates
-        .into_iter()
-        .skip(SUPERSEDED_PROJECTION_INSTANCES_TO_KEEP)
-    {
-        if deleted == SUPERSEDED_PROJECTION_DELETIONS_PER_PASS {
+    for (_, name, entry_name, instance_file) in candidates.into_iter().skip(instances_to_keep) {
+        if deletion_limit.is_some_and(|limit| deleted == limit) {
             break;
         }
         let Some((lease_name, instance_lease)) =
             try_acquire_projection_cleanup_lease(&runtime_directory, &name)?
         else {
+            if require_complete {
+                anyhow::bail!(
+                    "thread-history discard cannot remove projection still leased by another process: {}",
+                    runtime_directory.path().join(&entry_name).display()
+                );
+            }
             // An old process may still be reading this generation instance.
             // Its shared lease keeps both the database and sidecars intact.
             continue;
@@ -443,6 +567,219 @@ fn cleanup_superseded_projection_instances(
         deleted += 1;
     }
     Ok(deleted)
+}
+
+/// Remove the fixed projection path used before generation-scoped projection
+/// identities. It is no longer selected by current code, but an explicit
+/// all-history discard must not leave its old thread rows behind.
+fn cleanup_obsolete_fixed_projection(recovery: &RecoveryStore) -> anyhow::Result<usize> {
+    let runtime_directory = recovery.runtime_directory().try_clone()?;
+    let projection_name = "projection.sqlite3";
+    let projection_entry = std::ffi::OsStr::new(projection_name);
+    if !validate_obsolete_fixed_projection(&runtime_directory)? {
+        return Ok(0);
+    }
+    let projection_file = runtime_directory
+        .open_regular(projection_entry, false)?
+        .ok_or_else(|| anyhow::anyhow!("validated obsolete projection disappeared"))?;
+
+    let Some((lease_name, instance_lease)) =
+        try_acquire_projection_cleanup_lease(&runtime_directory, projection_name)?
+    else {
+        anyhow::bail!(
+            "thread-history discard cannot remove obsolete projection still leased by another process: {}",
+            runtime_directory.path().join(projection_name).display()
+        );
+    };
+    remove_projection_sidecars(&runtime_directory, projection_name)?;
+    runtime_directory
+        .remove_if_same(projection_entry, &projection_file)
+        .context("remove obsolete fixed thread projection")?;
+    runtime_directory
+        .remove_if_same(&lease_name, &instance_lease)
+        .context("remove obsolete fixed projection cleanup lease")?;
+    Ok(1)
+}
+
+fn validate_obsolete_fixed_projection(
+    runtime_directory: &lillux::PinnedDirectory,
+) -> anyhow::Result<bool> {
+    let projection_name = "projection.sqlite3";
+    let projection_entry = std::ffi::OsStr::new(projection_name);
+    let projection_file = runtime_directory.open_regular(projection_entry, false)?;
+    let sidecar_names = [
+        format!("{projection_name}-wal"),
+        format!("{projection_name}-shm"),
+        format!("{projection_name}-journal"),
+    ];
+    let has_sidecar = sidecar_names.iter().try_fold(false, |found, name| {
+        runtime_directory
+            .open_regular(std::ffi::OsStr::new(name), false)
+            .map(|file| found || file.is_some())
+    })?;
+    if projection_file.is_none() && !has_sidecar {
+        return Ok(false);
+    }
+
+    let projection_file = projection_file.ok_or_else(|| {
+        anyhow::anyhow!(
+            "obsolete projection sidecars exist without their owned database: {}",
+            runtime_directory.path().join(projection_name).display()
+        )
+    })?;
+    projection::assert_owned_projection_file_in_directory(
+        runtime_directory,
+        projection_entry,
+        &projection_file,
+    )?;
+    inspect_projection_sidecars(runtime_directory, projection_name)?;
+    ensure_existing_projection_cleanup_lease_available(runtime_directory, projection_name)?;
+    Ok(true)
+}
+
+fn remove_pinned_directory_contents(
+    directory: &lillux::PinnedDirectory,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    let mut removed = 0usize;
+    for name in directory.entry_names()? {
+        removed = removed
+            .checked_add(remove_pinned_directory_entry(directory, &name, dry_run)?)
+            .ok_or_else(|| anyhow::anyhow!("thread-history artifact count overflow"))?;
+    }
+    Ok(removed)
+}
+
+fn remove_pinned_directory_entry(
+    directory: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    dry_run: bool,
+) -> anyhow::Result<usize> {
+    match directory.open_entry(name, false)? {
+        Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+            let removed = remove_pinned_directory_contents(&child, dry_run)?
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("thread-history artifact count overflow"))?;
+            if !dry_run && !directory.remove_empty_child_if_same(name, &child)? {
+                anyhow::bail!(
+                    "thread-history directory changed during discard: {}",
+                    child.path().display()
+                );
+            }
+            Ok(removed)
+        }
+        Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
+            if !dry_run {
+                directory.remove_if_same(name, &file)?;
+            }
+            Ok(1)
+        }
+        None => anyhow::bail!(
+            "thread-history entry disappeared: {}",
+            directory.path().join(name).display()
+        ),
+    }
+}
+
+fn remove_pinned_directory_contents_with_progress(
+    directory: &lillux::PinnedDirectory,
+    dry_run: bool,
+    expected_heads: usize,
+    progress: &mut dyn FnMut(usize, usize),
+) -> anyhow::Result<usize> {
+    if dry_run {
+        return remove_pinned_directory_contents(directory, true);
+    }
+    let observed_heads = count_pinned_files_named(directory, std::ffi::OsStr::new("head"))?;
+    if observed_heads != expected_heads {
+        anyhow::bail!(
+            "verified chain-head count changed before discard: expected {expected_heads}, observed {observed_heads}"
+        );
+    }
+    progress(0, expected_heads);
+    let mut retired_heads = 0usize;
+    let removed = remove_pinned_directory_contents_tracking_heads(
+        directory,
+        &mut retired_heads,
+        expected_heads,
+        progress,
+    )?;
+    debug_assert_eq!(retired_heads, expected_heads);
+    Ok(removed)
+}
+
+fn count_pinned_files_named(
+    directory: &lillux::PinnedDirectory,
+    target: &std::ffi::OsStr,
+) -> anyhow::Result<usize> {
+    let mut count = 0usize;
+    for name in directory.entry_names()? {
+        match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                count = count
+                    .checked_add(count_pinned_files_named(&child, target)?)
+                    .ok_or_else(|| anyhow::anyhow!("thread-history head count overflow"))?;
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) if name == target => {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("thread-history head count overflow"))?;
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) => {}
+            None => anyhow::bail!(
+                "thread-history entry disappeared: {}",
+                directory.path().join(&name).display()
+            ),
+        }
+    }
+    Ok(count)
+}
+
+fn remove_pinned_directory_contents_tracking_heads(
+    directory: &lillux::PinnedDirectory,
+    retired_heads: &mut usize,
+    total_heads: usize,
+    progress: &mut dyn FnMut(usize, usize),
+) -> anyhow::Result<usize> {
+    let mut removed = 0usize;
+    for name in directory.entry_names()? {
+        match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                removed = removed
+                    .checked_add(remove_pinned_directory_contents_tracking_heads(
+                        &child,
+                        retired_heads,
+                        total_heads,
+                        progress,
+                    )?)
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| anyhow::anyhow!("thread-history artifact count overflow"))?;
+                if !directory.remove_empty_child_if_same(&name, &child)? {
+                    anyhow::bail!(
+                        "thread-history directory changed during discard: {}",
+                        child.path().display()
+                    );
+                }
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
+                directory.remove_if_same(&name, &file)?;
+                removed = removed
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("thread-history artifact count overflow"))?;
+                if name == std::ffi::OsStr::new("head") {
+                    *retired_heads = retired_heads
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("thread-history head count overflow"))?;
+                    progress(*retired_heads, total_heads);
+                }
+            }
+            None => anyhow::bail!(
+                "thread-history entry disappeared: {}",
+                directory.path().join(&name).display()
+            ),
+        }
+    }
+    Ok(removed)
 }
 
 fn try_acquire_projection_cleanup_lease(
@@ -477,18 +814,7 @@ fn remove_projection_sidecars(
     directory: &lillux::PinnedDirectory,
     projection_name: &str,
 ) -> anyhow::Result<()> {
-    let sidecars = [
-        std::ffi::OsString::from(format!("{projection_name}-wal")),
-        std::ffi::OsString::from(format!("{projection_name}-shm")),
-        std::ffi::OsString::from(format!("{projection_name}-journal")),
-    ];
-    let mut existing = Vec::new();
-    for name in sidecars {
-        if let Some(file) = directory.open_regular(&name, false)? {
-            let sidecar = directory.path().join(&name);
-            existing.push((sidecar, file));
-        }
-    }
+    let existing = inspect_projection_sidecars(directory, projection_name)?;
     // Preflight the complete set before unlinking any member, so one invalid
     // sidecar cannot leave a partially cleaned generation.
     for (sidecar, file) in &existing {
@@ -509,6 +835,25 @@ fn remove_projection_sidecars(
             .with_context(|| format!("remove projection sidecar {}", sidecar.display()))?;
     }
     Ok(())
+}
+
+fn inspect_projection_sidecars(
+    directory: &lillux::PinnedDirectory,
+    projection_name: &str,
+) -> anyhow::Result<Vec<(PathBuf, fs::File)>> {
+    let sidecars = [
+        std::ffi::OsString::from(format!("{projection_name}-wal")),
+        std::ffi::OsString::from(format!("{projection_name}-shm")),
+        std::ffi::OsString::from(format!("{projection_name}-journal")),
+    ];
+    let mut existing = Vec::new();
+    for name in sidecars {
+        if let Some(file) = directory.open_regular(&name, false)? {
+            let sidecar = directory.path().join(&name);
+            existing.push((sidecar, file));
+        }
+    }
+    Ok(existing)
 }
 
 fn ensure_same_projection_cleanup_file(
@@ -542,6 +887,24 @@ pub struct PendingReplayReport {
     pub removals_awaiting_runtime_cleanup: usize,
 }
 
+/// State-plane portion of an explicit offline all-thread-history discard.
+/// Runtime-process rows, per-thread files, and scheduler fire history are
+/// owned by higher layers and reported separately by the orchestrator.
+#[derive(Debug, Clone, Default)]
+pub struct AuthoritativeThreadHistoryDiscardReport {
+    pub chain_heads: usize,
+    pub chain_ref_artifacts: usize,
+    pub pending_transitions: usize,
+    pub superseded_projection_instances: usize,
+    pub rebuilt_projection: Option<crate::rebuild::RebuildReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthoritativeThreadHistoryDiscardProgress {
+    RetiringChainHeads { completed: usize, total: usize },
+    RebuildingProjection,
+}
+
 /// Exact signed-head state observed while replaying one pending Remove.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingRemoveHeadState {
@@ -562,6 +925,10 @@ pub struct AuthoritativeTerminalChain {
 
 enum ProspectiveChainMutation<'a> {
     AddSnapshot(&'a ThreadSnapshot),
+    AddContinuation {
+        snapshot: &'a ThreadSnapshot,
+        source_thread_id: &'a str,
+    },
     UpdateSnapshots(&'a [SnapshotUpdate]),
     ReplaceHead(&'a str),
 }
@@ -645,6 +1012,30 @@ fn prospective_mutation_invalidates_retirement(
                 &mut snapshot,
                 chain_root_id,
                 &timestamp_floor,
+                None,
+            )?;
+            if snapshots
+                .insert(snapshot.thread_id.clone(), snapshot.clone())
+                .is_some()
+            {
+                anyhow::bail!("thread {} already exists in chain", snapshot.thread_id);
+            }
+        }
+        ProspectiveChainMutation::AddContinuation {
+            snapshot,
+            source_thread_id,
+        } => {
+            if !snapshots.contains_key(source_thread_id) {
+                anyhow::bail!(
+                    "continuation source {source_thread_id} does not exist in chain {chain_root_id}"
+                );
+            }
+            let mut snapshot = (*snapshot).clone();
+            crate::chain::normalize_prospective_new_thread(
+                &mut snapshot,
+                chain_root_id,
+                &timestamp_floor,
+                Some(source_thread_id),
             )?;
             if snapshots
                 .insert(snapshot.thread_id.clone(), snapshot.clone())
@@ -766,6 +1157,9 @@ impl RecoveryObserverThrottle {
     }
 }
 
+// Replay exposes acknowledgment, liveness, trust, and recovery authority as
+// independent inputs because each changes the safety of the operation.
+#[allow(clippy::too_many_arguments)]
 fn replay_pending_into(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -868,19 +1262,19 @@ fn replay_pending_into(
                         &head.target_hash,
                         observer,
                     )?;
-                    if acknowledge {
-                        if !acknowledge_if_projection_current(
+                    if acknowledge
+                        && !acknowledge_if_projection_current(
                             projection,
                             recovery,
                             &chain_lock,
                             &current,
                             Some(head),
-                        )? {
-                            anyhow::bail!(
-                                "pending Set did not converge while replaying {}",
-                                current.chain_root_id
-                            );
-                        }
+                        )?
+                    {
+                        anyhow::bail!(
+                            "pending Set did not converge while replaying {}",
+                            current.chain_root_id
+                        );
                     }
                     report.sets_repaired += 1;
                 }
@@ -1009,19 +1403,19 @@ fn replay_pending_into(
                         &head.target_hash,
                         observer,
                     )?;
-                    if acknowledge {
-                        if !acknowledge_if_projection_current(
+                    if acknowledge
+                        && !acknowledge_if_projection_current(
                             projection,
                             recovery,
                             &chain_lock,
                             &replacement,
                             Some(&head),
-                        )? {
-                            anyhow::bail!(
-                                "advanced-head repair Set did not converge while replaying {}",
-                                replacement.chain_root_id
-                            );
-                        }
+                        )?
+                    {
+                        anyhow::bail!(
+                            "advanced-head repair Set did not converge while replaying {}",
+                            replacement.chain_root_id
+                        );
                     }
                     report.stale_removes_cleared += 1;
                 }
@@ -1793,6 +2187,11 @@ impl StateDb {
             runtime_state_directory.try_clone()?,
             recovery_directory.try_clone()?,
         )?;
+        if recovery.thread_history_discard_in_progress()? {
+            anyhow::bail!(
+                "offline thread-history discard is incomplete; rerun `ryeos node gc --discard-thread-history --confirm-discard-thread-history` while the daemon is stopped"
+            );
+        }
 
         // Operational rows are source-of-truth state and live in a fixed store
         // that is independent of replaceable projection generations.
@@ -2292,6 +2691,123 @@ impl StateDb {
             tracing::info!(deleted, "removed superseded projection instances");
         }
         Ok(report)
+    }
+
+    /// Durably mark an explicitly requested offline all-thread-history
+    /// discard. The marker survives interruption and blocks ordinary startup
+    /// until the same offline command reaches every participating store.
+    pub fn begin_thread_history_discard_admitted(
+        &self,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        self.recovery
+            .begin_thread_history_discard(cas_mutation_guard)
+    }
+
+    pub fn finish_thread_history_discard_admitted(
+        &self,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<()> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        self.recovery
+            .finish_thread_history_discard(cas_mutation_guard)
+    }
+
+    /// Retire the complete authoritative thread-head namespace and publish an
+    /// empty current projection. This is intentionally separate from normal
+    /// GC, which never removes chain heads blindly. The caller must also hold
+    /// the process-wide operator/state lock and clear the app-owned runtime and
+    /// scheduler stores before acknowledging the durable discard marker.
+    pub fn discard_authoritative_thread_history_admitted(
+        &mut self,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        dry_run: bool,
+    ) -> anyhow::Result<AuthoritativeThreadHistoryDiscardReport> {
+        self.discard_authoritative_thread_history_admitted_with_progress(
+            cas_mutation_guard,
+            dry_run,
+            &mut |_| {},
+        )
+    }
+
+    /// Progress is published after each verified chain head has been durably
+    /// retired and again immediately before the empty projection generation
+    /// is rebuilt.
+    pub fn discard_authoritative_thread_history_admitted_with_progress(
+        &mut self,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        dry_run: bool,
+        progress: &mut dyn FnMut(AuthoritativeThreadHistoryDiscardProgress),
+    ) -> anyhow::Result<AuthoritativeThreadHistoryDiscardReport> {
+        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
+        if !cas_mutation_guard.is_exclusive() {
+            anyhow::bail!("thread-history discard requires the exclusive CAS guard");
+        }
+        if !dry_run && !self.recovery.thread_history_discard_in_progress()? {
+            anyhow::bail!("thread-history discard intent was not durably published");
+        }
+
+        // Verification is deliberately at the signed-head boundary, not at
+        // the pointed-to snapshot shape: this command exists specifically to
+        // retire otherwise unsupported historical closures.
+        let heads = crate::refs::list_verified_chain_heads_in_directory(
+            &self._refs_directory,
+            self.trust_store.as_ref(),
+        )?;
+        let pending = self.recovery.list_pending()?;
+        let projection_instances = inspect_projection_history_discard(&self.recovery)?;
+        let chains_directory = match self
+            ._refs_directory
+            .open_child_directory(std::ffi::OsStr::new("generic"))?
+        {
+            Some(generic) => generic.open_child_directory(std::ffi::OsStr::new("chains"))?,
+            None => None,
+        };
+        let mut retire_progress = |completed, total| {
+            progress(
+                AuthoritativeThreadHistoryDiscardProgress::RetiringChainHeads { completed, total },
+            );
+        };
+        let chain_ref_artifacts = match chains_directory.as_ref() {
+            Some(directory) => remove_pinned_directory_contents_with_progress(
+                directory,
+                dry_run,
+                heads.len(),
+                &mut retire_progress,
+            )?,
+            None => 0,
+        };
+        if !dry_run && chains_directory.is_none() {
+            retire_progress(0, 0);
+        }
+        let pending_transitions = self
+            .recovery
+            .discard_all_pending_transitions(cas_mutation_guard, dry_run)?;
+        debug_assert_eq!(pending_transitions, pending.len());
+
+        if dry_run {
+            return Ok(AuthoritativeThreadHistoryDiscardReport {
+                chain_heads: heads.len(),
+                chain_ref_artifacts,
+                pending_transitions,
+                superseded_projection_instances: projection_instances,
+                rebuilt_projection: None,
+            });
+        }
+
+        self.head_cache.lock().expect("head_cache lock").clear();
+        progress(AuthoritativeThreadHistoryDiscardProgress::RebuildingProjection);
+        let rebuilt_projection =
+            self.rebuild_projection_generation_admitted(None, cas_mutation_guard)?;
+        cleanup_all_superseded_projection_instances(&self.recovery, self.projection.path())?;
+        Ok(AuthoritativeThreadHistoryDiscardReport {
+            chain_heads: heads.len(),
+            chain_ref_artifacts,
+            pending_transitions,
+            superseded_projection_instances: projection_instances,
+            rebuilt_projection: Some(rebuilt_projection),
+        })
     }
 
     /// Replay only durable pending chain transitions. This never enumerates the
@@ -2944,6 +3460,9 @@ impl StateDb {
         )
     }
 
+    // Admission authority, signer, liveness proof, and the held CAS guard stay
+    // explicit because omitting any one changes the durability contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_events_admitted(
         &self,
         chain_root_id: &str,
@@ -2965,6 +3484,7 @@ impl StateDb {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_events_inner(
         &self,
         chain_root_id: &str,
@@ -3289,7 +3809,10 @@ impl StateDb {
         )?;
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
-            ProspectiveChainMutation::AddSnapshot(&snapshot),
+            ProspectiveChainMutation::AddContinuation {
+                snapshot: &snapshot,
+                source_thread_id: existing_thread_id,
+            },
             &chain_lock,
         )?;
         let cancelled_remove = self.converge_pending_before_set_locked(
@@ -4268,6 +4791,9 @@ impl StateDb {
         )
     }
 
+    // Paging bounds and signing/trust authority remain explicit at the public
+    // state boundary rather than being hidden in an unchecked options bag.
+    #[allow(clippy::too_many_arguments)]
     pub fn read_bundle_event_chain_page(
         &self,
         bundle_id: &str,
@@ -4632,6 +5158,96 @@ mod tests {
             orphan_count - (SUPERSEDED_PROJECTION_DELETIONS_PER_PASS * 2),
             "repeated normal opens must make bounded progress"
         );
+    }
+
+    #[test]
+    fn explicit_thread_history_discard_retires_heads_and_every_old_projection() {
+        let signer = TestSigner::default();
+        let (dir, db) = open_temp_trusted(&signer);
+        db.create_chain(
+            "T-root",
+            test_root_snapshot("directive:system/test"),
+            &signer,
+        )
+        .unwrap();
+        let old_selected = db.selected_projection_path().to_path_buf();
+        let obsolete_fixed = dir.path().join("projection.sqlite3");
+        drop(ProjectionDb::open(&obsolete_fixed).unwrap());
+        drop(db);
+        let mut db = StateDb::open_for_projection_rebuild(dir.path(), test_trust_store()).unwrap();
+
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        let preview = db
+            .discard_authoritative_thread_history_admitted(&guard, true)
+            .unwrap();
+        assert_eq!(preview.chain_heads, 1);
+        assert!(preview.chain_ref_artifacts >= 2);
+        assert!(old_selected.is_file());
+        assert!(obsolete_fixed.is_file());
+        assert!(db
+            .discard_authoritative_thread_history_admitted(&guard, false)
+            .unwrap_err()
+            .to_string()
+            .contains("intent was not durably published"));
+
+        db.begin_thread_history_discard_admitted(&guard).unwrap();
+        let startup_error = StateDb::open(dir.path(), test_trust_store())
+            .err()
+            .expect("ordinary startup must refuse an incomplete discard");
+        assert!(startup_error
+            .to_string()
+            .contains("thread-history discard is incomplete"));
+
+        let report = db
+            .discard_authoritative_thread_history_admitted(&guard, false)
+            .unwrap();
+        let rebuilt = report.rebuilt_projection.as_ref().unwrap();
+        assert_eq!(rebuilt.chains_rebuilt, 0);
+        assert_eq!(rebuilt.threads_restored, 0);
+        assert!(report.superseded_projection_instances >= 2);
+        assert!(!old_selected.exists());
+        assert!(!obsolete_fixed.exists());
+        assert!(db.get_thread("T-root").unwrap().is_none());
+
+        db.finish_thread_history_discard_admitted(&guard).unwrap();
+        drop(guard);
+        drop(db);
+        let reopened = StateDb::open(dir.path(), test_trust_store()).unwrap();
+        assert!(reopened.get_thread("T-root").unwrap().is_none());
+    }
+
+    #[test]
+    fn thread_history_discard_preflight_refuses_a_foreign_fixed_projection() {
+        let signer = TestSigner::default();
+        let (dir, db) = open_temp_trusted(&signer);
+        db.create_chain(
+            "T-root",
+            test_root_snapshot("directive:system/test"),
+            &signer,
+        )
+        .unwrap();
+        drop(db);
+
+        let foreign_path = dir.path().join("projection.sqlite3");
+        let foreign = rusqlite::Connection::open(&foreign_path).unwrap();
+        foreign
+            .execute_batch("PRAGMA application_id=123; CREATE TABLE foreign_data (id INTEGER);")
+            .unwrap();
+        drop(foreign);
+
+        let mut db = StateDb::open_for_projection_rebuild(dir.path(), test_trust_store()).unwrap();
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        let error = db
+            .discard_authoritative_thread_history_admitted(&guard, true)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("foreign and will not be removed"));
+        assert!(foreign_path.is_file());
+        assert!(dir.path().join("refs/generic/chains/T-root/head").is_file());
+        assert!(!db.recovery.thread_history_discard_in_progress().unwrap());
     }
 
     #[test]

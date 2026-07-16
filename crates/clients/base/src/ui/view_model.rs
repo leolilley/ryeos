@@ -2799,14 +2799,13 @@ fn selected_collapsed(
     }
 }
 
-fn selected_row_state(
-    core: &RyeOsCore,
-    tile_id: TileId,
-) -> (
-    Option<&std::collections::BTreeSet<String>>,
-    Option<&std::collections::BTreeSet<String>>,
-    Option<&std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
-) {
+type SelectedRowState<'a> = (
+    Option<&'a std::collections::BTreeSet<String>>,
+    Option<&'a std::collections::BTreeSet<String>>,
+    Option<&'a std::collections::BTreeMap<String, crate::workspace::RowFlash>>,
+);
+
+fn selected_row_state(core: &RyeOsCore, tile_id: TileId) -> SelectedRowState<'_> {
     match core.workspace.tiles.get(&tile_id).map(|tile| &tile.local) {
         Some(ViewLocalState::GenericList {
             expanded_rows,

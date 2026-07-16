@@ -14,6 +14,11 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$script_dir/lib/ryeos-terminal.sh"
+ryeos_term_init
+
 URL=""
 KEY_PEM=""
 AUDIENCE=""
@@ -32,14 +37,14 @@ while [[ $# -gt 0 ]]; do
     --params-json)  PARAMS_JSON="$2"; shift 2 ;;
     --timeout)      TIMEOUT="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 --url <url> --key-pem <pem> --audience <fp:...> [--item-ref <ref>] [--project-path <path>]"
+      printf 'Usage: %s --url <url> --key-pem <pem> --audience <fp:...> [--item-ref <ref>] [--project-path <path>]\n' "$0"
       exit 0 ;;
-    *) echo "unknown arg: $1" >&2; exit 2 ;;
+    *) ryeos_term_fail "unknown argument: $1"; exit 2 ;;
   esac
 done
 
 if [[ -z "$URL" || -z "$KEY_PEM" || -z "$AUDIENCE" ]]; then
-  echo "ERROR: --url, --key-pem, and --audience are required" >&2
+  ryeos_term_fail "--url, --key-pem, and --audience are required"
   exit 2
 fi
 
@@ -71,14 +76,22 @@ FP=$(openssl pkey -in "$KEY_PEM" -pubout -outform der 2>/dev/null \
   | tail -c 32 | openssl dgst -sha256 -hex | awk '{print $2}')
 
 # 5. POST /execute/stream and capture SSE.
-echo "[smoke] POST $URL/execute/stream"
-echo "[smoke] key-id: fp:$FP"
-echo "[smoke] item_ref: $ITEM_REF"
-echo "[smoke] project_path: $PROJECT_PATH"
-echo "---"
+ryeos_term_section "execute stream smoke"
+ryeos_term_row "endpoint" "$URL/execute/stream"
+ryeos_term_row "key" "fp:$FP"
+ryeos_term_row "item" "$ITEM_REF"
+ryeos_term_row "project" "$PROJECT_PATH"
 
 TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
+cleanup_stream_smoke() {
+  local status="$1"
+  ryeos_term_handle_exit "$status"
+  rm -f "$TMP"
+  return "$status"
+}
+trap 'cleanup_stream_smoke "$?"' EXIT
+
+ryeos_term_begin VERIFY "waiting for SSE stream"
 
 HTTP_CODE=$(timeout "$TIMEOUT" curl -sS -o "$TMP" -w '%{http_code}' -N -X POST "$URL/execute/stream" \
   -H "x-ryeos-key-id: fp:$FP" \
@@ -88,19 +101,17 @@ HTTP_CODE=$(timeout "$TIMEOUT" curl -sS -o "$TMP" -w '%{http_code}' -N -X POST "
   -H "content-type: application/json" \
   -d "$BODY" || true)
 
-echo ""  # newline after any streaming output
-
 if [[ "$HTTP_CODE" != "200" ]]; then
-  echo "[smoke] FAIL: HTTP $HTTP_CODE" >&2
+  ryeos_term_fail "execute stream returned HTTP $HTTP_CODE"
   cat "$TMP" >&2
   exit 1
 fi
 
 # 6. Assert we got at least one SSE frame.
 if ! grep -qE '^event:' "$TMP"; then
-  echo "[smoke] FAIL: no SSE event frames in response" >&2
+  ryeos_term_fail "no SSE event frames in response"
   cat "$TMP" >&2
   exit 1
 fi
 
-echo "[smoke] OK: received SSE stream"
+ryeos_term_end success "VERIFY COMPLETE" "received SSE stream"

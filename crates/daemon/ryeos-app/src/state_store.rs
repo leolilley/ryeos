@@ -46,6 +46,7 @@ const MAX_THREAD_LIST_FACET_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_THREAD_LIST_FACET_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_THREAD_LIST_ERROR_PREVIEW_BYTES: usize = 2 * 1024;
 /// Exact JSON budget for the response-facing thread result record. The
 /// projection content itself is capped by the 512 KiB ThreadEvent ceiling;
 /// four MiB also covers worst-case JSON escaping of a malformed stored error
@@ -639,6 +640,7 @@ pub struct ThreadListEnrichment {
     pub follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
     pub facets: HashMap<String, Vec<(String, String)>>,
     pub current_graph_nodes: HashMap<String, (String, u32)>,
+    pub terminal_error_previews: HashMap<String, String>,
 }
 
 #[derive(Debug, Default)]
@@ -735,7 +737,7 @@ pub struct ChildLineageAppend {
 pub enum FinalizeCreatedUnattachedOutcome {
     Finalized {
         persisted: Vec<PersistedEventRecord>,
-        effective: FinalizeThreadRecord,
+        effective: Box<FinalizeThreadRecord>,
     },
     AlreadyTerminal,
     NotCurrent {
@@ -753,7 +755,7 @@ pub enum FinalizeCreatedUnattachedOutcome {
 pub enum FinalizeIfNonterminalOutcome {
     Finalized {
         persisted: Vec<PersistedEventRecord>,
-        effective: FinalizeThreadRecord,
+        effective: Box<FinalizeThreadRecord>,
     },
     AlreadyTerminal {
         status: String,
@@ -765,7 +767,7 @@ pub enum FinalizeIfNonterminalOutcome {
 /// lifecycle finalization.
 #[derive(Debug)]
 pub enum StopIfAdmissionOpenOutcome {
-    Requested(RuntimeInfo),
+    Requested(Box<RuntimeInfo>),
     AlreadyTerminal,
     PreservedForShutdown,
 }
@@ -1432,14 +1434,14 @@ impl ThreadRuntimeAuthority {
 fn count_runtime_tree_entries(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut count = 1usize;
     for name in directory.entry_names()? {
-        let child_count = if let Some(child) = directory.open_child_directory(&name)? {
-            count_runtime_tree_entries(&child)?
-        } else if directory.open_regular(&name, false)?.is_some() {
-            1
-        } else {
-            // An entry removed after enumeration is already absent. A link or
-            // special file fails in the no-follow regular-file open above.
-            continue;
+        let child_count = match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                count_runtime_tree_entries(&child)?
+            }
+            Some(lillux::PinnedDirectoryEntry::Regular(_)) => 1,
+            // An entry removed after enumeration is already absent. Links and
+            // special files fail in the no-follow mixed-entry open above.
+            None => continue,
         };
         count = count
             .checked_add(child_count)
@@ -1487,24 +1489,28 @@ fn inspect_thread_runtime_files(
 fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut deleted = 0usize;
     for name in directory.entry_names()? {
-        if let Some(child) = directory.open_child_directory(&name)? {
-            deleted = deleted
-                .checked_add(delete_runtime_tree_contents(&child)?)
-                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
-            if !directory.remove_empty_child_if_same(&name, &child)? {
-                bail!(
-                    "thread runtime directory changed during cleanup: {}",
-                    child.path().display()
-                );
+        match directory.open_entry(&name, false)? {
+            Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
+                deleted = deleted
+                    .checked_add(delete_runtime_tree_contents(&child)?)
+                    .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+                if !directory.remove_empty_child_if_same(&name, &child)? {
+                    bail!(
+                        "thread runtime directory changed during cleanup: {}",
+                        child.path().display()
+                    );
+                }
+                deleted = deleted
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
             }
-            deleted = deleted
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
-        } else if let Some(file) = directory.open_regular(&name, false)? {
-            directory.remove_if_same(&name, &file)?;
-            deleted = deleted
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+            Some(lillux::PinnedDirectoryEntry::Regular(file)) => {
+                directory.remove_if_same(&name, &file)?;
+                deleted = deleted
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
+            }
+            None => {}
         }
     }
     Ok(deleted)
@@ -1530,6 +1536,25 @@ fn delete_thread_runtime_files(paths: &[ThreadRuntimeRemoval]) -> Result<usize> 
             .ok_or_else(|| anyhow!("deleted runtime file count overflow"))?;
     }
     Ok(deleted)
+}
+
+/// Inspect or clear the complete per-thread runtime directory for the explicit
+/// offline all-history GC path. The `threads/` root itself remains as the
+/// current empty runtime namespace.
+pub(crate) fn discard_all_thread_runtime_files(
+    app_root: &Path,
+    runtime_state: &lillux::PinnedDirectory,
+    dry_run: bool,
+) -> Result<usize> {
+    let authority = ThreadRuntimeAuthority::capture(app_root, runtime_state, false)?;
+    authority.ensure_current_binding()?;
+    let Some(threads_root) = authority.threads_root.as_ref() else {
+        return Ok(0);
+    };
+    if dry_run {
+        return count_runtime_tree_entries(threads_root).map(|count| count.saturating_sub(1));
+    }
+    delete_runtime_tree_contents(threads_root)
 }
 
 impl StateStore {
@@ -2308,7 +2333,7 @@ impl StateStore {
             }
         }
         let base_project_snapshot_hash = base_project_snapshot_hash
-            .map(String::from)
+            .map(ToOwned::to_owned)
             .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
         let now = lillux::time::iso8601_now();
@@ -2316,7 +2341,7 @@ impl StateStore {
         updated_snapshot.updated_at.clone_from(&now);
         updated_snapshot.started_at = Some(now.clone());
         updated_snapshot.finished_at = None;
-        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash.map(String::from);
+        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
 
         let snapshot_update = SnapshotUpdate {
             thread_id: thread_id.to_string(),
@@ -2442,7 +2467,7 @@ impl StateStore {
         )?;
         Ok(FinalizeCreatedUnattachedOutcome::Finalized {
             persisted,
-            effective,
+            effective: Box::new(effective),
         })
     }
 
@@ -2489,7 +2514,7 @@ impl StateStore {
         )?;
         Ok(FinalizeIfNonterminalOutcome::Finalized {
             persisted,
-            effective,
+            effective: Box::new(effective),
         })
     }
 
@@ -2639,7 +2664,7 @@ impl StateStore {
             .collect();
 
         let mut updated_snapshot = authoritative_snapshot_for_transition(
-            &g,
+            g,
             &thread_row.chain_root_id,
             &thread_row.thread_id,
         )?;
@@ -2935,6 +2960,7 @@ impl StateStore {
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Atomic continuation handoff inputs stay explicit.
     pub fn create_machine_continuation_with_events(
         &self,
         successor: &NewThreadRecord,
@@ -2991,6 +3017,7 @@ impl StateStore {
     /// first), then settle the source `continued`. A race or seed failure aborts
     /// with the source still running — never `continued` behind an unlaunchable
     /// successor.
+    #[allow(clippy::too_many_arguments)] // Shared atomic continuation transaction boundary.
     fn create_running_continuation_successor(
         &self,
         successor: &NewThreadRecord,
@@ -3235,6 +3262,7 @@ impl StateStore {
     /// even if the daemon crashes before the runtime emits anything. A terminal
     /// (completed/failed) source keeps its status; a running source is settled
     /// `continued` (same as `create_continuation`).
+    #[allow(clippy::too_many_arguments)] // Idempotent continuation identity inputs stay explicit.
     pub(crate) fn create_or_get_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
@@ -4389,7 +4417,7 @@ impl StateStore {
     /// current graph nodes, and live follow waiters share one outer store lock
     /// instead of relocking the store for every row.
     pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
-        let (facet_rows, graph_node_payloads, follow_waiters) = {
+        let (facet_rows, graph_node_payloads, follow_waiters, terminal_error_previews) = {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
             let result = (
@@ -4405,11 +4433,22 @@ impl StateStore {
                     thread_ids,
                     MAX_THREAD_LIST_ENRICHMENT_THREADS,
                 )?,
+                queries::thread_result_error_previews(
+                    g.state_db.projection(),
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                    MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
+                )?,
             );
             Self::warn_slow_lock_hold("thread_list_enrichment", hold_started);
             result
         };
-        Self::assemble_thread_list_enrichment(facet_rows, graph_node_payloads, follow_waiters)
+        Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+            terminal_error_previews,
+        )
     }
 
     pub fn thread_list_enrichment_with_waiters(
@@ -4417,7 +4456,7 @@ impl StateStore {
         thread_ids: &[String],
         follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
     ) -> Result<ThreadListEnrichment> {
-        let (facet_rows, graph_node_payloads) = {
+        let (facet_rows, graph_node_payloads, terminal_error_previews) = {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
             let result = (
@@ -4429,17 +4468,29 @@ impl StateStore {
                     MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
                     MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
                 )?,
+                queries::thread_result_error_previews(
+                    g.state_db.projection(),
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                    MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
+                )?,
             );
             Self::warn_slow_lock_hold("thread_list_enrichment_with_waiters", hold_started);
             result
         };
-        Self::assemble_thread_list_enrichment(facet_rows, graph_node_payloads, follow_waiters)
+        Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+            terminal_error_previews,
+        )
     }
 
     fn assemble_thread_list_enrichment(
         facet_rows: Vec<queries::FacetRow>,
         graph_node_payloads: HashMap<String, Vec<u8>>,
         follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
+        terminal_error_previews: HashMap<String, String>,
     ) -> Result<ThreadListEnrichment> {
         let mut facets: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for row in facet_rows {
@@ -4476,6 +4527,7 @@ impl StateStore {
             follow_waiters,
             facets,
             current_graph_nodes,
+            terminal_error_previews,
         })
     }
 
@@ -4932,7 +4984,7 @@ impl StateStore {
         }
         g.runtime_db
             .request_thread_stop(thread_id, intent)
-            .map(StopIfAdmissionOpenOutcome::Requested)
+            .map(|runtime| StopIfAdmissionOpenOutcome::Requested(Box::new(runtime)))
     }
 
     pub fn clear_thread_process_if_matches(
@@ -5030,6 +5082,7 @@ impl StateStore {
         g.runtime_db.reserve_follow(seed)
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors one atomic runtime-db follow-child record.
     pub fn set_follow_child(
         &self,
         follow_key: &str,
@@ -5860,7 +5913,7 @@ mod tests {
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(
             identity.fingerprint().to_string(),
-            identity.verifying_key().clone(),
+            *identity.verifying_key(),
         );
         StateStore::new_with_head_trust(
             tmp.clone(),
@@ -6094,6 +6147,43 @@ mod tests {
         let snapshot = build_continuation_snapshot(&record, &resume).unwrap();
         assert_eq!(snapshot.project_root, Some(PathBuf::from("/work/project")));
         assert_eq!(snapshot.base_project_snapshot_hash, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn continuation_handoff_persists_created_successor_with_inherited_pin() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-root", "T-root"))
+            .expect("root thread");
+
+        let mut successor = thread_record("T-successor", "T-root");
+        successor.project_root = Some(PathBuf::from("/work/project"));
+        let resume = continuation_resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        let outcome = store
+            .create_or_get_continuation_for_test(
+                &successor,
+                "T-root",
+                "T-root",
+                Some("follow"),
+                "request-fingerprint",
+                Some(&resume),
+            )
+            .expect("create continuation successor");
+        assert!(matches!(outcome, ContinuationOutcome::Created(_)));
+
+        let projected = store
+            .get_thread("T-successor")
+            .expect("read successor")
+            .expect("successor row");
+        assert_eq!(projected.status, ThreadStatus::Created.as_str());
+        assert_eq!(projected.upstream_thread_id.as_deref(), Some("T-root"));
+
+        let inner = store.lock().expect("lock state store");
+        let persisted = authoritative_snapshot_for_transition(&inner, "T-root", "T-successor")
+            .expect("read authoritative successor snapshot");
+        assert_eq!(persisted.base_project_snapshot_hash, Some("a".repeat(64)));
     }
 
     #[test]

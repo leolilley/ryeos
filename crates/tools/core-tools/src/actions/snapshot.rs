@@ -49,7 +49,19 @@ pub struct SnapshotShowParams {
 }
 
 pub fn run_status(params: SnapshotStatusParams) -> Result<Value> {
-    invoke("status", serde_json::to_value(params)?)
+    if std::env::var_os("RYEOSD_THREAD_ID").is_some() {
+        return invoke("status", serde_json::to_value(params)?);
+    }
+    let app_root = std::env::var_os("RYEOS_APP_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_dir().map(|path| path.join("ryeos")))
+        .context("cannot resolve app root for offline snapshot status")?;
+    ryeos_app::runtime_project_snapshot_service::offline_status(
+        &app_root,
+        &params.project_path,
+        params.include_unchanged,
+        params.time_budget_ms,
+    )
 }
 
 pub fn run_log(params: SnapshotLogParams) -> Result<Value> {

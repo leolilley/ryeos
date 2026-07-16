@@ -177,11 +177,21 @@ async fn service_threads_list_empty_on_fresh_daemon() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hot_read_services_do_not_create_threads() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    // Neither node/status nor threads/list records a service thread. Repeated
-    // observation must therefore leave the projection empty.
+    // The TUI polls these read paths continuously. None may contend with real
+    // admissions by creating a durable service thread. Repeated observation
+    // must therefore leave the projection empty.
     for _ in 0..3 {
         let (s, b) = exec(&h, "service:node/status", json!({})).await;
         assert!(s.is_success(), "node.status failed: {b}");
+        let (s, b) = exec(&h, "service:commands/list", json!({})).await;
+        assert!(s.is_success(), "commands.list failed: {b}");
+        let (s, b) = exec(
+            &h,
+            "service:items/effective",
+            json!({"canonical_ref": "service:threads/list"}),
+        )
+        .await;
+        assert!(s.is_success(), "items.effective failed: {b}");
     }
     let (status, body) = exec(&h, "service:threads/list", json!({"limit": 100})).await;
     let result = unwrap_result(status, &body, "threads.list");

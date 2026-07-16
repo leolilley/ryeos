@@ -56,12 +56,18 @@ struct ProjectParams {
 }
 
 struct SnapshotContext<'a> {
-    state: &'a AppState,
+    state: SnapshotState<'a>,
+    ignore_matcher: &'a crate::ignore::IgnoreMatcher,
     project_path: PathBuf,
     project_hash: String,
     principal_key: String,
     authority: ryeos_state::PinnedStateAuthority,
     cas: CasStore,
+}
+
+enum SnapshotState<'a> {
+    Live(&'a AppState),
+    Offline(&'a ryeos_state::StateDb),
 }
 
 pub struct RuntimeProjectSnapshotService;
@@ -112,7 +118,8 @@ impl RuntimeProjectSnapshotService {
             .with_state_db(|db| db.pinned_authority())?;
         let cas = authority.cas_store()?;
         let ctx = SnapshotContext {
-            state,
+            state: SnapshotState::Live(state),
+            ignore_matcher: state.ignore_matcher.as_ref(),
             project_hash: ryeos_state::refs::deployed_project_key(canonical),
             principal_key: ryeos_state::refs::principal_storage_key(&thread_auth.acting_principal)?
                 .to_owned(),
@@ -136,14 +143,82 @@ impl RuntimeProjectSnapshotService {
     }
 }
 
+/// Read snapshot status without a daemon thread. This uses the fail-only,
+/// non-repairing projection opener and the same shared CAS guard as the live
+/// service, preserving signed-head verification without requiring callback
+/// authority for a read-only command.
+pub fn offline_status(
+    app_root: &Path,
+    project_path: &Path,
+    include_unchanged: bool,
+    time_budget_ms: u64,
+) -> Result<Value> {
+    let config = crate::config::Config::load(&crate::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        ..crate::config::ConfigSources::default()
+    })
+    .context("load local node configuration for snapshot status")?;
+    let identity = crate::identity::NodeIdentity::load(&config.node_signing_key_path)
+        .context("load node identity for signed-head verification")?;
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        *identity.verifying_key(),
+    );
+    let state_db = ryeos_state::StateDb::open_for_projection_verification(
+        &config.runtime_state_dir(),
+        std::sync::Arc::new(head_trust),
+    )
+    .context("open local snapshot projection for verification")?;
+    let authority = state_db.pinned_authority()?;
+    let cas = authority.cas_store()?;
+    let operator_key = lillux::crypto::load_signing_key(&config.operator_signing_key_path)
+        .context("load operator identity for principal snapshot head")?;
+    let principal = format!(
+        "fp:{}",
+        lillux::signature::compute_fingerprint(&operator_key.verifying_key())
+    );
+    let project_path = canonical_project_path(project_path)?;
+    let canonical = project_path
+        .to_str()
+        .ok_or_else(|| anyhow!("canonical project_path is not valid UTF-8"))?;
+    let project_hash = ryeos_state::refs::deployed_project_key(canonical);
+    let ignore_matcher = crate::ignore::load_from_app_root(&config.app_root)?;
+    let ctx = SnapshotContext {
+        state: SnapshotState::Offline(&state_db),
+        ignore_matcher: &ignore_matcher,
+        project_path,
+        project_hash,
+        principal_key: ryeos_state::refs::principal_storage_key(&principal)?.to_owned(),
+        authority,
+        cas,
+    };
+    status(
+        &ctx,
+        &ProjectParams {
+            project_path: None,
+            include_unchanged,
+            time_budget_ms,
+            limit: None,
+            message: None,
+            allow_empty: false,
+            snapshot_hash: None,
+        },
+    )
+}
+
 fn heads(ctx: &SnapshotContext<'_>) -> Result<(Option<String>, Option<String>)> {
-    ctx.state.state_store.with_state_db(|db| {
+    let read = |db: &ryeos_state::StateDb| {
         Ok((
             db.read_project_head(&ctx.principal_key, &ctx.project_hash)?,
             db.read_deployed_project_ref(&ctx.project_hash)?
                 .map(|head| head.target_hash),
         ))
-    })
+    };
+    match ctx.state {
+        SnapshotState::Live(state) => state.state_store.with_state_db(read),
+        SnapshotState::Offline(db) => read(db),
+    }
 }
 
 fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
@@ -162,12 +237,15 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
     };
     let head_state = manifest_state_map(&ctx.cas, &head_items)?;
     let mut worktree = BTreeMap::new();
+    // Status compares only snapshot-representable files. Symlinks are omitted
+    // here, while snapshot creation below continues to reject them strictly.
     let complete = walk_worktree(
         &ctx.project_path,
         &ctx.project_path,
         Path::new(""),
-        ctx.state.ignore_matcher.as_ref(),
+        ctx.ignore_matcher,
         deadline,
+        false,
         &mut worktree,
     )?;
     let mut paths = BTreeSet::new();
@@ -267,9 +345,11 @@ fn log(ctx: &SnapshotContext<'_>, limit: usize) -> Result<Value> {
 }
 
 fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool) -> Result<Value> {
+    let SnapshotState::Live(state) = ctx.state else {
+        bail!("snapshot creation requires live daemon authority");
+    };
     let guard = ctx.authority.acquire_shared_guard()?;
-    let _permit = ctx
-        .state
+    let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|error| anyhow!("cannot acquire snapshot write permit: {error}"))?;
@@ -312,8 +392,8 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
         source: "snapshot_create".to_string(),
     };
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
-    let signer = NodeIdentitySigner::from_identity(&ctx.state.identity);
-    ctx.state.state_store.with_state_db(|db| {
+    let signer = NodeIdentitySigner::from_identity(&state.identity);
+    state.state_store.with_state_db(|db| {
         let locked_head = db.read_project_head(&ctx.principal_key, &ctx.project_hash)?;
         if locked_head != initial_head {
             bail!("project head changed while creating snapshot; rerun snapshot create");
@@ -427,8 +507,9 @@ fn build_manifest(ctx: &SnapshotContext<'_>) -> Result<SourceManifest> {
         &ctx.project_path,
         &ctx.project_path,
         Path::new(""),
-        ctx.state.ignore_matcher.as_ref(),
+        ctx.ignore_matcher,
         None,
+        true,
         &mut files,
     )?;
     let mut items = HashMap::new();
@@ -455,6 +536,7 @@ fn walk_worktree(
     relative_dir: &Path,
     ignore: &crate::ignore::IgnoreMatcher,
     deadline: Option<Instant>,
+    reject_symlinks: bool,
     files: &mut BTreeMap<String, CapturedFile>,
 ) -> Result<bool> {
     let directory = open_directory_no_follow(root, dir)?;
@@ -467,10 +549,13 @@ fn walk_worktree(
         }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            bail!(
-                "project snapshots do not support symlinks: {}",
-                entry.path().display()
-            );
+            if reject_symlinks {
+                bail!(
+                    "project snapshots do not support symlinks: {}",
+                    entry.path().display()
+                );
+            }
+            continue;
         }
         let path = entry.path();
         let name = entry
@@ -486,7 +571,15 @@ fn walk_worktree(
             continue;
         }
         if file_type.is_dir() {
-            if !walk_worktree(root, &path, &relative_path, ignore, deadline, files)? {
+            if !walk_worktree(
+                root,
+                &path,
+                &relative_path,
+                ignore,
+                deadline,
+                reject_symlinks,
+                files,
+            )? {
                 return Ok(false);
             }
         } else if file_type.is_file() {
@@ -511,6 +604,7 @@ fn walk_worktree(
     _relative_dir: &Path,
     _ignore: &crate::ignore::IgnoreMatcher,
     _deadline: Option<Instant>,
+    _reject_symlinks: bool,
     _files: &mut BTreeMap<String, CapturedFile>,
 ) -> Result<bool> {
     bail!(

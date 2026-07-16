@@ -15,6 +15,7 @@ base64      = { workspace = true }
 clap        = { workspace = true }
 dirs        = { workspace = true }
 hex         = { workspace = true }
+libc        = { workspace = true }
 rand        = { workspace = true }
 reqwest     = { workspace = true, features = ["rustls-tls"] }
 serde       = { workspace = true }
@@ -24,6 +25,7 @@ thiserror   = { workspace = true }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-util", "net"] }
 tracing     = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+unicode-width = { workspace = true }
 
 lillux         = { workspace = true }
 ryeos-app      = { workspace = true }

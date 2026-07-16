@@ -169,15 +169,35 @@ pub fn preflight_verify_named_bundle_in_context(
     node_config_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
-    let _report = preflight_verify_bundle_in_context_inner(
+    let _report = preflight_verify_named_bundle_report_in_context(
+        source_path,
+        expected_bundle_name,
+        dependency_bundle_roots,
+        node_config_root,
+        isolation,
+    )?;
+    Ok(())
+}
+
+/// Verify an author tree against its declared effective bundle id while also
+/// returning non-blocking contract warnings. This is the authoring/doctor
+/// counterpart to install planning: a checkout directory may be named
+/// differently from the bundle it publishes.
+pub fn preflight_verify_named_bundle_report_in_context(
+    source_path: &Path,
+    expected_bundle_name: &str,
+    dependency_bundle_roots: &[PathBuf],
+    node_config_root: &Path,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+) -> Result<PreflightReport> {
+    preflight_verify_bundle_in_context_inner(
         source_path,
         dependency_bundle_roots,
         node_config_root,
         Some(expected_bundle_name),
         true,
         isolation,
-    )?;
-    Ok(())
+    )
 }
 
 /// Re-verify a completed install staging tree using the final bundle identity.

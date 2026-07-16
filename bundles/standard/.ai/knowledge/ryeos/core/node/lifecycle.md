@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:1f61b3edfe8ca830196410da6285d243d74c5833e90848bc6cebd9dd3a1d4dce:AkvB+0WY32i6pAKd3/niISOJ3UH209BgRgwE4UCHO4J3U7qXTxZJgiBAI4HefToGF5lgxJCl9cPugA7AZbA/DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T05:16:49Z:d0e9dca3755f54960e42cd2cafe195a380bcd403a311965282eb7de796eea5e7:BtG2uPSqB6+6i0iDD7L+6uRn3Tw1dzzk7isPbjlblYIEAXyGDcr9Hi2GcSN/amgUQEiUZHTDRlHFZqIjq91bDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   Local node lifecycle semantics owned by the ryeos-node crate: init,
   start, stop, status, liveness, daemon metadata, and CLI preflight.
@@ -37,7 +37,8 @@ daemon-backed dispatch.
   `daemon.json` hint reading, lifecycle RPC timeout, and start-lock
   acquisition.
 - `LifecycleController` — controller for `init`, `init_state`,
-  `require_initialized`, `status`, `start`, and `stop`.
+  `require_initialized`, `status`, `start`, and `stop`, including optional
+  progress-observer variants for startup and shutdown.
 - `init::run_init` — authoritative operator init.
 - `init_check::{init_state, require_initialized}` — initialized-state
   checks based on signed bundle registrations.
@@ -87,7 +88,13 @@ crashed starter cannot wedge future starts.
 readiness via the same `status` liveness contract. If the child exits
 early, it re-probes once for concurrent-starter convergence, then
 surfaces stderr immediately instead of holding the lock to the deadline.
-Default readiness timeout is 15 seconds.
+The readiness timeout is 15 minutes so verified projection recovery can finish.
+
+When stdout and stderr are interactive terminals, the CLI consumes the typed
+lifecycle observer and redraws one compact `RYE/OS BOOT` line. The bar follows
+the real `StartupPhase` enum and uses real chain counters when the daemon
+publishes them. Redirected and non-interactive calls do not emit cursor control
+sequences or timing-dependent progress lines.
 
 ## `ryeos stop`
 
@@ -107,6 +114,11 @@ kernel peer credentials, and fresh peer pidfd capture before `SIGKILL`
 escalation. Stop then waits another two seconds for disappearance. It fails
 closed when no configured socket has a verifiable live `ryeosd` peer. There is
 no numeric-PID or stale-metadata fallback.
+
+Interactive shutdown uses the same presentation boundary: `RYE/OS HALT`
+animates while verified lifecycle probes still see the daemon and completes
+only after the process/state authority is gone. This does not alter the
+pidfd-based stop contract.
 
 This contract requires the Linux pidfd and `SO_PEERPIDFD` primitives in the
 supported-node baseline; see [Platform Support](../platform-support.md).

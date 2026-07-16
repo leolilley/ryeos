@@ -111,4 +111,5 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+unicode-width = "0.2"
 zeroize = "1"

@@ -1,10 +1,11 @@
-# ryeos:signed:2026-07-14T02:18:23Z:db31f212f6c03d17a6ee8641a5cfd6e6673e41b7f2f382459dca2230d03349f4:Mkb7O7oNHciyG57NmhCrho35cuKY2+T64uRHXGuKekakxPdqdIx7HexAQSVFODFwyAUrBC+MzgEP18nOnNlSDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T00:08:43Z:973c987155ed3c11cf82828477bdb55787ebe0b3a05a278846bcbe2ce6f11eec:3eCQyfIE8TddUbPcxLKjsuLVJh6YeA/89qvn+qIUBpm4GTvaWNacO0Qjgj/+B5DjdhhIE2UcmvTXNH2xb1hDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: effective
 version: "1.0.0"
 description: Resolve, verify, compose, and return an effective item.
 endpoint: items.effective
 ui_read_only: true
+record_thread: false
 availability: both
 required_caps: []
 schema:

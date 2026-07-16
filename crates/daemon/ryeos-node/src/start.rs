@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::status::{is_ready, LifecycleStatus};
-use crate::LocalLifecycleEnv;
+use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartReport {
@@ -18,10 +18,20 @@ pub struct StartReport {
 }
 
 pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartReport> {
+    start_with_progress(env, timeout, None).await
+}
+
+pub async fn start_with_progress(
+    env: &LocalLifecycleEnv,
+    timeout: Duration,
+    mut observer: Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<StartReport> {
     let config = env.config();
     let deadline = Instant::now() + timeout;
 
-    match crate::status::status(env).await? {
+    let initial = crate::status::status(env).await?;
+    observe(&mut observer, &initial);
+    match initial {
         LifecycleStatus::NotInitialized { .. } => {
             bail!("RyeOS is not initialized. Run: ryeos init")
         }
@@ -46,7 +56,7 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
             // booting daemon as an error. This is what makes concurrent
             // `ryeos start` and install wrappers show the same rebuild/replay
             // progress without ever spawning a second daemon.
-            if let Some(status) = wait_for_existing_start(env, deadline).await? {
+            if let Some(status) = wait_for_existing_start(env, deadline, &mut observer).await? {
                 return Ok(StartReport {
                     status,
                     already_running: true,
@@ -75,6 +85,7 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 // Another `ryeos start` is in flight; let it converge.
                 let status = crate::status::status(env).await?;
+                observe(&mut observer, &status);
                 if is_ready(&status) {
                     return Ok(StartReport {
                         status,
@@ -109,11 +120,11 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
         .with_context(|| format!("spawn {}", ryeosd.display()))?;
 
     // Projection recovery can take minutes, but the lifecycle socket remains
-    // live throughout. Periodically render its structured phase/counters.
-    let wait_started = Instant::now();
-    let mut next_progress_note = wait_started + Duration::from_secs(5);
+    // live throughout. Publish each structured phase/counter snapshot to the
+    // caller-owned observer.
     loop {
         let status = crate::status::status(env).await?;
+        observe(&mut observer, &status);
         if is_ready(&status) {
             return Ok(StartReport {
                 status,
@@ -125,34 +136,6 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
                 "{message}\nstartup stderr log: {}",
                 stderr_log_path.display()
             );
-        }
-
-        if Instant::now() >= next_progress_note {
-            match &status {
-                LifecycleStatus::Starting {
-                    metadata, startup, ..
-                } => {
-                    let pid = metadata.pid.unwrap_or_default();
-                    eprintln!(
-                        "ryeosd (pid {pid}) is starting — {} after {}ms{}; log: {}",
-                        startup.phase.as_str(),
-                        startup.elapsed_ms,
-                        startup
-                            .message
-                            .as_deref()
-                            .map(|message| format!(" — {message}"))
-                            .unwrap_or_default(),
-                        stderr_log_path.display()
-                    )
-                }
-                LifecycleStatus::Failed { .. } => unreachable!("handled above"),
-                _ => eprintln!(
-                    "waiting for the daemon to become ready ({}s); log: {}",
-                    wait_started.elapsed().as_secs(),
-                    stderr_log_path.display()
-                ),
-            }
-            next_progress_note = Instant::now() + Duration::from_secs(15);
         }
 
         if let Some(exit) = child.try_wait().context("poll spawned ryeosd")? {
@@ -203,10 +186,11 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
 async fn wait_for_existing_start(
     env: &LocalLifecycleEnv,
     deadline: Instant,
+    observer: &mut Option<&mut dyn LifecycleProgressObserver>,
 ) -> Result<Option<LifecycleStatus>> {
-    let mut next_progress_note = Instant::now();
     loop {
         let status = crate::status::status(env).await?;
+        observe(observer, &status);
         match &status {
             LifecycleStatus::Running { .. } => return Ok(Some(status)),
             LifecycleStatus::Failed { .. } => {
@@ -216,24 +200,7 @@ async fn wait_for_existing_start(
                         .unwrap_or_else(|| "ryeosd startup failed".to_string())
                 )
             }
-            LifecycleStatus::Starting {
-                metadata, startup, ..
-            } => {
-                if Instant::now() >= next_progress_note {
-                    let pid = metadata.pid.unwrap_or_default();
-                    eprintln!(
-                        "ryeosd (pid {pid}) is starting — {} after {}ms{}",
-                        startup.phase.as_str(),
-                        startup.elapsed_ms,
-                        startup
-                            .message
-                            .as_deref()
-                            .map(|message| format!(" — {message}"))
-                            .unwrap_or_default(),
-                    );
-                    next_progress_note = Instant::now() + Duration::from_secs(15);
-                }
-            }
+            LifecycleStatus::Starting { .. } => {}
             LifecycleStatus::Unresponsive { .. } => {
                 // The process is still authoritative for this app root. Keep
                 // waiting; never turn a busy or incompatible control plane
@@ -248,6 +215,12 @@ async fn wait_for_existing_start(
             bail!("timed out waiting for existing RyeOS daemon lifecycle readiness");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn observe(observer: &mut Option<&mut dyn LifecycleProgressObserver>, status: &LifecycleStatus) {
+    if let Some(observer) = observer.as_deref_mut() {
+        observer.observe(status);
     }
 }
 

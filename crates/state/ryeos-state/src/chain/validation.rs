@@ -362,7 +362,7 @@ fn validate_genesis_state(
         .expect("ChainState::validate requires its root entry");
     let snapshot = load_hashed_snapshot(cas, &entry.snapshot_hash)?;
     validate_published_snapshot(state, &state.chain_root_id, entry, &snapshot, events)?;
-    validate_new_thread_snapshot(&snapshot)?;
+    validate_new_thread_snapshot(&snapshot, None)?;
     Ok(())
 }
 
@@ -433,7 +433,12 @@ fn validate_chain_state_transition(
                 )?;
                 let snapshot = load_hashed_snapshot(cas, &next_entry.snapshot_hash)?;
                 validate_published_snapshot(next, thread_id, next_entry, &snapshot, events)?;
-                validate_new_thread_snapshot(&snapshot)?;
+                let continuation_source = snapshot
+                    .base_project_snapshot_hash
+                    .as_ref()
+                    .and(snapshot.upstream_thread_id.as_deref())
+                    .filter(|source| previous.threads.contains_key(*source));
+                validate_new_thread_snapshot(&snapshot, continuation_source)?;
             }
             Some(previous_entry) => {
                 validate_event_advance(
@@ -475,14 +480,36 @@ fn validate_chain_state_transition(
     Ok(())
 }
 
-fn validate_new_thread_snapshot(snapshot: &ThreadSnapshot) -> anyhow::Result<()> {
+fn validate_new_thread_snapshot(
+    snapshot: &ThreadSnapshot,
+    continuation_source: Option<&str>,
+) -> anyhow::Result<()> {
     if snapshot.status != ThreadStatus::Created {
         anyhow::bail!("new authoritative thread must begin in created status");
     }
-    if snapshot.base_project_snapshot_hash.is_some()
-        || snapshot.result_project_snapshot_hash.is_some()
-    {
-        anyhow::bail!("new authoritative thread cannot carry base or result project hashes");
+    validate_new_thread_project_snapshots(snapshot, continuation_source)?;
+    Ok(())
+}
+
+fn validate_new_thread_project_snapshots(
+    snapshot: &ThreadSnapshot,
+    continuation_source: Option<&str>,
+) -> anyhow::Result<()> {
+    if snapshot.result_project_snapshot_hash.is_some() {
+        anyhow::bail!("new created snapshot cannot carry a result project snapshot hash");
+    }
+    if snapshot.base_project_snapshot_hash.is_some() {
+        let source = continuation_source.ok_or_else(|| {
+            anyhow::anyhow!(
+                "new created snapshot may carry a base project snapshot hash only for a continuation successor"
+            )
+        })?;
+        if snapshot.upstream_thread_id.as_deref() != Some(source) {
+            anyhow::bail!(
+                "continuation successor upstream {:?} does not match continuation source {source}",
+                snapshot.upstream_thread_id
+            );
+        }
     }
     Ok(())
 }
@@ -1023,11 +1050,14 @@ pub(super) fn normalize_and_validate_snapshot_transition(
 }
 
 /// Normalize a new thread's snapshot against the chain position at which it is
-/// inserted. New authoritative threads always begin in `created` state.
+/// inserted. New authoritative threads always begin in `created` state. Only
+/// an explicitly identified continuation successor may already carry the
+/// immutable project pin inherited at its atomic handoff.
 pub(super) fn normalize_and_validate_new_thread(
     snapshot: &mut ThreadSnapshot,
     chain_root_id: &str,
     timestamp_floor: &str,
+    continuation_source: Option<&str>,
 ) -> anyhow::Result<()> {
     if snapshot.chain_root_id != chain_root_id {
         anyhow::bail!(
@@ -1041,11 +1071,7 @@ pub(super) fn normalize_and_validate_new_thread(
             snapshot.status
         );
     }
-    if snapshot.base_project_snapshot_hash.is_some()
-        || snapshot.result_project_snapshot_hash.is_some()
-    {
-        anyhow::bail!("new created snapshot cannot carry base or result project snapshot hashes");
-    }
+    validate_new_thread_project_snapshots(snapshot, continuation_source)?;
     parse_canonical_timestamp(&snapshot.created_at)
         .with_context(|| "invalid new snapshot created_at")?;
     clamp_timestamp(&mut snapshot.updated_at, &snapshot.created_at, "updated_at")?;
@@ -1300,6 +1326,51 @@ mod tests {
         assert!(validate_snapshot_transition_identity(&running, &terminal).is_err());
         terminal.base_project_snapshot_hash = running.base_project_snapshot_hash.clone();
         validate_snapshot_transition_identity(&running, &terminal).unwrap();
+    }
+
+    #[test]
+    fn created_continuation_may_inherit_base_snapshot() {
+        let mut continuation = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
+        continuation.upstream_thread_id = Some("T-root".into());
+        continuation.base_project_snapshot_hash = Some("11".repeat(32));
+
+        normalize_and_validate_new_thread(
+            &mut continuation,
+            "T-root",
+            "2026-01-01T00:00:00Z",
+            Some("T-root"),
+        )
+        .unwrap();
+
+        let mut running = continuation.clone();
+        running.status = ThreadStatus::Running;
+        running.updated_at = "2026-01-01T00:00:01Z".into();
+        running.started_at = Some("2026-01-01T00:00:01Z".into());
+        validate_snapshot_transition_identity(&continuation, &running).unwrap();
+    }
+
+    #[test]
+    fn created_non_continuation_cannot_carry_project_snapshot_hashes() {
+        let mut fresh = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
+        fresh.base_project_snapshot_hash = Some("11".repeat(32));
+        let error =
+            normalize_and_validate_new_thread(&mut fresh, "T-root", "2026-01-01T00:00:00Z", None)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("only for a continuation successor"));
+
+        let mut continuation = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
+        continuation.upstream_thread_id = Some("T-root".into());
+        continuation.result_project_snapshot_hash = Some("22".repeat(32));
+        let error = normalize_and_validate_new_thread(
+            &mut continuation,
+            "T-root",
+            "2026-01-01T00:00:00Z",
+            Some("T-root"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot carry a result"));
     }
 
     #[test]

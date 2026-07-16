@@ -624,6 +624,42 @@ impl OperationalDb {
         Ok(db)
     }
 
+    /// Strictly open established operational state while sharing the caller's
+    /// already-held runtime-state namespace lock. Offline GC uses this to
+    /// preserve mirrored CAS roots and refuse active sync jobs without
+    /// reacquiring the directory flock through another file description.
+    pub fn open_existing_current_with_namespace_authority(
+        runtime_directory: &lillux::PinnedDirectory,
+        directory_lock: lillux::PinnedDirectoryLock,
+        read_only: bool,
+    ) -> Result<Self> {
+        ensure_directory_path_still_pinned(runtime_directory)?;
+        directory_lock.ensure_protects(runtime_directory)?;
+        let marker = inspect_initialized_marker(runtime_directory)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "operational state initialization marker is absent: {}",
+                runtime_directory
+                    .path()
+                    .join(OPERATIONAL_INITIALIZED_FILENAME)
+                    .display()
+            )
+        })?;
+        let mut db = Self::open_in_pinned_directory(
+            runtime_directory,
+            OsStr::new(OPERATIONAL_DB_FILENAME),
+            if read_only {
+                OperationalOpenMode::ExistingReadOnly
+            } else {
+                OperationalOpenMode::ExistingReadWrite
+            },
+            directory_lock,
+        )?;
+        db._initialization_marker = Some(marker);
+        assert_integrity(&db.conn, &db.path)?;
+        ensure_operational_bindings(&db)?;
+        Ok(db)
+    }
+
     fn open_existing_owned(path: &Path) -> Result<Self> {
         let (directory, name) = pin_operational_parent(path, false)?;
         let directory_lock = directory.lock_exclusive()?;
