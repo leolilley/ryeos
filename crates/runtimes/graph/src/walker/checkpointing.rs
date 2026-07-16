@@ -102,6 +102,31 @@ fn validate_follow_item_refs(
     Ok(())
 }
 
+/// Ordered child identity plus the optional fanout snapshot written into one
+/// pending-follow checkpoint. Keeping these coupled prevents call sites from
+/// supplying a cohort snapshot without the matching rendered refs (or vice
+/// versa), while keeping the checkpoint writer below Clippy's argument limit.
+pub(super) struct FollowCheckpointChildren<'a> {
+    item_refs: &'a [String],
+    iteration_snapshot: Option<&'a [Value]>,
+}
+
+impl<'a> FollowCheckpointChildren<'a> {
+    pub(super) fn single(item_refs: &'a [String]) -> Self {
+        Self {
+            item_refs,
+            iteration_snapshot: None,
+        }
+    }
+
+    pub(super) fn fanout(item_refs: &'a [String], iteration_snapshot: &'a [Value]) -> Self {
+        Self {
+            item_refs,
+            iteration_snapshot: Some(iteration_snapshot),
+        }
+    }
+}
+
 impl Walker {
     /// Fail checkpoint persistence deterministically after `successful_writes`
     /// writes. The seam exists only in graph-runtime unit-test builds and is
@@ -161,9 +186,12 @@ impl Walker {
         step: u32,
         state: &Value,
         suppressed_errors: &[ErrorRecord],
-        item_refs: &[String],
-        iteration_snapshot: Option<&[Value]>,
+        children: FollowCheckpointChildren<'_>,
     ) -> anyhow::Result<()> {
+        let FollowCheckpointChildren {
+            item_refs,
+            iteration_snapshot,
+        } = children;
         self.ensure_run_history_bounded()?;
         validate_follow_item_refs(item_refs, iteration_snapshot)?;
         let Some(writer) = &self.checkpoint else {

@@ -281,7 +281,8 @@ pub async fn dispatch_action(
 /// `continuation_id` lives at the leaf's top level under the typed
 /// callback contract, so classification MUST happen before the inline-
 /// continuation guard reads it.
-pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
+#[cfg(test)]
+fn classify_envelope(value: Value) -> ActionOutcome {
     classify_envelope_with_projection(value, NativeResultProjection::KindDefined)
 }
 
@@ -439,7 +440,8 @@ struct FollowFanoutResumeEnvelope {
 /// successful child result. `continued` is an intermediate link in the child
 /// continuation chain and is never a terminal follow result. For every other
 /// closed status, `success` must agree exactly with the status outcome.
-pub(crate) fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
+#[cfg(test)]
+fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
     classify_follow_envelope_with_projection(value, NativeResultProjection::KindDefined)
 }
 

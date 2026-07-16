@@ -1,4 +1,5 @@
 use super::*;
+use crate::walker::checkpointing::FollowCheckpointChildren;
 use crate::walker::continued_terminal_completion;
 
 impl Walker {
@@ -45,8 +46,7 @@ impl Walker {
                 step,
                 state,
                 suppressed_errors,
-                std::slice::from_ref(&item_ref),
-                None,
+                FollowCheckpointChildren::single(std::slice::from_ref(&item_ref)),
             )
             .await
         {
@@ -184,8 +184,7 @@ impl Walker {
                 step,
                 state,
                 suppressed_errors,
-                &item_refs,
-                Some(&iteration_snapshot),
+                FollowCheckpointChildren::fanout(&item_refs, &iteration_snapshot),
             )
             .await
         {
