@@ -1154,7 +1154,6 @@ impl SandboxRuntime {
             .backend_capture
             .as_ref()
             .expect("enforced sandbox runtime has a captured backend");
-        let backend_path = &backend.resolved_executable;
         let backend_handle = &backend.handle;
         let canonical_state_root = context
             .state_root
