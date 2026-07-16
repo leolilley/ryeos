@@ -405,23 +405,6 @@ fn ui_session_mint_body(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ui_session_mint_body;
-
-    #[test]
-    fn ui_session_is_bound_to_the_verified_operator_principal() {
-        let body = ui_session_mint_body(
-            "surface:ryeos/ui/lens",
-            Some("/work/project"),
-            true,
-            Some("fp:operator"),
-        );
-        assert_eq!(body["user_principal_id"], "fp:operator");
-        assert_eq!(body["project_path"], "/work/project");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // SSE Stream wrapper
 // ---------------------------------------------------------------------------
@@ -495,5 +478,22 @@ impl SseStream {
             event_type: event_type.to_string(),
             data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ui_session_mint_body;
+
+    #[test]
+    fn ui_session_is_bound_to_the_verified_operator_principal() {
+        let body = ui_session_mint_body(
+            "surface:ryeos/ui/lens",
+            Some("/work/project"),
+            true,
+            Some("fp:operator"),
+        );
+        assert_eq!(body["user_principal_id"], "fp:operator");
+        assert_eq!(body["project_path"], "/work/project");
     }
 }
