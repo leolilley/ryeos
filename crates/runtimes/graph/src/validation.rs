@@ -901,16 +901,15 @@ __CACHE__
       next: {type: unconditional, to: done}
     done: {node_type: return}
 "#;
-        for field in ["      cache_result: true"] {
-            let result = validate_graph(&make_graph(&base.replace("__CACHE__", field)));
-            assert!(
-                result.errors.iter().any(|error| {
-                    error.contains("foreach node 'iterate'") && error.contains("not cacheable")
-                }),
-                "{field} must be rejected on foreach: {:?}",
-                result.errors
-            );
-        }
+        let field = "      cache_result: true";
+        let result = validate_graph(&make_graph(&base.replace("__CACHE__", field)));
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("foreach node 'iterate'") && error.contains("not cacheable")
+            }),
+            "{field} must be rejected on foreach: {:?}",
+            result.errors
+        );
     }
 
     #[test]

@@ -735,7 +735,7 @@ pub struct ChildLineageAppend {
 pub enum FinalizeCreatedUnattachedOutcome {
     Finalized {
         persisted: Vec<PersistedEventRecord>,
-        effective: FinalizeThreadRecord,
+        effective: Box<FinalizeThreadRecord>,
     },
     AlreadyTerminal,
     NotCurrent {
@@ -753,7 +753,7 @@ pub enum FinalizeCreatedUnattachedOutcome {
 pub enum FinalizeIfNonterminalOutcome {
     Finalized {
         persisted: Vec<PersistedEventRecord>,
-        effective: FinalizeThreadRecord,
+        effective: Box<FinalizeThreadRecord>,
     },
     AlreadyTerminal {
         status: String,
@@ -765,7 +765,7 @@ pub enum FinalizeIfNonterminalOutcome {
 /// lifecycle finalization.
 #[derive(Debug)]
 pub enum StopIfAdmissionOpenOutcome {
-    Requested(RuntimeInfo),
+    Requested(Box<RuntimeInfo>),
     AlreadyTerminal,
     PreservedForShutdown,
 }
@@ -2339,7 +2339,7 @@ impl StateStore {
         updated_snapshot.updated_at.clone_from(&now);
         updated_snapshot.started_at = Some(now.clone());
         updated_snapshot.finished_at = None;
-        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash.map(String::from);
+        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
 
         let snapshot_update = SnapshotUpdate {
             thread_id: thread_id.to_string(),
@@ -2465,7 +2465,7 @@ impl StateStore {
         )?;
         Ok(FinalizeCreatedUnattachedOutcome::Finalized {
             persisted,
-            effective,
+            effective: Box::new(effective),
         })
     }
 
@@ -2512,7 +2512,7 @@ impl StateStore {
         )?;
         Ok(FinalizeIfNonterminalOutcome::Finalized {
             persisted,
-            effective,
+            effective: Box::new(effective),
         })
     }
 
@@ -2662,7 +2662,7 @@ impl StateStore {
             .collect();
 
         let mut updated_snapshot = authoritative_snapshot_for_transition(
-            &g,
+            g,
             &thread_row.chain_root_id,
             &thread_row.thread_id,
         )?;
@@ -2958,6 +2958,9 @@ impl StateStore {
         )
     }
 
+    // Source lineage, resume proof, launch metadata, and initial durable events
+    // stay explicit because each is validated under the same write permit.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_machine_continuation_with_events(
         &self,
         successor: &NewThreadRecord,
@@ -3014,6 +3017,7 @@ impl StateStore {
     /// first), then settle the source `continued`. A race or seed failure aborts
     /// with the source still running — never `continued` behind an unlaunchable
     /// successor.
+    #[allow(clippy::too_many_arguments)]
     fn create_running_continuation_successor(
         &self,
         successor: &NewThreadRecord,
@@ -3258,6 +3262,9 @@ impl StateStore {
     /// even if the daemon crashes before the runtime emits anything. A terminal
     /// (completed/failed) source keeps its status; a running source is settled
     /// `continued` (same as `create_continuation`).
+    // Idempotency identity, source lineage, launch metadata, and initial events
+    // remain explicit at this atomic admission boundary.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_or_get_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
@@ -4935,7 +4942,7 @@ impl StateStore {
         }
         g.runtime_db
             .request_thread_stop(thread_id, intent)
-            .map(StopIfAdmissionOpenOutcome::Requested)
+            .map(|runtime| StopIfAdmissionOpenOutcome::Requested(Box::new(runtime)))
     }
 
     pub fn clear_thread_process_if_matches(
@@ -5033,6 +5040,9 @@ impl StateStore {
         g.runtime_db.reserve_follow(seed)
     }
 
+    // Slot identity, item/spec identity, child lineage, and sealed authority
+    // stay explicit because each is independently verified under the store lock.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,

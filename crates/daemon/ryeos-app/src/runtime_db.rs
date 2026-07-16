@@ -1897,7 +1897,8 @@ impl RuntimeDb {
         let response_hash = lillux::sha256_hex(&response_json);
         let now = lillux::time::timestamp_millis() as i64;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, Option<Vec<u8>>, Option<String>)> = tx
+        type ExistingHookDispatch = (String, String, Option<Vec<u8>>, Option<String>);
+        let existing: Option<ExistingHookDispatch> = tx
             .query_row(
                 "SELECT request_hash, status, response_json, response_hash
                    FROM hook_dispatch_ledger WHERE dispatch_key=?1",
@@ -3542,6 +3543,9 @@ impl RuntimeDb {
     /// Record the spawned child's identities. Allowed only when unset (first
     /// write) or already equal (idempotent retry); never overwrites a different
     /// child, which would strand the original.
+    // Slot identity, item/spec identity, child lineage, and sealed authority
+    // stay explicit because each is independently compared before publication.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,
@@ -3930,8 +3934,7 @@ impl RuntimeDb {
             i64::try_from(query_limit).context("follow waiter summary limit exceeds SQLite i64")?;
         let mut summaries = std::collections::BTreeMap::new();
         for batch in thread_ids.chunks(FOLLOW_WAITER_SUMMARY_QUERY_BATCH) {
-            let requested_rows = std::iter::repeat("(?)")
-                .take(batch.len())
+            let requested_rows = std::iter::repeat_n("(?)", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
