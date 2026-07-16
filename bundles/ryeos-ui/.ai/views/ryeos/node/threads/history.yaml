@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T02:11:39Z:07d81419bee07c6b2521f41e9c5a542ccf2edf5024cd20fbeddb50f3c47f19cb:2Y9T7fyzGAxdlbjYfpOstMoIu75bUF4km1nQtPuqe0lxYjPPeWNFmkrfyJkFDi//658RkaARqUHcpJhy7tcXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T01:27:49Z:f512ff22cc72ac4e8d0bb04697b9b2c54f1103d795b5b9bef1c7abe47c41691f:z66XVKpA3Tml5t7zvNxQ1wxX+VSqGiaCHj/0sl4nh1e8czKdw35JhjqqmOm9KAb7zXzblHdv1Agl1TaCtEm5BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-threads-history
 title: Node Threads
 version: "1.0.0"
@@ -12,11 +12,6 @@ source:
   params:
     limit: 200
     sort: watch
-    # Substrate plumbing (threads/get polls, status strips, chain
-    # replays) records a service_run per invocation and drowns the
-    # execution signal ~9:1. The watch views exclude them wholesale;
-    # tool/graph/directive/knowledge runs and seats are the content.
-    exclude_item_prefixes: ["service:"]
   collection: threads
 projections:
   columns:

@@ -1091,13 +1091,18 @@ async fn main() -> Result<()> {
     };
     let (daemon_result, startup_cancelled, startup_failed) = daemon_result;
 
-    lifecycle_exit.record(if daemon_result.is_ok() || startup_cancelled {
+    let exit_reason = if daemon_result.is_ok() || startup_cancelled {
         "signal"
     } else if startup_failed {
         "startup_failed"
     } else {
         "runtime_error"
-    });
+    };
+    lifecycle_exit.record(exit_reason);
+    match daemon_result.as_ref() {
+        Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
+        Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
+    }
     if startup_cancelled {
         Ok(())
     } else {

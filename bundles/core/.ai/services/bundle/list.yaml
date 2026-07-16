@@ -1,6 +1,7 @@
-# ryeos:signed:2026-07-14T02:18:23Z:04bb1226df8b8fc22759c7ce70660c50fd7acef92a057cea113989b0e045e382:CE7HFHf1UcjVxRbg3kq0EvPbP5OR9afQcTj8kSMm9HRpoW7OUijRRQtRFj0pcaGI9Kd2N7LAly2MJSu39t0HCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T00:17:45Z:a31a6de6b22ee7f35b4c7aa3beaef0062f16b13769ae2ec098242e03532b3dad:TvvZSoXfiQFL3qxzt3mMwh3gt+Z95nJ6wXyDe9jU/mJnF9XN/4+pMU6FR9ZkSHDtPsWsCh/sz4tO/4pEQvD1Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.list
 ui_read_only: true
+record_thread: false
 required_caps: []
 description: "List installed bundles"

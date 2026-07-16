@@ -137,6 +137,9 @@ impl DaemonClient {
         project_path: Option<&str>,
         read_only: bool,
     ) -> Result<(), ClientError> {
+        if self.ui_session_id.is_some() {
+            return Ok(());
+        }
         let body = serde_json::json!({
             "surface_ref": surface_ref,
             "project_path": project_path,
@@ -355,16 +358,7 @@ impl DaemonClient {
         if let Some(pp) = project_path {
             params["project_path"] = serde_json::Value::String(pp.to_string());
         }
-        let mut body = serde_json::json!({
-            "item_ref": "service:items/effective",
-            "ref_bindings": {},
-            "parameters": params,
-        });
-        if let Some(pp) = project_path {
-            body["project_path"] = serde_json::Value::String(pp.to_string());
-        }
-        let response = self.signed_post("/execute", &body).await?;
-        Ok(response.get("result").cloned().unwrap_or(response))
+        self.signed_post("/ui/api/items/effective", &params).await
     }
 
     /// Resolve an effective surface via the daemon's items.effective
@@ -388,16 +382,7 @@ impl DaemonClient {
                 "expected_kind": "surface",
             })
         };
-        let mut body = serde_json::json!({
-            "item_ref": "service:items/effective",
-            "ref_bindings": {},
-            "parameters": params,
-        });
-        if let Some(pp) = project_path {
-            body["project_path"] = serde_json::Value::String(pp.to_string());
-        }
-        let response = self.signed_post("/execute", &body).await?;
-        Ok(response.get("result").cloned().unwrap_or(response))
+        self.signed_post("/ui/api/items/effective", &params).await
     }
 }
 

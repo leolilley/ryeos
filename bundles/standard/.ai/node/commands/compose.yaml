@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-19T05:40:59Z:d54c758ab4d94b301d6a6cb47bde40aa6eed1464c01699a2ea043f5d9fff8135:WdQN3AiuOEyEbCQKWJu/jfvxXzYkTRNkv9qk4vwZvRawmMH94IDvohyemD+4RokSaLkpjJ5UxH4SLRiaYNI1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T00:08:42Z:0d4019aaeb1661da55efec539903ec6db736ace49f98b1bd50f43e63b430fac2:Biw0XR9QdeGzb7SUoTp0HqEov3fykktmpKw+/wyV633zwv4JZ71V9YaQWIyRcfYtR8oJuhALZmQJzWBoJhXnDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - compose
 description: Compose a knowledge graph context block within a token budget
 dispatch:
   kind: execute_ref
-  execute: service:rye/dispatch
+  execute: service:commands/dispatch

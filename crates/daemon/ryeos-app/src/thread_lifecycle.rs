@@ -1798,7 +1798,9 @@ fn verified_item_signer(verified: &VerifiedItem) -> Result<Option<String>> {
             // intentionally different for every signed item.
             if header.content_hash != verified.resolved.raw_content_digest {
                 bail!(
-                    "signed admitted subject `{canonical}` has conflicting verified and header content hashes"
+                    "signed admitted subject `{canonical}` has conflicting verified and header content hashes: header={}, verified_raw={}",
+                    header.content_hash,
+                    verified.resolved.raw_content_digest,
                 );
             }
             Ok(Some(signer.0.clone()))
@@ -4837,11 +4839,12 @@ mod tests {
         assert_eq!(verified_item_signer(&verified).unwrap(), Some(signer));
 
         let mut inconsistent = verified;
-        inconsistent.resolved.raw_content_digest = "55".repeat(32);
-        assert!(verified_item_signer(&inconsistent)
-            .unwrap_err()
-            .to_string()
-            .contains("conflicting verified and header content hashes"));
+        let verified_raw = "55".repeat(32);
+        inconsistent.resolved.raw_content_digest = verified_raw.clone();
+        let error = verified_item_signer(&inconsistent).unwrap_err().to_string();
+        assert!(error.contains("conflicting verified and header content hashes"));
+        assert!(error.contains(&body_hash));
+        assert!(error.contains(&verified_raw));
     }
 
     #[test]

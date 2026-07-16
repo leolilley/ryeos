@@ -20,7 +20,7 @@ export async function runEffect(effect, invocationContext = {}) {
         kind: kind.kind,
       })));
     case "fetch_source": {
-      const resp = await dispatchInvocation(kind.source_ref, kind.params ?? {}, invocationContext);
+      const resp = await dispatchInvocation(kind.source_ref, kind.params ?? {}, invocationContext, true);
       return result(effect, "source_data", resp?.result?.result ?? resp?.result ?? resp);
     }
     case "list_files":
@@ -143,9 +143,11 @@ function bindInvocationContext(params, context) {
   return bound;
 }
 
-async function dispatchInvocation(itemRef, params = {}, context = {}) {
+async function dispatchInvocation(itemRef, params = {}, context = {}, readOnly = false) {
   return postJson("/ui/api/invocations/dispatch", {
     target: { kind: "ref", ref: itemRef },
+    ref_bindings: {},
+    read_only: readOnly,
     params: bindInvocationContext(params, context),
   });
 }
