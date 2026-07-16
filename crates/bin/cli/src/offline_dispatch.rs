@@ -778,7 +778,7 @@ fn run_standalone_service(
     match serde_json::from_str::<Value>(&stdout) {
         Ok(value) => Ok(OfflineDispatchOutcome::Json(value)),
         Err(_) => {
-            println!("{stdout}");
+            crate::tty::write_raw(&stdout)?;
             Ok(OfflineDispatchOutcome::Silent)
         }
     }

@@ -6,7 +6,6 @@
 //! daemon when no local descriptor help is available.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::Path;
 
 use crate::error::CliError;
@@ -23,115 +22,132 @@ use crate::node_descriptors::LoadedCommandDescriptor;
 /// The snapshot is loaded once per invocation in `dispatcher::run` and
 /// threaded through so help never re-reads node config from disk.
 pub fn print_help(
-    mut out: impl Write,
+    console: &crate::tty::Console,
     app_root: &Path,
     snapshot: &anyhow::Result<NodeConfigSnapshot>,
 ) -> std::io::Result<()> {
-    writeln!(out, "ryeos — CLI for Rye OS")?;
-    writeln!(out)?;
-    writeln!(out, "USAGE:")?;
-    writeln!(out, "  ryeos [-p PROJECT] [--debug] <command...> [args...]")?;
-    writeln!(out)?;
-    writeln!(out, "LIFECYCLE:")?;
-    writeln!(
-        out,
-        "  {:<30} Bootstrap local node state and packaged bundles",
-        "init"
-    )?;
-    writeln!(out, "  {:<30} Bring the local node runtime online", "start")?;
-    writeln!(
-        out,
-        "  {:<30} Gracefully stop the local node runtime",
-        "stop"
-    )?;
-    writeln!(
-        out,
-        "  {:<30} Show local node lifecycle status",
-        "node status"
-    )?;
-    writeln!(
-        out,
-        "  {:<30} Offline checklist answering \"why won't it start\"",
-        "node doctor"
-    )?;
-    writeln!(out)?;
-    writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
-    writeln!(
-        out,
-        "  {:<30} Execute any canonical item ref directly",
-        "execute [--async] <item_ref>"
-    )?;
-    writeln!(
-        out,
-        "  {:<30}   pass JSON parameters from file (or - for stdin)",
-        "  --input <file>"
-    )?;
-    writeln!(out)?;
+    let (document, warning) = build_top_level_help(app_root, snapshot);
+    if let Some(warning) = warning {
+        console.warning(&warning)?;
+    }
+    console.document(&document)
+}
+
+fn build_top_level_help(
+    app_root: &Path,
+    snapshot: &anyhow::Result<NodeConfigSnapshot>,
+) -> (crate::tty::Document, Option<crate::tty::Diagnostic>) {
+    let mut document = crate::tty::Document::titled("CLI FOR RYE/OS");
+    let mut usage = crate::tty::Section::named("usage");
+    usage.rows.push(crate::tty::Row::text(
+        "ryeos [-p PROJECT] [--debug] <command...> [args...]",
+    ));
+    document.sections.push(usage);
+    let mut lifecycle = crate::tty::Section::named("lifecycle");
+    lifecycle.rows = vec![
+        crate::tty::Row::key_value("init", "Bootstrap local node state and packaged bundles"),
+        crate::tty::Row::key_value("start", "Bring the local node runtime online"),
+        crate::tty::Row::key_value("stop", "Gracefully stop the local node runtime"),
+        crate::tty::Row::key_value("node status", "Show local node lifecycle status"),
+        crate::tty::Row::key_value(
+            "node doctor",
+            "Offline checklist answering \"why won't it start\"",
+        ),
+        crate::tty::Row::key_value("node gc", "Run explicit offline node garbage collection"),
+    ];
+    document.sections.push(lifecycle);
+    document.sections.push(
+        crate::tty::Section::named("universal escape hatch")
+            .row(
+                "execute [--async] <item_ref>",
+                "Execute any canonical item ref directly",
+            )
+            .row(
+                "--input <file>",
+                "Pass JSON parameters from file (or - for stdin)",
+            ),
+    );
 
     // ── Dynamic command discovery from installed bundles ──
-    let snapshot = match snapshot {
-        Ok(snapshot) => Some(snapshot),
-        Err(err) => {
-            eprintln!("warning: installed node config failed verification: {err:#}");
-            None
-        }
+    let (snapshot, warning) = match snapshot {
+        Ok(snapshot) => (Some(snapshot), None),
+        Err(err) => (
+            None,
+            Some(crate::tty::Diagnostic::warning(format!(
+                "installed node config failed verification: {err:#}"
+            ))),
+        ),
     };
-    let bundle_roots = snapshot
-        .map(crate::effective_metadata::snapshot_bundle_roots)
-        .unwrap_or_default();
-    let engine = (!bundle_roots.is_empty())
-        .then(|| {
-            crate::effective_metadata::build_effective_item_engine(app_root, None, &bundle_roots)
-                .ok()
-        })
-        .flatten();
     let discovered = snapshot
-        .map(|snapshot| discover_commands_from_snapshot(snapshot, engine.as_ref(), "."))
+        .map(|snapshot| command_rows(snapshot, app_root, "."))
         .unwrap_or_default();
 
     if !discovered.is_empty() {
         let mut offline_cmds: Vec<(&str, &str)> = Vec::new();
         let mut daemon_cmds: Vec<(&str, &str)> = Vec::new();
 
-        for (tokens_str, description, is_offline) in &discovered {
-            if *is_offline {
-                offline_cmds.push((tokens_str, description));
+        for row in &discovered {
+            if row.is_offline {
+                offline_cmds.push((&row.tokens, &row.description));
             } else {
-                daemon_cmds.push((tokens_str, description));
+                daemon_cmds.push((&row.tokens, &row.description));
             }
         }
 
         if !offline_cmds.is_empty() {
-            writeln!(out, "OFFLINE (no daemon required):")?;
             offline_cmds.sort_by_key(|c| c.0);
+            let mut section = crate::tty::Section::named("offline (no daemon required)");
             for (tokens_str, description) in &offline_cmds {
-                writeln!(out, "    {:<28} {}", tokens_str, description)?;
+                section
+                    .rows
+                    .push(crate::tty::Row::key_value(*tokens_str, *description));
             }
-            writeln!(out)?;
+            document.sections.push(section);
         }
 
         if !daemon_cmds.is_empty() {
-            writeln!(out, "DAEMON (requires running daemon):")?;
             daemon_cmds.sort_by_key(|c| c.0);
+            let mut section = crate::tty::Section::named("daemon (requires running daemon)");
             for (tokens_str, description) in &daemon_cmds {
-                writeln!(out, "    {:<28} {}", tokens_str, description)?;
+                section
+                    .rows
+                    .push(crate::tty::Row::key_value(*tokens_str, *description));
             }
-            writeln!(out)?;
+            document.sections.push(section);
         }
     }
 
-    writeln!(out, "Run `ryeos help <command>` for command-specific help.")?;
-    Ok(())
+    document.hints.push(crate::tty::Hint::new(
+        "Run `ryeos help <command>` for command-specific help.",
+    ));
+    document.hints.push(crate::tty::Hint::new(
+        "Set `RYEOS_TTY=always` or `RYEOS_TTY=never` to override terminal presentation detection.",
+    ));
+    (document, warning)
 }
 
-/// Discover commands from verified installed node config.
-/// Returns (token_string, description, is_offline) tuples.
-fn discover_commands_from_snapshot(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandHelpRow {
+    pub tokens: String,
+    pub description: String,
+    pub is_offline: bool,
+}
+
+/// Authoritative row model shared by exhaustive and compact help.
+pub(crate) fn command_rows(
     snapshot: &NodeConfigSnapshot,
-    engine: Option<&Engine>,
+    app_root: &Path,
     project_path: &str,
-) -> Vec<(String, String, bool)> {
+) -> Vec<CommandHelpRow> {
     let mut results = Vec::new();
+    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
+    let project_root = (project_path != ".").then(|| Path::new(project_path));
+    let engine = crate::effective_metadata::build_effective_item_engine(
+        app_root,
+        project_root,
+        &bundle_roots,
+    )
+    .ok();
     let commands = crate::node_descriptors::load_command_descriptors_from_snapshot(snapshot);
 
     for command in commands {
@@ -141,35 +157,68 @@ fn discover_commands_from_snapshot(
         }
 
         let metadata = command.execute_ref().and_then(|execute| {
-            engine.and_then(|engine| resolve_effective_help(engine, execute, project_path))
+            engine
+                .as_ref()
+                .and_then(|engine| resolve_effective_help(engine, execute, project_path))
         });
         let is_offline = metadata
             .as_ref()
             .is_some_and(ItemHelpMetadata::is_offline_dispatch);
-        results.push((command.tokens.join(" "), command.description, is_offline));
+        let description = metadata
+            .as_ref()
+            .map(|metadata| metadata.description.as_str())
+            .filter(|description| !description.is_empty())
+            .unwrap_or(&command.description)
+            .to_string();
+        results.push(CommandHelpRow {
+            tokens: command.tokens.join(" "),
+            description,
+            is_offline,
+        });
     }
 
-    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results.sort_by(|a, b| a.tokens.cmp(&b.tokens));
     results
 }
 
 /// Print command-specific help from installed descriptors or local bootstrap help.
 pub async fn print_command_help(
+    console: &crate::tty::Console,
     command_tokens: &[String],
     app_root: &std::path::Path,
     project_path: &str,
     snapshot: &anyhow::Result<NodeConfigSnapshot>,
 ) -> Result<(), CliError> {
-    // Prefer installed descriptor help. This keeps help kind-agnostic in the
-    // CLI: command descriptors are node config, and the help renderer does not
-    // need to classify the execute ref before deciding whether it can print usage.
-    if print_installed_command_help(command_tokens, app_root, project_path, snapshot)? {
-        return Ok(());
-    }
-
-    print_lifecycle_command_help(command_tokens)?;
-
+    let document = build_command_help(command_tokens, app_root, project_path, snapshot)?;
+    console.document(&document)?;
     Ok(())
+}
+
+fn build_command_help(
+    command_tokens: &[String],
+    app_root: &Path,
+    project_path: &str,
+    snapshot: &anyhow::Result<NodeConfigSnapshot>,
+) -> std::io::Result<crate::tty::Document> {
+    let is_lifecycle = crate::lifecycle_commands::local_command_descriptors()
+        .iter()
+        .any(|descriptor| {
+            descriptor.tokens.len() == command_tokens.len()
+                && descriptor
+                    .tokens
+                    .iter()
+                    .zip(command_tokens)
+                    .all(|(expected, actual)| *expected == actual)
+        });
+    if is_lifecycle {
+        return Ok(build_lifecycle_command_help(command_tokens));
+    }
+    if let Some(document) =
+        build_installed_command_help(command_tokens, app_root, project_path, snapshot)?
+    {
+        return Ok(document);
+    }
+    Ok(build_lifecycle_command_help(command_tokens))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -254,12 +303,12 @@ impl ItemHelpMetadata {
     }
 }
 
-fn print_installed_command_help(
+fn build_installed_command_help(
     command_tokens: &[String],
     app_root: &std::path::Path,
     project_path: &str,
     snapshot: &anyhow::Result<NodeConfigSnapshot>,
-) -> std::io::Result<bool> {
+) -> std::io::Result<Option<crate::tty::Document>> {
     let snapshot = snapshot.as_ref().map_err(|err| {
         std::io::Error::other(format!(
             "installed node config failed verification: {err:#}"
@@ -268,7 +317,7 @@ fn print_installed_command_help(
     let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
     let Some(command_descriptor) = crate::node_descriptors::find_command(snapshot, command_tokens)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let execute_ref = command_descriptor.execute_ref();
     let project_root = (project_path != ".").then(|| Path::new(project_path));
@@ -284,37 +333,41 @@ fn print_installed_command_help(
             .and_then(|engine| resolve_effective_help(engine, execute, project_path))
     });
 
-    let mut out = std::io::stdout();
     let command = command_descriptor.tokens.join(" ");
     let description = item
         .as_ref()
         .map(|s| s.description.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(&command_descriptor.description);
-    writeln!(out, "ryeos {command} — {description}")?;
-    writeln!(out)?;
+    let mut document = crate::tty::Document::titled(format!("ryeos {command}"));
+    let mut overview = crate::tty::Section::named("overview");
+    overview
+        .rows
+        .push(crate::tty::Row::text(description.to_string()));
+    document.sections.push(overview);
     if let Some(item) = &item {
         if item.is_offline_dispatch() {
-            writeln!(out, "DISPATCH: offline (no daemon required)")?;
-            writeln!(out)?;
+            document.sections.push(
+                crate::tty::Section::named("dispatch").row("mode", "offline (no daemon required)"),
+            );
         }
     } else if let Some(execute_ref) = execute_ref {
-        writeln!(out, "EXECUTE: {execute_ref}")?;
-        writeln!(out)?;
+        document
+            .sections
+            .push(crate::tty::Section::named("execute").row("item", execute_ref));
     }
-    writeln!(out, "USAGE:")?;
-    writeln!(
-        out,
-        "  {}",
-        installed_usage_line(&command_descriptor, item.as_ref())
-    )?;
+    let mut usage = crate::tty::Section::named("usage");
+    usage.rows.push(crate::tty::Row::text(installed_usage_line(
+        &command_descriptor,
+        item.as_ref(),
+    )));
+    document.sections.push(usage);
 
     // Control flags, rendered from the command's declared `control_flags`
     // (data-driven — no hardcoded flag list). Value flags (method/args) show a
     // `<value>` hint; aliases are listed alongside the primary spelling.
     if !command_descriptor.command.control_flags.is_empty() {
-        writeln!(out)?;
-        writeln!(out, "CONTROL FLAGS:")?;
+        let mut section = crate::tty::Section::named("control flags");
         for cf in &command_descriptor.command.control_flags {
             let mut names = vec![format!("--{}", cf.flag)];
             names.extend(cf.aliases.iter().map(|alias| format!("--{alias}")));
@@ -323,13 +376,12 @@ fn print_installed_command_help(
             } else {
                 ""
             };
-            writeln!(
-                out,
-                "  {:<24} {}",
+            section.rows.push(crate::tty::Row::key_value(
                 format!("{}{}", names.join(", "), value_hint),
-                cf.help
-            )?;
+                &cf.help,
+            ));
         }
+        document.sections.push(section);
     }
 
     // Parameter passing, from the command's declared `parameter_binding`.
@@ -338,27 +390,24 @@ fn print_installed_command_help(
             binding.mode,
             ryeos_runtime::CommandParameterBindingMode::None
         ) {
-            writeln!(out)?;
-            writeln!(out, "PARAMETERS:")?;
+            let mut section = crate::tty::Section::named("parameters");
             if let Some(input_flag) = &binding.input_flag {
-                writeln!(
-                    out,
-                    "  {:<24} Read JSON parameters from a file (or - for stdin)",
-                    format!("--{input_flag} <file>")
-                )?;
+                section.rows.push(crate::tty::Row::key_value(
+                    format!("--{input_flag} <file>"),
+                    "Read JSON parameters from a file (or - for stdin)",
+                ));
             }
-            writeln!(
-                out,
-                "  {:<24} Set parameter <key> (repeatable)",
-                "--<key> <value>"
-            )?;
+            section.rows.push(crate::tty::Row::key_value(
+                "--<key> <value>",
+                "Set parameter <key> (repeatable)",
+            ));
             if binding.single_json_object_arg {
-                writeln!(
-                    out,
-                    "  {:<24} A single JSON object of parameters",
-                    "'<json>'"
-                )?;
+                section.rows.push(crate::tty::Row::key_value(
+                    "'<json>'",
+                    "A single JSON object of parameters",
+                ));
             }
+            document.sections.push(section);
         }
     }
 
@@ -369,36 +418,41 @@ fn print_installed_command_help(
         .map(|project| project.resolution)
         .unwrap_or_default();
     if project_resolution != ryeos_runtime::CommandProjectResolution::None {
-        writeln!(out)?;
-        writeln!(out, "PROJECT:")?;
-        writeln!(
-            out,
-            "  --project <DIR>       Project root; accepted before or after the command"
-        )?;
+        let mut section = crate::tty::Section::named("project");
+        section.rows.push(crate::tty::Row::key_value(
+            "--project <DIR>",
+            "Project root; accepted before or after the command",
+        ));
         if project_resolution == ryeos_runtime::CommandProjectResolution::Optional {
-            writeln!(out, "  --no-project          Resolve against bundles only")?;
+            section.rows.push(crate::tty::Row::key_value(
+                "--no-project",
+                "Resolve against bundles only",
+            ));
         }
+        document.sections.push(section);
     }
 
     if let Some(item) = &item {
         if !item.schema.is_empty() {
-            writeln!(out)?;
-            writeln!(out, "FIELDS:")?;
+            let mut section = crate::tty::Section::named("fields");
             for (field, ty) in &item.schema {
                 let flag = field.replace('_', "-");
-                writeln!(out, "  --{:<20} {}", flag, ty)?;
+                section
+                    .rows
+                    .push(crate::tty::Row::key_value(format!("--{flag}"), ty));
             }
+            document.sections.push(section);
         }
         if !item.required_caps.is_empty() {
-            writeln!(out)?;
-            writeln!(out, "REQUIRED CAPABILITIES:")?;
+            let mut section = crate::tty::Section::named("required capabilities");
             for cap in &item.required_caps {
-                writeln!(out, "  {cap}")?;
+                section.rows.push(crate::tty::Row::text(cap));
             }
+            document.sections.push(section);
         }
     }
 
-    Ok(true)
+    Ok(Some(document))
 }
 
 fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>) -> String {
@@ -483,116 +537,120 @@ fn resolve_effective_help(
         .map(|value| ItemHelpMetadata::from_composed(&value))
 }
 
-/// Print help for lifecycle commands when installed descriptors are unavailable.
-fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    match command_tokens.first().map(|s| s.as_str()) {
-        Some("init") => {
-            writeln!(out, "ryeos init — Bootstrap operator keys and core bundle")?;
-            writeln!(out)?;
-            writeln!(out, "USAGE: ryeos init [OPTIONS]")?;
-            writeln!(out)?;
-            writeln!(out, "OPTIONS:")?;
-            writeln!(
-                out,
-                "  --source <DIR>           Bundle source directory (default: /usr/share/ryeos)"
-            )?;
-            writeln!(
-                out,
-                "  --trust-file <FILE>      Additional publisher trust doc (repeatable)"
-            )?;
-            writeln!(out, "  --app-root <DIR>        App root")?;
+/// Build help for lifecycle commands when installed descriptors are unavailable.
+fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Document {
+    let command = command_tokens.join(" ");
+    let (title, description, usage) = match command.as_str() {
+        "init" => (
+            "ryeos init",
+            "Bootstrap operator keys and core bundle",
+            "ryeos init [--json] [OPTIONS]",
+        ),
+        "node status" => (
+            "ryeos node status",
+            "Show local node lifecycle status",
+            "ryeos node status [--json] [--app-root <DIR>]",
+        ),
+        "node doctor" => (
+            "ryeos node doctor",
+            "Diagnose the local node environment",
+            "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
+        ),
+        "node gc" => (
+            "ryeos node gc",
+            "Run explicit offline node garbage collection",
+            "ryeos node gc [--json] [--dry-run] [--app-root <DIR>]",
+        ),
+        "start" => (
+            "ryeos start",
+            "Bring the local node runtime online",
+            "ryeos start [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
+        ),
+        "stop" => (
+            "ryeos stop",
+            "Gracefully stop the local node runtime",
+            "ryeos stop [--force] [--app-root <DIR>]",
+        ),
+        "execute" => (
+            "ryeos execute",
+            "Universal escape hatch",
+            "ryeos execute [--async] <item_ref> [flags...]",
+        ),
+        "sign" => (
+            "ryeos sign",
+            "Sign RyeOS items by canonical ref, glob, or .ai path",
+            "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
+        ),
+        "identity" => (
+            "ryeos identity",
+            "Print the local node public identity",
+            "ryeos identity [--json] [--app-root <DIR>]",
+        ),
+        _ => {
+            let mut document =
+                crate::tty::Document::titled(format!("no local help available for '{command}'"));
+            document.hints.push(crate::tty::Hint::new(
+                "Run `ryeos init` if RyeOS has not been initialized.",
+            ));
+            return document;
         }
-        Some("node") if command_tokens.get(1).map(String::as_str) == Some("status") => {
-            writeln!(out, "ryeos node status — Show local node lifecycle status")?;
-            writeln!(out)?;
-            writeln!(out, "USAGE: ryeos node status [--json] [--app-root <DIR>]")?;
-        }
-        Some("node") if command_tokens.get(1).map(String::as_str) == Some("doctor") => {
-            writeln!(
-                out,
-                "ryeos node doctor — Offline node-environment checklist: init state, \
-                 lifecycle + binary skew, storage write probe, socket bindability, \
-                 verified node config, per-bundle static doctor"
-            )?;
-            writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]"
-            )?;
-        }
-        Some("start") => {
-            writeln!(out, "ryeos start — Bring the local node runtime online")?;
-            writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos start [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]"
-            )?;
-        }
-        Some("stop") => {
-            writeln!(out, "ryeos stop — Gracefully stop the local node runtime")?;
-            writeln!(out)?;
-            writeln!(out, "USAGE: ryeos stop [--force] [--app-root <DIR>]")?;
-        }
-        Some("execute") => {
-            writeln!(out, "ryeos execute — Universal escape hatch")?;
-            writeln!(out)?;
-            writeln!(out, "USAGE: ryeos execute [--async] <item_ref> [flags...]")?;
-            writeln!(out)?;
-            writeln!(out, "CONTROL FLAGS:")?;
-            writeln!(
-                out,
-                "  --async         Accepted/background launch for root-executable refs; returns a thread_id"
-            )?;
-            writeln!(out)?;
-            writeln!(out, "PARAMETER INPUT:")?;
-            writeln!(out, "  --input <FILE>   Read JSON parameters from a file")?;
-            writeln!(out, "  --input -        Read JSON parameters from stdin")?;
-            writeln!(
-                out,
-                "  --key value      Heuristic flag binding (hyphens normalised to underscores)"
-            )?;
-        }
-        Some("sign") => {
-            writeln!(
-                out,
-                "ryeos sign — Sign RyeOS items by canonical ref, glob, or .ai path"
-            )?;
-            writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]"
-            )?;
-            writeln!(out)?;
-            writeln!(out, "EXAMPLES:")?;
-            writeln!(out, "  ryeos sign knowledge:my/entry")?;
-            writeln!(out, "  ryeos sign 'tool:agent-kiwi/*'")?;
-            writeln!(out, "  ryeos sign 'node:routes/*'")?;
-            writeln!(out, "  ryeos sign .ai/directives/foo.md .ai/tools/bar.yaml")?;
-            writeln!(out)?;
-            writeln!(out, "OPTIONS:")?;
-            writeln!(
-                out,
-                "  --project <DIR>       Project root (parent of .ai/); default: cwd"
-            )?;
-            writeln!(
-                out,
-                "  --source <SOURCE>     Where to look: project (default)"
-            )?;
-        }
-        Some("identity") => {
-            writeln!(out, "ryeos identity — Print the local node public identity")?;
-            writeln!(out)?;
-            writeln!(out, "USAGE: ryeos identity [--app-root <DIR>]")?;
-        }
-        Some(other) => {
-            writeln!(out, "no local help available for '{}'", other)?;
-            writeln!(out, "run `ryeos init` if Rye OS has not been initialized")?;
-        }
-        None => {}
+    };
+    let mut document = crate::tty::Document::titled(title);
+    let mut overview = crate::tty::Section::named("overview");
+    overview.rows.push(crate::tty::Row::text(description));
+    document.sections.push(overview);
+    let mut usage_section = crate::tty::Section::named("usage");
+    usage_section.rows.push(crate::tty::Row::text(usage));
+    document.sections.push(usage_section);
+
+    let rows: &[(&str, &str)] = match command.as_str() {
+        "init" => &[
+            (
+                "--source <DIR>",
+                "Bundle source directory (default: /usr/share/ryeos)",
+            ),
+            (
+                "--trust-file <FILE>",
+                "Additional publisher trust document (repeatable)",
+            ),
+            ("--app-root <DIR>", "Application root"),
+        ],
+        "execute" => &[
+            ("--async", "Launch in the background and return a thread ID"),
+            (
+                "--input <FILE>",
+                "Read JSON parameters from a file, or - for stdin",
+            ),
+            (
+                "--key <value>",
+                "Bind a parameter; hyphens normalize to underscores",
+            ),
+        ],
+        "sign" => &[
+            (
+                "--project <DIR>",
+                "Project root (parent of .ai/); default: cwd",
+            ),
+            ("--source <SOURCE>", "Item source; default: project"),
+        ],
+        _ => &[],
+    };
+    if !rows.is_empty() {
+        let mut options = crate::tty::Section::named("options");
+        options.rows.extend(
+            rows.iter()
+                .map(|(key, value)| crate::tty::Row::key_value(*key, *value)),
+        );
+        document.sections.push(options);
     }
-    Ok(())
+    if command == "node doctor" {
+        let mut checks = crate::tty::Section::named("checks");
+        checks.rows.push(crate::tty::Row::text(
+            "Initialization, lifecycle and binary skew, writable storage, socket bindability, verified node configuration, and per-bundle static diagnostics.",
+        ));
+        document.sections.push(checks);
+    }
+    document
 }
 
 #[cfg(test)]

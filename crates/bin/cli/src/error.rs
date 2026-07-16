@@ -81,9 +81,57 @@ pub enum CliError {
     #[error("{detail}")]
     Local { detail: String },
 
+    /// The command already rendered its complete result or diagnostic.
+    #[error("{detail}")]
+    Reported { detail: String },
+
     /// Client-side project-path resolution failed: discovery returned
     /// nothing and no `--no-project` / `--project` was provided, or the
     /// provided path could not be canonicalized.
     #[error("project resolution: {0}")]
     ProjectResolution(String),
+}
+
+impl CliError {
+    pub fn diagnostic(&self) -> crate::tty::Diagnostic {
+        let mut diagnostic = crate::tty::Diagnostic::error(self.to_string());
+        match self {
+            Self::Config(_) | Self::Dispatch(CliDispatchError::Config(_)) => {
+                diagnostic.heading = Some("CONFIGURATION FAILED".to_string());
+                diagnostic.hint = Some(crate::tty::Hint::new(
+                    "run `ryeos node doctor` for verified node diagnostics",
+                ));
+            }
+            Self::Transport(CliTransportError::DaemonJsonMissing { .. })
+            | Self::Transport(CliTransportError::Unreachable { .. })
+            | Self::Dispatch(CliDispatchError::Transport(
+                CliTransportError::DaemonJsonMissing { .. } | CliTransportError::Unreachable { .. },
+            )) => {
+                diagnostic.heading = Some("NODE UNAVAILABLE".to_string());
+                diagnostic.hint = Some(crate::tty::Hint::new(
+                    "run `ryeos node status`, then `ryeos start` if the node is offline",
+                ));
+            }
+            Self::Transport(CliTransportError::HttpError { status, .. })
+            | Self::Dispatch(CliDispatchError::Transport(CliTransportError::HttpError {
+                status,
+                ..
+            })) => {
+                diagnostic.heading = Some("DAEMON REQUEST FAILED".to_string());
+                diagnostic.context.push(format!("HTTP status {status}"));
+                diagnostic.hint = Some(crate::tty::Hint::new(
+                    "run `ryeos node doctor` for verified node diagnostics",
+                ));
+            }
+            Self::ProjectResolution(_) => {
+                diagnostic.heading = Some("PROJECT RESOLUTION FAILED".to_string());
+                diagnostic.hint = Some(crate::tty::Hint::new(
+                    "pass `--project <DIR>` or `--no-project` explicitly",
+                ));
+            }
+            Self::Reported { .. } => {}
+            _ => {}
+        }
+        diagnostic
+    }
 }

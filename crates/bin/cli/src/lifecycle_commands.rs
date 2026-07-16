@@ -27,6 +27,10 @@ use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv, StopOp
 
 use crate::error::CliError;
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ReportedLocalFailure(String);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalCommandDescriptor {
     pub tokens: &'static [&'static str],
@@ -95,41 +99,48 @@ pub fn local_command_descriptors() -> &'static [LocalCommandDescriptor] {
 /// if no lifecycle command matched.
 ///
 /// Errors from a matched lifecycle command propagate as `CliError::Local`.
-pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
+pub async fn try_dispatch(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<bool, CliError> {
     if argv.is_empty() {
         return Ok(false);
     }
     match (argv[0].as_str(), argv.get(1).map(String::as_str)) {
         ("identity", _) => {
-            run_identity_command(&argv[1..]).map_err(map_local_err)?;
+            run_identity_command(&argv[1..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("init", _) => {
-            run_init_command(&argv[1..]).map_err(map_local_err)?;
+            run_init_command(&argv[1..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("status")) => {
-            run_status_command(&argv[2..])
+            run_status_command(&argv[2..], console)
                 .await
                 .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("doctor")) => {
-            run_node_doctor_command(&argv[2..])
+            run_node_doctor_command(&argv[2..], console)
                 .await
                 .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("gc")) => {
-            run_node_gc_command(&argv[2..]).map_err(map_local_err)?;
+            run_node_gc_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("start", _) => {
-            run_start_command(&argv[1..]).await.map_err(map_local_err)?;
+            run_start_command(&argv[1..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("stop", _) => {
-            run_stop_command(&argv[1..]).await.map_err(map_local_err)?;
+            run_stop_command(&argv[1..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -193,8 +204,10 @@ impl NodeGcArgs {
     }
 }
 
-fn run_node_gc_command(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<NodeGcArgs>(argv)?;
+fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeGcArgs>(argv, console)? else {
+        return Ok(());
+    };
     args.validate()?;
 
     let options = ryeos_app::offline_gc::OfflineThreadHistoryGcOptions {
@@ -202,7 +215,7 @@ fn run_node_gc_command(argv: &[String]) -> Result<()> {
         dry_run: args.dry_run,
         sweep_cas: args.sweep_cas,
     };
-    let mut progress = crate::tty::OfflineGcProgress::new(!args.json);
+    let mut progress = crate::tty::OfflineGcProgress::new(!args.json, console.capabilities());
     let report = match progress.as_mut() {
         Some(progress) => {
             let mut observer = |event: &ryeos_app::offline_gc::OfflineThreadHistoryGcProgress| {
@@ -217,69 +230,73 @@ fn run_node_gc_command(argv: &[String]) -> Result<()> {
     }
     .context("offline node GC failed")?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::tty::write_json(&report)?;
         return Ok(());
     }
 
     if let Some(progress) = progress {
         progress.finish()?;
-        crate::tty::render_gc_summary(&report)?;
-        println!(
-            "   {} chain/recovery artifacts  ·  {} thread runtime artifacts",
-            report.chain_ref_artifacts + report.pending_transitions,
-            report.thread_runtime_artifacts,
-        );
-        if let Some(sweep) = report.cas_sweep.as_ref() {
-            println!(
-                "   CAS reclaimed {} objects  ·  {} blobs  ·  {} bytes",
-                sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
-            );
-        } else if !report.dry_run {
-            println!("   CAS sweep deferred to normal maintenance");
-        }
-        return Ok(());
     }
-
-    println!(
-        "{} thread-history GC — {}",
+    let mut status = crate::tty::StatusBanner::new(
+        crate::tty::Tone::Success,
         if report.dry_run {
-            "would discard"
+            "HISTORY SCAN COMPLETE"
         } else {
-            "discarded"
+            "HISTORY CLEAR COMPLETE"
         },
-        report.app_root.display()
     );
-    println!("chain heads: {}", report.chain_heads);
-    println!(
-        "chain/recovery artifacts: {}",
-        report.chain_ref_artifacts + report.pending_transitions
-    );
-    println!("runtime rows: {}", report.runtime_rows.total_rows());
-    println!(
-        "thread runtime artifacts: {}",
-        report.thread_runtime_artifacts
-    );
-    println!("scheduler rows: {}", report.scheduler_rows.total_rows());
-    println!(
-        "scheduler journal artifacts: {}",
-        report.scheduler_journal_artifacts
-    );
-    println!(
-        "old projection stores: {}",
-        report.projection.superseded_instances_deleted
-    );
+    status.detail = Some(report.app_root.display().to_string());
+    status.rows = vec![
+        crate::tty::Row::key_value("chain heads", report.chain_heads.to_string()),
+        crate::tty::Row::key_value(
+            "chain/recovery artifacts",
+            (report.chain_ref_artifacts + report.pending_transitions).to_string(),
+        ),
+        crate::tty::Row::key_value("runtime rows", report.runtime_rows.total_rows().to_string()),
+        crate::tty::Row::key_value(
+            "thread runtime artifacts",
+            report.thread_runtime_artifacts.to_string(),
+        ),
+        crate::tty::Row::key_value(
+            "scheduler rows",
+            report.scheduler_rows.total_rows().to_string(),
+        ),
+        crate::tty::Row::key_value(
+            "scheduler journal artifacts",
+            report.scheduler_journal_artifacts.to_string(),
+        ),
+        crate::tty::Row::key_value(
+            "old projection stores",
+            report.projection.superseded_instances_deleted.to_string(),
+        ),
+    ];
     if let Some(sweep) = report.cas_sweep.as_ref() {
-        println!(
-            "CAS swept: {} objects, {} blobs ({} bytes)",
-            sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
-        );
+        status.rows.push(crate::tty::Row::key_value(
+            "CAS swept",
+            format!(
+                "{} objects, {} blobs ({} bytes)",
+                sweep.deleted_objects, sweep.deleted_blobs, sweep.freed_bytes
+            ),
+        ));
     } else if !report.dry_run {
-        println!("CAS sweep: deferred (run normal maintenance GC later)");
+        status.rows.push(crate::tty::Row::key_value(
+            "CAS sweep",
+            "deferred (run normal maintenance GC later)",
+        ));
     }
+    console.success(&status)?;
     Ok(())
 }
 
 fn map_local_err(e: anyhow::Error) -> CliError {
+    if let Some(error) = e.downcast_ref::<ReportedLocalFailure>() {
+        return CliError::Reported {
+            detail: error.to_string(),
+        };
+    }
+    if let Some(error) = e.downcast_ref::<std::io::Error>() {
+        return CliError::Io(std::io::Error::new(error.kind(), error.to_string()));
+    }
     CliError::Local {
         detail: format!("{e:#}"),
     }
@@ -297,10 +314,16 @@ struct IdentityArgs {
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
     app_root: Option<PathBuf>,
+
+    /// Emit the exact structured identity document.
+    #[arg(long)]
+    json: bool,
 }
 
-fn run_identity_command(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<IdentityArgs>(argv)?;
+fn run_identity_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<IdentityArgs>(argv, console)? else {
+        return Ok(());
+    };
     let report = ryeos_core_tools::actions::inspect::identity::run_identity(
         ryeos_core_tools::actions::inspect::identity::IdentityParams {
             app_root: args.app_root.map(|p| p.to_string_lossy().into_owned()),
@@ -308,7 +331,23 @@ fn run_identity_command(argv: &[String]) -> Result<()> {
         },
     )
     .context("ryeos identity failed")?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    if args.json {
+        crate::tty::write_json(&report)?;
+    } else {
+        let mut section = crate::tty::Section::named("node");
+        if let Some(values) = report.as_object() {
+            for (key, value) in values {
+                let rendered = value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                section.rows.push(crate::tty::Row::key_value(key, rendered));
+            }
+        }
+        let mut document = crate::tty::Document::titled("NODE IDENTITY");
+        document.sections.push(section);
+        console.document(&document)?;
+    }
     Ok(())
 }
 
@@ -338,10 +377,16 @@ struct InitArgs {
     /// Non-official/dev publisher keys must be supplied explicitly.
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
     trust_files: Vec<PathBuf>,
+
+    /// Emit the exact structured initialization report.
+    #[arg(long)]
+    json: bool,
 }
 
-fn run_init_command(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<InitArgs>(argv)?;
+fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<InitArgs>(argv, console)? else {
+        return Ok(());
+    };
     let app_root = args.app_root.unwrap_or_else(default_app_root);
 
     let opts = ryeos_node::InitOptions {
@@ -350,8 +395,59 @@ fn run_init_command(argv: &[String]) -> Result<()> {
         trust_files: args.trust_files,
         skip_preflight: false,
     };
-    let report = ryeos_node::run_init(&opts).context("ryeos init failed")?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    let mut progress = if args.json {
+        None
+    } else {
+        console.progress(
+            crate::tty::OperationKind::Install,
+            "initializing node state",
+        )?
+    };
+    let report = if let Some(progress) = progress.as_mut() {
+        ryeos_node::run_init_with_progress(&opts, |event| {
+            let label = match event.phase {
+                ryeos_node::InitPhase::PreparingLayout => "preparing node layout",
+                ryeos_node::InitPhase::InitializingIdentity => "initializing operator identity",
+                ryeos_node::InitPhase::PinningTrust => "pinning publisher trust",
+                ryeos_node::InitPhase::DiscoveringBundles => "discovering bundle sources",
+                ryeos_node::InitPhase::VerifyingBundles => "verifying bundle signatures",
+                ryeos_node::InitPhase::InstallingBundles => "installing bundles",
+                ryeos_node::InitPhase::InitializingVault => "initializing vault identity",
+                ryeos_node::InitPhase::Finalizing => "verifying initialized state",
+            };
+            match (event.completed, event.total) {
+                (Some(completed), Some(total)) => {
+                    progress.update_determinate(label, completed, total, event.detail.as_deref())?
+                }
+                _ => progress.update(label, event.detail.as_deref())?,
+            }
+            Ok(())
+        })
+    } else {
+        ryeos_node::run_init(&opts)
+    }
+    .context("ryeos init failed")?;
+    if let Some(progress) = progress {
+        progress.finish()?;
+    }
+    if args.json {
+        crate::tty::write_json(&report)?;
+    } else {
+        let mut status =
+            crate::tty::StatusBanner::new(crate::tty::Tone::Success, "INITIALIZATION COMPLETE");
+        status.detail = Some(format!(
+            "{} bundles installed",
+            report.bundles_installed.len()
+        ));
+        status.rows = vec![
+            crate::tty::Row::key_value("app root", report.app_root.display().to_string()),
+            crate::tty::Row::key_value("operator", report.user_key_fingerprint),
+            crate::tty::Row::key_value("node", report.node_key_fingerprint),
+            crate::tty::Row::key_value("vault", report.vault_pubkey_fingerprint),
+            crate::tty::Row::key_value("bundles", report.bundles_installed.join(", ")),
+        ];
+        console.success(&status)?;
+    }
     Ok(())
 }
 
@@ -373,17 +469,19 @@ struct StatusArgs {
     json: bool,
 }
 
-async fn run_status_command(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<StatusArgs>(argv)?;
+async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<StatusArgs>(argv, console)? else {
+        return Ok(());
+    };
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let status = controller
         .status()
         .await
         .context("ryeos node status failed")?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&status)?);
+        crate::tty::write_json(&status)?;
     } else {
-        print_lifecycle_status(&status);
+        render_lifecycle_status(console, &status)?;
     }
     Ok(())
 }
@@ -416,10 +514,12 @@ struct NodeDoctorArgs {
 /// registry — exactly the machinery this command exists to diagnose when
 /// broken. Every check degrades independently; the command itself only
 /// errors when it cannot even load config.
-async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
+async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     use ryeos_core_tools::actions::doctor::{CheckResult, FAIL, NA, OK, WARN};
 
-    let args = parse_or_handle_help::<NodeDoctorArgs>(argv)?;
+    let Some(args) = parse_or_render_help::<NodeDoctorArgs>(argv, console)? else {
+        return Ok(());
+    };
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let config = controller.config().clone();
     let mut checks: Vec<CheckResult> = Vec::new();
@@ -827,26 +927,49 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     });
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::tty::write_json(&report)?;
     } else {
-        println!("node doctor — {}", config.app_root.display());
+        let mut section = crate::tty::Section::named("checks");
         for c in &checks {
-            let glyph = match c.status.as_str() {
-                s if s == OK => "✓",
-                s if s == FAIL => "✗",
-                s if s == WARN => "⚠",
-                _ => "·",
+            let tone = match c.status.as_str() {
+                s if s == OK => crate::tty::Tone::Success,
+                s if s == FAIL => crate::tty::Tone::Failure,
+                s if s == WARN => crate::tty::Tone::Warning,
+                _ => crate::tty::Tone::Neutral,
             };
-            println!("  {glyph} {:<24} {}", c.name, c.status);
+            section
+                .rows
+                .push(crate::tty::Row::key_value(&c.name, &c.status).with_tone(tone));
             if c.status != OK || c.name == "sandbox" {
-                println!("      {}", c.detail);
+                section.rows.push(
+                    crate::tty::Row::text(format!("{}: {}", c.name, c.detail))
+                        .with_tone(crate::tty::Tone::Secondary),
+                );
             }
+        }
+        let mut document =
+            crate::tty::Document::titled(format!("NODE DOCTOR — {}", config.app_root.display()));
+        document.sections.push(section);
+        console.document(&document)?;
+        if ok {
+            let mut summary =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Success, "DOCTOR PASSED");
+            summary.detail = Some(format!("{} checks", checks.len()));
+            console.status(&summary)?;
+        } else {
+            let mut summary =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Failure, "DOCTOR FAILED");
+            summary.detail = Some(format!("{} checks", checks.len()));
+            summary.rows.push(crate::tty::Row::text(
+                "rerun with --json for the complete structured report",
+            ));
+            console.status(&summary)?;
         }
     }
     if ok {
         Ok(())
     } else {
-        anyhow::bail!("node doctor found failing checks (rerun with --json for detail)")
+        Err(ReportedLocalFailure("node doctor found failing checks".to_string()).into())
     }
 }
 
@@ -949,13 +1072,17 @@ struct StartArgs {
     uds_path: Option<PathBuf>,
 }
 
-async fn run_start_command(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<StartArgs>(argv)?;
+async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<StartArgs>(argv, console)? else {
+        return Ok(());
+    };
     let env =
         LocalLifecycleEnv::load_with_overrides(args.app_root, args.bind, args.uds_path, true)?;
     let controller = LifecycleController::from_env(env);
-    let mut progress =
-        crate::tty::LifecycleProgress::new(crate::tty::LifecycleProgressAction::Boot);
+    let mut progress = crate::tty::LifecycleProgress::new(
+        crate::tty::LifecycleProgressAction::Boot,
+        console.capabilities(),
+    );
     let report = match progress.as_mut() {
         Some(progress) => controller.start_with_progress(progress).await,
         None => controller.start().await,
@@ -963,16 +1090,18 @@ async fn run_start_command(argv: &[String]) -> Result<()> {
     .context("ryeos start failed")?;
     if let Some(progress) = progress {
         progress.finish_start(&report)?;
-        warn_if_stale_daemon(&report.status);
+        warn_if_stale_daemon(console, &report.status)?;
         return Ok(());
     }
     if report.already_running {
-        println!("running");
-        warn_if_stale_daemon(&report.status);
+        let status = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RUNNING");
+        console.status(&status)?;
+        warn_if_stale_daemon(console, &report.status)?;
     } else {
-        println!("started");
+        let status = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "STARTED");
+        console.status(&status)?;
     }
-    print_lifecycle_status(&report.status);
+    render_lifecycle_status(console, &report.status)?;
     Ok(())
 }
 
@@ -990,9 +1119,9 @@ async fn run_start_command(argv: &[String]) -> Result<()> {
 ///      it writes once at startup — i.e. the binary was installed after the
 ///      daemon started. This catches a rebuild at the same commit, which the
 ///      revision check alone cannot see.
-fn warn_if_stale_daemon(status: &LifecycleStatus) {
+fn warn_if_stale_daemon(console: &crate::tty::Console, status: &LifecycleStatus) -> Result<()> {
     let LifecycleStatus::Running { metadata, .. } = status else {
-        return;
+        return Ok(());
     };
     let current = ryeos_app::build_info::get();
 
@@ -1000,18 +1129,23 @@ fn warn_if_stale_daemon(status: &LifecycleStatus) {
     let binary_is_newer = ryeosd_installed_after_daemon_started(metadata);
 
     if !revision_skew && !binary_is_newer {
-        return;
+        return Ok(());
     }
-
-    eprintln!();
-    eprintln!("⚠  the running daemon is an older build than the installed binary.");
-    eprintln!(
-        "   running:   revision {}",
-        metadata.revision.as_deref().unwrap_or("unknown")
+    let mut diagnostic = crate::tty::Diagnostic::warning(
+        "the running daemon is an older build than the installed binary",
     );
-    eprintln!("   installed: revision {}", current.revision);
-    eprintln!("   It holds the state lock, so newly installed changes will NOT take");
-    eprintln!("   effect until it is cycled:  ryeos stop && ryeos start");
+    diagnostic.context = vec![
+        format!(
+            "running revision {}",
+            metadata.revision.as_deref().unwrap_or("unknown")
+        ),
+        format!("installed revision {}", current.revision),
+        "newly installed changes do not take effect while the old daemon holds the state lock"
+            .to_string(),
+    ];
+    diagnostic.hint = Some(crate::tty::Hint::new("run `ryeos stop && ryeos start`"));
+    console.warning(&diagnostic)?;
+    Ok(())
 }
 
 /// Whether the daemon's recorded revision indicates an older build than this
@@ -1063,15 +1197,19 @@ struct StopArgs {
     force: bool,
 }
 
-async fn run_stop_command(argv: &[String]) -> Result<()> {
-    let args = parse_or_handle_help::<StopArgs>(argv)?;
+async fn run_stop_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<StopArgs>(argv, console)? else {
+        return Ok(());
+    };
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let options = StopOptions {
         force: args.force,
         ..StopOptions::default()
     };
-    let mut progress =
-        crate::tty::LifecycleProgress::new(crate::tty::LifecycleProgressAction::Shutdown);
+    let mut progress = crate::tty::LifecycleProgress::new(
+        crate::tty::LifecycleProgressAction::Shutdown,
+        console.capabilities(),
+    );
     let report = match progress.as_mut() {
         Some(progress) => controller.stop_with_progress(options, progress).await,
         None => controller.stop(options).await,
@@ -1082,11 +1220,13 @@ async fn run_stop_command(argv: &[String]) -> Result<()> {
         return Ok(());
     }
     if report.already_stopped {
-        println!("already stopped");
+        let status = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "ALREADY STOPPED");
+        console.status(&status)?;
     } else {
-        println!("stopped");
+        let status = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "STOPPED");
+        console.status(&status)?;
     }
-    print_lifecycle_status(&report.status);
+    render_lifecycle_status(console, &report.status)?;
     Ok(())
 }
 
@@ -1094,78 +1234,142 @@ fn local_env(app_root: Option<PathBuf>) -> Result<LocalLifecycleEnv> {
     LocalLifecycleEnv::load(app_root)
 }
 
-fn print_lifecycle_status(status: &LifecycleStatus) {
-    match status {
+fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStatus) -> Result<()> {
+    let mut banner = match status {
         LifecycleStatus::NotInitialized { diagnostics } => {
-            println!("not initialized — run: ryeos init");
-            println!("detail: {}", diagnostics.message);
+            let mut banner = crate::tty::StatusBanner::new(
+                crate::tty::Tone::Warning,
+                "NOT INITIALIZED — RUN: RYEOS INIT",
+            );
+            banner
+                .rows
+                .push(crate::tty::Row::key_value("detail", &diagnostics.message));
+            banner
         }
         LifecycleStatus::Stopped { app_root } => {
-            println!("initialized, stopped — run: ryeos start");
-            println!("app root: {}", app_root.display());
+            let mut banner = crate::tty::StatusBanner::new(
+                crate::tty::Tone::Neutral,
+                "INITIALIZED, STOPPED — RUN: RYEOS START",
+            );
+            banner.rows.push(crate::tty::Row::key_value(
+                "app root",
+                app_root.display().to_string(),
+            ));
+            banner
         }
         LifecycleStatus::Running {
             metadata, ready_at, ..
         } => {
-            println!("running");
+            let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RUNNING");
             if let Some(pid) = metadata.pid {
-                println!("pid: {pid}");
+                banner
+                    .rows
+                    .push(crate::tty::Row::key_value("pid", pid.to_string()));
             }
             if let Some(bind) = &metadata.bind {
-                println!("url: http://{bind}");
+                banner
+                    .rows
+                    .push(crate::tty::Row::key_value("url", format!("http://{bind}")));
             }
             if let Some(socket) = &metadata.uds_path {
-                println!("socket: {}", socket.display());
+                banner.rows.push(crate::tty::Row::key_value(
+                    "socket",
+                    socket.display().to_string(),
+                ));
             }
-            println!("ready since: {ready_at}");
+            banner
+                .rows
+                .push(crate::tty::Row::key_value("ready since", ready_at));
+            banner
         }
         LifecycleStatus::Stale { diagnostics, .. } => {
-            println!("stale daemon metadata — {}", diagnostics.message);
+            let mut banner =
+                crate::tty::StatusBanner::new(crate::tty::Tone::Warning, "STALE DAEMON METADATA");
+            banner.detail = Some(diagnostics.message.clone());
+            banner
         }
         LifecycleStatus::Unresponsive {
             metadata,
             diagnostics,
         } => {
-            println!("live daemon control is unusable — {}", diagnostics.message);
+            let mut banner = crate::tty::StatusBanner::new(
+                crate::tty::Tone::Failure,
+                "LIVE DAEMON CONTROL IS UNUSABLE",
+            );
+            banner.detail = Some(diagnostics.message.clone());
             if let Some(pid) = metadata.pid {
-                println!("pid: {pid}");
+                banner
+                    .rows
+                    .push(crate::tty::Row::key_value("pid", pid.to_string()));
             }
-            println!("retry if busy, otherwise inspect or stop it (do not start a second daemon)");
+            banner.rows.push(crate::tty::Row::text(
+                "retry if busy, otherwise inspect or stop it (do not start a second daemon)",
+            ));
+            banner
         }
         LifecycleStatus::Starting {
             metadata, startup, ..
         } => {
             let pid = metadata.pid.unwrap_or_default();
-            println!(
-                "starting — daemon (pid {pid}) is in {}",
-                startup.phase.as_str()
+            let mut banner = crate::tty::StatusBanner::new(
+                crate::tty::Tone::Active,
+                format!(
+                    "STARTING — DAEMON (PID {pid}) IS IN {}",
+                    startup.phase.as_str()
+                ),
             );
             if let Some(started_at) = &metadata.started_at {
-                println!("since: {started_at}");
+                banner
+                    .rows
+                    .push(crate::tty::Row::key_value("since", started_at));
             }
-            println!("elapsed: {}ms", startup.elapsed_ms);
+            banner.rows.push(crate::tty::Row::key_value(
+                "elapsed",
+                format!("{}ms", startup.elapsed_ms),
+            ));
             if let (Some(done), Some(total)) = (startup.chains_done, startup.chains_total) {
-                println!("chains: {done}/{total}");
+                banner.rows.push(crate::tty::Row::key_value(
+                    "chains",
+                    format!("{done}/{total}"),
+                ));
             }
             if let Some(message) = &startup.message {
-                println!("detail: {message}");
+                banner
+                    .rows
+                    .push(crate::tty::Row::key_value("detail", message));
             }
-            println!("wait for readiness");
+            banner
+                .rows
+                .push(crate::tty::Row::text("wait for readiness"));
+            banner
         }
         LifecycleStatus::Failed { metadata, startup } => {
             let pid = metadata.pid.unwrap_or_default();
-            println!("failed — daemon (pid {pid}) could not start");
-            println!("phase: {}", startup.phase.as_str());
-            println!(
-                "error: {}",
+            let mut banner = crate::tty::StatusBanner::new(
+                crate::tty::Tone::Failure,
+                format!("FAILED — DAEMON (PID {pid}) COULD NOT START"),
+            );
+            banner
+                .rows
+                .push(crate::tty::Row::key_value("phase", startup.phase.as_str()));
+            banner.rows.push(crate::tty::Row::key_value(
+                "error",
                 startup
                     .error
                     .as_deref()
-                    .unwrap_or("unknown startup failure")
-            );
-            println!("run `ryeos stop` after inspecting the error");
+                    .unwrap_or("unknown startup failure"),
+            ));
+            banner.rows.push(crate::tty::Row::text(
+                "run `ryeos stop` after inspecting the error",
+            ));
+            banner
         }
+    };
+    if matches!(status, LifecycleStatus::Running { .. }) {
+        banner.tone = crate::tty::Tone::Success;
     }
+    console.status(&banner)?;
+    Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -1176,15 +1380,18 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
 ///
 /// This direct process exit is acceptable for one-shot CLI dispatch. It must be
 /// converted to a returned outcome before extracting an in-process command core.
-fn parse_or_handle_help<P: Parser>(argv: &[String]) -> Result<P> {
+fn parse_or_render_help<P: Parser>(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<Option<P>> {
     use clap::error::ErrorKind;
     match P::try_parse_from(argv) {
-        Ok(p) => Ok(p),
+        Ok(p) => Ok(Some(p)),
         Err(e) => match e.kind() {
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
                 let s = e.render().to_string();
-                print!("{s}");
-                std::process::exit(0);
+                console.text(&s)?;
+                Ok(None)
             }
             _ => Err(anyhow::anyhow!("{e}")),
         },

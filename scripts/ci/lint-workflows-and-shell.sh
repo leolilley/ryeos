@@ -17,6 +17,7 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/ci/install-static-linters.sh \
     scripts/ci/lint-workflows-and-shell.sh \
     scripts/ci/test-publisher-trust-policy.sh \
+    scripts/lint-cli-presentation.sh \
     scripts/release/resolve-version.sh \
     scripts/release/test-resolve-version.sh \
     scripts/release/official-publisher-fingerprint.sh \
@@ -27,6 +28,12 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/release/test-prepare-aur.sh \
     scripts/pkg/bundle-sets.sh \
     scripts/pkg/install-local-direct.sh \
+    scripts/pkg/test-ryeos-terminal.sh \
+    scripts/lib/ryeos-terminal.sh \
+    scripts/gate.sh \
+    scripts/dev-tui.sh \
+    scripts/dev-ui-assets.sh \
+    scripts/smoke-execute-stream.sh \
     scripts/smoke-installed-resume.sh \
     scripts/populate-bundles.sh \
     deploy/entrypoint.sh

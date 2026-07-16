@@ -29,6 +29,11 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$ROOT/scripts/lib/ryeos-terminal.sh"
+ryeos_term_init
+
 # ── CLI parsing ──────────────────────────────────────────────────────
 
 KEY=""
@@ -50,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     # `--crates ryeos-core-tools` rebuilds core-tools without the full workspace.
     --crates) CRATES_OVERRIDE="$2"; shift 2 ;;
     --all) POPULATE_ALL=1; shift ;;
-    *) echo "populate-bundles.sh: unknown arg: $1" >&2; exit 2 ;;
+    *) ryeos_term_fail "unknown argument: $1"; exit 2 ;;
   esac
 done
 
@@ -58,21 +63,20 @@ done
 # what exhausts memory. The caller must be explicit: name the crates that
 # changed, or opt into the whole set with --all.
 if [[ -z "$CRATES_OVERRIDE" && "$POPULATE_ALL" -ne 1 ]]; then
-  echo "populate-bundles.sh: refusing to rebuild the full bundle set implicitly." >&2
-  echo "  Pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools)," >&2
-  echo "  or --all to rebuild the whole '$BUNDLE_SET' set." >&2
+  ryeos_term_fail "refusing to rebuild the full bundle set implicitly"
+  ryeos_term_info "pass --crates \"<crate ...>\" to rebuild only what changed, or --all to rebuild '$BUNDLE_SET'"
   exit 2
 fi
 
-if [[ -z "$KEY"   ]]; then echo "populate-bundles.sh: --key <pem-path> is required"   >&2; exit 2; fi
-if [[ -z "$OWNER" ]]; then echo "populate-bundles.sh: --owner <label> is required"    >&2; exit 2; fi
-if [[ ! -s "$KEY" ]]; then echo "populate-bundles.sh: key file is empty or missing: $KEY" >&2; exit 2; fi
-if ! command -v openssl >/dev/null 2>&1; then echo "populate-bundles.sh: openssl is required" >&2; exit 2; fi
-if ! command -v sha256sum >/dev/null 2>&1; then echo "populate-bundles.sh: sha256sum is required" >&2; exit 2; fi
-if ! command -v base64 >/dev/null 2>&1; then echo "populate-bundles.sh: base64 is required" >&2; exit 2; fi
+if [[ -z "$KEY"   ]]; then ryeos_term_fail "--key <pem-path> is required"; exit 2; fi
+if [[ -z "$OWNER" ]]; then ryeos_term_fail "--owner <label> is required"; exit 2; fi
+if [[ ! -s "$KEY" ]]; then ryeos_term_fail "key file is empty or missing: $KEY"; exit 2; fi
+if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is required"; exit 2; fi
+if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
+if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
   full|central-host|standard|hosted-node|hosted-workflow) ;;
-  *) echo "populate-bundles.sh: --bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $BUNDLE_SET" >&2; exit 2 ;;
+  *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
 base64_one_line() {
@@ -96,7 +100,7 @@ sign_seed_yaml() {
   local file="$1"
   local body_tmp hash_tmp sig_tmp tmp timestamp hash sig
 
-  [[ -f "$file" ]] || { echo "populate-bundles.sh: seed YAML missing: $file" >&2; exit 2; }
+  [[ -f "$file" ]] || { ryeos_term_fail "seed YAML missing: $file"; exit 2; }
   body_tmp="$(mktemp)"
   hash_tmp="$(mktemp)"
   sig_tmp="$(mktemp)"
@@ -144,7 +148,7 @@ assert_no_legacy_seed_paths() {
     "$SOURCE_ROOT_AI/node/bundle_registration_grants"
   do
     if [[ -e "$stale" ]]; then
-      echo "populate-bundles.sh: stale legacy source-root seed path exists: $stale" >&2
+      ryeos_term_fail "stale legacy source-root seed path exists: $stale"
       exit 2
     fi
   done
@@ -152,7 +156,6 @@ assert_no_legacy_seed_paths() {
 
 # ── Setup ────────────────────────────────────────────────────────────
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
 
@@ -174,7 +177,7 @@ if [ -z "$TARGET" ]; then
 elif [[ "$TARGET" != /* ]]; then
   TARGET="$ROOT/$TARGET"
 fi
-echo "[populate-bundles] target dir: $TARGET"
+ryeos_term_info "target directory $TARGET"
 
 CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
@@ -252,8 +255,11 @@ for p in "${pkgs[@]}"; do build_args+=(-p "$p"); done
 jobs_args=()
 [[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")
 
-echo "[populate-bundles] building release binaries${JOBS:+ (jobs=$JOBS)}: ${pkgs[*]}"
+ryeos_term_begin PUBLISH "building release binaries${JOBS:+ (jobs=$JOBS)}"
+ryeos_term_update "building release binaries" "${pkgs[*]}"
+ryeos_term_suspend
 "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}"
+ryeos_term_resume "release build complete"
 
 # ── Guard: no stale sibling binaries under --crates ──────────────────
 # With --crates only the named crates are rebuilt, but staging copies EVERY
@@ -304,12 +310,10 @@ if [[ -n "$CRATES_OVERRIDE" ]]; then
     done < <(staged_release_bins_for_set)
     if (( ${#_stale[@]} > 0 )); then
       {
-        echo "populate-bundles.sh: refusing to stage binaries older than the foundational libs."
-        echo "  The foundational crates (ryeos-runtime / ryeos-state / ryeos-app) have source newer"
-        echo "  than these staged binaries, so they would link against a stale lib:"
+        ryeos_term_fail "refusing to stage binaries older than the foundational libraries"
+        ryeos_term_info "ryeos-runtime / ryeos-state / ryeos-app have newer source than these binaries:"
         printf '    - %s\n' "${_stale[@]}"
-        echo "  Rebuild the whole '$BUNDLE_SET' set:"
-        echo "    ./scripts/populate-bundles.sh --key \"$KEY\" --owner \"$OWNER\" --bundle-set \"$BUNDLE_SET\" --all"
+        ryeos_term_info "rebuild '$BUNDLE_SET' with --all"
       } >&2
       exit 2
     fi
@@ -318,7 +322,7 @@ fi
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 
-echo "[populate-bundles] installing core bundle binaries → $CORE_BIN"
+ryeos_term_update "installing core bundle binaries" "$CORE_BIN"
 install -m 0755 \
   "$TARGET/release/rye-parser-yaml-document" \
   "$TARGET/release/rye-parser-yaml-header-document" \
@@ -328,7 +332,7 @@ install -m 0755 \
   "$CORE_BIN/"
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
+  ryeos_term_update "installing standard bundle binaries" "$STD_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-directive-runtime" \
     "$TARGET/release/ryeos-directive-launch-preparer" \
@@ -340,20 +344,20 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
-  echo "[populate-bundles] installing web bundle binaries → $WEB_BIN"
+  ryeos_term_update "installing web bundle binaries" "$WEB_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-web-tools" \
     "$WEB_BIN/"
 fi
 
 if [[ "$BUNDLE_SET" == "full" ]]; then
-  echo "[populate-bundles] installing ryeos-ui bundle binaries → $RYEOS_UI_BIN"
+  ryeos_term_update "installing ryeos-ui bundle binaries" "$RYEOS_UI_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
     "$TARGET/release/web" \
     "$RYEOS_UI_BIN/"
 
-  echo "[populate-bundles] installing browser bundle binaries → $BROWSER_BIN"
+  ryeos_term_update "installing browser bundle binaries" "$BROWSER_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-browser-tools" \
     "$BROWSER_BIN/"
@@ -361,7 +365,7 @@ fi
 
 # ── Publish ──────────────────────────────────────────────────────────
 
-echo "[populate-bundles] signing source-root seed data…"
+ryeos_term_update "signing source-root seed data" "publisher $OWNER"
 assert_no_legacy_seed_paths
 sign_seed_yaml "$INIT_SEED/command-registration/default.yaml"
 sign_seed_yaml "$INIT_SEED/bundle-registration-grants/default.yaml"
@@ -372,12 +376,18 @@ write_seed_trust_doc
 # a lifecycle-local CLI verb on `next` and would otherwise route through a
 # daemon/initialized-node dispatch path during Docker builds.
 SIGN_APP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$SIGN_APP_ROOT"' EXIT
+cleanup_publish() {
+  local status="$1"
+  ryeos_term_handle_exit "$status"
+  rm -rf "$SIGN_APP_ROOT"
+  return "$status"
+}
+trap 'cleanup_publish "$?"' EXIT
 mkdir -p "$SIGN_APP_ROOT/.ai/config/keys/signing"
 cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 
-echo "[populate-bundles] publishing core bundle…"
+ryeos_term_update "publishing core bundle" "signed manifests"
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
@@ -386,13 +396,13 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE"
 # manifest must stay current with the manifest schema. It depends only on core's
 # tool + config kinds, so publish it right after core (now that core carries a
 # published refs root) with core as its registry root.
-echo "[populate-bundles] publishing central-auth bundle…"
+ryeos_term_update "publishing central-auth bundle" "signed manifests"
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$ROOT/bundles/central-auth" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  echo "[populate-bundles] publishing standard bundle…"
+  ryeos_term_update "publishing standard bundle" "signed manifests"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STD" \
@@ -401,7 +411,7 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
-  echo "[populate-bundles] publishing web bundle…"
+  ryeos_term_update "publishing web bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
@@ -410,7 +420,7 @@ fi
 if [[ "$BUNDLE_SET" == "central-host" ]]; then
   # tv-tracker-authoring — source-only bundle (tool kind from core); ships the
   # operator context-doc author/read wrappers. No compiled binary of its own.
-  echo "[populate-bundles] publishing tv-tracker-authoring bundle…"
+  ryeos_term_update "publishing tv-tracker-authoring bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$TVTA" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
@@ -418,12 +428,12 @@ if [[ "$BUNDLE_SET" == "central-host" ]]; then
 fi
 
 if [[ "$BUNDLE_SET" == "full" ]]; then
-  echo "[populate-bundles] publishing browser bundle…"
+  ryeos_term_update "publishing browser bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 
-  echo "[populate-bundles] publishing ryeos-ui bundle…"
+  ryeos_term_update "publishing ryeos-ui bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$RYEOS_UI" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
@@ -431,10 +441,10 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  echo "[populate-bundles] publishing hosted-node bundle…"
+  ryeos_term_update "publishing hosted-node bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 fi
 
-echo "[populate-bundles] done"
+ryeos_term_end success "PUBLISH COMPLETE" "$BUNDLE_SET bundle set"
