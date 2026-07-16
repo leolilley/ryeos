@@ -287,11 +287,11 @@ config:
   start: act
   nodes:
     act:
-      action: {item_id: "tool:test/action"}
+      action: {item_id: "tool:test/action", ref_bindings: {}}
       assign: {candidate: "${result.value}"}
       next: {type: unconditional, to: after}
     after:
-      action: {item_id: "tool:test/successor"}
+      action: {item_id: "tool:test/successor", ref_bindings: {}}
 "#,
                 );
                 let prior = schema_3_checkpoint(
@@ -331,11 +331,11 @@ config:
       over: "${{state.items}}"
       as: item
       parallel: {parallel}
-      action: {{item_id: "tool:test/foreach", params: {{item: "${{item}}"}}}}
+      action: {{item_id: "tool:test/foreach", ref_bindings: {{}}, params: {{item: "${{item}}"}}}}
       collect: candidate_results
       next: {{type: unconditional, to: after}}
     after:
-      action: {{item_id: "tool:test/successor"}}
+      action: {{item_id: "tool:test/successor", ref_bindings: {{}}}}
 "#,
                 ));
                 let run_id = if parallel {
@@ -377,11 +377,11 @@ config:
   nodes:
     await_child:
       follow: true
-      action: {item_id: "directive:test/child"}
+      action: {item_id: "directive:test/child", ref_bindings: {}}
       assign: {candidate_child: "${result}"}
       next: {type: unconditional, to: after}
     after:
-      action: {item_id: "tool:test/successor"}
+      action: {item_id: "tool:test/successor", ref_bindings: {}}
 "#,
                 );
                 let run_id = "gr-follow-resume-authority";
@@ -432,11 +432,11 @@ config:
       over: "${state.jobs}"
       as: job
       parallel: true
-      action: {item_id: "directive:test/child", params: {job: "${job}"}}
+      action: {item_id: "directive:test/child", ref_bindings: {}, params: {job: "${job}"}}
       collect: candidate_children
       next: {type: unconditional, to: after}
     after:
-      action: {item_id: "tool:test/successor"}
+      action: {item_id: "tool:test/successor", ref_bindings: {}}
 "#,
                 );
                 let run_id = "gr-fanout-resume-authority";
@@ -771,7 +771,7 @@ config:
   start: increment
   nodes:
     increment:
-      action: {item_id: "tool:test/increment"}
+      action: {item_id: "tool:test/increment", ref_bindings: {}}
       assign: {count: "${state.count + 1}"}
       next: {type: unconditional, to: done}
     done:

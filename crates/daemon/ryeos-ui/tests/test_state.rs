@@ -1,9 +1,10 @@
 //! Shared test state builder for handler tests.
 //!
 //! Provides two modes:
-//! - `build_test_state()`: empty engine (fast, for error-path tests)
-//! - `build_test_state_with_bundles()`: full engine with workspace
-//!   bundles (slower, for happy-path tests; requires populated bundles)
+//! - `build_test_state()`: empty engine for paths that reject before item
+//!   resolution;
+//! - `build_test_state_with_live_bundles()`: full engine with signed workspace
+//!   bundles for paths that resolve or execute canonical item refs.
 
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::trust::TrustStore;
 
 /// Build a minimal AppState with an empty engine.
-/// Suitable for testing error paths (not found, wrong kind, etc.).
+/// Suitable only for paths that reject before canonical item resolution.
 #[allow(dead_code)]
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");

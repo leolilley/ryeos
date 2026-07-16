@@ -5544,7 +5544,7 @@ mod tests {
             db.delete_chain_projection("T-root", &wrong_root_lock)
                 .unwrap_err(),
         ] {
-            assert!(error.to_string().contains("different refs root"));
+            assert!(format!("{error:#}").contains("different refs root"));
         }
     }
 
@@ -5558,7 +5558,11 @@ mod tests {
 
         let signer = TestSigner::default();
         let created = db
-            .create_chain("T-root", test_root_snapshot("system/test"), &signer)
+            .create_chain(
+                "T-root",
+                test_root_snapshot("directive:system/test"),
+                &signer,
+            )
             .unwrap();
         let lock = crate::chain::ChainLock::acquire(db.refs_root(), "T-root").unwrap();
         db.recovery
@@ -5578,7 +5582,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
 
         let result = db.create_chain("T-root", snapshot, &signer).unwrap();
         assert_eq!(result.projection, ProjectionStatus::Current);
@@ -5614,12 +5618,12 @@ mod tests {
         let error = db
             .create_chain(
                 "T-root",
-                test_root_snapshot("system/test"),
+                test_root_snapshot("directive:system/test"),
                 &TestSigner::default(),
             )
             .unwrap_err();
 
-        assert!(error.to_string().contains("CAS root was replaced"));
+        assert!(format!("{error:#}").contains("CAS root was replaced"));
         assert!(!original.join("objects").exists());
     }
 
@@ -5630,7 +5634,7 @@ mod tests {
         let floor = "2099-01-01T00:00:10Z";
         let rolled_back = "2099-01-01T00:00:05Z";
 
-        let mut root = test_root_snapshot("system/test");
+        let mut root = test_root_snapshot("directive:system/test");
         root.created_at = floor.into();
         root.updated_at = floor.into();
         let created = db.create_chain("T-root", root, &signer).unwrap();
@@ -5704,7 +5708,7 @@ mod tests {
     fn authoritative_snapshot_read_uses_verified_head_and_cas() {
         let signer = TestSigner::default();
         let (_dir, db) = open_temp_trusted(&signer);
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
         db.create_chain("T-root", snapshot.clone(), &signer)
             .unwrap();
 
@@ -5733,7 +5737,7 @@ mod tests {
     fn projection_commit_is_idempotent_at_committed_cursor() {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
         let committed = db.create_chain("T-root", snapshot, &signer).unwrap();
         let cache = db.head_cache.lock().unwrap();
 
@@ -5751,7 +5755,7 @@ mod tests {
     fn projection_cursor_conflict_rolls_back_without_projecting_rows() {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
         db.create_chain("T-root", snapshot, &signer).unwrap();
         let conflicting_hash = "f".repeat(64);
         db.projection()
@@ -5798,7 +5802,7 @@ mod tests {
     fn committed_write_reports_stale_projection_without_losing_cas_result() {
         let (dir, db) = open_temp();
         let signer = TestSigner::default();
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
         let initial = db.create_chain("T-root", snapshot, &signer).unwrap();
         db.projection()
             .connection()
@@ -5875,7 +5879,7 @@ mod tests {
             StateDb::open_with_projection_repair_sink(dir.path(), sink.clone(), test_trust_store())
                 .unwrap();
         let signer = TestSigner::default();
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
         db.create_chain("T-root", snapshot, &signer).unwrap();
         db.projection()
             .connection()
@@ -5910,7 +5914,7 @@ mod tests {
 
         let projection_path = {
             let db = StateDb::open(&root, test_trust_store()).unwrap();
-            let snapshot = test_root_snapshot("system/test");
+            let snapshot = test_root_snapshot("directive:system/test");
             db.create_chain("T-root", snapshot, &signer).unwrap();
             db.projection().path().to_path_buf()
         };
@@ -6011,7 +6015,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
 
         let result = db.create_chain("T-root", snapshot, &signer).unwrap();
 
@@ -6037,7 +6041,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
 
         db.create_chain("T-root", snapshot, &signer).unwrap();
 
@@ -6050,7 +6054,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let root_snapshot = test_root_snapshot("system/test");
+        let root_snapshot = test_root_snapshot("directive:system/test");
 
         db.create_chain("T-root", root_snapshot, &signer).unwrap();
 
@@ -6079,7 +6083,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let root_snapshot = test_root_snapshot("system/test");
+        let root_snapshot = test_root_snapshot("directive:system/test");
 
         db.create_chain("T-root", root_snapshot, &signer).unwrap();
 
@@ -6107,7 +6111,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
 
         db.create_chain("T-root", snapshot, &signer).unwrap();
 
@@ -6137,7 +6141,7 @@ mod tests {
         let (_dir, db) = open_temp();
         let signer = TestSigner::default();
 
-        let snapshot = test_root_snapshot("system/test");
+        let snapshot = test_root_snapshot("directive:system/test");
 
         db.create_chain("T-root", snapshot, &signer).unwrap();
 
@@ -6313,7 +6317,11 @@ mod tests {
         let (_source_dir, source) = open_temp_trusted(&signer);
         let (_target_dir, target) = open_temp_trusted(&signer);
         source
-            .create_chain("T-root", test_root_snapshot("system/test"), &signer)
+            .create_chain(
+                "T-root",
+                test_root_snapshot("directive:system/test"),
+                &signer,
+            )
             .unwrap();
 
         let first = crate::sync::export_chain(

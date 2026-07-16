@@ -20,7 +20,7 @@ fn captured_policy() -> ryeos_state::objects::CapturedThreadHistoryPolicy {
     let hash = "a".repeat(64);
     ryeos_state::objects::CapturedThreadHistoryPolicy {
         retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
-        canonical_item_ref: "test/directive".to_string(),
+        canonical_item_ref: "directive:test/directive".to_string(),
         item_content_hash: hash.clone(),
         item_signer_fingerprint: Some(hash.clone()),
         item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
@@ -68,7 +68,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         thread_id: thread_id.to_string(),
         chain_root_id: chain_root_id.to_string(),
         kind: "directive".to_string(),
-        item_ref: "test/directive".to_string(),
+        item_ref: "directive:test/directive".to_string(),
         executor_ref: "test/executor".to_string(),
         launch_mode: "inline".to_string(),
         current_site_id: "site:test".to_string(),

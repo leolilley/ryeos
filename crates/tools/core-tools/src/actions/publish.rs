@@ -2,7 +2,9 @@
 //!
 //! Runs the full publish dance against a bundle source tree:
 //!
-//!   Phase 0:  Clean derived CAS artifacts (objects, refs, sidecars).
+//!   Phase 0:  Clean derived CAS artifacts (objects, stale refs, sidecars),
+//!             retaining a candidate executor-manifest authorization for
+//!             exact validation and byte reuse during the rebuild.
 //!   Phase 1:  Bootstrap-sign kind schemas + parser/handler descriptors.
 //!             Idempotent: skips files already validly signed.
 //!   Phase 2:  Rebuild CAS manifest (objects, refs, item_source sidecars)
@@ -526,13 +528,40 @@ fn collect_yaml_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// Cleans:
 ///   - `<bundle_source>/.ai/objects/`  (CAS blob store)
-///   - `<bundle_source>/.ai/refs/`     (manifest ref pointers)
+///   - `<bundle_source>/.ai/refs/`     (manifest ref pointers; the current
+///     executor manifest ref is retained only as a candidate for exact reuse)
 ///   - `**/*.item_source.json` under `.ai/bin/` (signed sidecars)
 ///
 /// Does NOT strip signatures or delete manifest.yaml — those are
 /// handled idempotently by their respective signing phases.
 fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
     let ai_dir = bundle_source.join(ryeos_engine::AI_DIR);
+    let bin_root = ai_dir.join("bin");
+
+    // Preserve the existing executor-manifest authorization only for a bundle
+    // that still owns a binary tree. The rebuild phase validates it against the
+    // exact newly derived manifest body and current signing key before reusing
+    // its bytes. A declarative bundle retains no stale binary authorization.
+    let manifest_ref_path = ai_dir.join("refs").join("bundles").join("manifest");
+    let preserved_manifest_ref = if bin_root.is_dir() {
+        match fs::symlink_metadata(&manifest_ref_path) {
+            Ok(metadata) if metadata.file_type().is_file() => Some(
+                fs::read(&manifest_ref_path)
+                    .with_context(|| format!("read {}", manifest_ref_path.display()))?,
+            ),
+            Ok(_) => bail!(
+                "executor manifest ref {} must be a regular file",
+                manifest_ref_path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect {}", manifest_ref_path.display()))
+            }
+        }
+    } else {
+        None
+    };
 
     // CAS objects
     let objects_dir = ai_dir.join("objects");
@@ -547,8 +576,16 @@ fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
         fs::remove_dir_all(&refs_dir).with_context(|| format!("remove {}", refs_dir.display()))?;
     }
 
+    if let Some(existing) = preserved_manifest_ref {
+        let parent = manifest_ref_path
+            .parent()
+            .expect("executor manifest ref has a parent");
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        fs::write(&manifest_ref_path, existing)
+            .with_context(|| format!("restore {}", manifest_ref_path.display()))?;
+    }
+
     // Per-triple MANIFEST.json + *.item_source.json sidecars
-    let bin_root = ai_dir.join("bin");
     if bin_root.is_dir() {
         clean_bin_sidecars(&bin_root)?;
     }

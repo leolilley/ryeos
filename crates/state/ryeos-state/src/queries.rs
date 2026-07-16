@@ -2171,7 +2171,7 @@ mod tests {
             thread_id,
             chain_root_id,
             "directive",
-            "system/test",
+            "directive:system/test",
             "directive-runtime",
         )
         .status(status)
@@ -2191,7 +2191,7 @@ mod tests {
         if thread_id == chain_root_id {
             builder = builder.captured_history_policy(Some(CapturedThreadHistoryPolicy {
                 retention: ThreadHistoryRetention::Durable,
-                canonical_item_ref: "system/test".to_string(),
+                canonical_item_ref: "directive:system/test".to_string(),
                 item_content_hash: "11".repeat(32),
                 item_signer_fingerprint: Some("22".repeat(32)),
                 item_trust_class: CapturedItemTrustClass::Trusted,
@@ -2786,7 +2786,7 @@ mod tests {
             Some("T-source"),
         );
         project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
-        project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
+        project_usage_event(&db, "chain-A", "T-successor", 3, 150, 15);
 
         let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
         assert_eq!(totals.thread_count, 1);
@@ -2813,7 +2813,7 @@ mod tests {
             Some("T-source"),
         );
         project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
-        project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
+        project_usage_event(&db, "chain-A", "T-successor", 3, 150, 15);
 
         let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
         assert_eq!(

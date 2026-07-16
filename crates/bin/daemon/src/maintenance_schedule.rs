@@ -606,6 +606,7 @@ mod tests {
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"
     timezone: UTC
@@ -771,7 +772,7 @@ schedules:
         let id = identity();
         let duplicated = DECL.replace(
             "schedules:\n",
-            "schedules:\n  - schedule_id: maintenance-gc\n    item_ref: \"service:maintenance/gc\"\n    schedule_type: cron\n    expression: \"0 0 3 * * *\"\n    timezone: UTC\n    misfire_policy: skip\n    overlap_policy: skip\n    lateness_grace_secs: 60\n    enabled: true\n    params: {}\n    capabilities:\n      - \"ryeos.execute.service.maintenance/gc\"\n",
+            "schedules:\n  - schedule_id: maintenance-gc\n    item_ref: \"service:maintenance/gc\"\n    ref_bindings: {}\n    schedule_type: cron\n    expression: \"0 0 3 * * *\"\n    timezone: UTC\n    misfire_policy: skip\n    overlap_policy: skip\n    lateness_grace_secs: 60\n    enabled: true\n    params: {}\n    capabilities:\n      - \"ryeos.execute.service.maintenance/gc\"\n",
         );
         write_declaration(&node_dir, &duplicated, &id);
         let trust = trust_store(&id);
@@ -828,6 +829,7 @@ schedules:
 schedules:
   - schedule_id: maintenance-gc
     item_ref: "service:maintenance/gc"
+    ref_bindings: {}
     schedule_type: cron
     expression: "0 0 4 * * *"
     timezone: UTC

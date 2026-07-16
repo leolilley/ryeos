@@ -244,13 +244,18 @@ mod integration_tests {
         use ryeos_engine::contracts::{
             EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
         };
+        let item_ref = match kind {
+            "directive" => "directive:test/item",
+            "graph" => "graph:test/graph",
+            other => panic!("unsupported continuable fixture kind: {other}"),
+        };
         store.mark_thread_running(id, None).unwrap();
         store
             .seed_launch_metadata(
                 id,
                 &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
                     kind: kind.into(),
-                    item_ref: "test/item".into(),
+                    item_ref: item_ref.into(),
                     ref_bindings: std::collections::BTreeMap::new(),
                     launch_mode: "inline".into(),
                     parameters: serde_json::json!({}),
@@ -280,7 +285,7 @@ mod integration_tests {
         let (_tmp, store) = setup_state_store();
         // Running parent with captured launch identity.
         store
-            .create_thread_for_test(&make_thread("P", "P", "graph", "test/graph", None))
+            .create_thread_for_test(&make_thread("P", "P", "graph", "graph:test/graph", None))
             .unwrap();
         seed_continuable(&store, "P", "graph");
 
@@ -290,13 +295,13 @@ mod integration_tests {
             .unwrap();
         // Child is a FRESH ROOT: its own chain root, no upstream braid.
         store
-            .create_thread_for_test(&make_thread("C", "C", "graph", "test/graph", None))
+            .create_thread_for_test(&make_thread("C", "C", "graph", "graph:test/graph", None))
             .unwrap();
         set_follow_child(&store, "P/gr-1/node-a/0", "C", "C");
         // Parent follow-resume successor: created (not launched), settles parent.
         store
             .create_follow_resume_successor(
-                &make_thread("S", "P", "graph", "test/graph", Some("P")),
+                &make_thread("S", "P", "graph", "graph:test/graph", Some("P")),
                 "P",
                 "P",
             )
@@ -332,7 +337,7 @@ mod integration_tests {
     fn follow_adopts_existing_successor_when_waiter_missing_it() {
         let (_tmp, store) = setup_state_store();
         store
-            .create_thread_for_test(&make_thread("P", "P", "graph", "test/graph", None))
+            .create_thread_for_test(&make_thread("P", "P", "graph", "graph:test/graph", None))
             .unwrap();
         seed_continuable(&store, "P", "graph");
         store.reserve_follow(&follow_seed("k")).unwrap();
@@ -341,7 +346,7 @@ mod integration_tests {
         // continued) but crashed before recording it on the waiter.
         store
             .create_follow_resume_successor(
-                &make_thread("S", "P", "graph", "test/graph", Some("P")),
+                &make_thread("S", "P", "graph", "graph:test/graph", Some("P")),
                 "P",
                 "P",
             )
@@ -367,7 +372,13 @@ mod integration_tests {
     fn state_store_can_create_root_thread() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-root-1", "T-root-1", "directive", "test/directive", None);
+        let thread = make_thread(
+            "T-root-1",
+            "T-root-1",
+            "directive",
+            "directive:test/directive",
+            None,
+        );
         let persisted = store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -380,7 +391,13 @@ mod integration_tests {
     fn state_store_can_mark_thread_running() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-running-1", "T-running-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-running-1",
+            "T-running-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -395,7 +412,13 @@ mod integration_tests {
     fn state_store_can_attach_process() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-proc-1", "T-proc-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-proc-1",
+            "T-proc-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -422,7 +445,13 @@ mod integration_tests {
     fn state_store_can_list_threads() {
         let (_tmpdir, store) = setup_state_store();
 
-        let root = make_thread("T-list-1", "T-list-1", "directive", "test/item", None);
+        let root = make_thread(
+            "T-list-1",
+            "T-list-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&root)
             .expect("create_thread 1 should succeed");
@@ -431,7 +460,7 @@ mod integration_tests {
             "T-list-2",
             "T-list-1",
             "tool",
-            "test/tool",
+            "tool:test/tool",
             Some("T-list-1"),
         );
         store
@@ -448,7 +477,13 @@ mod integration_tests {
     fn state_store_can_finalize_thread() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-final-1", "T-final-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-final-1",
+            "T-final-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -492,7 +527,13 @@ mod integration_tests {
     fn state_store_reads_back_structured_error_as_object() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-err-1", "T-err-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-err-1",
+            "T-err-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -537,7 +578,13 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         // Create root thread
-        let root = make_thread("T-edge-root", "T-edge-root", "directive", "test/item", None);
+        let root = make_thread(
+            "T-edge-root",
+            "T-edge-root",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&root)
             .expect("create root should succeed");
@@ -547,7 +594,7 @@ mod integration_tests {
             "T-edge-child",
             "T-edge-root",
             "tool",
-            "test/tool",
+            "tool:test/tool",
             Some("T-edge-root"),
         );
         store
@@ -568,7 +615,13 @@ mod integration_tests {
     fn artifact_derived_from_event() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-art-1", "T-art-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-art-1",
+            "T-art-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -603,7 +656,13 @@ mod integration_tests {
     fn artifact_derived_on_finalize() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-art-fin", "T-art-fin", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-art-fin",
+            "T-art-fin",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -647,7 +706,13 @@ mod integration_tests {
     fn continuation_sets_upstream_and_derives_edge() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-cont-1", "T-cont-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-cont-1",
+            "T-cont-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -656,7 +721,13 @@ mod integration_tests {
             .expect("mark_thread_running should succeed");
 
         // Create a successor via continuation
-        let successor = make_thread("T-cont-2", "T-cont-1", "directive", "test/item2", None);
+        let successor = make_thread(
+            "T-cont-2",
+            "T-cont-1",
+            "directive",
+            "directive:test/item2",
+            None,
+        );
         let events = store
             .create_continuation_for_test(&successor, "T-cont-1", "T-cont-1", Some("retry"))
             .expect("create_continuation should succeed");
@@ -703,7 +774,13 @@ mod integration_tests {
         // still advertises the successor.
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-done-1", "T-done-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-done-1",
+            "T-done-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -726,7 +803,13 @@ mod integration_tests {
             .expect("finalize_thread");
 
         // Braid a successor onto the completed turn.
-        let successor = make_thread("T-done-2", "T-done-1", "directive", "test/item", None);
+        let successor = make_thread(
+            "T-done-2",
+            "T-done-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_continuation_for_test(&successor, "T-done-1", "T-done-1", Some("follow-up"))
             .expect("create_continuation onto completed source");
@@ -769,7 +852,13 @@ mod integration_tests {
         // double-submit/race cannot mint sibling successors.
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-once-1", "T-once-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-once-1",
+            "T-once-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -791,12 +880,24 @@ mod integration_tests {
             )
             .expect("finalize_thread");
 
-        let first = make_thread("T-once-2", "T-once-1", "directive", "test/item", None);
+        let first = make_thread(
+            "T-once-2",
+            "T-once-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_continuation_for_test(&first, "T-once-1", "T-once-1", Some("first"))
             .expect("first continuation");
 
-        let dup = make_thread("T-once-3", "T-once-1", "directive", "test/item", None);
+        let dup = make_thread(
+            "T-once-3",
+            "T-once-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         let err = store
             .create_continuation_for_test(&dup, "T-once-1", "T-once-1", Some("second"))
             .expect_err("second continuation of the same source must be refused");
@@ -824,7 +925,13 @@ mod integration_tests {
         // must refuse it under the lock and mint no successor.
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-mc-done-1", "T-mc-done-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-mc-done-1",
+            "T-mc-done-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -846,7 +953,13 @@ mod integration_tests {
             )
             .expect("finalize_thread");
 
-        let successor = make_thread("T-mc-done-2", "T-mc-done-1", "directive", "test/item", None);
+        let successor = make_thread(
+            "T-mc-done-2",
+            "T-mc-done-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         let err = store
             .create_machine_continuation(&successor, "T-mc-done-1", "T-mc-done-1", Some("limit"))
             .expect_err("machine continuation must refuse a terminal source");
@@ -877,7 +990,13 @@ mod integration_tests {
         // the source RUNNING (not `continued`) so the runner fails terminal.
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-mc-run-1", "T-mc-run-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-mc-run-1",
+            "T-mc-run-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -886,7 +1005,13 @@ mod integration_tests {
             .expect("mark_thread_running");
         // Deliberately do NOT seed launch metadata.
 
-        let successor = make_thread("T-mc-run-2", "T-mc-run-1", "directive", "test/item", None);
+        let successor = make_thread(
+            "T-mc-run-2",
+            "T-mc-run-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         let err = store
             .create_machine_continuation(&successor, "T-mc-run-1", "T-mc-run-1", Some("limit"))
             .expect_err("machine continuation must require a captured ResumeContext");
@@ -918,7 +1043,7 @@ mod integration_tests {
     fn create_or_get_continuation_dedups_by_fingerprint() {
         use ryeos_app::state_store::ContinuationOutcome;
         let (_tmpdir, store) = setup_state_store();
-        let thread = make_thread("T-fp-1", "T-fp-1", "directive", "test/item", None);
+        let thread = make_thread("T-fp-1", "T-fp-1", "directive", "directive:test/item", None);
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -941,7 +1066,7 @@ mod integration_tests {
             .expect("finalize_thread");
 
         // First follow-up: creates the successor + persists fingerprint fp-A.
-        let succ = make_thread("T-fp-2", "T-fp-1", "directive", "test/item", None);
+        let succ = make_thread("T-fp-2", "T-fp-1", "directive", "directive:test/item", None);
         let outcome = store
             .create_or_get_continuation_for_test(
                 &succ,
@@ -977,7 +1102,7 @@ mod integration_tests {
 
         // Duplicate submit (same fingerprint, even a different candidate id) must
         // return the EXISTING successor and mint no sibling.
-        let dup = make_thread("T-fp-3", "T-fp-1", "directive", "test/item", None);
+        let dup = make_thread("T-fp-3", "T-fp-1", "directive", "directive:test/item", None);
         let outcome = store
             .create_or_get_continuation_for_test(
                 &dup,
@@ -1002,7 +1127,7 @@ mod integration_tests {
         );
 
         // A DIFFERENT fingerprint onto the already-continued source is a conflict.
-        let conflicting = make_thread("T-fp-4", "T-fp-1", "directive", "test/item", None);
+        let conflicting = make_thread("T-fp-4", "T-fp-1", "directive", "directive:test/item", None);
         let outcome = store
             .create_or_get_continuation_for_test(
                 &conflicting,
@@ -1038,7 +1163,7 @@ mod integration_tests {
 
         let resume_ctx = || ResumeContext {
             kind: "directive".into(),
-            item_ref: "test/item".into(),
+            item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({}),
@@ -1073,7 +1198,7 @@ mod integration_tests {
                 .expect("seed launch metadata");
         };
 
-        let root = make_thread("D0", "D0", "directive", "test/item", None);
+        let root = make_thread("D0", "D0", "directive", "directive:test/item", None);
         store.create_thread_for_test(&root).expect("create root");
         make_continuable("D0");
 
@@ -1081,7 +1206,7 @@ mod integration_tests {
         let mut source = "D0".to_string();
         for i in 1..=max {
             let id = format!("D{i}");
-            let succ = make_thread(&id, "D0", "directive", "test/item", Some(&source));
+            let succ = make_thread(&id, "D0", "directive", "directive:test/item", Some(&source));
             store
                 .create_machine_continuation(&succ, &source, "D0", Some("turn_limit"))
                 .unwrap_or_else(|e| panic!("machine link #{i} must be allowed: {e}"));
@@ -1092,7 +1217,13 @@ mod integration_tests {
         // The next machine continuation (link #max+1) is refused — the chain is at
         // the cap. No successor is persisted; the source stays running so the
         // runtime fails terminal.
-        let over = make_thread("D-over", "D0", "directive", "test/item", Some(&source));
+        let over = make_thread(
+            "D-over",
+            "D0",
+            "directive",
+            "directive:test/item",
+            Some(&source),
+        );
         let err = store
             .create_machine_continuation(&over, &source, "D0", Some("turn_limit"))
             .expect_err("continuation past the cap must be refused");
@@ -1113,7 +1244,13 @@ mod integration_tests {
         // A follow-resume successor IS allowed at the machine-depth cap: it is
         // structural progress, not an autonomous segment-cut, so the cap does not
         // apply. It is created (not launched) and settles the source `continued`.
-        let follow_succ = make_thread("D-follow", "D0", "directive", "test/item", Some(&source));
+        let follow_succ = make_thread(
+            "D-follow",
+            "D0",
+            "directive",
+            "directive:test/item",
+            Some(&source),
+        );
         store
             .create_follow_resume_successor(&follow_succ, &source, "D0")
             .expect("follow-resume must be allowed at the machine cap");
@@ -1143,7 +1280,7 @@ mod integration_tests {
 
         let resume_ctx = || ResumeContext {
             kind: "directive".into(),
-            item_ref: "test/item".into(),
+            item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "inline".into(),
             parameters: serde_json::json!({}),
@@ -1192,13 +1329,19 @@ mod integration_tests {
         for spoof in ["operator_follow_up", "graph_follow_resume"] {
             let src = format!("M-{spoof}");
             store
-                .create_thread_for_test(&make_thread(&src, &src, "directive", "test/item", None))
+                .create_thread_for_test(&make_thread(
+                    &src,
+                    &src,
+                    "directive",
+                    "directive:test/item",
+                    None,
+                ))
                 .expect("create root");
             make_continuable(&src);
             let succ = format!("M-{spoof}-s");
             store
                 .create_machine_continuation(
-                    &make_thread(&succ, &src, "directive", "test/item", Some(&src)),
+                    &make_thread(&succ, &src, "directive", "directive:test/item", Some(&src)),
                     &src,
                     &src,
                     Some(spoof),
@@ -1217,14 +1360,20 @@ mod integration_tests {
                 "F-root",
                 "F-root",
                 "directive",
-                "test/item",
+                "directive:test/item",
                 None,
             ))
             .expect("create root");
         make_continuable("F-root");
         store
             .create_follow_resume_successor(
-                &make_thread("F-succ", "F-root", "directive", "test/item", Some("F-root")),
+                &make_thread(
+                    "F-succ",
+                    "F-root",
+                    "directive",
+                    "directive:test/item",
+                    Some("F-root"),
+                ),
                 "F-root",
                 "F-root",
             )
@@ -1285,7 +1434,13 @@ mod integration_tests {
         assert!(
             store
                 .create_follow_resume_successor(
-                    &make_thread("F-dup", "F-root", "directive", "test/item", Some("F-root")),
+                    &make_thread(
+                        "F-dup",
+                        "F-root",
+                        "directive",
+                        "directive:test/item",
+                        Some("F-root")
+                    ),
                     "F-root",
                     "F-root",
                 )
@@ -1295,12 +1450,24 @@ mod integration_tests {
 
         // Source must be running.
         store
-            .create_thread_for_test(&make_thread("R-cr", "R-cr", "directive", "test/item", None))
+            .create_thread_for_test(&make_thread(
+                "R-cr",
+                "R-cr",
+                "directive",
+                "directive:test/item",
+                None,
+            ))
             .expect("create");
         assert!(
             store
                 .create_machine_continuation(
-                    &make_thread("R-cr-s", "R-cr", "directive", "test/item", Some("R-cr")),
+                    &make_thread(
+                        "R-cr-s",
+                        "R-cr",
+                        "directive",
+                        "directive:test/item",
+                        Some("R-cr")
+                    ),
                     "R-cr",
                     "R-cr",
                     Some("turn_limit"),
@@ -1311,7 +1478,13 @@ mod integration_tests {
 
         // Missing resume context fails BEFORE the source settles.
         store
-            .create_thread_for_test(&make_thread("R-nr", "R-nr", "directive", "test/item", None))
+            .create_thread_for_test(&make_thread(
+                "R-nr",
+                "R-nr",
+                "directive",
+                "directive:test/item",
+                None,
+            ))
             .expect("create");
         store
             .mark_thread_running("R-nr", None)
@@ -1319,7 +1492,13 @@ mod integration_tests {
         assert!(
             store
                 .create_machine_continuation(
-                    &make_thread("R-nr-s", "R-nr", "directive", "test/item", Some("R-nr")),
+                    &make_thread(
+                        "R-nr-s",
+                        "R-nr",
+                        "directive",
+                        "directive:test/item",
+                        Some("R-nr")
+                    ),
                     "R-nr",
                     "R-nr",
                     Some("turn_limit"),
@@ -1340,7 +1519,7 @@ mod integration_tests {
                 "G-root",
                 "G-root",
                 "directive",
-                "test/item",
+                "directive:test/item",
                 None,
             ))
             .expect("create");
@@ -1353,7 +1532,7 @@ mod integration_tests {
                         "G-bad-chain",
                         "OTHER",
                         "directive",
-                        "test/item",
+                        "directive:test/item",
                         Some("G-root")
                     ),
                     "G-root",
@@ -1375,7 +1554,7 @@ mod integration_tests {
                         "G-bad-up",
                         "G-root",
                         "directive",
-                        "test/item",
+                        "directive:test/item",
                         Some("ELSEWHERE")
                     ),
                     "G-root",
@@ -1396,7 +1575,13 @@ mod integration_tests {
     fn rebuild_recovers_edges_from_cas() {
         let (_tmpdir, store) = setup_state_store();
 
-        let root = make_thread("T-reb-root", "T-reb-root", "directive", "test/item", None);
+        let root = make_thread(
+            "T-reb-root",
+            "T-reb-root",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&root)
             .expect("create root should succeed");
@@ -1405,7 +1590,7 @@ mod integration_tests {
             "T-reb-child",
             "T-reb-root",
             "tool",
-            "test/tool",
+            "tool:test/tool",
             Some("T-reb-root"),
         );
         store
@@ -1463,7 +1648,13 @@ mod integration_tests {
     fn rebuild_recovers_artifacts_from_cas() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-reb-art", "T-reb-art", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-reb-art",
+            "T-reb-art",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -1537,7 +1728,13 @@ mod integration_tests {
     fn named_chain_repair_recovers_new_state() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-catchup", "T-catchup", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-catchup",
+            "T-catchup",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread should succeed");
@@ -1591,14 +1788,20 @@ mod integration_tests {
         let (_tmpdir, store) = setup_state_store();
 
         // 1. Create root thread
-        let root = make_thread("T-e2e", "T-e2e", "directive", "test/e2e", None);
+        let root = make_thread("T-e2e", "T-e2e", "directive", "directive:test/e2e", None);
         store.create_thread_for_test(&root).expect("create root");
         store
             .mark_thread_running("T-e2e", None)
             .expect("mark running");
 
         // 2. Spawn child thread
-        let child = make_thread("T-e2e-child", "T-e2e", "tool", "test/child", Some("T-e2e"));
+        let child = make_thread(
+            "T-e2e-child",
+            "T-e2e",
+            "tool",
+            "tool:test/child",
+            Some("T-e2e"),
+        );
         store.create_thread_for_test(&child).expect("create child");
 
         // 3. Finalize root with artifacts
@@ -1710,7 +1913,7 @@ mod integration_tests {
             "T-skip-attach",
             "T-skip-attach",
             "directive",
-            "test/item",
+            "directive:test/item",
             None,
         );
         store
@@ -1773,7 +1976,13 @@ mod integration_tests {
     fn finalize_as_cancelled_works() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-cancel-1", "T-cancel-1", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-cancel-1",
+            "T-cancel-1",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -1818,7 +2027,13 @@ mod integration_tests {
     fn finalize_as_cancelled_rejects_already_terminal() {
         let (_tmpdir, store) = setup_state_store();
 
-        let thread = make_thread("T-double", "T-double", "directive", "test/item", None);
+        let thread = make_thread(
+            "T-double",
+            "T-double",
+            "directive",
+            "directive:test/item",
+            None,
+        );
         store
             .create_thread_for_test(&thread)
             .expect("create_thread");
@@ -1866,7 +2081,7 @@ mod integration_tests {
             "T-created-cancel",
             "T-created-cancel",
             "directive",
-            "test/item",
+            "directive:test/item",
             None,
         );
         store

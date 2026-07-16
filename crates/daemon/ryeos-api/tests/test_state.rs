@@ -8,10 +8,36 @@
 use std::sync::Arc;
 
 use ryeos_app::state::AppState;
+use ryeos_engine::kind_registry::KindRegistry;
 
 /// Build a minimal AppState with an empty engine.
-/// Suitable for testing error paths (not found, wrong kind, etc.).
+/// Suitable for error paths that complete before item resolution, such as a
+/// malformed ref, a kind mismatch, or an explicitly unknown kind. Tests that
+/// need to distinguish a known-but-missing item use
+/// [`build_test_state_with_bundles`].
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
+    let engine = Arc::new(ryeos_engine::engine::Engine::new(
+        KindRegistry::empty(),
+        ryeos_engine::parsers::ParserDispatcher::new(
+            ryeos_engine::parsers::ParserRegistry::empty(),
+            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+        ),
+        Vec::new(),
+    ));
+    build_test_state_with_engine(engine)
+}
+
+/// Build an AppState backed by the live workspace bundles.
+/// Suitable for resolution paths that must distinguish a missing item from an
+/// unknown kind using the real kind, parser, and composer registries.
+#[allow(dead_code)]
+pub fn build_test_state_with_bundles() -> (tempfile::TempDir, AppState) {
+    build_test_state_with_engine(Arc::new(build_live_bundle_engine()))
+}
+
+fn build_test_state_with_engine(
+    engine: Arc<ryeos_engine::engine::Engine>,
+) -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
     let tmpdir = tempfile::TempDir::new().unwrap();
     let runtime_state_dir = tmpdir.path().join(".ai").join("state");
@@ -49,14 +75,6 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         )
         .unwrap(),
     );
-    let engine = Arc::new(ryeos_engine::engine::Engine::new(
-        ryeos_engine::kind_registry::KindRegistry::empty(),
-        ryeos_engine::parsers::ParserDispatcher::new(
-            ryeos_engine::parsers::ParserRegistry::empty(),
-            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-        ),
-        Vec::new(),
-    ));
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
@@ -90,6 +108,37 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         write_barrier,
         event_streams,
     )
+}
+
+fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
+    let trust_store = ryeos_engine::test_support::live_trust_store();
+    let core_bundle = ryeos_engine::test_support::core_bundle_root();
+    let standard_bundle = ryeos_engine::test_support::standard_bundle_root();
+    let ryeos_ui_bundle = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
+
+    let kinds = KindRegistry::load_base(
+        &[
+            core_bundle.join(".ai/node/engine/kinds"),
+            standard_bundle.join(".ai/node/engine/kinds"),
+        ],
+        &trust_store,
+    )
+    .expect("load live kind registry");
+
+    let bundle_roots = vec![core_bundle, standard_bundle, ryeos_ui_bundle];
+    let (parser_tools, _) =
+        ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
+            .expect("load live parser tools");
+    let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
+    let parser_dispatcher =
+        ryeos_engine::parsers::ParserDispatcher::new(parser_tools, Arc::clone(&native_handlers));
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
+        .expect("derive live composers");
+
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
+        .with_composers(composers)
 }
 
 #[allow(dead_code)]

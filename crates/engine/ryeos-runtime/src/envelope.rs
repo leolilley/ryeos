@@ -23,9 +23,19 @@ struct ManagedNativeEnvelope {
     cost: serde_json::Value,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(transparent)]
 struct RequiredNullableString(Option<String>);
+
+impl<'de> serde::Deserialize<'de> for RequiredNullableString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

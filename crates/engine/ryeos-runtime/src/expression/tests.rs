@@ -160,9 +160,12 @@ fn missing_null_and_falsy_values_have_distinct_coalescing_semantics() {
         evaluate_source("state.absent.child ?? 4", &context),
         json!(4)
     );
-    assert_eq!(evaluate_source("state.null.child ?? 5", &context), json!(5));
     assert_eq!(
-        evaluate_source("state.false ?? true", &context),
+        evaluate_source("state['null'].child ?? 5", &context),
+        json!(5)
+    );
+    assert_eq!(
+        evaluate_source("state['false'] ?? true", &context),
         json!(false)
     );
     assert_eq!(evaluate_source("state.zero ?? 8", &context), json!(0));
@@ -349,7 +352,7 @@ fn whole_expression_templates_preserve_native_json() {
 
 #[test]
 fn embedded_templates_are_scalar_and_one_pass() {
-    let context = json!({"state": {"count": 2, "generated": "${state.count}"}});
+    let context = json!({"state": {"count": 2, "generated": "${state.count}", "items": [1, 2]}});
     assert_eq!(
         render(
             "round ${state.count + 1}; enabled=${true}; none=${null}",

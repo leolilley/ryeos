@@ -1248,9 +1248,7 @@ mod tests {
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
                 "integrity": format!("sha256:{content_blob_hash}"),
-                "signature_info": {
-                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
-                },
+                "signature_info": null,
                 "mode": 0o755,
             });
             let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
@@ -1264,12 +1262,18 @@ mod tests {
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
                 let signed_ref = std::fs::read_to_string(&ref_path).unwrap();
-                let fingerprint = lillux::signature::compute_fingerprint(&self.key.verifying_key());
+                let trust_store = ryeos_engine::trust::TrustStore::load(
+                    None,
+                    &self.system.join(ryeos_engine::AI_DIR).join("config"),
+                )
+                .unwrap();
                 let verified_ref =
                     ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
                         &signed_ref,
                         |candidate| {
-                            (candidate == fingerprint.as_str()).then(|| self.key.verifying_key())
+                            trust_store
+                                .get(candidate)
+                                .map(|signer| signer.verifying_key)
                         },
                         ryeos_engine::resolution::TrustClass::TrustedBundle,
                     )

@@ -4787,7 +4787,9 @@ mod tests {
 
     #[test]
     fn non_fanout_waiter_requires_exactly_one_child_before_collection() {
-        for expected_children in [0, 2, u32::MAX] {
+        let error = validate_follow_waiter_cardinality(false, 0).unwrap_err();
+        assert!(error.to_string().contains("at least one child"));
+        for expected_children in [2, u32::MAX] {
             let error = validate_follow_waiter_cardinality(false, expected_children).unwrap_err();
             assert!(error.to_string().contains("exactly one child"));
         }
@@ -4974,6 +4976,7 @@ mod tests {
             "content_blob_hash": blob_hash,
             "integrity": format!("sha256:{blob_hash}"),
             "mode": 0o755,
+            "signature_info": null,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
         let manifest = serde_json::json!({

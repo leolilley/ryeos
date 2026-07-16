@@ -682,19 +682,19 @@ __LIMITS__
         let cases = [
             (
                 "  max_steps: 0",
-                "config.max_steps must be between 1 and 10000",
+                "config.max_steps must be between 1 and 500",
             ),
             (
-                "  max_steps: 10001",
-                "config.max_steps must be between 1 and 10000",
+                "  max_steps: 501",
+                "config.max_steps must be between 1 and 500",
             ),
             (
                 "  segment_steps: 0",
-                "config.segment_steps must be between 1 and 10000",
+                "config.segment_steps must be between 1 and 500",
             ),
             (
-                "  max_steps: 10000\n  segment_steps: 10001",
-                "config.segment_steps must be between 1 and 10000",
+                "  max_steps: 500\n  segment_steps: 501",
+                "config.segment_steps must be between 1 and 500",
             ),
             (
                 "  max_steps: 10\n  segment_steps: 11",
@@ -719,8 +719,8 @@ version: "1.0.0"
 category: test
 config:
   start: done
-  max_steps: 10000
-  segment_steps: 10000
+  max_steps: 500
+  segment_steps: 500
   nodes:
     done: {node_type: return}
 "#;
@@ -1206,7 +1206,11 @@ config:
             ),
         ];
         for (from, to, expected) in cases {
-            let graph = make_graph(&base.replacen(from, to, 1));
+            let mut yaml = base.replacen(from, to, 1);
+            if expected == "must declare 'as'" {
+                yaml = yaml.replace("${item}", "1");
+            }
+            let graph = make_graph(&yaml);
             let errors = validate_graph(&graph).errors;
             assert!(
                 errors.iter().any(|e| e.contains(expected)),

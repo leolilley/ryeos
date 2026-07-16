@@ -2214,26 +2214,23 @@ mod tests {
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
 
-        let activity_fetches: Vec<String> = core
-            .effects_for_hint("activity")
+        let hint_fetches: Vec<String> = core
+            .effects_for_hints(&["activity".to_string(), "thread".to_string()])
             .iter()
             .filter_map(|effect| match &effect.kind {
                 RyeOsEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(activity_fetches, vec!["service:ui/ryeos-ui/threads/list"]);
-
-        let thread_fetches: Vec<String> = core
-            .effects_for_hint("thread")
-            .iter()
-            .filter_map(|effect| match &effect.kind {
-                RyeOsEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(thread_fetches.contains(&"service:ui/ryeos-ui/threads/list".to_string()));
-        assert!(thread_fetches.contains(&"service:node/status".to_string()));
+        assert_eq!(
+            hint_fetches
+                .iter()
+                .filter(|source_ref| *source_ref == "service:ui/ryeos-ui/threads/list")
+                .count(),
+            1,
+            "one coalescing window deduplicates views matching multiple hints"
+        );
+        assert!(hint_fetches.contains(&"service:node/status".to_string()));
     }
 
     #[test]

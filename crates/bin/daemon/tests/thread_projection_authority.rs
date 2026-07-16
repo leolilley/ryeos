@@ -108,11 +108,16 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
 }
 
 fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
+    let item_ref = match kind {
+        "directive_run" => "directive:test/item",
+        "graph_run" => "graph:test/item",
+        other => panic!("unsupported fixture kind: {other}"),
+    };
     ThreadCreateParams {
         thread_id: thread_id.to_string(),
         chain_root_id: thread_id.to_string(),
         kind: kind.to_string(),
-        item_ref: "test/item".to_string(),
+        item_ref: item_ref.to_string(),
         executor_ref: "test/executor".to_string(),
         launch_mode: "inline".to_string(),
         current_site_id: "site:test".to_string(),
@@ -122,7 +127,7 @@ fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
         project_root: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
-        captured_history_policy: Some(captured_policy("test/item")),
+        captured_history_policy: Some(captured_policy(item_ref)),
     }
 }
 

@@ -109,12 +109,15 @@ mod tests {
     #[test]
     fn aggregate_cache_size_is_bounded() {
         let cache = NodeCache::new("test-graph");
-        let value = Value::String("x".repeat(700 * 1024));
-        for index in 0..8 {
+        // Each entry must first fit the ordinary per-value evaluation fuel
+        // budget. Enough individually valid entries must still be rejected
+        // once their combined cache shape exceeds the result-byte ceiling.
+        let value = Value::String("x".repeat(128 * 1024));
+        for index in 0..40 {
             cache.store(&format!("key-{index}"), &value);
         }
 
         assert!(cache.lookup("key-0").is_some());
-        assert!(cache.lookup("key-7").is_none());
+        assert!(cache.lookup("key-39").is_none());
     }
 }

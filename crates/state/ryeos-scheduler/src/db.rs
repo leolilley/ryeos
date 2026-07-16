@@ -528,6 +528,19 @@ impl SchedulerFireHistoryDiscardReport {
 
 impl SchedulerDb {
     pub fn open(path: &Path) -> Result<Self> {
+        // `:memory:` is SQLite's process-local database identity, not a
+        // filesystem pathname. Keep the fresh-projection semantics of
+        // `open` while bypassing pathname ownership checks that cannot apply.
+        if path == Path::new(":memory:") {
+            let conn = Connection::open_in_memory()
+                .context("failed to open fresh in-memory scheduler db")?;
+            let spec = scheduler_schema_spec();
+            prepare_owned_schema(&conn, &spec, SCHEMA_SQL, path)?;
+            return Ok(Self {
+                inner: std::sync::Mutex::new(conn),
+                outbox_drain: std::sync::Mutex::new(()),
+            });
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create scheduler db dir {}", parent.display())
@@ -2388,7 +2401,7 @@ mod tests {
         let error = db.upsert_fire(&fire).unwrap_err();
         assert!(error
             .to_string()
-            .contains("signer_fingerprint must not be empty"));
+            .contains("signer_fingerprint must be lowercase SHA-256 hex"));
         assert!(db.get_fire("sched@1000").unwrap().is_none());
     }
 
@@ -2404,9 +2417,11 @@ mod tests {
         let fire = make_fire("sched", 1000, "dispatched");
         db.upsert_fire(&fire).unwrap();
 
+        let completed_at = fire.fired_at.map(|fired_at| fired_at + 1);
         let updated = FireRecord {
             status: "completed".to_string(),
             outcome: Some("success".to_string()),
+            completed_at,
             ..fire
         };
         db.upsert_fire(&updated).unwrap();
@@ -2438,6 +2453,7 @@ mod tests {
     fn rebuild_cursors_for_specs_uses_latest_scheduled_boundary() {
         let db = test_db();
         let spec = make_spec("sched");
+        let expected_spec_hash = spec.spec_hash.clone();
         db.upsert_spec(&spec).unwrap();
         db.upsert_fire(&make_fire("sched", 61_000, "completed"))
             .unwrap();
@@ -2447,7 +2463,7 @@ mod tests {
         db.rebuild_cursors_for_specs(&[spec], 122_000).unwrap();
         let cursor = db.get_cursor("sched").unwrap().unwrap();
 
-        assert_eq!(cursor.spec_hash, "abc123");
+        assert_eq!(cursor.spec_hash, expected_spec_hash);
         assert_eq!(cursor.last_scheduled_at, Some(121_000));
         assert_eq!(cursor.next_fire_at, Some(181_000));
         assert_eq!(cursor.last_evaluated_at, Some(122_000));
@@ -2594,18 +2610,13 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_fire_succeeds_for_dispatched_no_thread() {
+    fn dispatched_fire_without_deterministic_thread_is_rejected() {
         let db = test_db();
-        // Insert a fire with dispatched status and no thread_id
         let mut fire = make_fire("sched", 1000, "dispatched");
         fire.thread_id = None;
-        db.upsert_fire(&fire).unwrap();
-
-        let reclaimed = db.reclaim_fire("sched@1000").unwrap();
-        assert!(
-            reclaimed,
-            "dispatched fire with no thread should be reclaimable"
-        );
+        let error = db.upsert_fire(&fire).unwrap_err();
+        assert!(format!("{error:#}")
+            .contains("dispatched scheduler fire must have its deterministic thread_id"));
     }
 
     #[test]
@@ -2614,16 +2625,17 @@ mod tests {
         let fire = make_fire("sched", 1000, "dispatched");
         db.upsert_fire(&fire).unwrap();
 
-        // Thread existence is checked by the caller (reconciler), not by reclaim_fire.
-        // reclaim_fire clears the old execution id so redispatch mints the current
-        // canonical thread id for this fire.
+        // Thread existence is checked by the caller (reconciler). Reclaim is
+        // only an eligibility check and never rewrites immutable dispatch
+        // identity.
+        let thread_id = fire.thread_id.clone();
         let reclaimed = db.reclaim_fire("sched@1000").unwrap();
         assert!(
             reclaimed,
             "dispatched fire should be reclaimable even with thread_id set"
         );
         let reclaimed_fire = db.get_fire("sched@1000").unwrap().unwrap();
-        assert_eq!(reclaimed_fire.thread_id, None);
+        assert_eq!(reclaimed_fire.thread_id, thread_id);
     }
 
     #[test]
@@ -2660,6 +2672,7 @@ mod tests {
         // Create a completed fire (should not show up even if old)
         let mut done = make_fire("sched", 3000, "completed");
         done.fired_at = Some(lillux::time::timestamp_millis() - 120_000);
+        done.completed_at = done.fired_at.map(|fired_at| fired_at + 1);
         db.upsert_fire(&done).unwrap();
 
         let stale = db.find_stale_dispatched_fires(30).unwrap();

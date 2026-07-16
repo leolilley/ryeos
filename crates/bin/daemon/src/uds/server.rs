@@ -678,9 +678,22 @@ struct RuntimeFinalizeParams {
     warnings: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(transparent)]
 struct RequiredNullable<T>(Option<T>);
+
+impl<'de, T> serde::Deserialize<'de> for RequiredNullable<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1517,7 +1530,7 @@ mod tests {
             let hash = "a".repeat(64);
             ryeos_state::objects::CapturedThreadHistoryPolicy {
                 retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
-                canonical_item_ref: "test/directive".to_string(),
+                canonical_item_ref: "directive:test/directive".to_string(),
                 item_content_hash: hash.clone(),
                 item_signer_fingerprint: Some(hash.clone()),
                 item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
@@ -1532,7 +1545,7 @@ mod tests {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
             kind: "system_task".to_string(),
-            item_ref: "test/directive".to_string(),
+            item_ref: "directive:test/directive".to_string(),
             executor_ref: "test/executor".to_string(),
             launch_mode: "inline".to_string(),
             current_site_id: "site:test".to_string(),
@@ -2016,7 +2029,7 @@ mod tests {
             let hash = "a".repeat(64);
             ryeos_state::objects::CapturedThreadHistoryPolicy {
                 retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
-                canonical_item_ref: "test/graph".to_string(),
+                canonical_item_ref: "graph:test/graph".to_string(),
                 item_content_hash: hash.clone(),
                 item_signer_fingerprint: Some(hash.clone()),
                 item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
@@ -2031,7 +2044,7 @@ mod tests {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
             kind: "graph".to_string(),
-            item_ref: "test/graph".to_string(),
+            item_ref: "graph:test/graph".to_string(),
             executor_ref: "test/executor".to_string(),
             launch_mode: "detached".to_string(),
             current_site_id: "site:test".to_string(),
@@ -2064,7 +2077,7 @@ mod tests {
                 "P",
                 &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
                     kind: "graph".into(),
-                    item_ref: "test/graph".into(),
+                    item_ref: "graph:test/graph".into(),
                     ref_bindings: std::collections::BTreeMap::new(),
                     launch_mode: "detached".into(),
                     parameters: json!({}),
@@ -4507,7 +4520,7 @@ mod tests {
                     thread_id: "T-succ".to_string(),
                     chain_root_id: "T-pred".to_string(),
                     kind: "system_task".to_string(),
-                    item_ref: "test/directive".to_string(),
+                    item_ref: "directive:test/directive".to_string(),
                     executor_ref: "test/executor".to_string(),
                     launch_mode: "inline".to_string(),
                     current_site_id: "site:test".to_string(),

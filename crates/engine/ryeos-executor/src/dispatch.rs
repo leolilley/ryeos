@@ -4403,7 +4403,8 @@ runtime_authority:
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
             .unwrap_err();
         assert!(
-            err.to_string().contains("no signed bundle manifest"),
+            err.to_string()
+                .contains("required signed bundle manifest is missing"),
             "got: {err}"
         );
     }

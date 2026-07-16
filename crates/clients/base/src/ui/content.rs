@@ -725,6 +725,19 @@ pub fn table_hierarchy_rows(
 
     // This local DFS keeps its immutable graph inputs and two accumulators
     // explicit; packaging them would obscure which state recursion mutates.
+    fn mark_hidden_descendants(
+        index: usize,
+        children: &[Vec<usize>],
+        visited: &mut BTreeSet<usize>,
+    ) {
+        if !visited.insert(index) {
+            return;
+        }
+        for child in children[index].iter().copied() {
+            mark_hidden_descendants(child, children, visited);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn visit(
         index: usize,
@@ -750,6 +763,9 @@ pub fn table_hierarchy_rows(
             collapsed,
         });
         if collapsed {
+            for child in children[index].iter().copied() {
+                mark_hidden_descendants(child, children, visited);
+            }
             return;
         }
         let mut next_ancestors = ancestors.to_vec();

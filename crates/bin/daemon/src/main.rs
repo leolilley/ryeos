@@ -2129,10 +2129,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn graceful_mode_uses_declared_grace() {
+    fn graceful_mode_is_capped_by_node_policy() {
         assert_eq!(
             resolve_shutdown_action(Some(CancellationMode::Graceful { grace_secs: 11 })),
-            ShutdownAction::Graceful(Duration::from_secs(11))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
+            ))
         );
     }
 

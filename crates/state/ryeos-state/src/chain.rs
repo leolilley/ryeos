@@ -2436,12 +2436,12 @@ mod tests {
             thread_id,
             thread_id,
             "directive",
-            "system/test",
+            "directive:system/test",
             "directive-runtime",
         )
         .captured_history_policy(Some(CapturedThreadHistoryPolicy {
             retention: ThreadHistoryRetention::Durable,
-            canonical_item_ref: "system/test".into(),
+            canonical_item_ref: "directive:system/test".into(),
             item_content_hash: hash.clone(),
             item_signer_fingerprint: Some(hash.clone()),
             item_trust_class: CapturedItemTrustClass::Trusted,

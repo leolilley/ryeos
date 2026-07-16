@@ -5861,7 +5861,9 @@ mod tests {
         // not silently degrade to None.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
-        let payload = serde_json::json!({ "schema_version": 999 }).to_string();
+        let mut payload = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
+        payload["schema_version"] = serde_json::json!(999);
+        let payload = serde_json::to_string(&payload).unwrap();
         db.conn
             .execute(
                 "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4

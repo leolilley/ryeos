@@ -1279,7 +1279,7 @@ mod tests {
         let backend = temp.path().join("bwrap");
         std::fs::write(
             &backend,
-            b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 'bubblewrap 0.11.2' ;;\n  --help) echo '--bind-fd --ro-bind-fd --argv0' ;;\n  *) exit 2 ;;\nesac\n",
+            b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 'bubblewrap 0.11.2' ;;\n  --help) echo '--args --bind-fd --cap-drop --chdir --clearenv --dev-bind --die-with-parent --json-status-fd --new-session --ro-bind-fd --tmpfs --unshare-all --argv0' ;;\n  *) exit 2 ;;\nesac\n",
         )
         .unwrap();
         std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
