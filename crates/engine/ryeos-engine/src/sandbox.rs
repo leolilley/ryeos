@@ -1475,9 +1475,9 @@ impl SandboxRuntime {
             )));
         }
         validate_namespace_destination("command", &command_path)?;
-        let status = lillux::bubblewrap_status_pipe().map_err(|reason| {
+        let status = lillux::supervised_launcher_status_pipe().map_err(|reason| {
             refused(format!(
-                "Bubblewrap process supervision cannot be initialized: {reason}"
+                "supervised launcher process tracking cannot be initialized: {reason}"
             ))
         })?;
         let status_fd = status.writer_fd().to_string();
@@ -2688,89 +2688,22 @@ fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> Result<boo
 /// file. The host process command line then contains only `--args <fd>`;
 /// target arguments and `--setenv` values never appear in `/proc/*/cmdline`.
 fn seal_bubblewrap_args(args: &[String]) -> Result<Arc<std::fs::File>, EngineError> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = args;
-        return Err(refused(
-            "fd-backed Bubblewrap arguments are supported only on Linux".to_string(),
-        ));
+    let mut bytes = Vec::new();
+    for (index, argument) in args.iter().enumerate() {
+        if argument.as_bytes().contains(&0) {
+            return Err(refused(format!(
+                "Bubblewrap argument {index} contains an interior NUL"
+            )));
+        }
+        bytes.extend_from_slice(argument.as_bytes());
+        bytes.push(0);
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::{Seek as _, Write as _};
-        use std::os::fd::{AsRawFd as _, FromRawFd as _};
-
-        let mut fd = unsafe {
-            libc::memfd_create(
-                c"ryeos-bwrap-args".as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            )
-        };
-        if fd < 0 {
-            return Err(refused(format!(
-                "Bubblewrap argument memfd cannot be created: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        if fd <= libc::STDERR_FILENO {
-            let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-            let duplicate_error = std::io::Error::last_os_error();
-            unsafe {
-                libc::close(fd);
-            }
-            if duplicated < 0 {
-                return Err(refused(format!(
-                    "Bubblewrap argument descriptor cannot be moved above stdio: {duplicate_error}"
-                )));
-            }
-            fd = duplicated;
-        }
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        for (index, argument) in args.iter().enumerate() {
-            if argument.as_bytes().contains(&0) {
-                return Err(refused(format!(
-                    "Bubblewrap argument {index} contains an interior NUL"
-                )));
-            }
-            file.write_all(argument.as_bytes()).map_err(|error| {
-                refused(format!(
-                    "Bubblewrap argument {index} cannot be written to its private descriptor: {error}"
-                ))
-            })?;
-            file.write_all(&[0]).map_err(|error| {
-                refused(format!(
-                    "Bubblewrap argument {index} terminator cannot be written to its private descriptor: {error}"
-                ))
-            })?;
-        }
-        file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
-            refused(format!(
-                "Bubblewrap argument descriptor cannot be rewound: {error}"
-            ))
-        })?;
-        let required_seals =
-            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, required_seals) } < 0 {
-            return Err(refused(format!(
-                "Bubblewrap argument descriptor cannot be sealed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        let observed_seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
-        if observed_seals < 0 {
-            return Err(refused(format!(
-                "Bubblewrap argument descriptor seals cannot be verified: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        if observed_seals & required_seals != required_seals {
-            return Err(refused(format!(
-                "Bubblewrap argument descriptor is missing required seals (observed {observed_seals:#x})"
-            )));
-        }
-        Ok(Arc::new(file))
-    }
+    lillux::sealed_memfd(c"ryeos-bwrap-args", &bytes).map_err(|error| {
+        refused(format!(
+            "Bubblewrap arguments cannot be stored in a sealed descriptor: {error}"
+        ))
+    })
 }
 
 fn resolve_writable_mount(

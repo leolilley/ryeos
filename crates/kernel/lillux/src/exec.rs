@@ -30,11 +30,11 @@ pub struct SubprocessRequest {
     pub limits: Option<SubprocessLimits>,
     /// Open descriptors intentionally kept alive and inherited through exec.
     /// Lillux retains the handles and clears `FD_CLOEXEC` only in the forked
-    /// child. The sandbox uses these only for Bubblewrap's fd-based mounts.
+    /// child. Trusted launchers use these for descriptor-backed authorities.
     pub inherited_fds: Vec<std::sync::Arc<std::fs::File>>,
     /// Optional trusted launcher status channel. When present, Lillux waits for
-    /// Bubblewrap to report the host PID of its command and supervises that
-    /// command's process group in addition to the outer Bubblewrap process.
+    /// the launcher to report the host PID of its target and supervises that
+    /// target's process group in addition to the outer launcher process.
     pub supervised_status: Option<SupervisedProcessStatus>,
 }
 
@@ -77,26 +77,26 @@ impl OutputLimitExceeded {
     }
 }
 
-/// Parent end of Bubblewrap's `--json-status-fd` channel.
+/// Parent end of a trusted launcher's target-status channel.
 ///
-/// Construct this only through [`bubblewrap_status_pipe`]. That factory and
-/// the parser form one protocol: the paired writer must be inherited by
-/// Bubblewrap and named by `--json-status-fd`. The sandbox command must remain
-/// in Bubblewrap's Lillux-owned process group (in particular, the launch must
-/// not use Bubblewrap's `--new-session`). Retaining the outer child then keeps
+/// Construct this only through [`supervised_launcher_status_pipe`]. That
+/// factory and the parser form one protocol: the paired writer must be
+/// inherited by the launcher, which reports the target's host PID in a bounded
+/// `{"child-pid": <u32>}` JSON document. The target must remain in the
+/// launcher's Lillux-owned process group. Retaining the outer child then keeps
 /// that PGID owned until Lillux has terminated every remaining group member.
 pub struct SupervisedProcessStatus {
     reader: std::fs::File,
 }
 
-/// Both ends needed to connect Lillux supervision to Bubblewrap.
-pub struct BubblewrapStatusPipe {
+/// Both ends needed to connect Lillux supervision to a trusted launcher.
+pub struct SupervisedLauncherStatusPipe {
     pub reader: SupervisedProcessStatus,
     pub writer: Arc<std::fs::File>,
 }
 
-impl BubblewrapStatusPipe {
-    /// Raw descriptor to pass as Bubblewrap's `--json-status-fd` value.
+impl SupervisedLauncherStatusPipe {
+    /// Raw descriptor to pass to the trusted launcher.
     #[cfg(unix)]
     pub fn writer_fd(&self) -> std::os::fd::RawFd {
         use std::os::fd::AsRawFd as _;
@@ -107,24 +107,24 @@ impl BubblewrapStatusPipe {
     pub fn writer_fd(&self) -> i32 {
         // Construction fails on non-Linux platforms, so this value is never
         // handed to a child. Keeping the method in the cross-platform API lets
-        // shared sandbox plumbing compile without platform-specific branches.
+        // shared launcher plumbing compile without platform-specific branches.
         -1
     }
 }
 
-/// Create an atomically-CLOEXEC status pipe for Bubblewrap supervision.
+/// Create an atomically-CLOEXEC status pipe for trusted-launcher supervision.
 ///
 /// The writer remains CLOEXEC in the multithreaded parent. Lillux clears that
 /// bit only in the forked child through `inherited_fds`, avoiding descriptor
 /// leaks into unrelated concurrent spawns.
 #[cfg(target_os = "linux")]
-pub fn bubblewrap_status_pipe() -> Result<BubblewrapStatusPipe, String> {
+pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
     let mut fds = [-1; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(format!(
-            "create Bubblewrap status pipe: {}",
+            "create supervised-launcher status pipe: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -132,15 +132,81 @@ pub fn bubblewrap_status_pipe() -> Result<BubblewrapStatusPipe, String> {
     // transferred into exactly one File below.
     let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
-    Ok(BubblewrapStatusPipe {
+    Ok(SupervisedLauncherStatusPipe {
         reader: SupervisedProcessStatus { reader },
         writer: Arc::new(writer),
     })
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn bubblewrap_status_pipe() -> Result<BubblewrapStatusPipe, String> {
-    Err("Bubblewrap status supervision is supported only on Linux".to_string())
+pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
+    Err("supervised-launcher status is supported only on Linux".to_string())
+}
+
+/// Create an immutable, rewound anonymous file for descriptor-backed protocol
+/// data.
+///
+/// The returned descriptor is always above stdio, retains `FD_CLOEXEC`, and
+/// carries all four write-prevention seals. Callers explicitly inherit it only
+/// for the child exec that consumes the data.
+#[cfg(target_os = "linux")]
+pub fn sealed_memfd(name: &std::ffi::CStr, bytes: &[u8]) -> Result<Arc<std::fs::File>, String> {
+    use std::io::{Seek as _, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+    let mut fd =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if fd < 0 {
+        return Err(format!(
+            "create sealed memfd: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if fd <= libc::STDERR_FILENO {
+        let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        let duplicate_error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        if duplicated < 0 {
+            return Err(format!(
+                "move sealed memfd descriptor above stdio: {duplicate_error}"
+            ));
+        }
+        fd = duplicated;
+    }
+
+    // SAFETY: memfd_create or F_DUPFD_CLOEXEC returned this uniquely owned fd.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| format!("write sealed memfd: {error}"))?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| format!("rewind sealed memfd: {error}"))?;
+
+    let required_seals =
+        libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, required_seals) } < 0 {
+        return Err(format!("seal memfd: {}", std::io::Error::last_os_error()));
+    }
+    let observed_seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+    if observed_seals < 0 {
+        return Err(format!(
+            "inspect sealed memfd seals: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if observed_seals & required_seals != required_seals {
+        return Err(format!(
+            "sealed memfd is missing required seals (observed {observed_seals:#x})"
+        ));
+    }
+
+    Ok(Arc::new(file))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sealed_memfd(_name: &std::ffi::CStr, _bytes: &[u8]) -> Result<Arc<std::fs::File>, String> {
+    Err("sealed memfd is supported only on Linux".to_string())
 }
 
 /// Result of a synchronous subprocess execution.
@@ -262,14 +328,14 @@ const SUPERVISED_STATUS_MAX_LINE_BYTES: usize = 64 * 1024;
 /// A running subprocess that can be waited on later.
 pub struct RunningProcess {
     /// Identity of the supervised command. For a direct launch this is the
-    /// spawned child; for Bubblewrap it is the command reported over
-    /// `--json-status-fd`. Sandboxed commands share the outer launcher's PGID,
+    /// spawned child; for a trusted launcher it is the target reported over
+    /// the status channel. Supervised targets share the outer launcher's PGID,
     /// which remains reserved by the retained [`process::Child`] even if the
-    /// reported command exits before its same-group descendants.
+    /// reported target exits before its same-group descendants.
     pub pid: u32,
     pub pgid: i64,
     /// The outer process is retained separately so timeout/overflow cleanup
-    /// always reaps Bubblewrap as well as the command group.
+    /// always reaps the launcher as well as the target process group.
     wrapper_pid: u32,
     wrapper_pgid: i64,
     child: process::Child,
@@ -400,7 +466,7 @@ impl RunningProcess {
             // Lillux creates the outer launcher as a session/group leader and
             // retains its Child handle until this cleanup completes. The live
             // or unreaped leader therefore reserves the numeric PGID while the
-            // signal is sent, even if Bubblewrap already reaped its reported
+            // signal is sent, even if the launcher already reaped its reported
             // target leader. A descendant that deliberately creates another
             // session is outside this local guarantee; hosted workers use
             // cgroup.kill.
@@ -666,7 +732,7 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
     };
     // The forked child now owns its inherited descriptor copies. Close the
     // request-owned parent copies promptly: in particular, keeping the status
-    // writer open here would hide Bubblewrap's pre-command EOF and force every
+    // writer open here would hide a launcher's pre-target EOF and force every
     // failed setup to wait for the full supervision timeout.
     drop(inherited_fds);
     let wrapper_pid = child.id();
@@ -746,25 +812,30 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
 
     let (identity, status_thread) = if let Some(status) = supervised_status {
         let (status_tx, status_rx) = std::sync::mpsc::channel();
-        let status_thread =
-            match spawn_bubblewrap_status_reader(status, status_tx, Arc::clone(&drain_stop)) {
-                Ok(handle) => handle,
-                Err(error) => {
-                    kill_process_group_if_safe(wrapper_pgid);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    drain_stop.store(true, Ordering::Release);
-                    if let Some(handle) = stdin_thread.take() {
-                        let _ = handle.join();
-                    }
-                    let _ = stdout_thread.join();
-                    let _ = stderr_thread.join();
-                    return Err(spawn_failure(
-                        start,
-                        format!("Failed to spawn: initialize Bubblewrap status reader: {error}"),
-                    ));
+        let status_thread = match spawn_supervised_launcher_status_reader(
+            status,
+            status_tx,
+            Arc::clone(&drain_stop),
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                kill_process_group_if_safe(wrapper_pgid);
+                let _ = child.kill();
+                let _ = child.wait();
+                drain_stop.store(true, Ordering::Release);
+                if let Some(handle) = stdin_thread.take() {
+                    let _ = handle.join();
                 }
-            };
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(spawn_failure(
+                    start,
+                    format!(
+                        "Failed to spawn: initialize supervised-launcher status reader: {error}"
+                    ),
+                ));
+            }
+        };
         let setup_deadline = supervised_setup_deadline(start, timeout);
         let setup_wait = setup_deadline.saturating_duration_since(Instant::now());
         let reported_pid = match status_rx.recv_timeout(setup_wait) {
@@ -782,7 +853,7 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!("Failed to spawn: Bubblewrap status refused: {error}"),
+                    format!("Failed to spawn: supervised launcher refused: {error}"),
                 ));
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -799,7 +870,7 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
                 return Err(spawn_failure(
                     start,
                     format!(
-                        "Failed to spawn: Bubblewrap did not report its command PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
+                        "Failed to spawn: supervised launcher did not report its target PID before the bounded setup/request deadline ({:.3} seconds remaining after launch setup)",
                         setup_wait.as_secs_f64()
                     ),
                 ));
@@ -817,7 +888,7 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    "Failed to spawn: Bubblewrap status channel closed before reporting its command PID",
+                    "Failed to spawn: supervised-launcher status channel closed before reporting its target PID",
                 ));
             }
         };
@@ -836,7 +907,7 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
                 let _ = status_thread.join();
                 return Err(spawn_failure(
                     start,
-                    format!("Failed to spawn: invalid Bubblewrap command identity: {error}"),
+                    format!("Failed to spawn: invalid supervised target identity: {error}"),
                 ));
             }
         };
@@ -991,7 +1062,7 @@ fn configure_nonblocking_fd<T>(_reader: &mut T) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_bubblewrap_status_reader(
+fn spawn_supervised_launcher_status_reader(
     mut status: SupervisedProcessStatus,
     initial_tx: std::sync::mpsc::Sender<Result<u32, String>>,
     stop: Arc<AtomicBool>,
@@ -1010,7 +1081,7 @@ fn spawn_bubblewrap_status_reader(
             match status.reader.read(&mut buffer) {
                 Ok(0) => {
                     if !pending.is_empty() && initial_tx.is_some() {
-                        report_bubblewrap_status_line(&pending, &mut initial_tx);
+                        report_supervised_launcher_status_line(&pending, &mut initial_tx);
                     }
                     if let Some(tx) = initial_tx.take() {
                         let _ = tx.send(Err(
@@ -1034,7 +1105,7 @@ fn spawn_bubblewrap_status_reader(
                         std::mem::swap(&mut pending, &mut remainder);
                         remainder.truncate(newline);
                         if initial_tx.is_some() && !remainder.is_empty() {
-                            report_bubblewrap_status_line(&remainder, &mut initial_tx);
+                            report_supervised_launcher_status_line(&remainder, &mut initial_tx);
                         }
                     }
                 }
@@ -1056,7 +1127,7 @@ fn spawn_bubblewrap_status_reader(
     }))
 }
 
-fn report_bubblewrap_status_line(
+fn report_supervised_launcher_status_line(
     line: &[u8],
     initial_tx: &mut Option<std::sync::mpsc::Sender<Result<u32, String>>>,
 ) {

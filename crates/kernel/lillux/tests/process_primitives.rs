@@ -11,9 +11,9 @@
 #![cfg(unix)]
 
 use lillux::{
-    bubblewrap_status_pipe, configure_subprocess_limits, is_alive, kill, run, spawn,
-    spawn_detached, validate_subprocess_limits, OutputLimitExceeded, SubprocessLimits,
-    SubprocessRequest,
+    configure_subprocess_limits, is_alive, kill, run, sealed_memfd, spawn, spawn_detached,
+    supervised_launcher_status_pipe, validate_subprocess_limits, OutputLimitExceeded,
+    SubprocessLimits, SubprocessRequest,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -245,11 +245,49 @@ fn output_overflow_terminates_a_continuously_writing_group() {
     );
 }
 
+// ── immutable descriptor-backed protocol data ─────────────────────────
+
+#[test]
+#[cfg(target_os = "linux")]
+fn sealed_memfd_is_rewound_cloexec_and_immutable() {
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::fd::AsRawFd as _;
+
+    let file = sealed_memfd(c"lillux-test", b"sealed protocol bytes").expect("sealed memfd");
+    let fd = file.as_raw_fd();
+    assert!(fd > libc::STDERR_FILENO);
+
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(descriptor_flags >= 0);
+    assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+
+    let required_seals =
+        libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    let observed_seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
+    assert_eq!(observed_seals & required_seals, required_seals);
+
+    let mut view = file.try_clone().expect("clone sealed memfd");
+    assert_eq!(view.stream_position().expect("position"), 0);
+    let mut bytes = Vec::new();
+    view.read_to_end(&mut bytes).expect("read sealed memfd");
+    assert_eq!(bytes, b"sealed protocol bytes");
+
+    let error = view.write_all(b"mutation").unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+}
+
+#[test]
+#[cfg(not(target_os = "linux"))]
+fn sealed_memfd_fails_closed_off_linux() {
+    let error = sealed_memfd(c"lillux-test", b"payload").unwrap_err();
+    assert!(error.contains("only on Linux"), "{error}");
+}
+
 // ── trusted-launcher target identity supervision ──────────────────────
 
 #[cfg(target_os = "linux")]
-fn bubblewrap_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
-    let status = bubblewrap_status_pipe().expect("status pipe");
+fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_fd();
     // Like the real sandbox launch, the mock target inherits the retained
     // wrapper's Lillux-owned session/process group. The status PID identifies
@@ -270,7 +308,7 @@ fn bubblewrap_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
 #[test]
 #[cfg(target_os = "linux")]
 fn reported_target_group_is_exposed_and_killed_on_timeout() {
-    let running = spawn(bubblewrap_protocol_shell("sleep 30", 0.25)).expect("spawn");
+    let running = spawn(supervised_launcher_protocol_shell("sleep 30", 0.25)).expect("spawn");
     let target_pid = running.pid;
 
     assert_ne!(running.pgid, target_pid as i64);
@@ -297,7 +335,11 @@ fn reported_target_group_is_exposed_and_killed_on_timeout() {
 #[test]
 #[cfg(target_os = "linux")]
 fn reported_target_exit_still_cleans_up_same_group_descendants() {
-    let running = spawn(bubblewrap_protocol_shell("sleep 30 & printf %s $!", 2.0)).expect("spawn");
+    let running = spawn(supervised_launcher_protocol_shell(
+        "sleep 30 & printf %s $!",
+        2.0,
+    ))
+    .expect("spawn");
     let target_pid = running.pid;
     let retained_pgid = running.pgid;
 
@@ -322,7 +364,7 @@ fn reported_target_exit_still_cleans_up_same_group_descendants() {
 #[test]
 #[cfg(target_os = "linux")]
 fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
-    let status = bubblewrap_status_pipe().expect("status pipe");
+    let status = supervised_launcher_status_pipe().expect("status pipe");
     let status_fd = status.writer_fd();
     let wrapper_script = format!("printf 'not-json\\n' >&{status_fd}; sleep 30");
     let mut request = sh(&["-c", &wrapper_script]);
