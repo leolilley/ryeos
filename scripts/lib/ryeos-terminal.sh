@@ -123,24 +123,24 @@ ryeos_term_init() {
     case "$override" in
         always)
             if [[ "${TERM:-}" == dumb ]]; then
-                _RYEOS_TERM_MODE=plain
+                _RYEOS_TERM_MODE="plain"
             else
-                _RYEOS_TERM_MODE=tty
+                _RYEOS_TERM_MODE="tty"
             fi
             ;;
-        never) _RYEOS_TERM_MODE=plain ;;
+        never) _RYEOS_TERM_MODE="plain" ;;
         auto)
             if [[ -t 1 && -t 2 && "${TERM:-}" != dumb ]]; then
-                _RYEOS_TERM_MODE=tty
+                _RYEOS_TERM_MODE="tty"
             else
-                _RYEOS_TERM_MODE=plain
+                _RYEOS_TERM_MODE="plain"
             fi
             ;;
         *)
             if [[ -t 1 && -t 2 && "${TERM:-}" != dumb ]]; then
-                _RYEOS_TERM_MODE=tty
+                _RYEOS_TERM_MODE="tty"
             else
-                _RYEOS_TERM_MODE=plain
+                _RYEOS_TERM_MODE="plain"
             fi
             ;;
     esac

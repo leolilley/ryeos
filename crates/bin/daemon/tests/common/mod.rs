@@ -86,12 +86,27 @@ pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
         .with_context(|| format!("parse 'bind' value '{s}' from daemon.json"))
 }
 
-fn daemon_stderr_log_path(harness_id: u64) -> Option<PathBuf> {
-    std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-        .map(|dir| PathBuf::from(dir).join(format!("daemon-{harness_id}.stderr.log")))
+fn daemon_stderr_log_path(fallback_dir: &Path, harness_id: u64) -> PathBuf {
+    let directory = std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback_dir.to_path_buf());
+    directory.join(format!(
+        "daemon-{}-{harness_id}.stderr.log",
+        std::process::id()
+    ))
 }
 
-async fn stop_and_collect_daemon_stderr(child: &mut Child, harness_id: u64) -> String {
+fn daemon_stderr_stdio(path: &Path) -> anyhow::Result<Stdio> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create daemon stderr directory {}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("create daemon stderr log {}", path.display()))?;
+    Ok(Stdio::from(file))
+}
+
+async fn stop_and_collect_daemon_stderr(child: &mut Child, stderr_path: &Path) -> String {
     child.start_kill().ok();
 
     let mut stderr = String::new();
@@ -101,27 +116,17 @@ async fn stop_and_collect_daemon_stderr(child: &mut Child, harness_id: u64) -> S
     {
         stderr.push_str("<daemon did not exit within 2s after kill>\n");
     }
-    if let Some(mut pipe) = child.stderr.take() {
-        match tokio::time::timeout(Duration::from_millis(500), pipe.read_to_string(&mut stderr))
-            .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                stderr.push_str(&format!("<failed to read daemon stderr: {error}>\n"));
-            }
-            Err(_) => {
-                stderr.push_str("<daemon stderr remained open after 500ms; drain abandoned>\n");
-            }
-        }
-    }
-
-    if let Some(path) = daemon_stderr_log_path(harness_id) {
-        if let Ok(log) = std::fs::read_to_string(path) {
+    match std::fs::read_to_string(stderr_path) {
+        Ok(log) => {
             if !stderr.is_empty() && !log.is_empty() {
                 stderr.push_str("<daemon stderr log>\n");
             }
             stderr.push_str(&log);
         }
+        Err(error) => stderr.push_str(&format!(
+            "<failed to read daemon stderr log {}: {error}>\n",
+            stderr_path.display()
+        )),
     }
     stderr
 }
@@ -129,7 +134,7 @@ async fn stop_and_collect_daemon_stderr(child: &mut Child, harness_id: u64) -> S
 async fn wait_for_daemon_ready(
     child: &mut Child,
     bind: SocketAddr,
-    harness_id: u64,
+    stderr_path: &Path,
     context: &str,
     deadline: Instant,
 ) -> anyhow::Result<()> {
@@ -151,7 +156,7 @@ async fn wait_for_daemon_ready(
                     .await
                     .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
                 if body.contains("node_startup_failed") {
-                    let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+                    let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
                     anyhow::bail!(
                         "{context} reported a terminal startup failure at {url}: HTTP {status}: \
                          {body}\ndaemon stderr:\n{stderr}"
@@ -163,7 +168,7 @@ async fn wait_for_daemon_ready(
         };
 
         if Instant::now() > deadline {
-            let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+            let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
             anyhow::bail!(
                 "{context} never became ready at {url}; last probe: {detail}\n\
                  daemon stderr:\n{stderr}"
@@ -176,7 +181,7 @@ async fn wait_for_daemon_ready(
 async fn wait_for_daemon_discovery(
     child: &mut Child,
     daemon_json: &Path,
-    harness_id: u64,
+    stderr_path: &Path,
     context: &str,
     deadline: Instant,
 ) -> anyhow::Result<()> {
@@ -185,14 +190,14 @@ async fn wait_for_daemon_discovery(
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+            let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
             anyhow::bail!(
                 "{context} exited with {status} before publishing {} — daemon stderr:\n{stderr}",
                 daemon_json.display()
             );
         }
         if Instant::now() > deadline {
-            let stderr = stop_and_collect_daemon_stderr(child, harness_id).await;
+            let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
             anyhow::bail!(
                 "{context} never published {} — daemon stderr:\n{stderr}",
                 daemon_json.display()
@@ -456,8 +461,10 @@ pub struct DaemonHarness {
     pub bind: SocketAddr,
     pub uds_path: PathBuf,
     pub child: Child,
-    /// Captured stderr (joined async) — populated on drop for diagnostics.
-    pub stderr_buf: Option<String>,
+    /// Regular file continuously receiving daemon stderr. A file is used rather
+    /// than an unread pipe so verbose test logging can never backpressure and
+    /// stall the daemon under test.
+    stderr_log_path: PathBuf,
     /// Operator signing key from the fast fixture. Used by `post_execute` to
     /// sign requests. `None` when the daemon was started via `start()`
     /// instead of `start_fast()`.
@@ -521,6 +528,7 @@ impl DaemonHarness {
         let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
+        let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--app-root")
@@ -532,20 +540,8 @@ impl DaemonHarness {
             .env("HOSTNAME", "testhost")
             .env("RYEOS_APP_ROOT", &app_root)
             .env("HOME", user_space.path())
-            // When RYEOSD_TEST_STDERR_DIR is set, mirror daemon stderr
-            // to a stable on-disk file (named per-harness-id) so test
-            // failures can dump diagnostics post-mortem. Otherwise
-            // pipe so drain_stderr_nonblocking can read it directly.
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
@@ -557,7 +553,7 @@ impl DaemonHarness {
         wait_for_daemon_discovery(
             &mut child,
             &daemon_json,
-            harness_id,
+            &stderr_log_path,
             "daemon",
             startup_deadline,
         )
@@ -569,7 +565,7 @@ impl DaemonHarness {
         wait_for_daemon_ready(
             &mut child,
             actual_bind,
-            harness_id,
+            &stderr_log_path,
             "daemon",
             startup_deadline,
         )
@@ -583,7 +579,7 @@ impl DaemonHarness {
             bind: actual_bind,
             uds_path,
             child,
-            stderr_buf: None,
+            stderr_log_path,
             user_key: None,
             node_key: None,
         })
@@ -667,6 +663,7 @@ impl DaemonHarness {
         let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
+        let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let mut cmd = Command::new(ryeosd_binary());
         // NOTE: NO . The fast fixture is the init.
@@ -680,15 +677,7 @@ impl DaemonHarness {
             .env("RYEOS_APP_ROOT", &state_path)
             .env("HOME", user_space.path())
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
@@ -700,7 +689,7 @@ impl DaemonHarness {
         wait_for_daemon_discovery(
             &mut child,
             &daemon_json,
-            harness_id,
+            &stderr_log_path,
             "daemon (fast fixture path)",
             startup_deadline,
         )
@@ -711,7 +700,7 @@ impl DaemonHarness {
         wait_for_daemon_ready(
             &mut child,
             actual_bind,
-            harness_id,
+            &stderr_log_path,
             "daemon (fast fixture path)",
             startup_deadline,
         )
@@ -725,7 +714,7 @@ impl DaemonHarness {
             bind: actual_bind,
             uds_path,
             child,
-            stderr_buf: None,
+            stderr_log_path,
             user_key: Some(fixture.user.clone()),
             node_key: Some(fixture.node.clone()),
         };
@@ -855,6 +844,7 @@ impl DaemonHarness {
         // Bind `:0` and read the new actual address back from daemon.json.
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
 
         // Remove the old daemon.json so we can detect when the new
         // daemon writes its own (with the new bind address).
@@ -872,15 +862,7 @@ impl DaemonHarness {
             .env("RYEOS_APP_ROOT", &self.state_path)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
@@ -891,7 +873,7 @@ impl DaemonHarness {
         wait_for_daemon_discovery(
             &mut self.child,
             &daemon_json,
-            harness_id,
+            &stderr_log_path,
             "respawned daemon",
             startup_deadline,
         )
@@ -901,11 +883,12 @@ impl DaemonHarness {
         wait_for_daemon_ready(
             &mut self.child,
             self.bind,
-            harness_id,
+            &stderr_log_path,
             "respawned daemon",
             startup_deadline,
         )
         .await?;
+        self.stderr_log_path = stderr_log_path;
 
         Ok(())
     }
@@ -961,6 +944,7 @@ impl DaemonHarness {
         // 4. Re-spawn with `:0`; read actual bind from daemon.json.
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
         let mut cmd = Command::new(ryeosd_binary());
@@ -974,15 +958,7 @@ impl DaemonHarness {
             .env("RYEOS_APP_ROOT", &self.state_path)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
@@ -995,7 +971,7 @@ impl DaemonHarness {
         wait_for_daemon_discovery(
             &mut self.child,
             &daemon_json,
-            harness_id,
+            &stderr_log_path,
             "restarted daemon",
             startup_deadline,
         )
@@ -1005,11 +981,12 @@ impl DaemonHarness {
         wait_for_daemon_ready(
             &mut self.child,
             self.bind,
-            harness_id,
+            &stderr_log_path,
             "restarted daemon",
             startup_deadline,
         )
         .await?;
+        self.stderr_log_path = stderr_log_path;
 
         Ok(())
     }
@@ -1020,52 +997,24 @@ impl DaemonHarness {
         self.restart_with(|_| {}).await
     }
 
-    /// Drain whatever has accumulated on the child's stderr handle
-    /// **without blocking** on EOF. Used by tests that need to print
-    /// diagnostics on assertion failure without waiting for the
-    /// daemon to exit. After the call the stderr handle is gone, so
-    /// only call once per harness.
+    /// Read whatever has accumulated in the daemon's stderr log without
+    /// waiting for the daemon to exit. The daemon writes directly to this
+    /// regular file, so diagnostics never create pipe backpressure.
     pub async fn drain_stderr_nonblocking(&mut self) -> String {
-        // When RYEOSD_TEST_STDERR_DIR is set, the harness redirects
-        // stderr to a per-port file there; read that. Otherwise, fall
-        // through and drain the piped handle.
-        if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-            let path = std::path::PathBuf::from(dir)
-                .join(format!("daemon-{}.stderr.log", self.bind.port()));
-            if let Ok(s) = std::fs::read_to_string(&path) {
-                return s;
-            }
+        match std::fs::read_to_string(&self.stderr_log_path) {
+            Ok(stderr) => stderr,
+            Err(error) => format!(
+                "<failed to read daemon stderr log {}: {error}>\n",
+                self.stderr_log_path.display()
+            ),
         }
-        use tokio::time::{timeout, Duration};
-        let Some(mut stderr) = self.child.stderr.take() else {
-            return String::new();
-        };
-        let mut buf = Vec::new();
-        let _ = timeout(Duration::from_millis(500), async {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match stderr.read(&mut chunk).await {
-                    Ok(0) => break,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    Err(_) => break,
-                }
-            }
-        })
-        .await;
-        String::from_utf8_lossy(&buf).into_owned()
     }
 }
 
 impl Drop for DaemonHarness {
     fn drop(&mut self) {
-        // Best-effort: kill the child synchronously. tokio::process::Child
-        // sets KILLONDROP via kill_on_drop(true), but we also want to drain
-        // stderr for diagnostics if a test fails.
-        if let Some(stderr) = self.child.stderr.take() {
-            // Drain on a tokio runtime if one is around; otherwise discard.
-            // We can't await here, so just give up on stderr capture in Drop.
-            drop(stderr);
-        }
+        // Best-effort: kill the child synchronously. tokio::process::Child also
+        // has kill_on_drop enabled; stderr is already captured in a regular file.
         let _ = self.child.start_kill();
     }
 }
@@ -1189,6 +1138,14 @@ pub async fn run_service_standalone(
     drop(ryeos_app::runtime_db::RuntimeDb::open(
         &state_path.join(".ai/state/runtime.sqlite3"),
     )?);
+    let runtime_state_dir = state_path.join(".ai/state");
+    let scheduler_db =
+        ryeos_scheduler::db::SchedulerDb::open(&runtime_state_dir.join("scheduler.sqlite3"))?;
+    ryeos_scheduler::projection::rebuild_fires_from_dir(
+        &runtime_state_dir.join("schedules"),
+        &scheduler_db,
+    )?;
+    drop(scheduler_db);
 
     let mut cmd = Command::new(ryeosd_binary());
     cmd.arg("--app-root")

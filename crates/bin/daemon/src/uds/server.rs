@@ -1372,7 +1372,7 @@ mod tests {
     use ryeos_app::event_store_service::EventStoreService;
     use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
     use ryeos_app::identity::NodeIdentity;
-    use ryeos_app::kind_profiles::KindProfileRegistry;
+    use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::{NewThreadRecord, StateStore};
     use ryeos_app::thread_lifecycle::{
@@ -1471,7 +1471,19 @@ mod tests {
             ),
             Vec::new(),
         ));
-        let kind_profiles = Arc::new(KindProfileRegistry::build(None));
+        // Most rows in this minimal harness use the daemon-internal
+        // `system_task` profile. Follow-reconciliation fixtures truthfully use
+        // the standard bundle's `graph_run` profile without teaching the
+        // production registry any hardcoded schema kinds.
+        let kind_profiles = Arc::new(KindProfileRegistry::build(None).with_test_profile(
+            "graph_run",
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: true,
+                supports_operator_followup: false,
+            },
+        ));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
@@ -2142,29 +2154,31 @@ mod tests {
             .state_store
             .seed_launch_metadata(
                 "P",
-                &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-                    kind: "graph".into(),
-                    item_ref: "graph:test/graph".into(),
-                    ref_bindings: std::collections::BTreeMap::new(),
-                    launch_mode: "detached".into(),
-                    parameters: json!({}),
-                    project_context: ProjectContext::LocalPath {
-                        path: std::path::PathBuf::from("/tmp/p"),
-                    },
-                    original_snapshot_hash: None,
-                    original_pushed_head_ref: None,
-                    state_root: None,
-                    current_site_id: "site:test".into(),
-                    origin_site_id: "site:test".into(),
-                    requested_by: EffectivePrincipal::Local(Principal {
-                        fingerprint: "fp".into(),
-                        scopes: vec![],
+                &RuntimeLaunchMetadata::default()
+                    .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_resume_context(ResumeContext {
+                        kind: "graph".into(),
+                        item_ref: "graph:test/graph".into(),
+                        ref_bindings: std::collections::BTreeMap::new(),
+                        launch_mode: "detached".into(),
+                        parameters: json!({}),
+                        project_context: ProjectContext::LocalPath {
+                            path: std::path::PathBuf::from("/tmp/p"),
+                        },
+                        original_snapshot_hash: None,
+                        original_pushed_head_ref: None,
+                        state_root: None,
+                        current_site_id: "site:test".into(),
+                        origin_site_id: "site:test".into(),
+                        requested_by: EffectivePrincipal::Local(Principal {
+                            fingerprint: "fp".into(),
+                            scopes: vec![],
+                        }),
+                        execution_hints: ExecutionHints::default(),
+                        effective_caps: vec![],
+                        executor_ref: None,
+                        runtime_ref: None,
                     }),
-                    execution_hints: ExecutionHints::default(),
-                    effective_caps: vec![],
-                    executor_ref: None,
-                    runtime_ref: None,
-                }),
             )
             .unwrap();
         state
@@ -4654,8 +4668,8 @@ mod tests {
     // `execution.supports_continuation` the client gates on, and the list rows
     // carry the chain-head edges (`upstream_thread_id` / `successor_thread_id`).
     //
-    // The harness builds `KindProfileRegistry::build(None)`, whose only kinds are
-    // the internal non-continuable profiles, so the value here is always `false`.
+    // These rows use the harness's internal non-continuable `system_task`
+    // profile, so the value here is always `false`.
     // That is the right thing to assert at this layer: `supports_continuation`'s
     // true/false value is the kind profile's concern (covered in
     // `kind_profiles`), while the risk THIS change introduces is whether every

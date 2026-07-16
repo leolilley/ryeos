@@ -261,8 +261,8 @@ mod integration_tests {
             .unwrap());
     }
 
-    /// Make `id` a RUNNING source with a captured ResumeContext — the
-    /// precondition `create_follow_resume_successor` requires.
+    /// Make `id` a RUNNING native-resume source with a captured ResumeContext —
+    /// the complete precondition `create_follow_resume_successor` requires.
     fn seed_continuable(store: &StateStore, id: &str, kind: &str) {
         use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
         use ryeos_engine::contracts::{
@@ -277,29 +277,31 @@ mod integration_tests {
         store
             .seed_launch_metadata(
                 id,
-                &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-                    kind: kind.into(),
-                    item_ref: item_ref.into(),
-                    ref_bindings: std::collections::BTreeMap::new(),
-                    launch_mode: "inline".into(),
-                    parameters: serde_json::json!({}),
-                    project_context: ProjectContext::LocalPath {
-                        path: std::path::PathBuf::from("/tmp/p"),
-                    },
-                    original_snapshot_hash: None,
-                    original_pushed_head_ref: None,
-                    state_root: None,
-                    current_site_id: "site:test".into(),
-                    origin_site_id: "site:test".into(),
-                    requested_by: EffectivePrincipal::Local(Principal {
-                        fingerprint: "fp".into(),
-                        scopes: vec![],
+                &RuntimeLaunchMetadata::default()
+                    .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_resume_context(ResumeContext {
+                        kind: kind.into(),
+                        item_ref: item_ref.into(),
+                        ref_bindings: std::collections::BTreeMap::new(),
+                        launch_mode: "inline".into(),
+                        parameters: serde_json::json!({}),
+                        project_context: ProjectContext::LocalPath {
+                            path: std::path::PathBuf::from("/tmp/p"),
+                        },
+                        original_snapshot_hash: None,
+                        original_pushed_head_ref: None,
+                        state_root: None,
+                        current_site_id: "site:test".into(),
+                        origin_site_id: "site:test".into(),
+                        requested_by: EffectivePrincipal::Local(Principal {
+                            fingerprint: "fp".into(),
+                            scopes: vec![],
+                        }),
+                        execution_hints: ExecutionHints::default(),
+                        effective_caps: vec![],
+                        executor_ref: None,
+                        runtime_ref: None,
                     }),
-                    execution_hints: ExecutionHints::default(),
-                    effective_caps: vec![],
-                    executor_ref: None,
-                    runtime_ref: None,
-                }),
             )
             .unwrap();
     }
@@ -361,6 +363,119 @@ mod integration_tests {
         assert_eq!(succ.upstream_thread_id.as_deref(), Some("P"));
         // The successor carries the follow-resume marker used for later wakeup.
         assert!(store.is_follow_resume_successor("P", "S").unwrap());
+    }
+
+    #[test]
+    fn sequential_follow_successors_preserve_native_resume_eligibility() {
+        use ryeos_engine::contracts::{CancellationMode, NativeResumeSpec};
+
+        let (_tmp, store) = setup_state_store();
+        store
+            .create_thread_for_test(&make_project_thread(
+                "P",
+                "P",
+                "graph",
+                "graph:test/graph",
+                None,
+            ))
+            .unwrap();
+        seed_continuable(&store, "P", "graph");
+
+        let policy = NativeResumeSpec {
+            checkpoint_interval_secs: 19,
+            max_auto_resume_attempts: 3,
+        };
+        let mut parent_metadata = store.get_launch_metadata("P").unwrap().unwrap();
+        parent_metadata.cancellation_mode = Some(CancellationMode::Hard);
+        parent_metadata.native_resume = Some(policy.clone());
+        let resume_context = parent_metadata.resume_context.clone().unwrap();
+        store.seed_launch_metadata("P", &parent_metadata).unwrap();
+
+        store
+            .create_follow_resume_successor(
+                &make_project_thread("S1", "P", "graph", "graph:test/graph", Some("P")),
+                "P",
+                "P",
+            )
+            .unwrap();
+        let first_metadata = store.get_launch_metadata("S1").unwrap().unwrap();
+        assert_eq!(first_metadata.native_resume, Some(policy.clone()));
+        assert_eq!(
+            first_metadata.cancellation_mode,
+            Some(CancellationMode::Hard)
+        );
+        assert_eq!(first_metadata.resume_context, Some(resume_context.clone()));
+        assert_eq!(
+            first_metadata.continuation_source_thread_id.as_deref(),
+            Some("P")
+        );
+        assert!(first_metadata.checkpoint_dir.is_none());
+
+        // Model the first resumed segment reaching its second follow callback.
+        // Its authoritative seed must itself satisfy the same follow-resume
+        // contract; no live predecessor metadata is consulted on this hop.
+        store.mark_thread_running("S1", None).unwrap();
+        store
+            .create_follow_resume_successor(
+                &make_project_thread("S2", "P", "graph", "graph:test/graph", Some("S1")),
+                "S1",
+                "P",
+            )
+            .unwrap();
+        let second_metadata = store.get_launch_metadata("S2").unwrap().unwrap();
+        assert_eq!(second_metadata.native_resume, Some(policy));
+        assert_eq!(
+            second_metadata.cancellation_mode,
+            Some(CancellationMode::Hard)
+        );
+        assert_eq!(second_metadata.resume_context, Some(resume_context));
+        assert_eq!(
+            second_metadata.continuation_source_thread_id.as_deref(),
+            Some("S1")
+        );
+        assert!(second_metadata.checkpoint_dir.is_none());
+    }
+
+    #[test]
+    fn follow_resume_rejects_source_without_native_resume_before_mutation() {
+        let (_tmp, store) = setup_state_store();
+        store
+            .create_thread_for_test(&make_project_thread(
+                "P-no-resume",
+                "P-no-resume",
+                "graph",
+                "graph:test/graph",
+                None,
+            ))
+            .unwrap();
+        seed_continuable(&store, "P-no-resume", "graph");
+        let mut metadata = store.get_launch_metadata("P-no-resume").unwrap().unwrap();
+        metadata.native_resume = None;
+        store
+            .seed_launch_metadata("P-no-resume", &metadata)
+            .unwrap();
+
+        let error = store
+            .create_follow_resume_successor(
+                &make_project_thread(
+                    "S-refused",
+                    "P-no-resume",
+                    "graph",
+                    "graph:test/graph",
+                    Some("P-no-resume"),
+                ),
+                "P-no-resume",
+                "P-no-resume",
+            )
+            .expect_err("follow resume requires a native-resume source");
+
+        assert!(error.to_string().contains("does not declare native_resume"));
+        assert_eq!(
+            store.get_thread("P-no-resume").unwrap().unwrap().status,
+            "running"
+        );
+        assert!(store.get_thread("S-refused").unwrap().is_none());
+        assert!(store.get_launch_metadata("S-refused").unwrap().is_none());
     }
 
     #[test]
@@ -1076,6 +1191,61 @@ mod integration_tests {
     }
 
     #[test]
+    fn prepared_machine_successor_cannot_drop_source_execution_policy() {
+        use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
+
+        let (_tmpdir, store) = setup_state_store();
+        store
+            .create_thread_for_test(&make_project_thread(
+                "T-policy-source",
+                "T-policy-source",
+                "directive",
+                "directive:test/item",
+                None,
+            ))
+            .unwrap();
+        seed_continuable(&store, "T-policy-source", "directive");
+        let source_metadata = store
+            .get_launch_metadata("T-policy-source")
+            .unwrap()
+            .unwrap();
+        let resume_context = source_metadata.resume_context.clone().unwrap();
+        let incomplete_prepared =
+            RuntimeLaunchMetadata::default().with_resume_context(resume_context.clone());
+
+        let error = store
+            .create_machine_continuation_with_events(
+                &make_project_thread(
+                    "T-policy-successor",
+                    "T-policy-source",
+                    "directive",
+                    "directive:test/item",
+                    Some("T-policy-source"),
+                ),
+                "T-policy-source",
+                "T-policy-source",
+                Some("turn_limit"),
+                &resume_context,
+                &incomplete_prepared,
+                Vec::new(),
+            )
+            .expect_err("prepared successor must carry the source execution policy");
+
+        assert!(error
+            .to_string()
+            .contains("execution policy differs from its source"));
+        assert_eq!(
+            store.get_thread("T-policy-source").unwrap().unwrap().status,
+            "running"
+        );
+        assert!(store.get_thread("T-policy-successor").unwrap().is_none());
+        assert!(store
+            .get_launch_metadata("T-policy-successor")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn create_or_get_continuation_dedups_by_fingerprint() {
         use ryeos_app::state_store::ContinuationOutcome;
         let (_tmpdir, store) = setup_state_store();
@@ -1229,7 +1399,9 @@ mod integration_tests {
             store
                 .seed_launch_metadata(
                     id,
-                    &RuntimeLaunchMetadata::default().with_resume_context(resume_ctx()),
+                    &RuntimeLaunchMetadata::default()
+                        .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                        .with_resume_context(resume_ctx()),
                 )
                 .expect("seed launch metadata");
         };
@@ -1345,7 +1517,9 @@ mod integration_tests {
             store
                 .seed_launch_metadata(
                     id,
-                    &RuntimeLaunchMetadata::default().with_resume_context(resume_ctx()),
+                    &RuntimeLaunchMetadata::default()
+                        .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                        .with_resume_context(resume_ctx()),
                 )
                 .expect("seed launch metadata");
         };

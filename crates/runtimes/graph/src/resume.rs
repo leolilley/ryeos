@@ -19,6 +19,9 @@ pub struct PendingFollow {
     pub follow_node: String,
     pub step_count: u32,
     pub graph_run_id: String,
+    /// Exact ordered canonical refs rendered for the child handoff. One entry
+    /// for a single follow; one per checkpointed iteration for fanout.
+    pub item_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration_snapshot: Option<Vec<Value>>,
 }
@@ -192,6 +195,18 @@ impl ResumeState {
 
         require_non_empty(&pending.follow_node, "pending_follow.follow_node")?;
         require_non_empty(&pending.graph_run_id, "pending_follow.graph_run_id")?;
+        if pending.item_refs.is_empty() {
+            return Err(restart_required(
+                "resume pending_follow item_refs must contain at least one canonical ref",
+            ));
+        }
+        for (index, item_ref) in pending.item_refs.iter().enumerate() {
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|error| {
+                restart_required(format!(
+                    "resume pending_follow item_refs[{index}] is not canonical: {error}"
+                ))
+            })?;
+        }
         if pending.follow_node != self.current_node {
             return Err(restart_required(format!(
                 "resume pending_follow follow_node `{}` does not match current_node `{}`",
@@ -246,15 +261,32 @@ impl ResumeState {
                 ));
             }
         }
+        let expected_refs = pending
+            .iteration_snapshot
+            .as_ref()
+            .map_or(1, |snapshot| snapshot.len());
+        if pending.item_refs.len() != expected_refs {
+            return Err(restart_required(format!(
+                "resume pending_follow item_refs cardinality {} does not match required {expected_refs}",
+                pending.item_refs.len()
+            )));
+        }
         if let Some(result) = &self.follow_result {
             crate::evaluation::validate_runtime_shape(result, "resume follow_result")
                 .map_err(restart_required)?;
             if let Some(snapshot) = pending.iteration_snapshot.as_ref() {
-                crate::dispatch::classify_follow_fanout_envelope(result.clone(), snapshot.len())
-                    .map_err(restart_required)?;
+                debug_assert_eq!(snapshot.len(), pending.item_refs.len());
+                crate::dispatch::classify_follow_fanout_envelope(
+                    result.clone(),
+                    &pending.item_refs,
+                )
+                .map_err(restart_required)?;
             } else {
-                crate::dispatch::classify_follow_envelope(result.clone())
-                    .map_err(restart_required)?;
+                crate::dispatch::classify_follow_envelope_for_item(
+                    result.clone(),
+                    &pending.item_refs[0],
+                )
+                .map_err(restart_required)?;
             }
         }
         Ok(())
@@ -560,6 +592,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child", "directive:test/child"],
             "iteration_snapshot": ["a", "b"],
         });
         let mut value = checkpoint(&definition);
@@ -587,6 +620,10 @@ config:
                 follow_node: "wait".to_string(),
                 step_count: 4,
                 graph_run_id: "run-1".to_string(),
+                item_refs: vec![
+                    "directive:test/child".to_string(),
+                    "directive:test/child".to_string(),
+                ],
                 iteration_snapshot: Some(vec![json!("a"), json!("b")]),
             })
         );
@@ -600,6 +637,7 @@ config:
                     "follow_node": "",
                     "step_count": 4,
                     "graph_run_id": "run-1",
+                    "item_refs": ["directive:test/child"],
                 }),
                 "missing non-empty `pending_follow.follow_node`",
             ),
@@ -608,6 +646,7 @@ config:
                     "follow_node": "other",
                     "step_count": 4,
                     "graph_run_id": "run-1",
+                    "item_refs": ["directive:test/child"],
                 }),
                 "does not match current_node",
             ),
@@ -615,6 +654,7 @@ config:
                 json!({
                     "follow_node": "wait",
                     "graph_run_id": "run-1",
+                    "item_refs": ["directive:test/child"],
                 }),
                 "missing field `step_count`",
             ),
@@ -623,6 +663,7 @@ config:
                     "follow_node": "wait",
                     "step_count": 5,
                     "graph_run_id": "run-1",
+                    "item_refs": ["directive:test/child"],
                 }),
                 "does not match top-level",
             ),
@@ -631,6 +672,7 @@ config:
                     "follow_node": "wait",
                     "step_count": 4,
                     "graph_run_id": "",
+                    "item_refs": ["directive:test/child"],
                 }),
                 "missing non-empty `pending_follow.graph_run_id`",
             ),
@@ -639,6 +681,7 @@ config:
                     "follow_node": "wait",
                     "step_count": 4,
                     "graph_run_id": "other-run",
+                    "item_refs": ["directive:test/child"],
                 }),
                 "does not match top-level",
             ),
@@ -647,6 +690,7 @@ config:
                     "follow_node": "wait",
                     "step_count": 4,
                     "graph_run_id": "run-1",
+                    "item_refs": ["directive:test/child"],
                     "iteration_snapshot": null,
                 }),
                 "iteration_snapshot` must be omitted rather than null",
@@ -671,6 +715,7 @@ config:
             "follow_node": "done",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
         });
         let error = from_checkpoint_value(&value, &definition)
             .unwrap_err()
@@ -703,6 +748,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
         });
         canonical_failure[crate::walker::follow_keys::FOLLOW_RESULT] =
             follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Failed);
@@ -727,6 +773,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
             "iteration_snapshot": ["a"],
         });
         malformed_cohort[crate::walker::follow_keys::FOLLOW_RESULT] = json!({
@@ -748,6 +795,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child", "directive:test/child"],
             "iteration_snapshot": ["a", "b"],
         });
         let mut first = follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Completed);
@@ -785,6 +833,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
         });
         let error = from_checkpoint_value(&missing_snapshot, &fanout)
             .unwrap_err()
@@ -798,6 +847,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
             "iteration_snapshot": [],
         });
         let error = from_checkpoint_value(&unexpected_snapshot, &single)
@@ -805,6 +855,63 @@ config:
             .to_string();
         assert!(
             error.contains("must not contain `iteration_snapshot`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pending_follow_item_refs_are_required_canonical_and_exactly_cardinal() {
+        let single = single_follow_definition();
+        let mut base = checkpoint(&single);
+        base["current_node"] = json!("wait");
+        base[crate::walker::follow_keys::PENDING_FOLLOW] = json!({
+            "follow_node": "wait",
+            "step_count": 4,
+            "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
+        });
+
+        let mut missing = base.clone();
+        missing[crate::walker::follow_keys::PENDING_FOLLOW]
+            .as_object_mut()
+            .unwrap()
+            .remove("item_refs");
+        let error = from_checkpoint_value(&missing, &single)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing field `item_refs`"), "{error}");
+
+        for (item_refs, expected) in [
+            (json!([]), "must contain at least one canonical ref"),
+            (json!(["child"]), "is not canonical"),
+            (
+                json!(["directive:test/child", "directive:test/other"]),
+                "cardinality 2 does not match required 1",
+            ),
+        ] {
+            let mut value = base.clone();
+            value[crate::walker::follow_keys::PENDING_FOLLOW]["item_refs"] = item_refs;
+            let error = from_checkpoint_value(&value, &single)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let fanout = definition();
+        let mut wrong_fanout_cardinality = checkpoint(&fanout);
+        wrong_fanout_cardinality["current_node"] = json!("wait");
+        wrong_fanout_cardinality[crate::walker::follow_keys::PENDING_FOLLOW] = json!({
+            "follow_node": "wait",
+            "step_count": 4,
+            "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
+            "iteration_snapshot": ["a", "b"],
+        });
+        let error = from_checkpoint_value(&wrong_fanout_cardinality, &fanout)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cardinality 1 does not match required 2"),
             "{error}"
         );
     }
@@ -894,6 +1001,7 @@ config:
             "follow_node": "wait",
             "step_count": 4,
             "graph_run_id": "run-1",
+            "item_refs": ["directive:test/child"],
             "iteration_snapshot": [],
             "child_thread_id": "legacy-child",
         });

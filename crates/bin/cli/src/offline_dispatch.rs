@@ -1019,8 +1019,8 @@ mod tests {
             std::fs::create_dir_all(&node_identity_dir).unwrap();
             std::fs::write(
                 node_identity_dir.parent().unwrap().join("sandbox.yaml"),
-                "version: 1\nmode: enforce\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\n\
-                 filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n\
+                "version: 1\nmode: disabled\nbackend:\n  kind: bubblewrap\n  executable: /usr/bin/bwrap\n\
+                 filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n    - \"{bundle_roots}\"\n    - \"{verified_code}\"\n\
                  network:\n  mode: isolated\nenvironment:\n  allow:\n    - \"*\"\n\
                  limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             )
@@ -1414,8 +1414,31 @@ import sys
 req = json.load(sys.stdin)
 cmd = req.get("command")
 
-if cmd in ("validate_parser_config", "validate_composer_config"):
+if cmd == "validate_parser_config":
     print(json.dumps({"result": "validate_ok"}))
+elif cmd == "validate_composer_config":
+    config = req.get("composer_config")
+    requirements = req.get("field_requirements", [])
+    if config not in (None, {}):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer takes no config",
+        }))
+    elif any(not item.get("field") for item in requirements):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer field requirement must not be empty",
+        }))
+    elif any(item.get("semantics") != "root_verbatim" for item in requirements):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer only preserves root fields verbatim",
+        }))
+    else:
+        print(json.dumps({
+            "result": "validate_composer_ok",
+            "field_requirements": requirements,
+        }))
 elif cmd == "parse":
     try:
         import yaml

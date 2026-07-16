@@ -1126,6 +1126,16 @@ struct PreparedManagedLaunchAuthority {
     pending_project_snapshot: Option<super::PendingProjectSnapshot>,
 }
 
+/// Whether the exact authority audit for this launch is already part of the
+/// thread's signed birth commit or must be appended for this claimed attempt.
+/// Keeping this typed prevents an existing `created` successor from silently
+/// taking the fresh-birth path (or a fresh root from duplicating its audit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchAuditDisposition {
+    CommittedAtBirth,
+    AppendForAttempt,
+}
+
 fn launch_audit_records(
     resolved: &ResolvedExecutionRequest,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -1555,7 +1565,13 @@ pub async fn build_and_launch(
             )?,
     };
     drop(authority.pending_project_snapshot.take());
-    run_claimed_thread_row_with_authority(params, thread, authority, true).await
+    run_claimed_thread_row_with_authority(
+        params,
+        thread,
+        authority,
+        LaunchAuditDisposition::CommittedAtBirth,
+    )
+    .await
 }
 
 /// Run an already-created `created` thread row to completion: resolve, spawn its
@@ -1604,14 +1620,20 @@ async fn run_claimed_thread_row(
             return Err(error);
         }
     };
-    run_claimed_thread_row_with_authority(params, thread, authority, false).await
+    run_claimed_thread_row_with_authority(
+        params,
+        thread,
+        authority,
+        LaunchAuditDisposition::AppendForAttempt,
+    )
+    .await
 }
 
 async fn run_claimed_thread_row_with_authority(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let state = params.state;
     let thread_id = thread.thread_id.clone();
@@ -1633,7 +1655,7 @@ async fn run_claimed_thread_row_with_authority(
         params,
         thread,
         authority,
-        launch_audit_already_persisted,
+        launch_audit,
         &mut lifecycle_owner,
     )
     .await;
@@ -1650,7 +1672,7 @@ async fn run_claimed_thread_row_inner(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
     lifecycle_owner: &mut super::process_attachment::LifecycleOwnerGuard,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
@@ -1997,18 +2019,20 @@ async fn run_claimed_thread_row_inner(
 
     // Fresh roots and continuations committed this audit with `thread_created`
     // in their birth transaction. Existing-row retry/recovery paths append the
-    // recomputed trio atomically with their created -> running transition before
-    // handoff. A same-thread running recovery appends only the new attempt audit.
-    if !launch_audit_already_persisted {
-        let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?;
-        state
-            .threads
-            .mark_running_with_events(&thread_id, launch_audit)
-            .map_err(|error| {
-                BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "atomic durable launch audit and running transition failed: {error}"
-                ))
-            })?;
+    // recomputed trio atomically before handoff.
+    match launch_audit {
+        LaunchAuditDisposition::CommittedAtBirth => {}
+        LaunchAuditDisposition::AppendForAttempt => {
+            let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?;
+            state
+                .threads
+                .append_launch_attempt_audit(&chain_root_id, &thread_id, &launch_audit)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "atomic durable launch audit append failed: {error}"
+                    ))
+                })?;
+        }
     }
 
     // 8. Build envelope
@@ -2464,7 +2488,7 @@ struct PreparedSuccessorLaunch {
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
 }
 
 pub struct PreparedOperatorSuccessorLaunch {
@@ -2487,10 +2511,10 @@ impl PreparedOperatorSuccessorLaunch {
     }
 
     /// Mark that the authoritative audit committed with a newly-created
-    /// successor. Existing-row retry preparations deliberately remain false so
-    /// their recomputed attempt audit is appended before handoff.
+    /// successor. Existing-row retry preparations deliberately retain
+    /// `AppendForAttempt` so their recomputed audit is appended before handoff.
     pub fn with_persisted_birth_audit(mut self) -> Self {
-        self.prepared.launch_audit_already_persisted = true;
+        self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
         self
     }
@@ -2502,7 +2526,7 @@ pub struct PreparedMachineSuccessorLaunch {
 
 impl PreparedMachineSuccessorLaunch {
     pub fn with_persisted_birth_audit(mut self) -> Self {
-        self.prepared.launch_audit_already_persisted = true;
+        self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
         self
     }
@@ -2520,7 +2544,7 @@ pub struct PreparedFollowChildLaunch {
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
 }
 
 impl PreparedFollowChildLaunch {
@@ -2543,10 +2567,10 @@ impl PreparedFollowChildLaunch {
     }
 
     /// Mark that `initial_audit_events` committed atomically with this fresh
-    /// root. Re-driven pre-existing rows leave this false so the recomputed
-    /// attempt audit is appended before their spawn handoff.
+    /// root. Re-driven pre-existing rows retain `AppendForAttempt` so the
+    /// recomputed audit is appended before their spawn handoff.
     pub fn with_persisted_birth_audit(mut self) -> Self {
-        self.launch_audit_already_persisted = true;
+        self.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.authority.pending_project_snapshot.take());
         self
     }
@@ -2811,7 +2835,7 @@ async fn prepare_follow_child_launch_inner(
         execution,
         launch_metadata,
         authority,
-        launch_audit_already_persisted: false,
+        launch_audit: LaunchAuditDisposition::AppendForAttempt,
     })
 }
 
@@ -2941,7 +2965,7 @@ async fn prepare_successor_launch(
         execution,
         launch_metadata,
         authority,
-        launch_audit_already_persisted: false,
+        launch_audit: LaunchAuditDisposition::AppendForAttempt,
     })
 }
 
@@ -3357,7 +3381,7 @@ async fn launch_claimed_successor(
             }
             (
                 prepared.execution,
-                Some((prepared.authority, prepared.launch_audit_already_persisted)),
+                Some((prepared.authority, prepared.launch_audit)),
             )
         }
         None => (
@@ -3412,14 +3436,9 @@ async fn launch_claimed_successor(
         launch_handoff,
     };
     match prepared_authority {
-        Some((authority, launch_audit_already_persisted)) => {
-            run_claimed_thread_row_with_authority(
-                launch_params,
-                successor,
-                authority,
-                launch_audit_already_persisted,
-            )
-            .await
+        Some((authority, launch_audit)) => {
+            run_claimed_thread_row_with_authority(launch_params, successor, authority, launch_audit)
+                .await
         }
         None => run_claimed_thread_row(launch_params, successor).await,
     }
@@ -3685,45 +3704,48 @@ async fn launch_claimed_follow_child(
     let identity = metadata.resume_context.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
     })?;
-    let (params, parent_context, prepared_authority, launch_audit_already_persisted) =
-        match prepared_child {
-            Some(prepared) => {
-                if prepared.thread_id != thread_id {
-                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "precomputed child authority names {}, not persisted child {thread_id}",
-                        prepared.thread_id
-                    )));
-                }
-                if prepared.resume_context != identity {
-                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "precomputed child authority does not match persisted launch identity"
-                    )));
-                }
-                let audit_persisted = prepared.launch_audit_already_persisted;
-                (
-                    prepared.execution,
-                    prepared.parent_context,
-                    Some(prepared.authority),
-                    audit_persisted,
-                )
+    let (params, parent_context, prepared_authority, launch_audit) = match prepared_child {
+        Some(prepared) => {
+            if prepared.thread_id != thread_id {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed child authority names {}, not persisted child {thread_id}",
+                    prepared.thread_id
+                )));
             }
-            None => {
-                let parent_context =
-                    parent_context.or(persisted_parent_context).ok_or_else(|| {
-                        anyhow::anyhow!("follow child: {thread_id} has no persisted parent context")
-                    })?;
-                // Recovery reconstructs the exact admitted root identity from
-                // the sealed request. A live caller may still override only the
-                // borrowed workspace provenance.
-                let params = crate::execution::runner::execution_params_from_sealed_root_request(
-                    state,
-                    &identity,
-                    &sealed_root_request,
-                    provenance_override,
-                )?;
-                (params, parent_context, None, false)
+            if prepared.resume_context != identity {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed child authority does not match persisted launch identity"
+                )));
             }
-        };
+            let launch_audit = prepared.launch_audit;
+            (
+                prepared.execution,
+                prepared.parent_context,
+                Some(prepared.authority),
+                launch_audit,
+            )
+        }
+        None => {
+            let parent_context = parent_context.or(persisted_parent_context).ok_or_else(|| {
+                anyhow::anyhow!("follow child: {thread_id} has no persisted parent context")
+            })?;
+            // Recovery reconstructs the exact admitted root identity from
+            // the sealed request. A live caller may still override only the
+            // borrowed workspace provenance.
+            let params = crate::execution::runner::execution_params_from_sealed_root_request(
+                state,
+                &identity,
+                &sealed_root_request,
+                provenance_override,
+            )?;
+            (
+                params,
+                parent_context,
+                None,
+                LaunchAuditDisposition::AppendForAttempt,
+            )
+        }
+    };
     // Working dir + runtime registry follow the FINAL provenance (post-
     // override), so the hot path runs in the parent's workspace with the
     // parent's request engine.
@@ -3764,13 +3786,8 @@ async fn launch_claimed_follow_child(
     };
     match prepared_authority {
         Some(authority) => {
-            run_claimed_thread_row_with_authority(
-                launch_params,
-                thread,
-                authority,
-                launch_audit_already_persisted,
-            )
-            .await
+            run_claimed_thread_row_with_authority(launch_params, thread, authority, launch_audit)
+                .await
         }
         None => run_claimed_thread_row(launch_params, thread).await,
     }

@@ -36,7 +36,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -807,34 +807,6 @@ pricing:
     Ok(())
 }
 
-/// Install the mock provider as a node bundle. Provider executable/network
-/// policy is node authority and must not be sourced from mutable project space.
-fn register_mock_provider_bundle(
-    state_path: &Path,
-    base_url: &str,
-    signer: &SigningKey,
-) -> anyhow::Result<()> {
-    let bundle_root = state_path.join(".ai/test-bundles/follow-cost-provider");
-    plant_mock_provider(&bundle_root, base_url, signer)?;
-    let manifest_body = r#"name: follow-cost-provider
-version: 0.1.0
-description: "test-only mock model provider"
-provides_kinds: []
-requires_kinds:
-  - config
-uses_kinds: []
-"#;
-    let manifest = lillux::signature::sign_content(manifest_body, signer, "#", None);
-    std::fs::write(bundle_root.join(".ai/manifest.yaml"), manifest)?;
-
-    let records = state_path.join(".ai/node/bundles");
-    std::fs::create_dir_all(&records)?;
-    let body = format!("kind: node\npath: {}\n", bundle_root.display());
-    let signed = lillux::signature::sign_content(&body, signer, "#", None);
-    std::fs::write(records.join("follow-cost-provider.yaml"), signed)?;
-    Ok(())
-}
-
 /// Map the `general` tier to the mock provider.
 fn plant_model_routing(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = root.join(".ai/config/ryeos-runtime");
@@ -906,14 +878,17 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let mock = MockProvider::start(vec![MockResponse::Text("hi from child".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let mock_url_for_bundle = mock_url.clone();
-    let plant =
-        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_vault_with_zen_key(state_path)?;
-            register_mock_provider_bundle(state_path, &mock_url_for_bundle, &fixture.publisher)?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-follow-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
@@ -921,9 +896,6 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
                 "info,ryeosd=debug,ryeos_graph_runtime=debug,ryeos_directive_runtime=debug".into()
             }),
         );
-        // The model-routing choice remains project-authored; provider authority
-        // itself is installed in the fixture's node bundle set above.
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");

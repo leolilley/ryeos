@@ -469,6 +469,24 @@ impl RuntimeLaunchMetadata {
         }
     }
 
+    /// Project this thread's execution-level policy into a newly-created
+    /// continuation successor.
+    ///
+    /// A continuation is another segment of the same managed execution, so its
+    /// cancellation and native-resume declarations remain authoritative. The
+    /// checkpoint directory and follow-child admission fields are owned by one
+    /// concrete thread, however, and must never be copied to a different thread
+    /// identity. Launch preparation allocates the successor's own checkpoint
+    /// directory before it attaches.
+    pub(crate) fn continuation_successor_seed(&self, resume_context: ResumeContext) -> Self {
+        Self {
+            cancellation_mode: self.cancellation_mode,
+            native_resume: self.native_resume.clone(),
+            resume_context: Some(resume_context),
+            ..Self::default()
+        }
+    }
+
     pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
         self.sealed_root_request = Some(request);
         self
@@ -486,7 +504,7 @@ impl RuntimeLaunchMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec};
+    use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec};
     use std::collections::HashMap;
 
     fn empty_spec() -> PlanSubprocessSpec {
@@ -603,7 +621,6 @@ mod tests {
 
     #[test]
     fn from_spec_native_resume_propagates() {
-        use ryeos_engine::contracts::NativeResumeSpec;
         let mut spec = empty_spec();
         spec.execution.native_resume = Some(NativeResumeSpec {
             checkpoint_interval_secs: 60,
@@ -620,6 +637,45 @@ mod tests {
     fn declares_native_resume_false_without_native_resume() {
         let m = RuntimeLaunchMetadata::from_spec(&empty_spec());
         assert!(!m.declares_native_resume());
+    }
+
+    #[test]
+    fn continuation_successor_seed_preserves_policy_and_clears_thread_owned_state() {
+        let native_resume = NativeResumeSpec {
+            checkpoint_interval_secs: 17,
+            max_auto_resume_attempts: 4,
+        };
+        let source = RuntimeLaunchMetadata {
+            cancellation_mode: Some(CancellationMode::Hard),
+            native_resume: Some(native_resume.clone()),
+            checkpoint_dir: Some(PathBuf::from("/state/threads/source/checkpoints")),
+            resume_context: Some(resume_context(local_path_ctx())),
+            continuation_source_thread_id: Some("earlier-source".to_string()),
+            follow_parent_context: Some(PersistedParentExecutionContext {
+                parent_thread_id: "follow-parent".to_string(),
+                hard_limits: serde_json::json!({"max_depth": 2}),
+                depth: 1,
+            }),
+            follow_launch_window: Some(FollowLaunchWindow {
+                key: "follow:source".to_string(),
+                width: 2,
+            }),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let successor_resume = resume_context(ProjectContext::SnapshotHash {
+            hash: "a".repeat(64),
+        });
+
+        let successor = source.continuation_successor_seed(successor_resume.clone());
+
+        assert_eq!(successor.cancellation_mode, Some(CancellationMode::Hard));
+        assert_eq!(successor.native_resume, Some(native_resume));
+        assert_eq!(successor.resume_context, Some(successor_resume));
+        assert!(successor.checkpoint_dir.is_none());
+        assert!(successor.continuation_source_thread_id.is_none());
+        assert!(successor.sealed_root_request.is_none());
+        assert!(successor.follow_parent_context.is_none());
+        assert!(successor.follow_launch_window.is_none());
     }
 
     #[test]

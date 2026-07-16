@@ -21,6 +21,9 @@ const ALLOWED_SECRET_NAMES: &[&str] = &[
     "OPENROUTER_API_KEY",
     "ZEN_API_KEY",
 ];
+// A 64-byte lowercase SHA-256 hex string occupies 66 bytes as canonical JSON:
+// one byte for each surrounding quote plus the 64-byte value.
+const SHA256_HEX_CANONICAL_JSON_BYTES: u32 = 66;
 
 pub fn prepare(request: LaunchPrepareRequest) -> HandlerResponse {
     HandlerResponse::LaunchPrepare {
@@ -482,14 +485,14 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         "config_hash",
         true,
         RuntimeFactKindWire::String,
-        66,
+        SHA256_HEX_CANONICAL_JSON_BYTES,
     )?;
     fact(
         request,
         "config_value_digest",
         true,
         RuntimeFactKindWire::String,
-        66,
+        SHA256_HEX_CANONICAL_JSON_BYTES,
     )?;
     fact(
         request,

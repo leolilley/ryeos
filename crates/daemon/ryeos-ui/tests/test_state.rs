@@ -190,39 +190,29 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
 }
 
 #[allow(dead_code)]
-fn workspace_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
-}
-
-#[allow(dead_code)]
 fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
-    let workspace = workspace_root();
     let trust_store = ryeos_engine::test_support::live_trust_store();
     let core_bundle = ryeos_engine::test_support::core_bundle_root();
-    let std_bundle = ryeos_engine::test_support::standard_bundle_root();
-    let ryeos_bundle = workspace.join("bundles/ryeos-ui");
+    let standard_bundle = ryeos_engine::test_support::standard_bundle_root();
+    let ryeos_ui_bundle = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
 
     let kinds = KindRegistry::load_base(
         &[
             core_bundle.join(".ai/node/engine/kinds"),
-            std_bundle.join(".ai/node/engine/kinds"),
+            standard_bundle.join(".ai/node/engine/kinds"),
         ],
         &trust_store,
     )
-    .expect("load kind registry");
+    .expect("load live kind registry");
 
-    let bundle_roots = vec![core_bundle, std_bundle, ryeos_bundle];
+    let bundle_roots = vec![core_bundle, standard_bundle, ryeos_ui_bundle];
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
             .expect("load live parser tools");
-    let handlers = ryeos_engine::test_support::load_live_handler_registry();
+    let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
     let parser_dispatcher =
-        ryeos_engine::parsers::ParserDispatcher::new(parser_tools, Arc::clone(&handlers));
-    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)
+        ryeos_engine::parsers::ParserDispatcher::new(parser_tools, Arc::clone(&native_handlers));
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive live composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)

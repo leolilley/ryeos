@@ -515,6 +515,7 @@ pub(super) enum CommitResult {
 pub(super) struct FollowResumeState {
     pub(super) follow_node: String,
     pub(super) follow_result: Option<Value>,
+    pub(super) item_refs: Vec<String>,
     pub(super) iteration_snapshot: Option<Vec<Value>>,
 }
 

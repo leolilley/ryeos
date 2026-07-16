@@ -3263,6 +3263,22 @@ config:
       node_type: return
 "#;
 
+const GRAPH_FOLLOW_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action: {item_id: "graph:test/child", ref_bindings: {}, params: {}}
+      assign: {child_ran: "${result.child_ran}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: {child_ran: "${state.child_ran}"}
+"#;
+
 #[tokio::test]
 async fn follow_suspend_emits_events_and_no_receipt() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3392,6 +3408,7 @@ async fn follow_resume_consumes_child_result_and_completes() {
             "follow_node": "fetch",
             "step_count": 0,
             "graph_run_id": "gr-resume",
+            "item_refs": ["directive:child"],
         })),
         Some(follow_terminal_envelope(
             RuntimeResultStatus::Completed,
@@ -3467,6 +3484,7 @@ fn follow_resume_params(graph: &GraphDefinition, follow_result: Option<Value>) -
             "follow_node": "fetch",
             "step_count": 0,
             "graph_run_id": "gr-resume",
+            "item_refs": ["directive:child"],
         })),
         follow_result,
         0,
@@ -3482,6 +3500,85 @@ fn follow_terminal_envelope(status: RuntimeResultStatus, result: Value) -> Value
         "warnings": [],
         "cost": null,
     })
+}
+
+fn completed_child_graph_result(definition_ref: &str, result: Value) -> Value {
+    json!({
+        "success": true,
+        "graph_id": definition_ref.trim_start_matches("graph:"),
+        "definition_ref": definition_ref,
+        "definition_hash": "sha256:test-child",
+        "graph_run_id": "gr-child",
+        "status": GraphRunStatus::Completed,
+        "steps": 1,
+        "state": {"child_private": true},
+        "result": result,
+        "node_costs": [],
+        "hook_costs": [],
+    })
+}
+
+#[tokio::test]
+async fn graph_follow_resume_exposes_authored_child_return_to_parent_expressions() {
+    let graph = make_graph(GRAPH_FOLLOW_YAML);
+    let authored = json!({"child_ran": "sentinel"});
+    let resume = strict_resume_params(
+        &graph,
+        "fetch",
+        0,
+        json!({}),
+        "gr-resume",
+        Some(json!({
+            "follow_node": "fetch",
+            "step_count": 0,
+            "graph_run_id": "gr-resume",
+            "item_refs": ["graph:test/child"],
+        })),
+        Some(follow_terminal_envelope(
+            RuntimeResultStatus::Completed,
+            completed_child_graph_result("graph:test/child", authored),
+        )),
+        0,
+    );
+    let (walker, recorder) = make_recording_walker(graph, vec![], None);
+    let result = walker.execute(resume, Some("gr-resume".to_string())).await;
+
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.state["child_ran"], json!("sentinel"));
+    assert_eq!(result.result, Some(json!({"child_ran": "sentinel"})));
+    assert_eq!(recorder.dispatch_count(), 0);
+    assert!(recorder.recorded_follow_requests().is_empty());
+}
+
+#[tokio::test]
+async fn single_follow_redrive_rejects_rendered_item_ref_drift() {
+    let graph = make_graph(FOLLOW_YAML);
+    let resume = strict_resume_params(
+        &graph,
+        "fetch",
+        0,
+        json!({}),
+        "gr-resume",
+        Some(json!({
+            "follow_node": "fetch",
+            "step_count": 0,
+            "graph_run_id": "gr-resume",
+            "item_refs": ["directive:other"],
+        })),
+        None,
+        0,
+    );
+    let (walker, recorder) = make_recording_walker(graph, vec![], None);
+    let result = walker.execute(resume, Some("gr-resume".to_string())).await;
+
+    assert_eq!(result.status, GraphRunStatus::Error, "{result:?}");
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("checkpoint records `directive:other`"));
+    assert!(recorder.recorded_follow_requests().is_empty());
+    assert_eq!(recorder.dispatch_count(), 0);
 }
 
 #[tokio::test]
@@ -3585,6 +3682,7 @@ async fn follow_resume_rejects_noncanonical_terminal_envelopes() {
                 "follow_node": "fetch",
                 "step_count": 0,
                 "graph_run_id": "gr-resume",
+                "item_refs": ["directive:child"],
             })),
             Some(malformed),
             0,
@@ -3687,6 +3785,7 @@ async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
             "follow_node": "fetch1",
             "step_count": 0,
             "graph_run_id": "gr-seq",
+            "item_refs": ["directive:child1"],
         })),
         Some(follow_terminal_envelope(
             RuntimeResultStatus::Completed,
@@ -3725,6 +3824,7 @@ async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
             "follow_node": "fetch2",
             "step_count": fetch2_step,
             "graph_run_id": "gr-seq",
+            "item_refs": ["directive:child2"],
         })),
         Some(follow_terminal_envelope(
             RuntimeResultStatus::Completed,
@@ -3774,6 +3874,21 @@ config:
 "#;
 
 fn fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Option<Value>) -> Value {
+    fanout_resume_for_kind(graph, items, wrapper, "directive")
+}
+
+fn fanout_resume_for_kind(
+    graph: &GraphDefinition,
+    items: Value,
+    wrapper: Option<Value>,
+    kind: &str,
+) -> Value {
+    let item_refs = items
+        .as_array()
+        .expect("fanout test snapshot must be an array")
+        .iter()
+        .map(|item| format!("{kind}:{}", item["kind"].as_str().unwrap()))
+        .collect::<Vec<_>>();
     strict_resume_params(
         graph,
         "fan",
@@ -3784,6 +3899,7 @@ fn fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Option<Value>) 
             "follow_node": "fan",
             "step_count": 0,
             "graph_run_id": "gr-fan",
+            "item_refs": item_refs,
             "iteration_snapshot": items,
         })),
         wrapper,
@@ -3792,6 +3908,12 @@ fn fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Option<Value>) 
 }
 
 fn unchecked_fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Value) -> Value {
+    let item_refs = items
+        .as_array()
+        .expect("fanout test snapshot must be an array")
+        .iter()
+        .map(|item| format!("directive:{}", item["kind"].as_str().unwrap()))
+        .collect::<Vec<_>>();
     unchecked_resume_params(
         graph,
         "fan",
@@ -3802,6 +3924,7 @@ fn unchecked_fanout_resume(graph: &GraphDefinition, items: Value, wrapper: Value
             "follow_node": "fan",
             "step_count": 0,
             "graph_run_id": "gr-fan",
+            "item_refs": item_refs,
             "iteration_snapshot": items,
         })),
         Some(wrapper),
@@ -3840,6 +3963,10 @@ async fn follow_fanout_spawns_one_ordered_rendered_cohort() {
         serde_json::from_str(&std::fs::read_to_string(tmp.path().join("latest.json")).unwrap())
             .unwrap();
     assert_eq!(checkpoint["pending_follow"]["iteration_snapshot"], jobs);
+    assert_eq!(
+        checkpoint["pending_follow"]["item_refs"],
+        json!(["directive:alpha", "directive:beta"])
+    );
 }
 
 #[tokio::test]
@@ -3936,6 +4063,65 @@ async fn follow_fanout_bare_marker_redrives_same_key_from_snapshot() {
     assert_eq!(request.graph_run_id, "gr-fan");
     assert_eq!(request.follow_node, "fan");
     assert_eq!(request.children[0].item_ref, "directive:original");
+}
+
+#[tokio::test]
+async fn follow_fanout_redrive_rejects_ordered_item_ref_drift() {
+    let snapshot = json!([{"kind":"original","value":1,"lane":"a"}]);
+    let graph = make_graph(FOLLOW_FANOUT_YAML);
+    let mut params = fanout_resume(&graph, snapshot, None);
+    params["resume_state"]["pending_follow"]["item_refs"] = json!(["directive:other"]);
+    let (walker, recorder) = make_recording_walker(graph, vec![], None);
+    let result = walker.execute(params, Some("gr-fan".into())).await;
+
+    assert_eq!(result.status, GraphRunStatus::Error, "{result:?}");
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("differ from its checkpointed ordered item_refs"));
+    assert!(recorder.recorded_follow_requests().is_empty());
+    assert_eq!(recorder.dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn graph_follow_fanout_collects_authored_child_returns_in_order() {
+    let yaml = FOLLOW_FANOUT_YAML.replace(
+        "item_id: \"directive:${job.kind}\"",
+        "item_id: \"graph:${job.kind}\"",
+    );
+    let snapshot = json!([
+        {"kind":"a","value":1,"lane":"a"},
+        {"kind":"b","value":2,"lane":"b"}
+    ]);
+    let wrapper = json!({
+        "fanout": true,
+        "expected": 2,
+        "failed": 0,
+        "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Completed],
+        "items": [
+            follow_terminal_envelope(
+                RuntimeResultStatus::Completed,
+                completed_child_graph_result("graph:a", json!({"child_ran": "a"})),
+            ),
+            follow_terminal_envelope(
+                RuntimeResultStatus::Completed,
+                completed_child_graph_result("graph:b", json!({"child_ran": "b"})),
+            ),
+        ],
+    });
+    let graph = make_graph(&yaml);
+    let params = fanout_resume_for_kind(&graph, snapshot, Some(wrapper), "graph");
+    let (walker, recorder) = make_recording_walker(graph, vec![], None);
+    let result = walker.execute(params, Some("gr-fan".into())).await;
+
+    assert!(result.success, "{result:?}");
+    assert_eq!(
+        result.state["gathered"],
+        json!([{"child_ran": "a"}, {"child_ran": "b"}])
+    );
+    assert!(recorder.recorded_follow_requests().is_empty());
+    assert_eq!(recorder.dispatch_count(), 0);
 }
 
 #[tokio::test]

@@ -152,11 +152,37 @@ impl Walker {
         // re-drive with no result yet (which re-suspends idempotently). Taken
         // BEFORE env preflight so a parent-side env gap can't turn an already-
         // completed child's result into a dispatch hard error.
-        let resumed_follow_envelope = if node.follow {
-            self.take_follow_result(current)
+        let resumed_follow_state = if node.follow {
+            self.take_follow_state(current)
         } else {
             None
         };
+        if let Some(resumed) = &resumed_follow_state {
+            let stored_item_ref = resumed
+                .item_refs
+                .first()
+                .expect("validated single-follow resume carries exactly one item ref");
+            if stored_item_ref != &dispatched_item_id {
+                return StepOutcome::Terminal(TerminalOutcome {
+                    status: GraphRunStatus::Error,
+                    error: Some(format!(
+                        "follow node `{current}` rendered item `{dispatched_item_id}`, but its checkpoint records `{stored_item_ref}`"
+                    )),
+                    origin: TerminalOrigin::RunControl,
+                    output: None,
+                });
+            }
+        }
+        let resumed_follow_envelope = resumed_follow_state.and_then(|state| {
+            state.follow_result.map(|envelope| {
+                let item_ref = state
+                    .item_refs
+                    .into_iter()
+                    .next()
+                    .expect("validated single-follow resume carries exactly one item ref");
+                (envelope, item_ref)
+            })
+        });
 
         // Env preflight — skipped when consuming a stored follow result (the child
         // already ran). Still enforced for first-run follow suspend, bare-marker
@@ -226,11 +252,11 @@ impl Walker {
         let mut cache_hit = false;
         let mut cache_write_key = None;
         let outcome: Result<dispatch::ActionOutcome, dispatch::ActionDispatchError> = if let Some(
-            envelope,
+            (envelope, stored_item_ref),
         ) =
             resumed_follow_envelope
         {
-            match dispatch::classify_follow_envelope(envelope) {
+            match dispatch::classify_follow_envelope_for_item(envelope, &stored_item_ref) {
                 Ok(classified) => Ok(classified.outcome),
                 Err(error) => {
                     return StepOutcome::Terminal(TerminalOutcome {
@@ -523,10 +549,14 @@ impl Walker {
         // Consume first. An armed successor must never repeat env preflight or
         // render or dispatch the child action.
         let resumed_state = self.take_follow_state(current);
-        let checkpointed_items = resumed_state
-            .as_ref()
-            .and_then(|state| state.iteration_snapshot.clone());
-        let resumed = resumed_state.and_then(|state| state.follow_result);
+        let (checkpointed_items, checkpointed_item_refs, resumed) = match resumed_state {
+            Some(state) => (
+                state.iteration_snapshot,
+                state.item_refs,
+                state.follow_result,
+            ),
+            None => (None, Vec::new(), None),
+        };
         if resumed.is_some() && checkpointed_items.is_none() {
             return StepOutcome::Terminal(TerminalOutcome {
                 status: GraphRunStatus::Error,
@@ -596,7 +626,10 @@ impl Walker {
                     output: None,
                 });
             }
-            let wrapper = match dispatch::classify_follow_fanout_envelope(wrapper, over.len()) {
+            let wrapper = match dispatch::classify_follow_fanout_envelope(
+                wrapper,
+                &checkpointed_item_refs,
+            ) {
                 Ok(wrapper) => wrapper,
                 Err(error) => {
                     return StepOutcome::Terminal(TerminalOutcome {
@@ -940,6 +973,22 @@ impl Walker {
                 ref_bindings,
                 parameters,
                 facets,
+            });
+        }
+        if !checkpointed_item_refs.is_empty()
+            && (children.len() != checkpointed_item_refs.len()
+                || children
+                    .iter()
+                    .zip(checkpointed_item_refs.iter())
+                    .any(|(child, checkpointed)| child.item_ref != *checkpointed))
+        {
+            return StepOutcome::Terminal(TerminalOutcome {
+                status: GraphRunStatus::Error,
+                error: Some(format!(
+                    "follow fanout node `{current}` rendered child refs that differ from its checkpointed ordered item_refs"
+                )),
+                origin: TerminalOrigin::RunControl,
+                output: None,
             });
         }
         let width = match node.max_concurrency.map(u32::try_from).transpose() {

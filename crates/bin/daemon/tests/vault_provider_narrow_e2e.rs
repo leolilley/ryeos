@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -69,6 +69,29 @@ pricing:
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join(format!("{provider_id}.yaml")), signed)?;
     Ok(())
+}
+
+fn register_provider_config_bundle(
+    state_path: &Path,
+    provider_id: &str,
+    mock_base_url: &str,
+    env_var: Option<&str>,
+    fixture: &FastFixture,
+) -> anyhow::Result<()> {
+    register_config_fixture_bundle(
+        state_path,
+        "fixture-vault-provider-model-config",
+        fixture,
+        |bundle_root| {
+            plant_provider_config(
+                bundle_root,
+                provider_id,
+                mock_base_url,
+                env_var,
+                &fixture.publisher,
+            )
+        },
+    )
 }
 
 fn plant_model_routing_to(
@@ -170,6 +193,13 @@ async fn missing_selected_secret_fails_before_provider_request() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_provider_config_bundle(
+            state_path,
+            "zen",
+            &mock_url,
+            Some("ZEN_API_KEY"),
+            fixture,
+        )?;
         // Empty vault — no ZEN_API_KEY sealed.
         plant_empty_vault(state_path)?;
         Ok(())
@@ -180,23 +210,12 @@ async fn missing_selected_secret_fails_before_provider_request() {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon starts (vault is read at request time)");
 
-    // Project-tier plants override the standard bundle's shipped zen
-    // routing/provider, pointing `zen` at the mock so the zero-request
-    // assertion below stays sharp.
+    // Project routing selects the bundle-owned `zen` fixture provider.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_provider_config(
-        project.path(),
-        "zen",
-        &mock_url,
-        Some("ZEN_API_KEY"),
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing_to(project.path(), "zen", &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/narrow_missing", &fixture.publisher)
         .expect("plant directive");
@@ -277,6 +296,13 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
     let (h, fixture) = DaemonHarness::start_fast_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             register_standard_bundle(state_path, fixture)?;
+            register_provider_config_bundle(
+                state_path,
+                "zen",
+                &mock_url,
+                Some("ZEN_API_KEY"),
+                fixture,
+            )?;
             // Empty vault — no ZEN_API_KEY.
             plant_empty_vault(state_path)?;
             Ok(())
@@ -286,7 +312,6 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
             );
-            cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
         },
     )
     .await
@@ -296,14 +321,6 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
     // helper as resume). The error is routed through
     // DispatchError::RequiredSecretMissing with stable code.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_provider_config(
-        project.path(),
-        "zen",
-        &mock_url,
-        Some("ZEN_API_KEY"),
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing_to(project.path(), "zen", &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/resume_typed", &fixture.publisher)
         .expect("plant directive");
@@ -377,6 +394,7 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_provider_config_bundle(state_path, "noauth", &mock_url, None, fixture)?;
         // Empty vault — fine because provider declares no env var.
         plant_empty_vault(state_path)?;
         Ok(())
@@ -387,7 +405,6 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon starts with noauth provider + empty vault");
@@ -395,14 +412,6 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
     // Project routing overrides the bundle's shipped zen routing so
     // tier `general` resolves to the no-auth mock provider.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_provider_config(
-        project.path(),
-        "noauth",
-        &mock_url,
-        None,
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing_to(project.path(), "noauth", &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/narrow_noauth", &fixture.publisher)
         .expect("plant directive");
@@ -750,14 +759,13 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
 // ── Test 5: SSE stream emits structured required_secret_missing ──
 //
 // F3: proves the `/execute/stream` endpoint surfaces a missing provider secret
-// as a `thread_failed` terminal whose payload carries the structured error
-// fields (env_var, source_kind, source_name, remediation). Secret resolution
-// runs inside the spawned launch (after the thread is created), so the failure
-// is a persisted thread lifecycle terminal — not a pre-spawn `stream_error`,
-// which is reserved for synchronous gateway rejections before any thread exists.
+// as one pre-handoff `stream_error` carrying the structured error fields
+// (env_var, launch-preparation origin, remediation, retryability). Authoritative
+// launch preparation resolves required secrets before a managed thread is handed
+// to the gateway, so this is deliberately not a tailed `thread_failed` event.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn execute_stream_emits_structured_required_secret_missing_event() {
+async fn execute_stream_emits_structured_required_secret_missing_stream_error() {
     use base64::Engine;
     use lillux::crypto::Signer;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -769,6 +777,7 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     let (h, fixture) = DaemonHarness::start_fast_with(
         |state_path: &Path, _user: &Path, f: &FastFixture| {
             register_standard_bundle(state_path, f)?;
+            register_provider_config_bundle(state_path, "zen", &mock_url, Some("ZEN_API_KEY"), f)?;
             plant_empty_vault(state_path)?;
             // Authorize the user key so /execute/stream accepts signed requests.
             common::fast_fixture::write_authorized_key_signed_by(state_path, &f.user, &f.node)?;
@@ -779,21 +788,12 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
             );
-            cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
         },
     )
     .await
     .expect("daemon starts");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_provider_config(
-        project.path(),
-        "zen",
-        &mock_url,
-        Some("ZEN_API_KEY"),
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing_to(project.path(), "zen", &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/sse_secret", &fixture.publisher)
         .expect("plant directive");
@@ -856,92 +856,104 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
         .expect("SSE response timed out")
         .expect("SSE response read failed");
 
-    // Parse SSE lines looking for the `thread_failed` terminal whose payload
-    // carries a structured `required_secret_missing` error:
-    //   event: thread_failed
-    //   data: {"payload":{"outcome_code":"required_secret_missing",
-    //          "error":{"code":"required_secret_missing","env_var":...}},...}
-    let mut found_error = false;
-    for line in text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            // SSE frames emit `data:` before `event:`, so the terminal is
-            // identified by the payload itself (order-independent) rather than
-            // a tracked event-type line.
-            {
-                let parsed: serde_json::Value =
-                    serde_json::from_str(data.trim()).unwrap_or(serde_json::json!({}));
-
-                let outcome_code = parsed
-                    .pointer("/payload/outcome_code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let error = parsed
-                    .pointer("/payload/error")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let code = error
-                    .get("code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if outcome_code == "required_secret_missing" && code == "required_secret_missing" {
-                    found_error = true;
-
-                    // Assert structured fields.
-                    let env_var = error
-                        .get("env_var")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    assert_eq!(
-                        env_var, "ZEN_API_KEY",
-                        "thread_failed error must have env_var=ZEN_API_KEY; got: {env_var}"
-                    );
-
-                    let source_kind = error
-                        .get("source_kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    assert_eq!(
-                        source_kind, "provider",
-                        "thread_failed error must have source_kind=provider; got: {source_kind}"
-                    );
-
-                    let source_name = error
-                        .get("source_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    assert_eq!(
-                        source_name, "zen",
-                        "thread_failed error must have source_name=zen; got: {source_name}"
-                    );
-
-                    let remediation = error
-                        .get("remediation")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    assert!(
-                        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
-                        "remediation must contain vault set command; got: {remediation}"
-                    );
-
-                    // The error message must be a non-empty string.
-                    let error_msg = error
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    assert!(
-                        !error_msg.is_empty(),
-                        "thread_failed error must have non-empty error message"
-                    );
-                    break;
-                }
+    let normalized_sse = text.replace("\r\n", "\n");
+    let stream_errors = normalized_sse
+        .split("\n\n")
+        .filter_map(|frame| {
+            let event = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("event: "))?
+                .trim();
+            if event != "stream_error" {
+                return None;
             }
-        }
-    }
-
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .map(str::trim)
+        })
+        .map(|data| {
+            serde_json::from_str::<serde_json::Value>(data)
+                .unwrap_or_else(|error| panic!("stream_error data is not JSON: {error}; {data}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stream_errors.len(),
+        1,
+        "missing secret must emit exactly one pre-handoff stream_error; raw SSE output:\n{text}"
+    );
     assert!(
-        found_error,
-        "SSE stream must contain a thread_failed terminal whose payload carries a \
-         structured required_secret_missing error; raw SSE output:\n{text}"
+        !normalized_sse
+            .lines()
+            .any(|line| line.trim() == "event: thread_failed"),
+        "a pre-handoff secret failure must not be presented as a tailed thread terminal: {text}"
+    );
+
+    let error = &stream_errors[0];
+    assert_eq!(
+        error.get("code").and_then(serde_json::Value::as_str),
+        Some("required_secret_missing")
+    );
+    assert_eq!(
+        error.get("env_var").and_then(serde_json::Value::as_str),
+        Some("ZEN_API_KEY")
+    );
+    assert_eq!(
+        error.get("source_kind").and_then(serde_json::Value::as_str),
+        Some("launch_preparation")
+    );
+    assert_eq!(
+        error.get("retryable").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+
+    let source_name = error
+        .get("source_name")
+        .and_then(serde_json::Value::as_str)
+        .expect("launch-preparation error must name its canonical config origin");
+    let source_origin: serde_json::Value = serde_json::from_str(source_name)
+        .unwrap_or_else(|parse_error| panic!("source_name is not canonical JSON: {parse_error}"));
+    assert_eq!(
+        source_origin
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("config_input")
+    );
+    assert_eq!(
+        source_origin
+            .get("name")
+            .and_then(serde_json::Value::as_str),
+        Some("model_providers")
+    );
+    assert_eq!(
+        source_origin
+            .get("canonical_id")
+            .and_then(serde_json::Value::as_str),
+        Some("ryeos-runtime/model-providers/zen")
+    );
+    let digest = source_origin
+        .get("value_digest")
+        .and_then(serde_json::Value::as_str)
+        .expect("config-input origin must include its value digest");
+    assert!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "config-input value digest must be a SHA-256 hex digest; got {digest:?}"
+    );
+
+    let remediation = error
+        .get("remediation")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+        "remediation must contain vault set command; got: {remediation}"
+    );
+    assert!(
+        error
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| !message.is_empty()),
+        "stream_error must include a non-empty human-readable error"
     );
 
     // Mock provider must receive zero requests — launch preparation blocked.

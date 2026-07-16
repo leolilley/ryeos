@@ -13,7 +13,10 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
+use common::fast_fixture::{
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
+    FastFixture,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
@@ -222,6 +225,12 @@ async fn boot_and_run_directive_with_extra_keys(
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-chain-tail-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             for bytes in &extra_key_bytes {
                 let extra = SigningKey::from_bytes(bytes);
@@ -235,8 +244,6 @@ async fn boot_and_run_directive_with_extra_keys(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        // Provider/routing/directive are resolved from the project root.
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + route YAML");
@@ -244,11 +251,9 @@ async fn boot_and_run_directive_with_extra_keys(
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
-    // Dispatch resolves items from the project root (+ installed bundles), not
-    // from HOME — plant provider, routing, and the directive into the project
-    // that we pass as `project_path`.
+    // Dispatch resolves the routing overlay and directive from the project,
+    // while provider authority remains in the registered fixture bundle.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),

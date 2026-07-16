@@ -3679,6 +3679,24 @@ impl ThreadLifecycleService {
         Ok(persisted)
     }
 
+    /// Persist and publish the daemon-authored authority audit for one claimed
+    /// managed-runtime launch attempt. This is intentionally distinct from
+    /// [`Self::append_thread_events`]: a continuation successor may still be
+    /// `created` here, while runtime-authored events remain restricted to an
+    /// already-`running` process.
+    pub fn append_launch_attempt_audit(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+    ) -> Result<()> {
+        let persisted =
+            self.state_store
+                .append_launch_attempt_audit(chain_root_id, thread_id, events)?;
+        self.publish_records(&persisted);
+        Ok(())
+    }
+
     /// Record one portable cross-chain parent→child edge exactly once and
     /// publish it only after the signed authoritative append succeeds.
     pub fn append_child_thread_spawned_once(
