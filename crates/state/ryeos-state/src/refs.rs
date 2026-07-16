@@ -1481,6 +1481,9 @@ impl Drop for DeployedProjectHeadLock {
 /// the fold-back path to prevent lost updates when multiple executions
 /// race on the same project.
 #[cfg(test)]
+// This test-only CAS adapter deliberately exposes every identity, trust, and
+// held-lock prerequisite independently, matching the production boundary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_project_head_ref(
     refs_root: &Path,
     principal_key: &str,
@@ -1970,6 +1973,9 @@ pub(crate) fn remove_generic_head_ref_in_directory(
 ///
 /// `expected_current_hash = None` means the head must not exist yet.
 #[cfg(test)]
+// Keep namespace identity, CAS expectation, trust, and lock authority explicit
+// in tests so invalid combinations remain directly constructible.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_generic_head_ref(
     refs_root: &Path,
     namespace: &str,

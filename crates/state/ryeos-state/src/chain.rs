@@ -1582,6 +1582,9 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
 }
 
 #[cfg(test)]
+// The test adapter mirrors the authority-bearing production boundary, keeping
+// CAS, refs, signer, trust, and cache inputs independently visible.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events(
     cas_root: &Path,
     refs_root: &Path,
@@ -1605,6 +1608,9 @@ pub(crate) fn add_thread_to_chain_with_events(
 }
 
 #[cfg(test)]
+// Preserve the explicit authority/trust seam in tests rather than hiding
+// security-relevant inputs inside a convenience fixture.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust(
     cas_root: &Path,
     refs_root: &Path,
