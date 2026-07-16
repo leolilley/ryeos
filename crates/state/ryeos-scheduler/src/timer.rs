@@ -462,7 +462,6 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
     let ctx = Arc::clone(ctx);
     let spec = spec.clone();
     let fire_id = fire_id.to_string();
-    let trigger_reason = trigger_reason;
     tokio::spawn(async move {
         if !ctx.wait_for_recovery_execution_release().await {
             tracing::info!(

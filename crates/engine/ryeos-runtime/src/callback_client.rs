@@ -292,6 +292,9 @@ impl CallbackClient {
     /// hard error — a lost suspend would leave the graph believing it handed off.
     /// The caller's own thread + project identity are injected here; the daemon
     /// derives all trust-bearing state from the validated tokens.
+    // Keep graph position, child payload, frontier, and terminal handoff
+    // explicit: each field participates independently in resume correctness.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_follow_child(
         &self,
         graph_run_id: &str,
@@ -331,6 +334,9 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    // Keep graph position, launch-window policy, frontier, and terminal handoff
+    // explicit: each field participates independently in resume correctness.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_follow_children(
         &self,
         graph_run_id: &str,
