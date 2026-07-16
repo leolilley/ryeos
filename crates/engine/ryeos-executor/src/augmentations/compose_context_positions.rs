@@ -166,34 +166,47 @@ pub async fn run(
                 "target kind '{target_kind}' must declare execution.thread_profile"
             ))
         })?;
+    let caller_scopes = match &plan_ctx.requested_by {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => principal.scopes.clone(),
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+            principal.delegated_scopes.clone()
+        }
+    };
+    let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
+        engine,
+        &state.node_history_policy,
+        &runtime_item_ref_string,
+        project_path,
+        principal_fingerprint,
+        caller_scopes,
+        &plan_ctx.current_site_id,
+        &plan_ctx.origin_site_id,
+        child_thread_kind.to_string(),
+    )
+    .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     state
         .threads
-        .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
-            thread_id: child_thread_id.clone(),
-            chain_root_id: child_thread_id.clone(),
-            kind: child_thread_kind.to_string(),
-            item_ref: runtime_item_ref_string.clone(),
-            executor_ref: executor_ref.clone(),
-            launch_mode: "inline".to_string(),
-            current_site_id: plan_ctx.current_site_id.clone(),
-            origin_site_id: plan_ctx.origin_site_id.clone(),
-            upstream_thread_id: None,
-            requested_by: Some(principal_fingerprint.to_string()),
-            project_root: match &plan_ctx.project_context {
-                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                    Some(path.canonicalize().map_err(|error| {
-                        LaunchAugmentationError::Threads(format!(
-                            "canonicalize augmentation project {}: {error}",
-                            path.display()
-                        ))
-                    })?)
-                }
-                _ => None,
+        .create_non_execution_root_thread(
+            &ryeos_app::thread_lifecycle::ThreadCreateParams {
+                thread_id: child_thread_id.clone(),
+                chain_root_id: child_thread_id.clone(),
+                kind: child_thread_kind.to_string(),
+                item_ref: runtime_item_ref_string.clone(),
+                executor_ref: executor_ref.clone(),
+                launch_mode: "inline".to_string(),
+                current_site_id: plan_ctx.current_site_id.clone(),
+                origin_site_id: plan_ctx.origin_site_id.clone(),
+                upstream_thread_id: None,
+                requested_by: Some(principal_fingerprint.to_string()),
+                project_root: root_admission
+                    .project_root()
+                    .map(std::path::Path::to_path_buf),
+                usage_subject: None,
+                usage_subject_asserted_by: None,
+                captured_history_policy: None,
             },
-            usage_subject: None,
-            usage_subject_asserted_by: None,
-            captured_history_policy: None,
-        })
+            &root_admission,
+        )
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);

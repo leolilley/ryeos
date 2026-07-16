@@ -159,6 +159,7 @@ pub async fn handle_open(
         &owner,
         session.granted_caps.clone(),
         state.threads.site_id(),
+        state.threads.site_id(),
         SEAT_KIND.to_string(),
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;

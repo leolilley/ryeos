@@ -4204,6 +4204,7 @@ pub fn admit_non_execution_root(
     requested_by: &str,
     caller_scopes: Vec<String>,
     current_site_id: &str,
+    origin_site_id: &str,
     thread_profile: String,
 ) -> Result<NonExecutionRootAdmission> {
     validate_principal_identifier("non-execution root acting principal", requested_by)?;
@@ -4223,7 +4224,7 @@ pub fn admit_non_execution_root(
             })?,
         },
         current_site_id: current_site_id.to_string(),
-        origin_site_id: current_site_id.to_string(),
+        origin_site_id: origin_site_id.to_string(),
         execution_hints: ExecutionHints::default(),
         validate_only: false,
     };
