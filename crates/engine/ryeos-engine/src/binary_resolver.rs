@@ -1633,7 +1633,7 @@ mod tests {
             "item_ref": item_ref,
             "content_blob_hash": content_blob_hash,
             "integrity": format!("sha256:{content_blob_hash}"),
-            "signature_info": { "fingerprint": fingerprint },
+            "signature_info": null,
             "mode": 0o755,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();

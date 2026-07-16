@@ -157,12 +157,23 @@ struct LauncherProbeOutput {
 }
 
 fn run_launcher_probe(launcher_fd: RawFd, argument: &str) -> Result<LauncherProbeOutput, String> {
-    let mut child = Command::new(format!("/proc/self/fd/{launcher_fd}"))
+    use std::os::unix::process::CommandExt as _;
+
+    let mut command = Command::new(format!("/proc/self/fd/{launcher_fd}"));
+    command
         .arg(argument)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // An ELF image is opened before close-on-exec descriptors are discarded,
+    // while a script interpreter reopens the kernel-provided /proc/self/fd/N
+    // name after exec. Retain the exact inspected artifact explicitly so both
+    // forms execute the same pinned inode and do not depend on ambient flags.
+    unsafe {
+        command.pre_exec(move || set_cloexec(launcher_fd, false).map_err(std::io::Error::other));
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("execute exact launcher for {argument} inspection: {error}"))?;
     let stdout = child

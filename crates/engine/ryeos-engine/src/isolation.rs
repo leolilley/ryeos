@@ -5,7 +5,7 @@
 //! once. Launch paths then share the resolved runtime and call [`IsolationRuntime::apply`]
 //! without reopening node configuration at the process boundary.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,10 +14,10 @@ use crate::canonical_ref::CanonicalRef;
 use crate::error::EngineError;
 use crate::trust::TrustStore;
 use ryeos_isolation_protocol::{
-    AdapterLaunchRequest, IsolationAdapterProtocolVersion, IsolationArtifactRole,
-    IsolationAuthority, IsolationAuthorityId, IsolationAuthorityPurpose, IsolationCapability,
-    IsolationDeviceSurface, IsolationEnvironment, IsolationMount, IsolationMountAccess,
-    IsolationNetwork, IsolationPath, IsolationPlan, IsolationTarget,
+    AdapterLaunchRequest, IsolationAdapterProtocolVersion, IsolationAuthority,
+    IsolationAuthorityId, IsolationAuthorityPurpose, IsolationDeviceSurface, IsolationEnvironment,
+    IsolationMount, IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPlan,
+    IsolationTarget,
 };
 
 mod authority;
@@ -2925,8 +2925,10 @@ fn refused(reason: String) -> EngineError {
 mod tests {
     use super::*;
     use ryeos_isolation_protocol::{
-        InspectedArtifact, IsolationBackendDeclaration, IsolationBackendSelection,
+        InspectedArtifact, IsolationArtifactRole, IsolationBackendDeclaration,
+        IsolationBackendSelection, IsolationCapability,
     };
+    use std::collections::BTreeSet;
 
     #[cfg(unix)]
     fn resolved_backend() -> ResolvedIsolationBackend {

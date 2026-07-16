@@ -576,7 +576,7 @@ fn exec_tool(
             content_hash: resolved.content_hash.clone(),
         },
     ];
-    let request = isolation
+    let mut request = isolation
         .apply(
             lillux::SubprocessRequest {
                 cmd: resolved.absolute_path.to_string_lossy().into_owned(),

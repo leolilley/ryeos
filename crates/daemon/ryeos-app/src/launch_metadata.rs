@@ -475,6 +475,10 @@ impl RuntimeLaunchMetadata {
             sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            // Isolation is compiled against one concrete spawn and verified
+            // bundle generation. The successor receives fresh provenance when
+            // its own launch plan is compiled.
+            isolation: None,
         }
     }
 

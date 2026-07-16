@@ -1418,7 +1418,7 @@ fn default_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_core_tools::actions::doctor::{NA, OK};
+    use ryeos_core_tools::actions::doctor::NA;
 
     fn node_gc_args(dry_run: bool, confirm: bool, sweep_cas: bool) -> NodeGcArgs {
         NodeGcArgs {
@@ -1526,10 +1526,8 @@ mod tests {
         )
         .unwrap();
 
-        let error = inspect_isolation_policy(temp.path())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("unknown field"));
+        let error = format!("{:#}", inspect_isolation_policy(temp.path()).unwrap_err());
+        assert!(error.contains("unknown field"), "{error}");
 
         std::fs::write(&policy, isolation_policy("enforce", None)).unwrap();
         assert!(inspect_isolation_policy(temp.path())
