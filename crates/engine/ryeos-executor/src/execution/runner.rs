@@ -422,10 +422,19 @@ pub(crate) fn stop_owner_dropped_execution_tree(
     root_thread_id: &str,
 ) -> Result<OwnerDropStopOutcome> {
     match stop_owner_dropped_thread(state, root_thread_id)? {
-        OwnerDropStopOutcome::PreservedForShutdown => {
+        OwnerDropThreadOutcome::AlreadyTerminal => {
+            // A terminal root no longer belongs to the request task. In
+            // particular, `continued` means the follow callback has already
+            // committed ownership to its child/successor chain. The terminal
+            // event can reach an SSE client before that callback finishes its
+            // spawn handoffs; cancelling descendants here would turn a normal
+            // stream close into a durable chain kill.
+            return Ok(OwnerDropStopOutcome::Settled);
+        }
+        OwnerDropThreadOutcome::PreservedForShutdown => {
             return Ok(OwnerDropStopOutcome::PreservedForShutdown)
         }
-        OwnerDropStopOutcome::Settled => {}
+        OwnerDropThreadOutcome::Settled => {}
     }
 
     const MAX_DESCENDANT_FIXED_POINT_PASSES: usize = 16;
@@ -444,8 +453,8 @@ pub(crate) fn stop_owner_dropped_execution_tree(
         }
         for thread_id in new_descendants {
             match stop_owner_dropped_thread(state, &thread_id) {
-                Ok(OwnerDropStopOutcome::Settled) => {}
-                Ok(OwnerDropStopOutcome::PreservedForShutdown) => {
+                Ok(OwnerDropThreadOutcome::Settled | OwnerDropThreadOutcome::AlreadyTerminal) => {}
+                Ok(OwnerDropThreadOutcome::PreservedForShutdown) => {
                     tracing::info!(
                         thread_id,
                         root_thread_id,
@@ -472,15 +481,24 @@ pub(crate) fn stop_owner_dropped_execution_tree(
     Ok(OwnerDropStopOutcome::Settled)
 }
 
-fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerDropStopOutcome> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerDropThreadOutcome {
+    Settled,
+    AlreadyTerminal,
+    PreservedForShutdown,
+}
+
+fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerDropThreadOutcome> {
     let runtime = match state
         .state_store
         .request_thread_stop_if_admission_open(thread_id, StopIntent::Kill)?
     {
         StopIfAdmissionOpenOutcome::Requested(runtime) => runtime,
-        StopIfAdmissionOpenOutcome::AlreadyTerminal => return Ok(OwnerDropStopOutcome::Settled),
+        StopIfAdmissionOpenOutcome::AlreadyTerminal => {
+            return Ok(OwnerDropThreadOutcome::AlreadyTerminal)
+        }
         StopIfAdmissionOpenOutcome::PreservedForShutdown => {
-            return Ok(OwnerDropStopOutcome::PreservedForShutdown)
+            return Ok(OwnerDropThreadOutcome::PreservedForShutdown)
         }
     };
 
@@ -529,7 +547,7 @@ fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerD
     if let Some(error) = clear_error {
         return Err(error);
     }
-    Ok(OwnerDropStopOutcome::Settled)
+    Ok(OwnerDropThreadOutcome::Settled)
 }
 
 /// Parts harvested from an `ExecutionGuard` before moving into a

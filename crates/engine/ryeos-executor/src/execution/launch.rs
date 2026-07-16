@@ -2766,7 +2766,7 @@ async fn prepare_follow_child_launch_inner(
         capture_project_snapshot,
     )
     .await?;
-    let launch_metadata =
+    let mut launch_metadata =
         if capture_project_snapshot {
             authority.launch_metadata.as_ref().cloned().ok_or_else(|| {
                 anyhow::anyhow!("follow-child authority produced no launch metadata")
@@ -2774,6 +2774,21 @@ async fn prepare_follow_child_launch_inner(
         } else {
             launch_metadata.clone()
         };
+    // The prepared authority carries the CHILD's composed capabilities for the
+    // actual launch. The durable pre-launch ResumeContext has a different,
+    // explicit role: it must retain the PARENT's capabilities so a hot launch
+    // and a crash/reconcile launch apply the same FollowChildHybrid bound.
+    // `prepare_managed_launch_authority` refreshes ResumeContext from the child
+    // resolution, so restore only this overloaded birth-identity field while
+    // preserving its newly pinned snapshot and all other prepared metadata.
+    if capture_project_snapshot {
+        launch_metadata
+            .resume_context
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no ResumeContext"))?
+            .effective_caps
+            .clone_from(&resume.effective_caps);
+    }
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()

@@ -2664,7 +2664,7 @@ impl StateStore {
             .collect();
 
         let mut updated_snapshot = authoritative_snapshot_for_transition(
-            &g,
+            g,
             &thread_row.chain_root_id,
             &thread_row.thread_id,
         )?;

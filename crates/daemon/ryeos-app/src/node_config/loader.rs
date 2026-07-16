@@ -1086,6 +1086,13 @@ mod tests {
                 .any(|route| route.path == "/ui/api/items/effective"),
             "browser-session effective item route should load from nested route directory"
         );
+        assert!(
+            snapshot
+                .routes
+                .iter()
+                .any(|route| route.path == "/ui/api/invocations/dispatch"),
+            "browser-session invocation route should load from nested route directory"
+        );
     }
 
     #[test]
