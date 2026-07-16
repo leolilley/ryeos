@@ -86,6 +86,7 @@ pub async fn handle_open(
         &caller,
         ctx.scopes.clone(),
         state.threads.site_id(),
+        state.threads.site_id(),
         SEAT_KIND.to_string(),
     )
     .map_err(|error| HandlerError::BadRequest(error.to_string()))?;

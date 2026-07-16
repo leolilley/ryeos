@@ -150,9 +150,8 @@ impl LiveDaemonTarget {
             if rc != 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error).with_context(|| {
-                        format!("signal pinned ryeosd pid {}", self.pid)
-                    });
+                    return Err(error)
+                        .with_context(|| format!("signal pinned ryeosd pid {}", self.pid));
                 }
             }
             return Ok(());
@@ -172,9 +171,8 @@ impl LiveDaemonTarget {
             };
             let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
             if result < 0 {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!("poll pinned ryeosd pid {}", self.pid)
-                });
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("poll pinned ryeosd pid {}", self.pid));
             }
             return Ok(result > 0);
         }
@@ -212,10 +210,7 @@ async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemonTarget> {
     ))
 }
 
-fn pin_verified_ryeosd_peer(
-    stream: &tokio::net::UnixStream,
-    pid: u32,
-) -> Result<LiveDaemonTarget> {
+fn pin_verified_ryeosd_peer(stream: &tokio::net::UnixStream, pid: u32) -> Result<LiveDaemonTarget> {
     #[cfg(target_os = "linux")]
     {
         let mut raw_pidfd: libc::c_int = -1;

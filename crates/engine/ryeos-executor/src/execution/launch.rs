@@ -1277,8 +1277,7 @@ async fn prepare_managed_launch_authority(
         resolution.composed.composed.get("requires"),
         &params.resolved.resolved_item,
         resolution.effective_trust_class,
-        &engine.bundle_roots,
-        &engine.node_trust_store,
+        engine,
     )
     .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
     let child_execute_cap = ryeos_runtime::authorizer::canonical_cap(
