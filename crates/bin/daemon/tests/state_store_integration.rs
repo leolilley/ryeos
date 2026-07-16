@@ -99,7 +99,7 @@ mod integration_tests {
         upstream: Option<&str>,
     ) -> NewThreadRecord {
         let mut thread = make_thread(thread_id, chain_root_id, kind, item_ref, upstream);
-        thread.project_root = Some("/tmp/p".to_string());
+        thread.project_root = Some(std::path::PathBuf::from("/tmp/p"));
         thread
     }
 
