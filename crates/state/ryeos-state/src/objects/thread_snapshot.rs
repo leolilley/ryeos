@@ -636,7 +636,9 @@ pub struct ThreadSnapshot {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     /// The project snapshot hash at the start of execution.
-    /// Set when execution begins against a specific project state.
+    /// Set when execution begins against a specific project state. A
+    /// continuation successor may inherit its captured launch pin while still
+    /// in `created` state so its project identity is durable at handoff.
     /// Immutable for this thread. Null for non-CS executions.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub base_project_snapshot_hash: Option<String>,

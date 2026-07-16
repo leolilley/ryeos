@@ -46,6 +46,7 @@ const MAX_THREAD_LIST_FACET_CONTENT_BYTES: usize = 1024 * 1024;
 const MAX_THREAD_LIST_FACET_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_THREAD_LIST_ERROR_PREVIEW_BYTES: usize = 2 * 1024;
 /// Exact JSON budget for the response-facing thread result record. The
 /// projection content itself is capped by the 512 KiB ThreadEvent ceiling;
 /// four MiB also covers worst-case JSON escaping of a malformed stored error
@@ -639,6 +640,7 @@ pub struct ThreadListEnrichment {
     pub follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
     pub facets: HashMap<String, Vec<(String, String)>>,
     pub current_graph_nodes: HashMap<String, (String, u32)>,
+    pub terminal_error_previews: HashMap<String, String>,
 }
 
 #[derive(Debug, Default)]
@@ -2331,6 +2333,7 @@ impl StateStore {
             }
         }
         let base_project_snapshot_hash = base_project_snapshot_hash
+            .map(ToOwned::to_owned)
             .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
         let now = lillux::time::iso8601_now();
@@ -2454,7 +2457,7 @@ impl StateStore {
         }
 
         let (persisted, effective) = self.finalize_thread_with_rows(
-            g,
+            &g,
             permit.cas_guard(),
             thread_id,
             thread_row,
@@ -4414,7 +4417,7 @@ impl StateStore {
     /// current graph nodes, and live follow waiters share one outer store lock
     /// instead of relocking the store for every row.
     pub fn thread_list_enrichment(&self, thread_ids: &[String]) -> Result<ThreadListEnrichment> {
-        let (facet_rows, graph_node_payloads, follow_waiters) = {
+        let (facet_rows, graph_node_payloads, follow_waiters, terminal_error_previews) = {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
             let result = (
@@ -4430,11 +4433,22 @@ impl StateStore {
                     thread_ids,
                     MAX_THREAD_LIST_ENRICHMENT_THREADS,
                 )?,
+                queries::thread_result_error_previews(
+                    g.state_db.projection(),
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                    MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
+                )?,
             );
             Self::warn_slow_lock_hold("thread_list_enrichment", hold_started);
             result
         };
-        Self::assemble_thread_list_enrichment(facet_rows, graph_node_payloads, follow_waiters)
+        Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+            terminal_error_previews,
+        )
     }
 
     pub fn thread_list_enrichment_with_waiters(
@@ -4442,7 +4456,7 @@ impl StateStore {
         thread_ids: &[String],
         follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
     ) -> Result<ThreadListEnrichment> {
-        let (facet_rows, graph_node_payloads) = {
+        let (facet_rows, graph_node_payloads, terminal_error_previews) = {
             let g = self.lock()?;
             let hold_started = std::time::Instant::now();
             let result = (
@@ -4454,17 +4468,29 @@ impl StateStore {
                     MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES,
                     MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES,
                 )?,
+                queries::thread_result_error_previews(
+                    g.state_db.projection(),
+                    thread_ids,
+                    MAX_THREAD_LIST_ENRICHMENT_THREADS,
+                    MAX_THREAD_LIST_ERROR_PREVIEW_BYTES,
+                )?,
             );
             Self::warn_slow_lock_hold("thread_list_enrichment_with_waiters", hold_started);
             result
         };
-        Self::assemble_thread_list_enrichment(facet_rows, graph_node_payloads, follow_waiters)
+        Self::assemble_thread_list_enrichment(
+            facet_rows,
+            graph_node_payloads,
+            follow_waiters,
+            terminal_error_previews,
+        )
     }
 
     fn assemble_thread_list_enrichment(
         facet_rows: Vec<queries::FacetRow>,
         graph_node_payloads: HashMap<String, Vec<u8>>,
         follow_waiters: Vec<runtime_db::FollowWaiterSummary>,
+        terminal_error_previews: HashMap<String, String>,
     ) -> Result<ThreadListEnrichment> {
         let mut facets: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for row in facet_rows {
@@ -4501,6 +4527,7 @@ impl StateStore {
             follow_waiters,
             facets,
             current_graph_nodes,
+            terminal_error_previews,
         })
     }
 
@@ -6100,6 +6127,43 @@ mod tests {
         let snapshot = build_continuation_snapshot(&record, &resume).unwrap();
         assert_eq!(snapshot.project_root, Some(PathBuf::from("/work/project")));
         assert_eq!(snapshot.base_project_snapshot_hash, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn continuation_handoff_persists_created_successor_with_inherited_pin() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-root", "T-root"))
+            .expect("root thread");
+
+        let mut successor = thread_record("T-successor", "T-root");
+        successor.project_root = Some(PathBuf::from("/work/project"));
+        let resume = continuation_resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        let outcome = store
+            .create_or_get_continuation_for_test(
+                &successor,
+                "T-root",
+                "T-root",
+                Some("follow"),
+                "request-fingerprint",
+                Some(&resume),
+            )
+            .expect("create continuation successor");
+        assert!(matches!(outcome, ContinuationOutcome::Created(_)));
+
+        let projected = store
+            .get_thread("T-successor")
+            .expect("read successor")
+            .expect("successor row");
+        assert_eq!(projected.status, ThreadStatus::Created.as_str());
+        assert_eq!(projected.upstream_thread_id.as_deref(), Some("T-root"));
+
+        let inner = store.lock().expect("lock state store");
+        let persisted = authoritative_snapshot_for_transition(&inner, "T-root", "T-successor")
+            .expect("read authoritative successor snapshot");
+        assert_eq!(persisted.base_project_snapshot_hash, Some("a".repeat(64)));
     }
 
     #[test]

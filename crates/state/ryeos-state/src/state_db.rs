@@ -925,6 +925,10 @@ pub struct AuthoritativeTerminalChain {
 
 enum ProspectiveChainMutation<'a> {
     AddSnapshot(&'a ThreadSnapshot),
+    AddContinuation {
+        snapshot: &'a ThreadSnapshot,
+        source_thread_id: &'a str,
+    },
     UpdateSnapshots(&'a [SnapshotUpdate]),
     ReplaceHead(&'a str),
 }
@@ -1008,6 +1012,30 @@ fn prospective_mutation_invalidates_retirement(
                 &mut snapshot,
                 chain_root_id,
                 &timestamp_floor,
+                None,
+            )?;
+            if snapshots
+                .insert(snapshot.thread_id.clone(), snapshot.clone())
+                .is_some()
+            {
+                anyhow::bail!("thread {} already exists in chain", snapshot.thread_id);
+            }
+        }
+        ProspectiveChainMutation::AddContinuation {
+            snapshot,
+            source_thread_id,
+        } => {
+            if !snapshots.contains_key(source_thread_id) {
+                anyhow::bail!(
+                    "continuation source {source_thread_id} does not exist in chain {chain_root_id}"
+                );
+            }
+            let mut snapshot = (*snapshot).clone();
+            crate::chain::normalize_prospective_new_thread(
+                &mut snapshot,
+                chain_root_id,
+                &timestamp_floor,
+                Some(source_thread_id),
             )?;
             if snapshots
                 .insert(snapshot.thread_id.clone(), snapshot.clone())
@@ -3781,7 +3809,10 @@ impl StateDb {
         )?;
         let invalidates_retirement = self.pending_remove_invalidated_by_mutation_locked(
             chain_root_id,
-            ProspectiveChainMutation::AddSnapshot(&snapshot),
+            ProspectiveChainMutation::AddContinuation {
+                snapshot: &snapshot,
+                source_thread_id: existing_thread_id,
+            },
             &chain_lock,
         )?;
         let cancelled_remove = self.converge_pending_before_set_locked(

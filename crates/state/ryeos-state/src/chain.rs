@@ -602,8 +602,14 @@ pub(crate) fn normalize_prospective_new_thread(
     snapshot: &mut ThreadSnapshot,
     chain_root_id: &str,
     timestamp_floor: &str,
+    continuation_source: Option<&str>,
 ) -> anyhow::Result<()> {
-    validation::normalize_and_validate_new_thread(snapshot, chain_root_id, timestamp_floor)
+    validation::normalize_and_validate_new_thread(
+        snapshot,
+        chain_root_id,
+        timestamp_floor,
+        continuation_source,
+    )
 }
 
 pub(crate) fn normalize_prospective_snapshot_transition(
@@ -841,6 +847,7 @@ pub(crate) fn create_chain_with_trust_under_lock(
         &mut initial_snapshot,
         chain_root_id,
         &initial_floor,
+        None,
     )?;
     lock.ensure_protects(refs_root, chain_root_id)?;
     verify_expected_current_head(lock, chain_root_id, None, trust_store)?;
@@ -999,6 +1006,7 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
         &mut initial_snapshot,
         chain_root_id,
         &append_timestamp,
+        None,
     )?;
     validation::validate_snapshot_last_event(
         &initial_snapshot,
@@ -1498,6 +1506,7 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
         &mut new_snapshot,
         chain_root_id,
         &current_chain_state.updated_at,
+        None,
     )?;
 
     // Serialize the complete prospective closure before the first CAS write.
@@ -1753,6 +1762,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
         &mut new_snapshot,
         chain_root_id,
         &append_timestamp,
+        None,
     )?;
     validation::validate_snapshot_last_event(
         &new_snapshot,
@@ -2017,6 +2027,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_append_with_trust_under_lock(
         &mut new_snapshot,
         chain_root_id,
         &append_timestamp,
+        Some(existing_thread_id),
     )?;
     let new_thread_last_event_index =
         usize::try_from(new_event_count - 1).context("new-thread event batch is too large")?;
