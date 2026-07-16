@@ -623,7 +623,7 @@ impl PendingTransitionCursor {
             let record = decode_pending_file(file, stem)?;
             if self
                 .operation
-                .map_or(true, |operation| operation == record.operation)
+                .is_none_or(|operation| operation == record.operation)
             {
                 return Ok(Some(record));
             }

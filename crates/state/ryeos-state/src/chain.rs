@@ -684,6 +684,9 @@ pub(crate) fn read_thread_snapshot_with_trust(
 /// The caller must hold [`ChainLock`] and must keep the daemon/maintenance GC
 /// exclusion permit from before its first CAS write until this function
 /// returns. The pending Set is durable before the signed head becomes visible.
+// The authority-bearing lock, expected head, signer, and trust store stay
+// explicit so publication provenance cannot be hidden in an opaque argument bag.
+#[allow(clippy::too_many_arguments)]
 fn publish_chain_head(
     cas_root: &Path,
     refs_root: &Path,
@@ -803,6 +806,9 @@ pub(crate) fn create_chain_with_trust(
     )
 }
 
+// Mutation authority and trust inputs deliberately remain explicit at this
+// boundary; callers must prove each prerequisite independently.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_chain_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -890,7 +896,7 @@ pub(crate) fn create_chain_with_trust_under_lock(
     publish_chain_head(
         cas_root,
         refs_root,
-        &lock,
+        lock,
         chain_root_id,
         None,
         &chain_state_hash,
@@ -921,6 +927,9 @@ pub(crate) fn create_chain_with_trust_under_lock(
 /// lock. Snapshot metadata, event linkage, CAS publication, and the recovery
 /// journal therefore form the same indivisible mutation used by every other
 /// authoritative chain write.
+// Mutation authority and trust inputs deliberately remain explicit at this
+// boundary; callers must prove each prerequisite independently.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_chain_with_events_and_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -1350,7 +1359,7 @@ pub(crate) fn append_events_with_trust_under_lock(
     publish_chain_head(
         cas_root,
         refs_root,
-        &lock,
+        lock,
         chain_root_id,
         new_chain_state.prev_chain_state_hash.as_deref(),
         &chain_state_hash,
@@ -1425,6 +1434,9 @@ pub(crate) fn add_thread_to_chain_with_trust(
     )
 }
 
+// Mutation authority and trust inputs deliberately remain explicit at this
+// boundary; callers must prove each prerequisite independently.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -1545,7 +1557,7 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
     publish_chain_head(
         cas_root,
         refs_root,
-        &lock,
+        lock,
         chain_root_id,
         new_chain_state.prev_chain_state_hash.as_deref(),
         &chain_state_hash,
@@ -1618,6 +1630,9 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust(
     )
 }
 
+// Mutation authority and trust inputs deliberately remain explicit at this
+// boundary; callers must prove each prerequisite independently.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     cas_root: &Path,
     refs_root: &Path,
@@ -1793,7 +1808,7 @@ pub(crate) fn add_thread_to_chain_with_events_and_trust_under_lock(
     publish_chain_head(
         cas_root,
         refs_root,
-        &lock,
+        lock,
         chain_root_id,
         new_chain_state.prev_chain_state_hash.as_deref(),
         &chain_state_hash,

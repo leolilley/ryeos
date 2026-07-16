@@ -529,6 +529,9 @@ pub(crate) fn scan_bundle_events_pinned(
 }
 
 /// Read a bounded, newest-first page from one chain.
+// Keep each signed authority, cursor bound, and serialization limit explicit at
+// this trust boundary; grouping them would hide which inputs have been verified.
+#[allow(clippy::too_many_arguments)]
 pub fn read_bundle_event_chain_page(
     cas: &lillux::CasStore,
     refs_directory: &lillux::PinnedDirectory,
@@ -617,6 +620,9 @@ pub fn read_bundle_event_chain_page(
 
 /// Scan bounded pages across bundle event chains without collecting every
 /// signed head or every event under the StateStore lock.
+// Keep each signed authority, cursor bound, and serialization limit explicit at
+// this trust boundary; grouping them would hide which inputs have been verified.
+#[allow(clippy::too_many_arguments)]
 pub fn scan_bundle_events_page(
     cas: &lillux::CasStore,
     refs_directory: &lillux::PinnedDirectory,

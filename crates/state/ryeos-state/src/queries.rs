@@ -403,8 +403,7 @@ pub fn get_threads_many(
 ) -> anyhow::Result<Vec<ThreadRow>> {
     let mut threads = Vec::new();
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         if placeholders.is_empty() {
@@ -1264,8 +1263,7 @@ fn latest_event_payloads_bounded(
     let mut total_items = 0usize;
     let mut total_bytes = 0usize;
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -1316,8 +1314,7 @@ fn latest_event_payloads_bounded(
 
     let mut payloads = HashMap::with_capacity(total_items);
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
@@ -1754,8 +1751,7 @@ pub fn thread_facet_stats_many(
     }
     let mut stats = Vec::new();
     for batch in thread_ids.chunks(THREAD_ID_QUERY_BATCH) {
-        let placeholders = std::iter::repeat("?")
-            .take(batch.len())
+        let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(

@@ -723,6 +723,9 @@ pub fn table_hierarchy_rows(
         }
     }
 
+    // This local DFS keeps its immutable graph inputs and two accumulators
+    // explicit; packaging them would obscure which state recursion mutates.
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         index: usize,
         is_last: bool,

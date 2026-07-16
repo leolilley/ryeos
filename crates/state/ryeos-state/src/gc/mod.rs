@@ -752,13 +752,11 @@ fn remove_rebuildable_cache_directory(
         match cache_directory.open_entry(&name, false)? {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
-                if !dry_run {
-                    if !cache_directory.remove_empty_child_if_same(&name, &child)? {
-                        anyhow::bail!(
-                            "runtime cache directory changed while being purged: {}",
-                            child.path().display()
-                        );
-                    }
+                if !dry_run && !cache_directory.remove_empty_child_if_same(&name, &child)? {
+                    anyhow::bail!(
+                        "runtime cache directory changed while being purged: {}",
+                        child.path().display()
+                    );
                 }
             }
             Some(lillux::PinnedDirectoryEntry::Regular(file)) => {

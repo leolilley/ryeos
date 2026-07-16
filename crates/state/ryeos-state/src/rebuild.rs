@@ -548,6 +548,9 @@ pub(crate) fn verify_preverified_projection(
     )
 }
 
+// The verified baseline and both pinned authorities stay separate so recovery
+// cannot accidentally substitute ambient paths for captured storage handles.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_preverified_projection_pinned(
     projection: &ProjectionDb,
     cas: &lillux::CasStore,

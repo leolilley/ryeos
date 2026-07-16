@@ -1523,6 +1523,9 @@ pub(crate) fn advance_verified_project_head_ref(
     )
 }
 
+// Signed-ref authority, CAS expectation, trust, and the held lock are explicit
+// so callers cannot conflate verification with publication authority.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_project_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     principal_key: &str,
@@ -1993,6 +1996,9 @@ pub(crate) fn advance_verified_generic_head_ref(
     write_generic_head_ref_unchecked(refs_root, namespace, name, new_target_hash, signer)
 }
 
+// Signed-ref authority, CAS expectation, trust, and the held lock are explicit
+// so callers cannot conflate verification with publication authority.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn advance_verified_generic_head_ref_in_directory(
     refs_directory: &lillux::PinnedDirectory,
     namespace: &str,

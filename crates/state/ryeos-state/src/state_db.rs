@@ -204,6 +204,9 @@ fn open_recovered_projection(
     .map(|(projection, _)| projection)
 }
 
+// Recovery keeps each pinned/path authority and liveness observer explicit;
+// combining them would make authority substitution easier to miss at callers.
+#[allow(clippy::too_many_arguments)]
 fn rebuild_and_install_projection(
     runtime_state_dir: &Path,
     cas_root: &Path,
@@ -1126,6 +1129,9 @@ impl RecoveryObserverThrottle {
     }
 }
 
+// Replay exposes acknowledgment, liveness, trust, and recovery authority as
+// independent inputs because each changes the safety of the operation.
+#[allow(clippy::too_many_arguments)]
 fn replay_pending_into(
     projection: &ProjectionDb,
     cas_root: &Path,
@@ -1228,19 +1234,19 @@ fn replay_pending_into(
                         &head.target_hash,
                         observer,
                     )?;
-                    if acknowledge {
-                        if !acknowledge_if_projection_current(
+                    if acknowledge
+                        && !acknowledge_if_projection_current(
                             projection,
                             recovery,
                             &chain_lock,
                             &current,
                             Some(head),
-                        )? {
-                            anyhow::bail!(
-                                "pending Set did not converge while replaying {}",
-                                current.chain_root_id
-                            );
-                        }
+                        )?
+                    {
+                        anyhow::bail!(
+                            "pending Set did not converge while replaying {}",
+                            current.chain_root_id
+                        );
                     }
                     report.sets_repaired += 1;
                 }
@@ -1369,19 +1375,19 @@ fn replay_pending_into(
                         &head.target_hash,
                         observer,
                     )?;
-                    if acknowledge {
-                        if !acknowledge_if_projection_current(
+                    if acknowledge
+                        && !acknowledge_if_projection_current(
                             projection,
                             recovery,
                             &chain_lock,
                             &replacement,
                             Some(&head),
-                        )? {
-                            anyhow::bail!(
-                                "advanced-head repair Set did not converge while replaying {}",
-                                replacement.chain_root_id
-                            );
-                        }
+                        )?
+                    {
+                        anyhow::bail!(
+                            "advanced-head repair Set did not converge while replaying {}",
+                            replacement.chain_root_id
+                        );
                     }
                     report.stale_removes_cleared += 1;
                 }
@@ -3426,6 +3432,9 @@ impl StateDb {
         )
     }
 
+    // Admission authority, signer, liveness proof, and the held CAS guard stay
+    // explicit because omitting any one changes the durability contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_events_admitted(
         &self,
         chain_root_id: &str,
@@ -3447,6 +3456,7 @@ impl StateDb {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_events_inner(
         &self,
         chain_root_id: &str,
@@ -4750,6 +4760,9 @@ impl StateDb {
         )
     }
 
+    // Paging bounds and signing/trust authority remain explicit at the public
+    // state boundary rather than being hidden in an unchecked options bag.
+    #[allow(clippy::too_many_arguments)]
     pub fn read_bundle_event_chain_page(
         &self,
         bundle_id: &str,
