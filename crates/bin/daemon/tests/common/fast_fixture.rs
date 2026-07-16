@@ -254,7 +254,9 @@ pub fn install_signed_bundle_binary(
 /// <state>/.ai/node/vault/public_key.pem
 /// <state>/.ai/node/auth/authorized_keys/               (empty dir)
 /// <state>/.ai/state/objects/                           (empty dir)
+/// <state>/.ai/state/locators/                          (empty dir)
 /// <state>/.ai/state/refs/                              (empty dir)
+/// <state>/.ai/state/recovery/thread-projection/        (empty dir)
 /// <state>/.ai/config/keys/signing/private_key.pem      (deterministic operator Ed25519)
 /// <state>/.ai/config/keys/trusted/<publisher_fp>.toml  (self-signed trust doc)
 /// <state>/.ai/config/keys/trusted/<node_fp>.toml       (self-signed trust doc)
@@ -298,6 +300,15 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
     ] {
         fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
     }
+    let runtime_state_path = state_path.join(AI_DIR).join("state");
+    let runtime_state = lillux::PinnedDirectory::open_or_create(&runtime_state_path)
+        .context("pin fast-fixture runtime-state directory")?;
+    let recovery = runtime_state
+        .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
+        .context("create fast-fixture recovery authority")?;
+    recovery
+        .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
+        .context("create fast-fixture thread-projection recovery authority")?;
 
     let sandbox_policy =
         serde_yaml::to_string(&ryeos_engine::sandbox::SandboxPolicy::default_disabled())
@@ -540,6 +551,55 @@ pub fn register_fixture_bundle(
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
+    Ok(())
+}
+
+/// Create and register a synthetic bundle that owns runtime configuration.
+///
+/// Launch contracts deliberately accept model-provider catalogs only from
+/// bundle space. Integration fixtures therefore install dynamic provider
+/// endpoints in a real signed bundle instead of weakening that authority
+/// boundary or pretending project configuration is bundle-owned.
+pub fn register_config_fixture_bundle(
+    state_path: &Path,
+    bundle_name: &str,
+    fixture: &FastFixture,
+    populate: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !bundle_name.is_empty()
+            && Path::new(bundle_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(bundle_name),
+        "synthetic config bundle name must be one safe path segment"
+    );
+
+    let bundle_root = state_path.join(AI_DIR).join("bundles").join(bundle_name);
+    fs::create_dir_all(bundle_root.join(AI_DIR))?;
+    populate(&bundle_root)?;
+
+    let manifest_body = format!(
+        "name: {bundle_name}\nversion: 1.0.0\ndescription: synthetic runtime config fixture\nprovides_kinds: []\nrequires_kinds:\n  - config\nuses_kinds: []\n"
+    );
+    let manifest = lillux::signature::sign_content_at(
+        &manifest_body,
+        &fixture.publisher,
+        "#",
+        None,
+        FAST_FIXTURE_TIME,
+    );
+    fs::write(bundle_root.join(AI_DIR).join("manifest.yaml"), manifest)?;
+
+    let absolute_root = bundle_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize config fixture {}", bundle_root.display()))?;
+    let registration_dir = state_path.join(AI_DIR).join("node").join("bundles");
+    fs::create_dir_all(&registration_dir)?;
+    let body = node_bundle_record_body(bundle_name, &absolute_root)?;
+    let signed =
+        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+    fs::write(registration_dir.join(format!("{bundle_name}.yaml")), signed)?;
     Ok(())
 }
 

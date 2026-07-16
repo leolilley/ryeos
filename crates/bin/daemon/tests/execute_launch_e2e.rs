@@ -19,7 +19,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::fast_fixture::{
-    register_standard_bundle, write_authorized_key_with_scopes, FastFixture,
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_with_scopes,
+    FastFixture,
 };
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
@@ -383,19 +384,19 @@ async fn execute_launch_admits_directive_ref() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-execute-launch-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )
     };
-    // The mock provider config is planted in the project root; allow that
-    // (dev-only) since provider configs are otherwise restricted to user/bundle
-    // roots.
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
-    })
-    .await
-    .expect("start daemon with standard bundle");
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/launch", &fixture.publisher).expect("plant directive");
 
@@ -658,8 +659,8 @@ async fn execute_launch_in_process_service_is_rejected() {
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "body={body}");
     let error = body.get("error").and_then(Value::as_str).unwrap_or("");
     assert!(
-        error.contains("in-process"),
-        "expected in-process rejection, got: {body}"
+        error.contains("pre-minted thread root") && error.contains("without --async"),
+        "expected accepted-launch persistence rejection, got: {body}"
     );
     assert!(
         body.get("thread_id").is_none(),

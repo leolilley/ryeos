@@ -355,7 +355,8 @@ async fn pin_native_runtime_with_detached() {
         body,
         serde_json::json!({
             "code": "capability_rejected",
-            "error": "detached mode not yet supported for native runtimes"
+            "error": "detached mode not yet supported for native runtimes",
+            "retryable": false
         }),
         "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"
     );
@@ -381,7 +382,8 @@ async fn pin_native_runtime_with_target_site_id() {
         body,
         serde_json::json!({
             "code": "unknown_target_site",
-            "error": "unknown target site 'site:other'; configured sites: []"
+            "error": "unknown target site 'site:other'; configured sites: []",
+            "retryable": false
         }),
         "exact error body shape (target-site forwarding v1 planning)"
     );

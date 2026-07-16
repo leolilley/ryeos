@@ -521,6 +521,7 @@ pub(crate) fn validate_runtime_yaml(
             reason: "`binary_ref` must be non-empty".to_owned(),
         });
     }
+    validate_runtime_binary_ref(yaml_path, &yaml.binary_ref)?;
     if yaml.abi_version.is_empty() {
         return Err(EngineError::RuntimeYamlInvalid {
             path: yaml_path.to_owned(),
@@ -539,6 +540,29 @@ pub(crate) fn validate_runtime_yaml(
         });
     }
     validate_launch_contract(yaml_path, yaml)?;
+    Ok(())
+}
+
+fn validate_runtime_binary_ref(yaml_path: &Path, binary_ref: &str) -> Result<(), EngineError> {
+    let parts: Vec<&str> = binary_ref.split('/').collect();
+    let valid = parts.len() >= 3
+        && parts[0] == "bin"
+        && parts[1..].iter().all(|segment| {
+            !segment.is_empty()
+                && *segment != "."
+                && *segment != ".."
+                && !segment.contains('\\')
+                && !segment.chars().any(char::is_whitespace)
+                && !segment.chars().any(char::is_control)
+        });
+    if !valid {
+        return runtime_yaml_error(
+            yaml_path,
+            format!(
+                "runtime binary_ref `{binary_ref}` has unexpected shape; expected `bin/<triple>/<binary>`"
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -943,7 +967,7 @@ mod tests {
     const BASE_YAML: &str = concat!(
         "kind: runtime\n",
         "serves: test_kind\n",
-        "binary_ref: bin/test\n",
+        "binary_ref: bin/test-triple/test\n",
         "abi_version: v1\n",
         "launch_contract:\n",
         "  primary_allowed_kinds: [test_kind]\n",
@@ -1122,6 +1146,35 @@ mod tests {
             validate_runtime_yaml(&test_path(), &yaml).is_ok(),
             "v1 abi_version should be accepted"
         );
+    }
+
+    #[test]
+    fn runtime_binary_ref_validation_preserves_nested_binary_paths() {
+        assert!(validate_runtime_binary_ref(
+            &test_path(),
+            "bin/x86_64-unknown-linux-gnu/tools/test-runtime",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn runtime_binary_ref_validation_rejects_malformed_or_unsafe_segments() {
+        for binary_ref in [
+            "badshape",
+            "bin//test-runtime",
+            "bin/../test-runtime",
+            "bin/test-triple/../test-runtime",
+            "bin/test triple/test-runtime",
+            "bin/test-triple/test runtime",
+            "bin/test-triple/bad\\name",
+        ] {
+            let error = validate_runtime_binary_ref(&test_path(), binary_ref)
+                .expect_err("malformed runtime binary_ref must be rejected");
+            assert!(
+                error.to_string().contains(binary_ref),
+                "diagnostic must identify `{binary_ref}`: {error}"
+            );
+        }
     }
 
     #[test]

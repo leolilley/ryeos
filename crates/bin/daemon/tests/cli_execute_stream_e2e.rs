@@ -13,7 +13,10 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
+use common::fast_fixture::{
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
+    FastFixture,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::{ryeos_binary, ryeosd_binary, DaemonHarness};
 
@@ -112,6 +115,12 @@ async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-cli-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             plant_execute_stream_route(state_path, &fixture.publisher)?;
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             Ok(())
@@ -122,13 +131,11 @@ async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=warn".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), &fixture.publisher).expect("plant directive");
     let project_path = project.path().to_str().unwrap().to_string();

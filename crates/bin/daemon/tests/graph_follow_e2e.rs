@@ -36,7 +36,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -880,6 +880,12 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-follow-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -890,14 +896,11 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
                 "info,ryeosd=debug,ryeos_graph_runtime=debug,ryeos_directive_runtime=debug".into()
             }),
         );
-        // Allow the project-level mock provider config the directive child resolves.
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_cost_directive_child(project.path(), &fixture.publisher).expect("plant child directive");
     plant_parent_cost_graph(project.path(), &fixture.publisher).expect("plant parent");

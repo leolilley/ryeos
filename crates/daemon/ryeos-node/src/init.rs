@@ -893,6 +893,10 @@ fn create_layout(app_root: &Path) -> Result<()> {
         app_root
             .join(ryeos_engine::AI_DIR)
             .join("state")
+            .join("locators"),
+        app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
             .join("refs"),
         // Installed bundles directory
         app_root.join(ryeos_engine::AI_DIR).join("bundles"),
@@ -911,6 +915,15 @@ fn create_layout(app_root: &Path) -> Result<()> {
     for d in &dirs {
         fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
     }
+    let runtime_state_path = app_root.join(ryeos_engine::AI_DIR).join("state");
+    let runtime_state = lillux::PinnedDirectory::open_or_create(&runtime_state_path)
+        .context("pin initialized runtime-state directory")?;
+    let recovery = runtime_state
+        .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
+        .context("create initialized recovery authority")?;
+    recovery
+        .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
+        .context("create initialized thread-projection recovery authority")?;
     Ok(())
 }
 

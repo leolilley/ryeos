@@ -401,10 +401,11 @@ inputs: []
 
 // ── 5b. Malformed runtime binary refs fail boot admission ─────────────
 //
-// The installed bundle graph now validates runtime binary provenance before
-// external admission opens. A malformed `binary_ref` is therefore a bundle
-// admission error, not a dispatch-time 400. The B1 cap-gate ordering remains
-// covered by dispatch unit tests with a fully admitted runtime.
+// The runtime registry validates executor-reference shape while the installed
+// bundle admission validates the signed executable set, both before external
+// admission opens. A malformed `binary_ref` is therefore a boot error, not a
+// dispatch-time 400. The B1 cap-gate ordering remains covered by dispatch unit
+// tests with a fully admitted runtime.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
@@ -447,8 +448,8 @@ async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
         "malformed runtime binary_ref must fail terminal boot admission; got: {startup_error}"
     );
     assert!(
-        startup_error.contains("installed bundle graph admission failed"),
-        "malformed runtime must be rejected by installed bundle admission; got: {startup_error}"
+        startup_error.contains("failed to build runtime registry"),
+        "malformed runtime must be rejected while building the admitted runtime registry; got: {startup_error}"
     );
     assert!(
         startup_error.contains("badshape")
@@ -467,10 +468,10 @@ async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
 // caller-typed subject's identity, not the executor's.
 //
 // This test pins that contract end-to-end using the real standard
-// bundle's directive runtime. A synth directive item in app root
-// dispatches through the real runtime. The dispatch either succeeds
-// or fails at runtime execution (no LLM provider configured), but
-// either way the thread row must record the SUBJECT's identity.
+// bundle's directive runtime. A synth directive item in project space
+// dispatches through the real runtime using a bundle-owned, deliberately
+// unreachable no-auth provider. Whether that provider call succeeds or fails,
+// the thread row must record the SUBJECT's identity.
 //
 // We open the generation-selected projection directly and assert the thread row
 // has the directive's kind/thread_profile/item_ref, not the runtime's.
@@ -482,7 +483,45 @@ async fn e2e_malformed_runtime_binary_ref_is_rejected_at_boot_admission() {
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)
+        common::fast_fixture::register_standard_bundle(state, fixture)?;
+        common::fast_fixture::register_config_fixture_bundle(
+            state,
+            "fixture-audit-model-config",
+            fixture,
+            |bundle_root| {
+                let config_root = bundle_root.join(".ai/config/ryeos-runtime");
+                let provider_dir = config_root.join("model-providers");
+                std::fs::create_dir_all(&provider_dir)?;
+                let provider = r#"base_url: "http://127.0.0.1:9"
+family: chat_completions
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
+auth: {}
+headers: {}
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+"#;
+                std::fs::write(
+                    provider_dir.join("audit-noauth.yaml"),
+                    lillux::signature::sign_content(provider, &fixture.publisher, "#", None),
+                )?;
+                let routing = r#"tiers:
+  general:
+    provider: audit-noauth
+    model: audit-model
+    context_window: 1024
+"#;
+                std::fs::write(
+                    config_root.join("model_routing.yaml"),
+                    lillux::signature::sign_content(routing, &fixture.publisher, "#", None),
+                )?;
+                Ok(())
+            },
+        )
     };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
@@ -515,9 +554,9 @@ inputs: []
         .await
         .expect("post /execute");
 
-    // The dispatch may succeed (real runtime binary exists) or fail
-    // (no LLM provider configured). The KEY assertion is the thread
-    // row identity below — regardless of dispatch outcome.
+    // The dispatch may succeed or fail when the runtime contacts the
+    // deliberately unreachable no-auth fixture provider. The KEY assertion is
+    // the thread row identity below — regardless of dispatch outcome.
     let _ = (status, body);
 
     // Open the projection DB and find the thread row created for

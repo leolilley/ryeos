@@ -38,7 +38,7 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -82,6 +82,31 @@ pricing:
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("mock.yaml"), signed)?;
     Ok(())
+}
+
+fn register_mock_provider_bundle(
+    state_path: &Path,
+    mock_base_url: &str,
+    env_var: &str,
+    header_name: Option<&str>,
+    prefix: Option<&str>,
+    fixture: &FastFixture,
+) -> anyhow::Result<()> {
+    register_config_fixture_bundle(
+        state_path,
+        "fixture-provider-secret-model-config",
+        fixture,
+        |bundle_root| {
+            plant_mock_provider_with_auth(
+                bundle_root,
+                mock_base_url,
+                env_var,
+                header_name,
+                prefix,
+                &fixture.publisher,
+            )
+        },
+    )
 }
 
 fn plant_model_routing(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
@@ -178,6 +203,14 @@ async fn run_directive_and_capture_first_request_headers(
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_mock_provider_bundle(
+                state_path,
+                &mock_url,
+                &env_var_owned,
+                header_name,
+                prefix,
+                fixture,
+            )?;
             // Seal the secret into the daemon's vault store BEFORE boot
             // so `SealedEnvelopeVault::load` decrypts it at request time.
             let mut secrets = std::collections::HashMap::new();
@@ -192,27 +225,16 @@ async fn run_directive_and_capture_first_request_headers(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + vault-backed secret");
 
-    // Project-tier plants: provider + routing override the standard
-    // bundle's shipped zen routing; the directive declares the env var
-    // as a required secret so the dispatcher reads it out of the vault
+    // Project routing selects the bundle-owned fixture provider; the directive
+    // declares the env var as a required secret so the dispatcher reads it out of the vault
     // and injects it into the runtime subprocess. Without this
     // declaration, dispatch ignores the vault entirely (post-step-7a
     // scoping).
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider_with_auth(
-        project.path(),
-        &mock_url,
-        env_var,
-        header_name,
-        prefix,
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive_with_secrets(
         project.path(),
@@ -386,6 +408,14 @@ async fn run_directive_with_vault_secret(
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_mock_provider_bundle(
+                state_path,
+                &mock_url,
+                &env_var_owned,
+                header_name,
+                prefix,
+                fixture,
+            )?;
             // Crucial: secret comes from the sealed vault store, NOT
             // cmd.env(...). Pre-generate the daemon's vault keypair so we
             // can seal the store before daemon boot picks the key up.
@@ -401,27 +431,16 @@ async fn run_directive_with_vault_secret(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with vault-backed secret");
 
-    // Project-tier plants: provider + routing override the standard
-    // bundle's shipped zen routing. The directive declares the env var
-    // as a required secret so the dispatcher reads it out of the vault
+    // Project routing selects the bundle-owned fixture provider. The directive
+    // declares the env var as a required secret so the dispatcher reads it out of the vault
     // and injects it into the runtime subprocess. Without this
     // declaration, dispatch ignores the vault entirely (post-step-7a
     // scoping).
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider_with_auth(
-        project.path(),
-        &mock_url,
-        env_var,
-        header_name,
-        prefix,
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive_with_secrets(
         project.path(),
@@ -511,6 +530,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
         // Pre-generate vault keypair so the daemon boots cleanly,
         // but DO NOT seal any secret — the .env overlay must be the
         // sole source of the declared secret.
@@ -525,25 +545,15 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with empty vault but .env-backed secret");
 
-    // Project-tier plants: provider + routing override the standard
-    // bundle's shipped zen routing; the directive declares the secret.
+    // Project routing selects the bundle-owned fixture provider; the directive
+    // declares the secret.
     // The `.env` file goes in the same project root the dispatcher
     // walks for the overlay.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider_with_auth(
-        project.path(),
-        &mock_url,
-        env_var,
-        None,
-        None,
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive_with_secrets(
         project.path(),
@@ -634,6 +644,14 @@ async fn vault_blocked_name_fails_request_loud() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(
+            state_path,
+            &mock_url,
+            "E2E_TEST_VAULT_BLOCKED",
+            None,
+            None,
+            fixture,
+        )?;
         // Poisoned sealed store: PATH is on the blocked list, but we
         // bypass write-time validation by sealing the plaintext
         // directly. The declared secret is included so the test
@@ -653,26 +671,15 @@ async fn vault_blocked_name_fails_request_loud() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon starts even with poisoned vault — vault is read at request time, not boot");
 
-    // Project-tier plants: provider + routing override the standard
-    // bundle's shipped zen routing. The directive declares a required
-    // secret so the vault is actually read at dispatch time. Without a
+    // Project routing selects the bundle-owned fixture provider. The directive
+    // declares a required secret so the vault is actually read at dispatch time. Without a
     // declared secret the post-step-7a dispatcher skips the vault read
     // entirely and a poisoned PATH key in the store never trips.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider_with_auth(
-        project.path(),
-        &mock_url,
-        "E2E_TEST_VAULT_BLOCKED",
-        None,
-        None,
-        &fixture.publisher,
-    )
-    .expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive_with_secrets(
         project.path(),
