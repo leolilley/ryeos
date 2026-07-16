@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-15T07:49:21Z:6dc0aa0d92547dbb32b78fc835a2777eaa4cc737f123f0400e74d80a2c400ea4:vwOuUME/bY5ENsOObKOzXGSBt/GZTrqAkQSGIga+aX6WlDYIzhMwZKWF8RR4vgrt4+YgCtY5e4z83IvPVo+eAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T10:54:58Z:ff86c44525fa336df2f43bf5b625912aec184d3b977fa1e3e8b0b467bcdadcb3:FK+kfxZS/3f2ab881hE0LoJN0Z0U5c9cWQFUuQ2Rq+cn4QilTmBFxs8qoUTrx4Fml0FXFEIJpqWGdpMJ9MICAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime, operations, callbacks, identity]
 version: "1.1.0"
 description: >
-  The bundle-events runtime operation surface — the three neutral daemon
-  callbacks a bundle uses to append, read, and scan its event chains, their
+  The bundle-events runtime operation surface — the neutral daemon callbacks
+  a bundle uses to append, read, scan, and materialize event attachments, their
   input shapes, and why bundle identity is never a caller-supplied field.
 ---
 
@@ -18,13 +18,14 @@ runtime is privileged over another. For *who* may call these (the capability /
 manifest runtime-authority model), see `ryeos/standard/bundle-events`. This
 document covers *how* the calls are shaped.
 
-## The three operations
+## The operations
 
 The canonical public operation names are the live daemon callbacks:
 
 - `runtime.bundle_events_append`
 - `runtime.bundle_events_read_chain`
 - `runtime.bundle_events_scan`
+- `runtime.bundle_events_materialize_attachment`
 
 These names (namespaced under `runtime.`) are the wire contract. Any
 language-specific helper is a thin wrapper over exactly these operations, never
@@ -57,7 +58,14 @@ before any handler logic runs. Identity cannot be spoofed by input.
   "expected_chain_head_hash": null,
   "idempotency_key": "optional",
   "correlation_id": "optional",
-  "causation_id": "optional"
+  "causation_id": "optional",
+  "attachments": [
+    {
+      "name": "checkpoint",
+      "source_path": "models/actor/checkpoint.bin",
+      "media_type": "application/octet-stream"
+    }
+  ]
 }
 ```
 
@@ -67,6 +75,10 @@ defaults to `1`. `payload` defaults to an empty object. The optional
 current chain head (optimistic concurrency); `idempotency_key` makes a retry
 return the prior result instead of writing twice; `correlation_id` /
 `causation_id` carry cross-event lineage.
+
+`attachments` defaults to empty. Each source is a regular project-relative
+file opened without following symlinks. The event response contains its CAS
+blob hash and size; the event object retains that blob through GC and sync.
 
 ### Read chain
 
@@ -117,6 +129,22 @@ Chains are visited in lexical `chain_id` order and events within each chain are
 newest-first. Clients must return the cursor unchanged; its signature and head
 anchor are authoritative. `limit` defaults to 16 and may not exceed 16.
 Authorized under `scan`.
+
+### Materialize attachment
+
+```json
+{
+  "event_kind": "example_event",
+  "event_hash": "<event hash>",
+  "attachment_name": "checkpoint",
+  "destination_path": "models/actor/checkpoint.bin",
+  "replace": true
+}
+```
+
+Authorized under `scan`. The event must belong to the callback's effective
+bundle and requested event kind. The destination is confined below the pinned
+project root and published atomically without following symlinks.
 
 ## Pagination and page bounds
 

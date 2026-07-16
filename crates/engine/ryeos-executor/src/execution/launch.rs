@@ -19,7 +19,6 @@ use super::limits::{
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
-use ryeos_app::event_store_service::{EventAppendBatchParams, EventAppendItem};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
@@ -1998,25 +1997,16 @@ async fn run_claimed_thread_row_inner(
 
     // Fresh roots and continuations committed this audit with `thread_created`
     // in their birth transaction. Existing-row retry/recovery paths append the
-    // recomputed trio atomically before handoff.
+    // recomputed trio atomically with their created -> running transition before
+    // handoff. A same-thread running recovery appends only the new attempt audit.
     if !launch_audit_already_persisted {
-        let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?
-            .into_iter()
-            .map(|event| EventAppendItem {
-                event_type: event.event_type,
-                storage_class: event.storage_class,
-                payload: event.payload,
-            })
-            .collect();
+        let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?;
         state
-            .events
-            .append_batch(&EventAppendBatchParams {
-                thread_id: thread_id.clone(),
-                events: launch_audit,
-            })
+            .threads
+            .mark_running_with_events(&thread_id, launch_audit)
             .map_err(|error| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "atomic durable launch audit append failed: {error}"
+                    "atomic durable launch audit and running transition failed: {error}"
                 ))
             })?;
     }

@@ -238,14 +238,13 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
     let head_state = manifest_state_map(&ctx.cas, &head_items)?;
     let mut worktree = BTreeMap::new();
     // Status compares only snapshot-representable files. Symlinks are omitted
-    // here, while snapshot creation below continues to reject them strictly.
+    // consistently with snapshot creation and are never followed.
     let complete = walk_worktree(
         &ctx.project_path,
         &ctx.project_path,
         Path::new(""),
         ctx.ignore_matcher,
         deadline,
-        false,
         &mut worktree,
     )?;
     let mut paths = BTreeSet::new();
@@ -509,7 +508,6 @@ fn build_manifest(ctx: &SnapshotContext<'_>) -> Result<SourceManifest> {
         Path::new(""),
         ctx.ignore_matcher,
         None,
-        true,
         &mut files,
     )?;
     let mut items = HashMap::new();
@@ -536,7 +534,6 @@ fn walk_worktree(
     relative_dir: &Path,
     ignore: &crate::ignore::IgnoreMatcher,
     deadline: Option<Instant>,
-    reject_symlinks: bool,
     files: &mut BTreeMap<String, CapturedFile>,
 ) -> Result<bool> {
     let directory = open_directory_no_follow(root, dir)?;
@@ -549,12 +546,10 @@ fn walk_worktree(
         }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            if reject_symlinks {
-                bail!(
-                    "project snapshots do not support symlinks: {}",
-                    entry.path().display()
-                );
-            }
+            // A snapshot represents regular-file bytes, not filesystem link
+            // topology. Omitting links keeps virtualenvs and similar project
+            // tooling usable without ever following a path outside the
+            // project capability root.
             continue;
         }
         let path = entry.path();
@@ -571,15 +566,7 @@ fn walk_worktree(
             continue;
         }
         if file_type.is_dir() {
-            if !walk_worktree(
-                root,
-                &path,
-                &relative_path,
-                ignore,
-                deadline,
-                reject_symlinks,
-                files,
-            )? {
+            if !walk_worktree(root, &path, &relative_path, ignore, deadline, files)? {
                 return Ok(false);
             }
         } else if file_type.is_file() {
@@ -604,7 +591,6 @@ fn walk_worktree(
     _relative_dir: &Path,
     _ignore: &crate::ignore::IgnoreMatcher,
     _deadline: Option<Instant>,
-    _reject_symlinks: bool,
     _files: &mut BTreeMap<String, CapturedFile>,
 ) -> Result<bool> {
     bail!(
@@ -798,4 +784,34 @@ fn capture_regular_file_no_follow(_root: &Path, path: &Path) -> Result<Option<Ca
         "secure no-follow project snapshot capture is unavailable on this platform: {}",
         path.display()
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn snapshot_walk_omits_symlinks_without_following_them() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(project.path().join("regular.txt"), b"regular").unwrap();
+        let bin = project.path().join(".venv/bin");
+        fs::create_dir_all(&bin).unwrap();
+        symlink("/usr/bin/python", bin.join("python")).unwrap();
+
+        let mut files = BTreeMap::new();
+        let complete = walk_worktree(
+            project.path(),
+            project.path(),
+            Path::new(""),
+            &crate::ignore::matcher_from_builtins(),
+            None,
+            &mut files,
+        )
+        .unwrap();
+
+        assert!(complete);
+        assert!(files.contains_key("regular.txt"));
+        assert!(!files.contains_key(".venv/bin/python"));
+    }
 }

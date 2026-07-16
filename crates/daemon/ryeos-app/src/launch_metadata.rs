@@ -447,6 +447,28 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    /// Derive the durable launch seed for a continuation successor. Runtime
+    /// policy and the reconstructable request identity survive the handoff;
+    /// fresh-root-only admission records do not. A replay-aware successor gets
+    /// its own checkpoint directory rather than inheriting the source path.
+    pub fn for_continuation_successor(
+        &self,
+        source_thread_id: &str,
+        checkpoint_dir: PathBuf,
+    ) -> Self {
+        Self {
+            schema_version: self.schema_version,
+            cancellation_mode: self.cancellation_mode,
+            native_resume: self.native_resume.clone(),
+            checkpoint_dir: self.native_resume.as_ref().map(|_| checkpoint_dir),
+            resume_context: self.resume_context.clone(),
+            continuation_source_thread_id: Some(source_thread_id.to_string()),
+            sealed_root_request: None,
+            follow_parent_context: None,
+            follow_launch_window: None,
+        }
+    }
+
     pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
         self.sealed_root_request = Some(request);
         self

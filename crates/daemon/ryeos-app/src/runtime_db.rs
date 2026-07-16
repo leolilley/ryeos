@@ -3457,6 +3457,17 @@ impl RuntimeDb {
         Ok(())
     }
 
+    pub fn child_link_relation(&self, child_thread_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT relation FROM thread_child_link WHERE child_thread_id=?1",
+                params![child_thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// Every transitive descendant of `root_thread_id`, breadth-first in spawn
     /// order. `root` itself is excluded, and a `seen` set guards against a link
     /// cycle ever driving an unbounded walk.

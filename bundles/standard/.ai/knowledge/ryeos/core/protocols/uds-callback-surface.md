@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:30Z:b5f5f6786ab1321f679efce2cc7725a1e89eedb99561de8ac424d2f0f86165b3:oRwE1exXsJzLsonEYEtqjtPIVdgWQ5AItWBXk4y7zlAa9UWyDMZEBa596frcSZuKwESqiIkLgtKFFdTlYVpeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T10:54:56Z:2728e996c06f802fb1335054bac5e1c0419303c7524e88829c5d0a4e19841e77:3Lj51TOYzoo+zyAC6L7WexsHHpmPttwesmPkLSwPjaguEQLUhpBXYIibtmTR6XtXWUHyBWEZLfjmh0NygQjkDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
@@ -55,6 +55,7 @@ requests already past token validation still meet the locked lifecycle check.
 | `runtime.bundle_events_append` | exact-thread write | Handler receives the capability and enforces the bundle scope. |
 | `runtime.bundle_events_read_chain` | exact-thread | A *read* by name, but gated to the exact executing thread — not a chain-wide token — and bundle-scoped in the service. |
 | `runtime.bundle_events_scan` | exact-thread | Bundle-scoped in the service. |
+| `runtime.bundle_events_materialize_attachment` | exact-thread write | Requires bundle-event scan authority; reads a retained CAS attachment and atomically writes the caller-selected project-relative destination without following symlinks. |
 | `runtime.vault_put` / `vault_get` / `vault_delete` / `vault_list` | exact-thread write | Vault refs rejected on bundle mismatch against the token's `effective_bundle_id`. List uses an exclusive lexical cursor, defaults to 64 keys, and accepts at most 128. |
 | `runtime.finalize_thread` | exact-thread write | |
 | `runtime.mark_running` | exact-thread write | |

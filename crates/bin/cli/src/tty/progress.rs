@@ -11,9 +11,6 @@ use ryeos_node::{
 use super::TerminalCapabilities;
 
 const MAX_BAR_WIDTH: usize = 18;
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const TICK_INTERVAL: Duration = Duration::from_millis(100);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
     Fetch,
@@ -379,17 +376,18 @@ fn progress_ticker(
         }
         let (next_state, timeout) = shared
             .wake
-            .wait_timeout(state, TICK_INTERVAL)
+            .wait_timeout(state, super::theme::SPINNER_TICK_INTERVAL)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state = next_state;
         if state.stopped {
             return;
         }
-        if timeout.timed_out() && state.current.is_some() {
-            if render_progress_state(&mut state, started, color, unicode, width).is_err() {
-                state.stopped = true;
-                return;
-            }
+        if timeout.timed_out()
+            && state.current.is_some()
+            && render_progress_state(&mut state, started, color, unicode, width).is_err()
+        {
+            state.stopped = true;
+            return;
         }
     }
 }
@@ -406,11 +404,7 @@ fn render_progress_state(
     };
     state.frame = state.frame.wrapping_add(1);
     let frame = state.frame;
-    let spinner = if unicode {
-        SPINNER[frame % SPINNER.len()]
-    } else {
-        '.'
-    };
+    let spinner = super::theme::spinner(frame, unicode);
     let bar_width = progress_bar_width(width);
     let bar = current
         .ratio
@@ -460,8 +454,7 @@ fn non_redundant_detail<'a>(label: &str, detail: &'a str) -> Option<&'a str> {
             .get(..label.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(label))
     {
-        let remainder = detail[label.len()..]
-            .trim_start_matches(|ch: char| matches!(ch, ' ' | '·' | ':' | '-' | '—'));
+        let remainder = detail[label.len()..].trim_start_matches([' ', '·', ':', '-', '—']);
         return (!remainder.is_empty()).then_some(remainder);
     }
     Some(detail)
@@ -597,9 +590,9 @@ fn pulse_bar(frame: usize, width: usize) -> String {
     bar
 }
 
-fn colorize_progress_line(line: &str, spinner: char) -> String {
+fn colorize_progress_line(line: &str, spinner: &str) -> String {
     let remainder = line.strip_prefix(spinner).unwrap_or(line);
-    let spinner = super::theme::style(&spinner.to_string(), super::Tone::Active, true);
+    let spinner = super::theme::style(spinner, super::Tone::Active, true);
     let remainder = super::theme::style(remainder, super::Tone::Secondary, true);
     format!("{spinner}{remainder}")
 }

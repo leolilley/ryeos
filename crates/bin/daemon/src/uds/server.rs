@@ -14,7 +14,8 @@ use tokio::sync::Semaphore;
 #[cfg(test)]
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::bundle_event_service::{
-    BundleEventAppendParams, BundleEventReadChainParams, BundleEventScanParams, BundleEventService,
+    BundleEventAppendParams, BundleEventMaterializeAttachmentParams, BundleEventReadChainParams,
+    BundleEventScanParams, BundleEventService,
 };
 use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, CommandSubmitParams};
 use ryeos_app::event_store_service::{
@@ -362,6 +363,9 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.bundle_events_scan" => {
             handle_bundle_events_scan(&clean_params, state, callback_cap.as_ref())
         }
+        "runtime.bundle_events_materialize_attachment" => {
+            handle_bundle_events_materialize_attachment(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.vault_put" => {
             handle_runtime_vault_put(&clean_params, state, callback_cap.as_ref())
         }
@@ -460,6 +464,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.vault_put"
             | "runtime.vault_delete"
             | "runtime.bundle_events_append"
+            | "runtime.bundle_events_materialize_attachment"
             | "runtime.publish_artifact"
             | "runtime.submit_command"
             | "runtime.poll_input"
@@ -1102,6 +1107,23 @@ fn handle_bundle_events_scan(
         params,
     )?)
     .context("failed to encode bundle_events.scan result")
+}
+
+fn handle_bundle_events_materialize_attachment(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: BundleEventMaterializeAttachmentParams = serde_json::from_value(params.clone())
+        .context("invalid bundle_events.materialize_attachment params")?;
+    serde_json::to_value(BundleEventService::materialize_attachment(
+        &state.state_store,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode bundle_events.materialize_attachment result")
 }
 
 fn handle_runtime_vault_put(
@@ -3685,16 +3707,23 @@ mod tests {
     #[tokio::test]
     async fn runtime_bundle_events_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("models")).unwrap();
+        std::fs::write(
+            project.path().join("models/checkpoint.bin"),
+            b"learner-checkpoint",
+        )
+        .unwrap();
         create_running_test_thread(&state, "T-bundle-1");
         let cbt = state.callback_tokens.generate_with_context(
             "T-bundle-1",
-            std::path::PathBuf::from("/test"),
+            project.path().to_path_buf(),
             std::time::Duration::from_secs(300),
             vec![
                 "ryeos.append.bundle-events.example-bundle/example_event".to_string(),
                 "ryeos.scan.bundle-events.example-bundle/example_event".to_string(),
             ],
-            test_provenance(&state, "/test"),
+            test_provenance(&state, project.path().to_str().unwrap()),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
             "0".repeat(64),
@@ -3713,7 +3742,12 @@ mod tests {
                     "event_type": "example_planned",
                     "schema_version": 1,
                     "payload": {"example_id": "example_1"},
-                    "idempotency_key": "record:example_1"
+                    "idempotency_key": "record:example_1",
+                    "attachments": [{
+                        "name": "checkpoint",
+                        "source_path": "models/checkpoint.bin",
+                        "media_type": "application/octet-stream"
+                    }]
                 }),
             ),
             &state,
@@ -3725,6 +3759,35 @@ mod tests {
         assert_eq!(
             rpc_ok(&append)["event"]["attribution"]["tool"],
             "tool:example-bundle/send"
+        );
+        assert_eq!(
+            rpc_ok(&append)["event"]["attachments"][0]["name"],
+            "checkpoint"
+        );
+
+        let materialize = dispatch(
+            rpc(
+                "runtime.bundle_events_materialize_attachment",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-bundle-1",
+                    "event_kind": "example_event",
+                    "event_hash": event_hash,
+                    "attachment_name": "checkpoint",
+                    "destination_path": "models/restored/checkpoint.bin"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            materialize.error.is_none(),
+            "materialize failed: {:?}",
+            materialize.error
+        );
+        assert_eq!(
+            std::fs::read(project.path().join("models/restored/checkpoint.bin")).unwrap(),
+            b"learner-checkpoint"
         );
 
         let scan = dispatch(

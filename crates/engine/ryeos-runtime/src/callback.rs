@@ -476,6 +476,20 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         request: Value,
     ) -> Result<Value, CallbackError>;
 
+    async fn bundle_events_materialize_attachment(
+        &self,
+        _thread_id: &str,
+        _request: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "bundle event attachment materialization is not supported by this callback client"
+                    .to_string(),
+            retryable: false,
+        })
+    }
+
     async fn vault_put(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;
 
     async fn vault_get(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;

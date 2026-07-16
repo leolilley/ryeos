@@ -27,7 +27,7 @@
 //!     `work`) and the successor (ran post-follow `mark`) each reach
 //!     `thread_completed` exactly once.
 //!   - Value flow: the child returns a sentinel that the resumed parent consumes
-//!     (`${result.child_ran}`) and re-returns, so the successor's persisted
+//!     (`${result.result.child_ran}`) and re-returns, so the successor's persisted
 //!     result carries it — proving the child's result was actually consumed, not
 //!     merely stepped past.
 
@@ -102,11 +102,11 @@ fn plant_parent_follow_graph(project_dir: &Path, signer: &SigningKey) -> anyhow:
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     // `fetch` consumes the child result on resume and assigns the child's value
-    // into state via `${result.child_ran}` — the follow result binds to the child's
-    // terminal `result`, which for a graph child is its return `output`
-    // (`graph_result.result`), so the child's `child_ran` output is at the top
-    // level. `done` re-returns it so the successor's persisted result carries the
-    // sentinel iff the follow result was consumed correctly.
+    // from the typed GraphResult (`result.result.child_ran`). Graph-to-graph
+    // dispatch deliberately preserves that structured result rather than
+    // flattening one runtime kind specially. `done` re-returns it so the
+    // successor's persisted result carries the sentinel iff the follow result
+    // was consumed correctly.
     let body = r#"category: ""
 version: "1.0.0"
 requires:
@@ -124,7 +124,7 @@ config:
         ref_bindings: {}
         params: {}
       assign:
-        child_ran: "${result.child_ran}"
+        child_ran: "${result.result.child_ran}"
       next:
         type: unconditional
         to: mark
@@ -382,11 +382,11 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
 
     // 6. Value flow: the child's returned value reached the resumed parent's
     //    persisted result. A missing / mis-shaped follow result would break the
-    //    `${result.child_ran}` assign and the sentinel would be absent.
+    //    `${result.result.child_ran}` assign and the sentinel would be absent.
     let (get_status, get_body) = h
         .post_execute(
             "service:threads/get",
-            ".",
+            project.path().to_str().unwrap(),
             serde_json::json!({ "thread_id": successor_tid }),
         )
         .await
@@ -807,6 +807,34 @@ pricing:
     Ok(())
 }
 
+/// Install the mock provider as a node bundle. Provider executable/network
+/// policy is node authority and must not be sourced from mutable project space.
+fn register_mock_provider_bundle(
+    state_path: &Path,
+    base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let bundle_root = state_path.join(".ai/test-bundles/follow-cost-provider");
+    plant_mock_provider(&bundle_root, base_url, signer)?;
+    let manifest_body = r#"name: follow-cost-provider
+version: 0.1.0
+description: "test-only mock model provider"
+provides_kinds: []
+requires_kinds:
+  - config
+uses_kinds: []
+"#;
+    let manifest = lillux::signature::sign_content(manifest_body, signer, "#", None);
+    std::fs::write(bundle_root.join(".ai/manifest.yaml"), manifest)?;
+
+    let records = state_path.join(".ai/node/bundles");
+    std::fs::create_dir_all(&records)?;
+    let body = format!("kind: node\npath: {}\n", bundle_root.display());
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(records.join("follow-cost-provider.yaml"), signed)?;
+    Ok(())
+}
+
 /// Map the `general` tier to the mock provider.
 fn plant_model_routing(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = root.join(".ai/config/ryeos-runtime");
@@ -878,11 +906,14 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let mock = MockProvider::start(vec![MockResponse::Text("hi from child".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_vault_with_zen_key(state_path)?;
-        Ok(())
-    };
+    let mock_url_for_bundle = mock_url.clone();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_vault_with_zen_key(state_path)?;
+            register_mock_provider_bundle(state_path, &mock_url_for_bundle, &fixture.publisher)?;
+            Ok(())
+        };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
@@ -890,14 +921,14 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
                 "info,ryeosd=debug,ryeos_graph_runtime=debug,ryeos_directive_runtime=debug".into()
             }),
         );
-        // Allow the project-level mock provider config the directive child resolves.
+        // The model-routing choice remains project-authored; provider authority
+        // itself is installed in the fixture's node bundle set above.
         cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_cost_directive_child(project.path(), &fixture.publisher).expect("plant child directive");
     plant_parent_cost_graph(project.path(), &fixture.publisher).expect("plant parent");
@@ -958,7 +989,7 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let (get_status, get_body) = h
         .post_execute(
             "service:threads/get",
-            ".",
+            project.path().to_str().unwrap(),
             serde_json::json!({ "thread_id": successor_tid }),
         )
         .await

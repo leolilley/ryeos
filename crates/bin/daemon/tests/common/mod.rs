@@ -278,7 +278,7 @@ pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
 
 /// Ensure published bundle artifacts under `bundles/{core,standard}/`
 /// reflect the current source tree. If any tracked source file is newer
-/// than the standard bundle's published manifest, re-run
+/// than the standard bundle's published manifest ref, re-run
 /// `scripts/populate-bundles.sh` to rebuild release binaries, restage
 /// them, and re-sign + republish both bundles.
 ///
@@ -319,10 +319,16 @@ pub fn ensure_bundles_fresh() {
 
         // Re-check staleness inside the lock — another process may have
         // already refreshed while we waited.
-        let representative = root.join(
-            "bundles/standard/.ai/runtimes/directive-runtime.yaml",
-        );
-        let publish_time = read_signature_timestamp(&representative);
+        // Publication rewrites this ref only after the standard bundle's
+        // manifest closure has been committed. Do not use a source item's
+        // embedded signature timestamp here: unchanged signed YAML remains
+        // byte-for-byte stable across publication, which made every later test
+        // incorrectly treat a freshly published bundle as stale.
+        let representative = root.join("bundles/standard/.ai/refs/bundles/manifest");
+        let publish_time = representative
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
         let needs_refresh = match publish_time {
             None => true,
             Some(m) => bundle_inputs_newer_than(&root, m),
@@ -348,66 +354,21 @@ pub fn ensure_bundles_fresh() {
     });
 }
 
-/// Parse the `# ryeos:signed:<RFC3339>:...` envelope from a signed
-/// bundle file and return the embedded publish timestamp. Returns
-/// `None` if the file is missing, unsigned, or the timestamp is
-/// unparseable.
-fn read_signature_timestamp(path: &Path) -> Option<std::time::SystemTime> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let line = content.lines().find(|l| l.starts_with("# ryeos:signed:"))?;
-    // Format: `# ryeos:signed:<RFC3339>:<digest>:<sig>:<fp>` where the
-    // timestamp itself contains 2 colons (`2026-05-07T08:09:10Z`).
-    // Strip the prefix, then take the first 3 colon-separated segments
-    // of the remainder and reconstruct the RFC3339 string.
-    let body = line.strip_prefix("# ryeos:signed:")?;
-    let mut parts = body.splitn(4, ':');
-    let date_h = parts.next()?; // "2026-05-07T08"
-    let mi = parts.next()?; // "09"
-    let se_z = parts.next()?; // "10Z"
-    let ts = format!("{date_h}:{mi}:{se_z}");
-    rfc3339_to_systemtime(&ts)
-}
-
-/// Tiny RFC3339 → SystemTime parser (UTC `Z` only — that's all the
-/// signing format emits). Returns `None` on any malformed input.
-fn rfc3339_to_systemtime(s: &str) -> Option<std::time::SystemTime> {
-    // Expect: `YYYY-MM-DDTHH:MM:SSZ`
-    let s = s.strip_suffix('Z')?;
-    let (date, time) = s.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let y: i64 = date_parts.next()?.parse().ok()?;
-    let mo: u32 = date_parts.next()?.parse().ok()?;
-    let d: u32 = date_parts.next()?.parse().ok()?;
-    let mut time_parts = time.split(':');
-    let h: u32 = time_parts.next()?.parse().ok()?;
-    let mi: u32 = time_parts.next()?.parse().ok()?;
-    let se: u32 = time_parts.next()?.parse().ok()?;
-
-    // Days since 1970-01-01 using Howard Hinnant's algorithm
-    // (handles Gregorian leap years correctly through 9999).
-    let y_adj = y - if mo <= 2 { 1 } else { 0 };
-    let era = y_adj.div_euclid(400);
-    let yoe = y_adj - era * 400;
-    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 } as i64) + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days_since_epoch = era * 146097 + doe - 719468;
-    let total_secs = days_since_epoch * 86400 + (h as i64) * 3600 + (mi as i64) * 60 + se as i64;
-    if total_secs < 0 {
-        return None;
-    }
-    Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(total_secs as u64))
-}
-
 /// Walk the source roots that affect bundle binary contents and return
-/// `true` if any `.rs` / `Cargo.toml` file under them has an mtime
-/// newer than `published`. We only check source crates (not bundle
-/// item YAMLs): YAMLs are always rewritten by the publish step, so
-/// comparing them against the publish timestamp would be circular.
+/// `true` if a workspace manifest or production crate source has an mtime
+/// newer than `published`. Integration tests, benches, and examples cannot
+/// affect release binaries and must not force a full bundle rebuild.
+///
+/// We do not check bundle item YAMLs: publishing intentionally preserves
+/// unchanged signed source items, while rebuilding their manifest closure.
 /// A user editing a bundle YAML directly without republishing is a
 /// known-acceptable hole — that path is rare and republishing is one
 /// command.
 fn bundle_inputs_newer_than(root: &Path, published: std::time::SystemTime) -> bool {
-    dir_has_newer(&root.join("crates"), published)
+    [root.join("Cargo.toml"), root.join("Cargo.lock")]
+        .iter()
+        .any(|path| file_is_newer(path, published))
+        || dir_has_newer(&root.join("crates"), published)
 }
 
 fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
@@ -417,22 +378,31 @@ fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| matches!(name, "tests" | "benches" | "examples"))
+            {
+                continue;
+            }
             if dir_has_newer(&p, published) {
                 return true;
             }
-        } else if p.file_name().is_some_and(|name| name == "Cargo.toml")
-            || p.extension().is_some_and(|ext| ext == "rs")
+        } else if (p.file_name().is_some_and(|name| name == "Cargo.toml")
+            || p.file_name().is_some_and(|name| name == "build.rs")
+            || p.extension().is_some_and(|ext| ext == "rs"))
+            && file_is_newer(&p, published)
         {
-            if let Ok(m) = entry.metadata() {
-                if let Ok(modified) = m.modified() {
-                    if modified > published {
-                        return true;
-                    }
-                }
-            }
+            return true;
         }
     }
     false
+}
+
+fn file_is_newer(path: &Path, published: std::time::SystemTime) -> bool {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified > published)
 }
 
 /// Recursive directory copy (Unix, no special handling).

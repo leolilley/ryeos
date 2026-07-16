@@ -482,14 +482,14 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         "config_hash",
         true,
         RuntimeFactKindWire::String,
-        64,
+        66,
     )?;
     fact(
         request,
         "config_value_digest",
         true,
         RuntimeFactKindWire::String,
-        64,
+        66,
     )?;
     fact(
         request,

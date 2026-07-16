@@ -353,6 +353,7 @@ mod tests {
             correlation_id: None,
             causation_id: None,
             attribution: Default::default(),
+            attachments: vec![],
         }
     }
 

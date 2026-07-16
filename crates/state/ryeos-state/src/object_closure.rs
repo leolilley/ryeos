@@ -1035,6 +1035,19 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
         }
         "bundle_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
+            let attachments = value
+                .get("attachments")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| "bundle_event attachments is not an array".to_string())
+                })
+                .transpose()?
+                .cloned()
+                .unwrap_or_default();
+            for attachment in &attachments {
+                push_required_hash(attachment, "blob_hash", &mut links.blob_hashes)?;
+            }
         }
         "project_snapshot" => {
             push_required_hash(value, "project_manifest_hash", &mut links.object_hashes)?;

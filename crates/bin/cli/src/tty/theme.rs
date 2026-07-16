@@ -1,3 +1,9 @@
+use std::time::Duration;
+
+pub(super) const SPINNER_TICK_INTERVAL: Duration = Duration::from_millis(100);
+const UNICODE_SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const ASCII_SPINNER: &[&str] = &[".", "o", "O", "o"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     Success,
@@ -21,6 +27,15 @@ pub fn glyph(tone: Tone, unicode: bool) -> &'static str {
         (Tone::Failure, false) => "ERROR",
         (Tone::Neutral | Tone::Secondary, false) => "-",
     }
+}
+
+pub(super) fn spinner(frame: usize, unicode: bool) -> &'static str {
+    let frames = if unicode {
+        UNICODE_SPINNER
+    } else {
+        ASCII_SPINNER
+    };
+    frames[frame % frames.len()]
 }
 
 pub fn style(value: &str, tone: Tone, color: bool) -> String {
@@ -51,5 +66,11 @@ mod tests {
         assert!(style("x", Tone::Failure, true).contains("38;2;251;73;52"));
         assert!(style("x", Tone::Neutral, true).contains("38;2;213;196;161"));
         assert!(style("x", Tone::Secondary, true).contains("38;2;168;153;132"));
+    }
+
+    #[test]
+    fn spinner_advances_in_unicode_and_ascii_modes() {
+        assert_ne!(spinner(0, true), spinner(1, true));
+        assert_ne!(spinner(0, false), spinner(1, false));
     }
 }

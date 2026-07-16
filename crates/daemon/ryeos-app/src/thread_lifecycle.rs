@@ -2570,6 +2570,21 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("thread not found after mark_running: {thread_id}"))
     }
 
+    /// Persist a daemon-prepared launch audit in the same commit that makes a
+    /// deferred successor runnable. Runtime `mark_running` remains idempotent.
+    pub fn mark_running_with_events(
+        &self,
+        thread_id: &str,
+        initial_events: Vec<NewEventRecord>,
+    ) -> Result<ThreadDetail> {
+        let persisted =
+            self.state_store
+                .mark_thread_running_with_events(thread_id, None, initial_events)?;
+        self.publish_records(&persisted);
+        self.get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found after mark_running_with_events: {thread_id}"))
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "thread:attach_process",
@@ -3606,13 +3621,17 @@ impl ThreadLifecycleService {
         source_thread_id: &str,
         chain_root_id: &str,
         completion: &ryeos_runtime::TerminalCompletion,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
     ) -> Result<()> {
         validate_continued_completion(completion)?;
-        let persisted = self.state_store.create_follow_resume_successor(
-            successor,
-            source_thread_id,
-            chain_root_id,
-        )?;
+        let persisted = self
+            .state_store
+            .create_follow_resume_successor_with_launch_metadata(
+                successor,
+                source_thread_id,
+                chain_root_id,
+                successor_launch_metadata,
+            )?;
         self.publish_records(&persisted);
         Ok(())
     }
@@ -4126,8 +4145,13 @@ pub fn resolve_root_execution(
     })
 }
 
-/// Resolve a concrete history launch contract from the same verified composed
-/// value execution will receive. This must run before root persistence.
+/// Resolve a concrete history contract from the verified effective item used
+/// by a non-execution root. This must run before root persistence.
+///
+/// Non-execution roots can legitimately bind subjects such as surfaces whose
+/// kind has no `execution` block. They still use the normal effective-item
+/// resolution, trust, and composition substrate; only executable launches use
+/// the stricter `run_resolution_pipeline` entry point.
 pub fn resolve_thread_history_policy(
     engine: &Engine,
     plan_context: &PlanContext,

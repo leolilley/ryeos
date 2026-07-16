@@ -4759,6 +4759,11 @@ impl StateDb {
         )
     }
 
+    pub fn read_bundle_event_by_hash(&self, event_hash: &str) -> anyhow::Result<BundleEventRecord> {
+        let cas = self.pinned_cas()?;
+        bundle_events::read_bundle_event_by_hash_with_cas(&cas, event_hash)
+    }
+
     pub fn read_bundle_event_chain(
         &self,
         bundle_id: &str,

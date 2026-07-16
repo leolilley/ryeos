@@ -228,6 +228,15 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     // cannot tell a live runtime from a crashed one on restart and would
     // resume a duplicate. Resume-critical: must precede all work.
     callback.attach_current_process().await?;
+    // The directive bootstrap emits the opening cognition before Runner enters
+    // its state machine. Cross the lifecycle boundary immediately after process
+    // attachment so every subsequent durable callback is authored by a running
+    // thread. Runner's Init mark remains an idempotent defense for alternate
+    // harnesses and resume entry points.
+    callback
+        .mark_running()
+        .await
+        .context("failed to mark directive runtime running after attach")?;
 
     let mut runtime_data = std::mem::take(&mut envelope.runtime_data);
     let provider_snapshot: ResolvedProviderSnapshot =

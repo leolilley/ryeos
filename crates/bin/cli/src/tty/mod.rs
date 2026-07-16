@@ -300,7 +300,9 @@ fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapa
                     }
                     continue;
                 }
-                let marker = if row.tone == Tone::Neutral {
+                let marker = if let Some(marker) = &row.marker {
+                    theme::style(marker, row.tone, capabilities.color)
+                } else if row.tone == Tone::Neutral {
                     " ".to_string()
                 } else {
                     theme::style(
@@ -362,7 +364,7 @@ fn wrap_words(value: &str, width: usize) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut line = String::new();
-    for word in value.split_whitespace() {
+    for mut word in value.split_whitespace() {
         let separator = usize::from(!line.is_empty());
         if visible_width(&line) + separator + visible_width(word) <= width {
             if separator == 1 {
@@ -373,13 +375,32 @@ fn wrap_words(value: &str, width: usize) -> Vec<String> {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
-            line = clamp_visible(word, width);
+            while visible_width(word) > width {
+                let split = visible_prefix_end(word, width);
+                lines.push(word[..split].to_string());
+                word = &word[split..];
+            }
+            line.push_str(word);
         }
     }
     if !line.is_empty() {
         lines.push(line);
     }
     lines
+}
+
+fn visible_prefix_end(value: &str, max_width: usize) -> usize {
+    let mut width = 0;
+    let mut end = 0;
+    for (index, ch) in value.char_indices() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        width += ch_width;
+        end = index + ch.len_utf8();
+    }
+    end.max(value.chars().next().map(char::len_utf8).unwrap_or(0))
 }
 
 fn write_lines(out: &mut impl Write, lines: &[String], width: usize) -> io::Result<()> {
@@ -465,16 +486,36 @@ pub async fn run(
     let operator_problem = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
 
-    let rendered_lines = render(console, &loading_projection(screen, &project), 0)?;
-
+    let mut loading_frame = 0;
+    let mut rendered_lines = render(
+        console,
+        &loading_projection(screen, &project, loading_frame),
+        0,
+    )?;
     let live = build_live_projection(
         app_root,
         &project,
         operator_problem.as_deref(),
         screen,
         remote_url.as_deref(),
-    )
-    .await;
+    );
+    tokio::pin!(live);
+    let mut ticker = tokio::time::interval(theme::SPINNER_TICK_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    let live = loop {
+        tokio::select! {
+            live = &mut live => break live,
+            _ = ticker.tick() => {
+                loading_frame = loading_frame.wrapping_add(1);
+                rendered_lines = render(
+                    console,
+                    &loading_projection(screen, &project, loading_frame),
+                    rendered_lines,
+                )?;
+            }
+        }
+    };
     render(console, &live, rendered_lines)?;
 
     Ok(())
@@ -573,9 +614,14 @@ fn remote_daemon_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn loading_projection(screen: TtyScreen, project: &ProjectDisplay) -> TtyHomeFile {
+fn loading_projection(
+    screen: TtyScreen,
+    project: &ProjectDisplay,
+    loading_frame: usize,
+) -> TtyHomeFile {
     TtyHomeFile {
         screen,
+        loading_frame: Some(loading_frame),
         sections: TtyHomeSections {
             node: TtyNodeSummary {
                 status: "loading".to_string(),
@@ -641,6 +687,7 @@ async fn build_live_projection(
 
     TtyHomeFile {
         screen,
+        loading_frame: None,
         sections: TtyHomeSections {
             node,
             project: Some(TtyProjectSummary::from_project(project)),
@@ -801,6 +848,7 @@ fn loading_command_detail(screen: TtyScreen) -> &'static str {
 #[derive(Debug, Clone)]
 struct TtyHomeFile {
     screen: TtyScreen,
+    loading_frame: Option<usize>,
     sections: TtyHomeSections,
 }
 
@@ -1380,7 +1428,7 @@ fn render_lines(home: &TtyHomeFile, capabilities: TerminalCapabilities) -> Vec<S
     };
     lines.push(theme::style(&subtitle, Tone::Secondary, capabilities.color));
     lines.push(String::new());
-    let mut summary = vec![Row::key_value(
+    let mut node_row = Row::key_value(
         "node",
         format!(
             "{}{}",
@@ -1388,7 +1436,11 @@ fn render_lines(home: &TtyHomeFile, capabilities: TerminalCapabilities) -> Vec<S
             detail_suffix(home.sections.node.detail.as_deref())
         ),
     )
-    .with_tone(node_status_tone(&home.sections.node.status))];
+    .with_tone(node_status_tone(&home.sections.node.status));
+    if let Some(frame) = home.loading_frame {
+        node_row = node_row.with_marker(theme::spinner(frame, capabilities.unicode));
+    }
+    let mut summary = vec![node_row];
     if let Some(project) = &home.sections.project {
         summary.push(Row::key_value(
             "project",
@@ -1555,6 +1607,7 @@ mod tests {
         };
         let home = TtyHomeFile {
             screen: TtyScreen::Help,
+            loading_frame: None,
             sections: TtyHomeSections {
                 node: TtyNodeSummary {
                     status: "running".to_string(),
@@ -1580,6 +1633,48 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("metadata")));
         assert!(!lines.iter().any(|line| line.contains("pack...")));
         assert!(lines.iter().all(|line| visible_width(line) < 60));
+    }
+
+    #[test]
+    fn loading_projection_advances_its_node_spinner() {
+        let capabilities = TerminalCapabilities {
+            mode: capabilities::HumanOutputMode::Tty,
+            color: false,
+            unicode: true,
+            width: 80,
+        };
+        let project = ProjectDisplay {
+            key: None,
+            label: "none".to_string(),
+            detail: None,
+        };
+        let first = render_lines(
+            &loading_projection(TtyScreen::Help, &project, 0),
+            capabilities,
+        );
+        let second = render_lines(
+            &loading_projection(TtyScreen::Help, &project, 1),
+            capabilities,
+        );
+        let first_node = first
+            .iter()
+            .find(|line| line.contains("node"))
+            .expect("first loading frame has node row");
+        let second_node = second
+            .iter()
+            .find(|line| line.contains("node"))
+            .expect("second loading frame has node row");
+        assert_ne!(first_node, second_node);
+        assert!(first_node.starts_with('⠋'));
+        assert!(second_node.starts_with('⠙'));
+    }
+
+    #[test]
+    fn word_wrapping_preserves_long_error_tokens() {
+        let token = format!("vault:{}", "x".repeat(160));
+        let lines = wrap_words(&token, 24);
+        assert!(lines.iter().all(|line| visible_width(line) <= 24));
+        assert_eq!(lines.concat(), token);
     }
 
     #[test]

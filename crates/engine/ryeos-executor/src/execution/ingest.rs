@@ -5,8 +5,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use lillux::cas::sha256_hex;
-
 use ryeos_state::objects::ItemSource;
 
 use ryeos_app::ignore::IgnoreMatcher;
@@ -20,18 +18,17 @@ pub struct IngestResult {
 pub fn ingest_item(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
-    mut staged_roots: Option<&mut ryeos_state::StagedCasRootLease>,
     item_ref: &str,
     file_path: &Path,
 ) -> Result<IngestResult> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
     let bytes = fs::read(file_path)?;
-    let blob_hash = match staged_roots.as_deref_mut() {
-        Some(staged_roots) => staged_roots.store_blob_admitted(guard, &cas, &bytes)?,
-        None => cas.store_blob(&bytes)?,
-    };
-    let integrity = sha256_hex(&bytes);
+    let blob_hash = cas.store_blob(&bytes)?;
+    // CAS blob identity and ItemSource integrity are the same SHA-256 of the
+    // source bytes. Reuse the verified address instead of hashing every file a
+    // second time during live-project capture.
+    let integrity = blob_hash.clone();
 
     let signature_info = parse_signature_info_from_bytes(&bytes);
 
@@ -56,12 +53,7 @@ pub fn ingest_item(
         signature_info,
         mode,
     };
-    let object_hash = match staged_roots {
-        Some(staged_roots) => {
-            staged_roots.store_object_admitted(guard, &cas, &source.to_value())?
-        }
-        None => cas.store_object(&source.to_value())?,
-    };
+    let object_hash = cas.store_object(&source.to_value())?;
 
     Ok(IngestResult {
         blob_hash,
@@ -75,20 +67,11 @@ pub fn ingest_item(
 pub fn ingest_directory(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
-    staged_roots: &mut ryeos_state::StagedCasRootLease,
     base_path: &Path,
     ignore: &IgnoreMatcher,
 ) -> Result<HashMap<String, String>> {
     let mut items = HashMap::new();
-    ingest_walk(
-        authority,
-        guard,
-        staged_roots,
-        base_path,
-        base_path,
-        &mut items,
-        ignore,
-    )?;
+    ingest_walk(authority, guard, base_path, base_path, &mut items, ignore)?;
     Ok(items)
 }
 
@@ -120,7 +103,6 @@ pub fn materialize_item(
 fn ingest_walk(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
-    staged_roots: &mut ryeos_state::StagedCasRootLease,
     root: &Path,
     dir: &Path,
     items: &mut HashMap<String, String>,
@@ -168,9 +150,15 @@ fn ingest_walk(
         }
 
         if file_type.is_dir() {
-            ingest_walk(authority, guard, staged_roots, root, &path, items, ignore)?;
+            ingest_walk(authority, guard, root, &path, items, ignore)?;
         } else if file_type.is_file() {
-            let result = ingest_item(authority, guard, Some(&mut *staged_roots), &rel, &path)?;
+            // The caller holds the global CAS write permit and mutation guard
+            // for the complete walk. GC therefore cannot observe or sweep the
+            // descendants before the final SourceManifest is durably staged.
+            // Staging every intermediate hash would rewrite a growing recovery
+            // record once per blob and object (quadratic metadata I/O); the
+            // manifest's verified closure protects all of them after capture.
+            let result = ingest_item(authority, guard, &rel, &path)?;
             items.insert(rel, result.object_hash);
         }
     }

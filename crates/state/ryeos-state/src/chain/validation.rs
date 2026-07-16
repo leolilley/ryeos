@@ -350,9 +350,6 @@ fn validate_genesis_state(
     if state.prev_chain_state_hash.is_some() {
         anyhow::bail!("genesis ChainState has a predecessor");
     }
-    if state.last_chain_seq != 0 || state.last_event_hash.is_some() {
-        anyhow::bail!("genesis ChainState must begin before the first event");
-    }
     if state.threads.len() != 1 {
         anyhow::bail!("genesis ChainState must contain only its root thread");
     }
@@ -363,6 +360,41 @@ fn validate_genesis_state(
     let snapshot = load_hashed_snapshot(cas, &entry.snapshot_hash)?;
     validate_published_snapshot(state, &state.chain_root_id, entry, &snapshot, events)?;
     validate_new_thread_snapshot(&snapshot, None)?;
+
+    if state.last_chain_seq == 0 {
+        if state.last_event_hash.is_some() {
+            anyhow::bail!("zero-event genesis ChainState carries an event hash");
+        }
+        return Ok(());
+    }
+
+    // Histories written before zero-event genesis states were introduced
+    // published the root's initial event batch directly in the first signed
+    // ChainState. Those immutable histories remain authoritative: accept only
+    // the exact historical shape, while every newly created chain continues to
+    // receive a separate zero-event predecessor.
+    if entry.last_thread_seq != state.last_chain_seq
+        || entry.last_event_hash != state.last_event_hash
+    {
+        anyhow::bail!("historical event-bearing genesis must contain one root-only event history");
+    }
+    let last_hash = state
+        .last_event_hash
+        .as_deref()
+        .expect("positive chain sequence requires an event hash");
+    let last_event = events
+        .get(last_hash)
+        .expect("authoritative closure validation loaded the final event");
+    if last_event.thread_id != state.chain_root_id
+        || last_event.thread_sequence != state.last_chain_seq
+    {
+        anyhow::bail!("historical event-bearing genesis must contain only contiguous root events");
+    }
+    if parse_canonical_timestamp(&snapshot.updated_at)?
+        < parse_canonical_timestamp(&last_event.timestamp)?
+    {
+        anyhow::bail!("historical genesis snapshot predates its final initial event");
+    }
     Ok(())
 }
 
@@ -1272,6 +1304,41 @@ mod tests {
         (genesis_hash, running_state_hash)
     }
 
+    fn valid_historical_event_bearing_genesis(cas_root: &Path) -> String {
+        let mut event = NewEvent::new("T-root", "T-root", "thread_created")
+            .chain_seq(1)
+            .thread_seq(1)
+            .build();
+        event.ts = "2026-01-01T00:00:01Z".into();
+        let event_hash = write_value(cas_root, event.to_value());
+
+        let mut created = root();
+        created.updated_at = event.ts.clone();
+        created.last_event_hash = Some(event_hash.clone());
+        created.last_chain_seq = 1;
+        created.last_thread_seq = 1;
+        let created_hash = write_value(cas_root, created.to_value());
+        let genesis = ChainState {
+            schema: 1,
+            kind: "chain_state".into(),
+            chain_root_id: "T-root".into(),
+            prev_chain_state_hash: None,
+            last_event_hash: Some(event_hash.clone()),
+            last_chain_seq: 1,
+            updated_at: event.ts,
+            threads: BTreeMap::from([(
+                "T-root".into(),
+                ChainThreadEntry {
+                    snapshot_hash: created_hash,
+                    last_event_hash: Some(event_hash),
+                    last_thread_seq: 1,
+                    status: ThreadStatus::Created,
+                },
+            )]),
+        };
+        write_value(cas_root, genesis.to_value())
+    }
+
     #[test]
     fn created_can_transition_directly_to_every_terminal_status() {
         let previous = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
@@ -1418,6 +1485,13 @@ mod tests {
         let (genesis_hash, target_hash) = valid_two_state_history(temp.path());
         validate_authoritative_history(temp.path(), "T-root", &target_hash, Some(&genesis_hash))
             .unwrap();
+    }
+
+    #[test]
+    fn authoritative_history_accepts_historical_event_bearing_genesis() {
+        let temp = tempfile::tempdir().unwrap();
+        let genesis_hash = valid_historical_event_bearing_genesis(temp.path());
+        validate_authoritative_history(temp.path(), "T-root", &genesis_hash, None).unwrap();
     }
 
     #[test]

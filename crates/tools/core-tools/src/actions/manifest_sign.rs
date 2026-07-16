@@ -54,17 +54,16 @@ pub fn manifest_sign(
             .map(str::to_string)
             .context("bundle_source path has no UTF-8 directory name")?,
     };
-    super::publisher_transaction::with_staged_bundle_generation(bundle_source, |staging| {
-        let mut report = manifest_sign_in_place(staging, &effective_name, signing_key)?;
-        report.bundle_source = live_root.clone();
-        let live_manifest_path = report
-            .manifest_generated
-            .strip_prefix(staging)
-            .map(|relative| live_root.join(relative))
-            .unwrap_or_else(|_| report.manifest_generated.clone());
-        report.manifest_generated = live_manifest_path;
-        Ok(report)
-    })
+    // This operation authors exactly one file and the shared generator
+    // validates/materializes the complete body before its atomic write. A full
+    // publisher-generation copy is both unnecessary and incorrect here: it
+    // makes an unrelated project symlink (for example `.venv/bin/python`)
+    // prevent manifest-only authoring even though neither manifest input nor
+    // output traverses that path.
+    let mut report = manifest_sign_in_place(&canonical_live_root, &effective_name, signing_key)?;
+    report.bundle_source = live_root.clone();
+    report.manifest_generated = live_root.join(ryeos_engine::AI_DIR).join("manifest.yaml");
+    Ok(report)
 }
 
 fn manifest_sign_in_place(
@@ -164,5 +163,24 @@ mod tests {
             format!("{err:#}").contains("identity mismatch"),
             "got {err:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_project_symlink_does_not_block_manifest_only_signing() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("arc");
+        let ai = bundle.join(ryeos_engine::AI_DIR);
+        write(
+            &ai.join("manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\n",
+        );
+        std::fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+
+        let report = manifest_sign(&bundle, None, &test_key()).expect("manifest-only sign");
+        assert!(report.manifest_generated.is_file());
     }
 }

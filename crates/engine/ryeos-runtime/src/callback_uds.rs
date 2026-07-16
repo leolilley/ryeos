@@ -282,6 +282,19 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn bundle_events_materialize_attachment(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.bundle_events_materialize_attachment", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn vault_put(&self, thread_id: &str, mut request: Value) -> Result<Value, CallbackError> {
         request["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut request);

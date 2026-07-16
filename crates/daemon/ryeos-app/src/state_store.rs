@@ -145,6 +145,13 @@ pub struct NewArtifactRecord {
     pub metadata: Option<Value>,
 }
 
+#[derive(Debug)]
+pub struct NewBundleEventAttachment {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub media_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FinalizeThreadRecord {
     pub status: String,
@@ -769,6 +776,7 @@ pub enum FinalizeIfNonterminalOutcome {
 pub enum StopIfAdmissionOpenOutcome {
     Requested(Box<RuntimeInfo>),
     AlreadyTerminal,
+    PreservedForFollow,
     PreservedForShutdown,
 }
 
@@ -2278,6 +2286,18 @@ impl StateStore {
         thread_id: &str,
         base_project_snapshot_hash: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.mark_thread_running_with_events(thread_id, base_project_snapshot_hash, Vec::new())
+    }
+
+    /// Atomically append launch-attempt audit and cross a created thread into
+    /// `running`. Existing running recovery attempts append only their new
+    /// audit; they never emit a duplicate `thread_started` event.
+    pub fn mark_thread_running_with_events(
+        &self,
+        thread_id: &str,
+        base_project_snapshot_hash: Option<&str>,
+        mut initial_events: Vec<NewEventRecord>,
+    ) -> Result<Vec<PersistedEventRecord>> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
@@ -2301,75 +2321,75 @@ impl StateStore {
             );
         }
 
-        match thread_row.status.as_str() {
+        let transition_created = match thread_row.status.as_str() {
             // Fresh launch: fall through to the created -> running transition
             // (appends `thread_started`, sets `started_at`).
-            "created" => {}
+            "created" => true,
             // Same-thread crash recovery re-spawns a row that is still `running`,
             // and the resumed runtime calls `mark_running` again. Idempotent
             // no-op: do NOT append a second `thread_started` or rewrite
             // `started_at` — an empty persisted-events list means "already
             // running". (`drain_running_threads` still sees `running`, so the
             // shutdown kill window stays intact — no transient non-running state.)
-            "running" => return Ok(Vec::new()),
+            "running" if initial_events.is_empty() => return Ok(Vec::new()),
+            "running" => false,
             other => {
                 bail!("invalid status transition: {other} -> running");
             }
-        }
+        };
 
-        let mut updated_snapshot = authoritative_snapshot_for_transition(
-            &g,
-            &thread_row.chain_root_id,
-            &thread_row.thread_id,
-        )?;
-        if let (Some(authoritative), Some(requested)) = (
-            updated_snapshot.base_project_snapshot_hash.as_deref(),
-            base_project_snapshot_hash,
-        ) {
-            if authoritative != requested {
-                bail!(
-                    "mark_running project snapshot mismatch for {thread_id}: authoritative {authoritative}, requested {requested}"
-                );
+        let snapshot_updates = if transition_created {
+            let mut updated_snapshot = authoritative_snapshot_for_transition(
+                &g,
+                &thread_row.chain_root_id,
+                &thread_row.thread_id,
+            )?;
+            if let (Some(authoritative), Some(requested)) = (
+                updated_snapshot.base_project_snapshot_hash.as_deref(),
+                base_project_snapshot_hash,
+            ) {
+                if authoritative != requested {
+                    bail!(
+                        "mark_running project snapshot mismatch for {thread_id}: authoritative {authoritative}, requested {requested}"
+                    );
+                }
             }
-        }
-        let base_project_snapshot_hash = base_project_snapshot_hash
-            .map(ToOwned::to_owned)
-            .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
+            let base_project_snapshot_hash = base_project_snapshot_hash
+                .map(ToOwned::to_owned)
+                .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
-        let now = lillux::time::iso8601_now();
-        updated_snapshot.status = ThreadStatus::Running;
-        updated_snapshot.updated_at.clone_from(&now);
-        updated_snapshot.started_at = Some(now.clone());
-        updated_snapshot.finished_at = None;
-        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
+            let now = lillux::time::iso8601_now();
+            updated_snapshot.status = ThreadStatus::Running;
+            updated_snapshot.updated_at.clone_from(&now);
+            updated_snapshot.started_at = Some(now);
+            updated_snapshot.finished_at = None;
+            updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
 
-        let snapshot_update = SnapshotUpdate {
-            thread_id: thread_id.to_string(),
-            new_snapshot: updated_snapshot,
+            initial_events.push(NewEventRecord {
+                event_type: "thread_started".to_string(),
+                storage_class: "indexed".to_string(),
+                payload: json!({}),
+            });
+            vec![SnapshotUpdate {
+                thread_id: thread_id.to_string(),
+                new_snapshot: updated_snapshot,
+            }]
+        } else {
+            Vec::new()
         };
 
-        let event = NewEventRecord {
-            event_type: "thread_started".to_string(),
-            storage_class: "indexed".to_string(),
-            payload: json!({}),
-        };
-
-        let te = convert_events(
-            std::slice::from_ref(&event),
-            &thread_row.chain_root_id,
-            thread_id,
-        );
+        let te = convert_events(&initial_events, &thread_row.chain_root_id, thread_id);
         let result = committed_value(g.state_db.append_events_admitted(
             &thread_row.chain_root_id,
             thread_id,
             te,
-            vec![snapshot_update],
+            snapshot_updates,
             g.signer.as_ref(),
             &g.runtime_db,
             permit.cas_guard(),
         )?);
 
-        persisted_from_append(&result, &[event])
+        persisted_from_append(&result, &initial_events)
     }
 
     #[tracing::instrument(
@@ -3008,6 +3028,24 @@ impl StateStore {
             RunningContinuationKind::GraphFollowResume,
             None,
             None,
+            Vec::new(),
+        )
+    }
+
+    pub fn create_follow_resume_successor_with_launch_metadata(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_running_continuation_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            RunningContinuationKind::GraphFollowResume,
+            successor_launch_metadata.resume_context.as_ref(),
+            Some(successor_launch_metadata),
             Vec::new(),
         )
     }
@@ -4960,6 +4998,18 @@ impl StateStore {
         if is_terminal_status(&thread.status) {
             return Ok(StopIfAdmissionOpenOutcome::AlreadyTerminal);
         }
+        // A durable follow waiter transfers lifecycle ownership to the daemon.
+        // Keep this check under the same store lock as the stop tombstone so a
+        // request drop cannot race waiter reservation and kill the new chain.
+        if g.runtime_db
+            .get_follow_waiter_by_parent_thread(thread_id)?
+            .is_some()
+            || g.runtime_db
+                .get_follow_waiter_by_successor(thread_id)?
+                .is_some()
+        {
+            return Ok(StopIfAdmissionOpenOutcome::PreservedForFollow);
+        }
         if !self
             .process_attachment_admission_open
             .load(Ordering::Acquire)
@@ -5517,6 +5567,83 @@ impl StateStore {
             .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
     }
 
+    pub fn append_bundle_event_with_attachments(
+        &self,
+        mut request: ryeos_state::BundleEventAppendRequest,
+        attachments: Vec<NewBundleEventAttachment>,
+    ) -> Result<ryeos_state::BundleEventAppendResult> {
+        let permit = self.acquire_write_permit()?;
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let cas = self.state_authority.cas_store()?;
+        request.attachments = attachments
+            .into_iter()
+            .map(|attachment| {
+                let size_bytes = u64::try_from(attachment.bytes.len())
+                    .map_err(|_| anyhow!("bundle event attachment size does not fit u64"))?;
+                let stored = cas.put_blob(&attachment.bytes).with_context(|| {
+                    format!("store bundle event attachment '{}' in CAS", attachment.name)
+                })?;
+                Ok(ryeos_state::BundleEventAttachment {
+                    name: attachment.name,
+                    blob_hash: stored.hash,
+                    size_bytes,
+                    media_type: attachment.media_type,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let g = self.lock()?;
+        g.state_db
+            .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
+    }
+
+    pub fn read_bundle_event_attachment(
+        &self,
+        event_hash: &str,
+        expected_bundle_id: &str,
+        expected_event_kind: &str,
+        attachment_name: &str,
+    ) -> Result<(
+        ryeos_state::BundleEventRecord,
+        ryeos_state::BundleEventAttachment,
+        Vec<u8>,
+    )> {
+        let record = {
+            let g = self.lock()?;
+            g.state_db.read_bundle_event_by_hash(event_hash)?
+        };
+        if record.event.bundle_id != expected_bundle_id
+            || record.event.event_kind != expected_event_kind
+        {
+            bail!(
+                "bundle event attachment identity mismatch: expected {expected_bundle_id}/{expected_event_kind}, event belongs to {}/{}",
+                record.event.bundle_id,
+                record.event.event_kind
+            );
+        }
+        let attachment = record
+            .event
+            .attachments
+            .iter()
+            .find(|attachment| attachment.name == attachment_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!("bundle event {event_hash} has no attachment named {attachment_name:?}")
+            })?;
+        let cas = self.state_authority.cas_store()?;
+        let bytes = cas
+            .get_blob(&attachment.blob_hash)?
+            .ok_or_else(|| anyhow!("bundle event attachment blob is missing"))?;
+        if bytes.len() as u64 != attachment.size_bytes {
+            bail!(
+                "bundle event attachment '{}' size mismatch: event says {}, CAS contains {}",
+                attachment.name,
+                attachment.size_bytes,
+                bytes.len()
+            );
+        }
+        Ok((record, attachment, bytes))
+    }
+
     pub fn read_bundle_event_chain_page(
         &self,
         bundle_id: &str,
@@ -5796,7 +5923,10 @@ impl StateStore {
         // this atomic linkage point afterward. Preserve the lineage, but stop
         // the freshly-created child before it can attach. Continuations are
         // different: their predecessor is intentionally terminal/continued.
-        if relation == "dispatch" && is_terminal_status(&parent.status) {
+        let existing_relation = g.runtime_db.child_link_relation(child_thread_id)?;
+        let is_follow_child =
+            relation == "follow" || existing_relation.as_deref() == Some("follow");
+        if relation == "dispatch" && !is_follow_child && is_terminal_status(&parent.status) {
             inherited_stop = Some(StopIntent::Cancel);
         }
         g.runtime_db

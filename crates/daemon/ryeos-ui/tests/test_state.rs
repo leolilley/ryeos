@@ -10,7 +10,20 @@ use std::sync::Arc;
 
 use ryeos_app::state::AppState;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
+
+fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
+    static DESCRIPTORS: std::sync::OnceLock<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
+        std::sync::OnceLock::new();
+    DESCRIPTORS
+        .get_or_init(|| {
+            ryeos_api::handlers::ALL
+                .iter()
+                .chain(ryeos_ui::handlers::ALL.iter())
+                .copied()
+                .collect()
+        })
+        .as_slice()
+}
 
 /// Build a minimal AppState with an empty engine.
 /// Suitable only for paths that reject before canonical item resolution.
@@ -97,9 +110,8 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
 }
 
 /// Build an AppState backed by the live workspace core + standard + RyeOS UI bundles.
-/// Suitable for happy-path topology/session tests that need real kind schemas
-/// and bundled items. These handlers do not execute parser, composer, or runtime
-/// binaries, so the fixture deliberately remains usable in a clean checkout.
+/// Suitable for happy-path topology/session tests that need real kind schemas,
+/// verified item resolution, and effective-item composition.
 #[allow(dead_code)]
 pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
@@ -189,10 +201,9 @@ fn workspace_root() -> std::path::PathBuf {
 #[allow(dead_code)]
 fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     let workspace = workspace_root();
-    let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
-    let core_bundle = workspace.join("bundles/core");
-    let std_bundle = workspace.join("bundles/standard");
+    let trust_store = ryeos_engine::test_support::live_trust_store();
+    let core_bundle = ryeos_engine::test_support::core_bundle_root();
+    let std_bundle = ryeos_engine::test_support::standard_bundle_root();
     let ryeos_bundle = workspace.join("bundles/ryeos-ui");
 
     let kinds = KindRegistry::load_base(
@@ -205,14 +216,19 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     .expect("load kind registry");
 
     let bundle_roots = vec![core_bundle, std_bundle, ryeos_bundle];
-    let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(
-        ryeos_engine::parsers::ParserRegistry::empty(),
-        Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-    );
+    let (parser_tools, _) =
+        ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
+            .expect("load live parser tools");
+    let handlers = ryeos_engine::test_support::load_live_handler_registry();
+    let parser_dispatcher =
+        ryeos_engine::parsers::ParserDispatcher::new(parser_tools, Arc::clone(&handlers));
+    let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers)
+        .expect("derive live composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
+        .with_composers(composers)
 }
 
 // Test fixture: one argument per AppState component under test.
@@ -229,6 +245,7 @@ fn build_app_state(
     write_barrier: ryeos_app::write_barrier::WriteBarrier,
     event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
 ) -> (tempfile::TempDir, AppState) {
+    let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         bundles: vec![],
         routes: vec![],
@@ -269,9 +286,9 @@ fn build_app_state(
             missing_services: vec![],
         },
         services: Arc::new(ryeos_api::registry::build_service_registry_from(
-            ryeos_ui::handlers::ALL,
+            service_descriptors,
         )),
-        service_descriptors: ryeos_ui::handlers::ALL,
+        service_descriptors,
         node_config: Arc::new(snapshot),
         node_history_policy: Arc::new(
             ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),

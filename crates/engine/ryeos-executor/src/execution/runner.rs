@@ -497,6 +497,13 @@ fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerD
         StopIfAdmissionOpenOutcome::AlreadyTerminal => {
             return Ok(OwnerDropThreadOutcome::AlreadyTerminal)
         }
+        StopIfAdmissionOpenOutcome::PreservedForFollow => {
+            tracing::debug!(
+                thread_id,
+                "execution owner transferred to durable follow waiter"
+            );
+            return Ok(OwnerDropThreadOutcome::AlreadyTerminal);
+        }
         StopIfAdmissionOpenOutcome::PreservedForShutdown => {
             return Ok(OwnerDropThreadOutcome::PreservedForShutdown)
         }

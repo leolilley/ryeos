@@ -124,13 +124,7 @@ pub(crate) fn capture_live_project_snapshot(
     let mut staged_roots = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, source)?;
-    let items = ingest::ingest_directory(
-        &authority,
-        &guard,
-        &mut staged_roots,
-        project_path,
-        &state.ignore_matcher,
-    )?;
+    let items = ingest::ingest_directory(&authority, &guard, project_path, &state.ignore_matcher)?;
     let manifest = SourceManifest {
         item_source_hashes: items,
     };
@@ -170,13 +164,7 @@ pub(crate) fn capture_live_project_manifest(
     let mut staged_roots = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, source)?;
-    let items = ingest::ingest_directory(
-        &authority,
-        &guard,
-        &mut staged_roots,
-        project_path,
-        &state.ignore_matcher,
-    )?;
+    let items = ingest::ingest_directory(&authority, &guard, project_path, &state.ignore_matcher)?;
     let manifest = SourceManifest {
         item_source_hashes: items,
     };
@@ -543,13 +531,8 @@ fn walk_and_diff(
                 }
                 _ => {
                     // New or changed — ingest into items (canonical format).
-                    let result: self::ingest::IngestResult = self::ingest::ingest_item(
-                        authority,
-                        cas_mutation_guard,
-                        None,
-                        &rel,
-                        &path,
-                    )?;
+                    let result: self::ingest::IngestResult =
+                        self::ingest::ingest_item(authority, cas_mutation_guard, &rel, &path)?;
                     tracing::trace!(
                         rel_path = %rel,
                         blob_hash = %result.blob_hash,
