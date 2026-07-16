@@ -1274,8 +1274,7 @@ mod tests {
             if status.is_none() {
                 status = child.try_wait().expect("poll child");
             }
-            if status.is_some() && kill_handle.is_finished() {
-                let status = status.expect("child status checked above");
+            if let Some(status) = status.take_if(|_| kill_handle.is_finished()) {
                 let result = kill_handle.join().expect("kill thread join");
                 return (result, status);
             }
