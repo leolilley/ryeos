@@ -2331,7 +2331,6 @@ impl StateStore {
             }
         }
         let base_project_snapshot_hash = base_project_snapshot_hash
-            .map(String::from)
             .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
         let now = lillux::time::iso8601_now();
@@ -2455,7 +2454,7 @@ impl StateStore {
         }
 
         let (persisted, effective) = self.finalize_thread_with_rows(
-            &g,
+            g,
             permit.cas_guard(),
             thread_id,
             thread_row,
