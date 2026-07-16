@@ -158,11 +158,7 @@ impl Console {
                         .map(|value| {
                             format!(
                                 "   {}",
-                                theme::style(
-                                    &value,
-                                    Tone::Secondary,
-                                    self.capabilities.color,
-                                )
+                                theme::style(&value, Tone::Secondary, self.capabilities.color,)
                             )
                         }),
                 );
@@ -176,11 +172,7 @@ impl Console {
                     .saturating_sub(visible_width(prefix) + 1)
                     .max(8);
                 for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
-                    let value = theme::style(
-                        &value,
-                        Tone::Secondary,
-                        self.capabilities.color,
-                    );
+                    let value = theme::style(&value, Tone::Secondary, self.capabilities.color);
                     lines.push(if index == 0 {
                         format!("{prefix}{value}")
                     } else {
@@ -293,8 +285,7 @@ fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapa
                         "  {}",
                         theme::style(key, Tone::Secondary, capabilities.color)
                     ));
-                    for value in
-                        wrap_words(&row.value, capabilities.width.saturating_sub(5).max(8))
+                    for value in wrap_words(&row.value, capabilities.width.saturating_sub(5).max(8))
                     {
                         lines.push(format!(
                             "    {}",
@@ -1084,16 +1075,9 @@ struct CommandFrame<'a> {
     payload: &'a [(&'a str, &'a str)],
 }
 
-fn command_frame_lines(
-    frame: CommandFrame<'_>,
-    capabilities: TerminalCapabilities,
-) -> Vec<String> {
+fn command_frame_lines(frame: CommandFrame<'_>, capabilities: TerminalCapabilities) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(theme::style(
-        frame.title,
-        Tone::Neutral,
-        capabilities.color,
-    ));
+    lines.push(theme::style(frame.title, Tone::Neutral, capabilities.color));
     append_frame_row(
         &mut lines,
         "phase",
@@ -1116,13 +1100,7 @@ fn command_frame_lines(
         capabilities,
     );
     if let Some(detail) = frame.detail {
-        append_frame_row(
-            &mut lines,
-            "detail",
-            detail,
-            Tone::Secondary,
-            capabilities,
-        );
+        append_frame_row(&mut lines, "detail", detail, Tone::Secondary, capabilities);
     }
     if !frame.payload.is_empty() {
         lines.push(String::new());
@@ -1149,11 +1127,7 @@ fn append_frame_row(
     const KEY_WIDTH: usize = 13;
     let label = clamp_visible(label, KEY_WIDTH);
     let label = format!("{label:<width$}", width = KEY_WIDTH);
-    let key = theme::style(
-        &label,
-        Tone::Secondary,
-        capabilities.color,
-    );
+    let key = theme::style(&label, Tone::Secondary, capabilities.color);
     let prefix = format!("  {key} ");
     let available = capabilities
         .width
@@ -1393,20 +1367,12 @@ fn render_lines(home: &TtyHomeFile, capabilities: TerminalCapabilities) -> Vec<S
         TtyScreen::Home => "RYEOS".to_string(),
         TtyScreen::Help => "RYEOS HELP".to_string(),
     };
-    lines.push(theme::style(
-        &title,
-        Tone::Neutral,
-        capabilities.color,
-    ));
+    lines.push(theme::style(&title, Tone::Neutral, capabilities.color));
     let subtitle = match home.screen {
         TtyScreen::Home => "portable verified execution".to_string(),
         TtyScreen::Help => "verified command surface".to_string(),
     };
-    lines.push(theme::style(
-        &subtitle,
-        Tone::Secondary,
-        capabilities.color,
-    ));
+    lines.push(theme::style(&subtitle, Tone::Secondary, capabilities.color));
     lines.push(String::new());
     let mut summary = vec![Row::key_value(
         "node",
@@ -1469,12 +1435,7 @@ fn render_home_items(
     lines.push(theme::style("items", Tone::Neutral, capabilities.color));
     let rows = items
         .iter()
-        .map(|item| {
-            Row::key_value(
-                &item.label,
-                item.detail.as_deref().unwrap_or_default(),
-            )
-        })
+        .map(|item| Row::key_value(&item.label, item.detail.as_deref().unwrap_or_default()))
         .collect::<Vec<_>>();
     append_rows(lines, &rows, capabilities);
 }
@@ -1484,27 +1445,14 @@ fn render_help_items(
     lines: &mut Vec<String>,
     capabilities: TerminalCapabilities,
 ) {
-    lines.push(theme::style(
-        "commands",
-        Tone::Neutral,
-        capabilities.color,
-    ));
+    lines.push(theme::style("commands", Tone::Neutral, capabilities.color));
     let visible = items.iter().take(24).collect::<Vec<_>>();
     if visible.is_empty() {
-        append_rows(
-            lines,
-            &[Row::text("no commands available")],
-            capabilities,
-        );
+        append_rows(lines, &[Row::text("no commands available")], capabilities);
     } else {
         let rows = visible
             .into_iter()
-            .map(|item| {
-                Row::key_value(
-                    &item.label,
-                    item.detail.as_deref().unwrap_or_default(),
-                )
-            })
+            .map(|item| Row::key_value(&item.label, item.detail.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>();
         append_rows(lines, &rows, capabilities);
         let remaining = items.len().saturating_sub(24);
