@@ -2039,8 +2039,8 @@ async fn run_claimed_thread_row_inner(
             token: cap.token.clone(),
         },
         resolution,
-        prepared_launch.runtime_data.clone(),
     )
+    .runtime_data(prepared_launch.runtime_data.clone())
     .inventory(inventory)
     .build();
 

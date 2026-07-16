@@ -186,7 +186,7 @@ for package in ryeos ryeos-mcp; do
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck "$root/scripts/release/prepare-aur.sh"
+    (cd "$root" && shellcheck -x scripts/release/prepare-aur.sh scripts/pkg/bundle-sets.sh)
 fi
 
 printf 'prepared AUR metadata for %s (source %s, bundles %s)\n' \

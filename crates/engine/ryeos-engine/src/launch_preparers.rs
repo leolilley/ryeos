@@ -1183,7 +1183,7 @@ fn reject_elf_runtime_search_paths(
         2 => (16, 8),
         _ => return Err(invalid_elf()),
     };
-    if size == 0 || size % entry_size != 0 {
+    if size == 0 || !size.is_multiple_of(entry_size) {
         return Err(invalid_elf());
     }
     let dynamic = image

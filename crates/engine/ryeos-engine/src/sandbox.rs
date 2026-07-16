@@ -245,7 +245,6 @@ impl Drop for VerifiedArtifactStore {
                     );
                 }
             }
-            return;
         }
     }
 }
@@ -781,6 +780,27 @@ struct WritableMount {
     source_handle: Arc<std::fs::File>,
 }
 
+/// Canonicalized and pinned per-launch paths shared by mount resolution.
+///
+/// Keeping these facts together prevents the readable, writable, and
+/// validation paths from drifting onto different filesystem identities.
+struct ResolvedSandboxPaths<'a> {
+    project_destination: &'a Path,
+    canonical_project: &'a Path,
+    cwd_destination: &'a Path,
+    canonical_cwd: &'a Path,
+    canonical_checkpoint_dir: Option<&'a Path>,
+    checkpoint_source_handle: Option<&'a Arc<std::fs::File>>,
+    project_source_handle: Option<&'a Arc<std::fs::File>>,
+    runtime_workspace_authorized: bool,
+}
+
+struct CodeNamespaceContext<'a> {
+    project_destination: &'a Path,
+    canonical_project: &'a Path,
+    bundle_roots: &'a [PathBuf],
+}
+
 impl SandboxRuntime {
     /// Load the node-owned policy from its fixed path and resolve its runtime.
     ///
@@ -1190,6 +1210,16 @@ impl SandboxRuntime {
                 })?,
             ));
         }
+        let resolved_paths = ResolvedSandboxPaths {
+            project_destination: &project_destination,
+            canonical_project: &canonical_project,
+            cwd_destination: &cwd_destination,
+            canonical_cwd: &canonical_cwd,
+            canonical_checkpoint_dir: canonical_checkpoint_dir.as_deref(),
+            checkpoint_source_handle: checkpoint_source_handle.as_ref(),
+            project_source_handle: project_source_handle.as_ref(),
+            runtime_workspace_authorized,
+        };
         let resolved_writable_mounts =
             if context.project_authority == SandboxProjectAuthority::ReadOnly {
                 Vec::new()
@@ -1198,19 +1228,7 @@ impl SandboxRuntime {
                     .filesystem
                     .writable
                     .iter()
-                    .map(|configured| {
-                        resolve_writable_mount(
-                            configured,
-                            &project_destination,
-                            &canonical_project,
-                            &cwd_destination,
-                            &canonical_cwd,
-                            context.checkpoint_dir,
-                            canonical_checkpoint_dir.as_deref(),
-                            checkpoint_source_handle.as_ref(),
-                            project_source_handle.as_ref(),
-                        )
-                    })
+                    .map(|configured| resolve_writable_mount(configured, &resolved_paths, &context))
                     .collect::<Result<Vec<_>, _>>()?
             };
         let mut writable_mounts = Vec::<WritableMount>::new();
@@ -1231,28 +1249,16 @@ impl SandboxRuntime {
                 .then_with(|| left.source.cmp(&right.source))
         });
         for mount in &writable_mounts {
-            validate_writable_mount(
-                &mount.source,
-                self.app_root.as_deref(),
-                backend_path,
-                self.daemon_socket
-                    .as_ref()
-                    .map(|socket| socket.source.as_path()),
-                &canonical_project,
-                context.project_authority,
-                runtime_workspace_authorized,
-                mount.authority,
-                canonical_checkpoint_dir.as_deref(),
-            )?;
+            validate_writable_mount(self, mount, &resolved_paths, &context)?;
         }
+        let code_namespace = CodeNamespaceContext {
+            project_destination: &project_destination,
+            canonical_project: &canonical_project,
+            bundle_roots: context.bundle_roots,
+        };
         let mut prepared_code = Vec::with_capacity(context.verified_code.len() + 1);
         for verified in context.verified_code {
-            let prepared = self.prepare_verified_code(
-                verified,
-                &project_destination,
-                &canonical_project,
-                context.bundle_roots,
-            )?;
+            let prepared = self.prepare_verified_code(verified, &code_namespace)?;
             rewrite_verified_code_references(
                 &mut args,
                 &mut envs,
@@ -1312,12 +1318,7 @@ impl SandboxRuntime {
                 // Operator/project executables such as a virtual-environment
                 // interpreter are not signed bundle material. Capture the
                 // exact opened bytes now and execute only the immutable copy.
-                let prepared = self.prepare_current_command(
-                    &canonical_command,
-                    &project_destination,
-                    &canonical_project,
-                    context.bundle_roots,
-                )?;
+                let prepared = self.prepare_current_command(&canonical_command, &code_namespace)?;
                 let command_path = prepared.artifact.destination.clone();
                 prepared_code.push(prepared);
                 (command_path, false)
@@ -1382,18 +1383,10 @@ impl SandboxRuntime {
             .iter()
             .map(|configured| {
                 resolve_readable_mounts(
+                    self,
                     configured,
-                    &project_destination,
-                    &canonical_project,
-                    &cwd_destination,
-                    &canonical_cwd,
-                    self.app_root.as_deref(),
-                    self.app_root_authority.as_deref(),
-                    self.app_root_destination.as_deref(),
-                    self.daemon_socket.as_ref(),
-                    requested_daemon_socket,
-                    context.bundle_roots,
-                    context.node_trusted_keys_dir,
+                    &resolved_paths,
+                    &context,
                     &verified_code_mounts,
                 )
             })
@@ -1790,9 +1783,7 @@ impl SandboxRuntime {
     fn prepare_verified_code(
         &self,
         verified: &SandboxVerifiedCode,
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: &CodeNamespaceContext<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         if !verified.source_path.is_absolute() {
             return Err(refused(format!(
@@ -1838,18 +1829,14 @@ impl SandboxRuntime {
             Some(&canonical_source),
             &verified.content_hash,
             &content,
-            project_destination,
-            canonical_project,
-            bundle_roots,
+            namespace,
         )
     }
 
     fn prepare_current_command(
         &self,
         command: &Path,
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: &CodeNamespaceContext<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         let artifacts = self
             .verified_artifacts
@@ -1867,15 +1854,7 @@ impl SandboxRuntime {
             }
         }
         let content_hash = lillux::cas::sha256_hex(&content);
-        self.prepare_code_bytes(
-            command,
-            Some(command),
-            &content_hash,
-            &content,
-            project_destination,
-            canonical_project,
-            bundle_roots,
-        )
+        self.prepare_code_bytes(command, Some(command), &content_hash, &content, namespace)
     }
 
     fn prepare_code_bytes(
@@ -1884,9 +1863,7 @@ impl SandboxRuntime {
         expected_canonical_source: Option<&Path>,
         content_hash: &str,
         content: &[u8],
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: &CodeNamespaceContext<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         let canonical_source = canonicalize_context_mount("code source", original)?;
         if expected_canonical_source.is_some_and(|expected| expected != canonical_source) {
@@ -1898,9 +1875,9 @@ impl SandboxRuntime {
         let (mirror, destination) = code_namespace_layout(
             original,
             &canonical_source,
-            project_destination,
-            canonical_project,
-            bundle_roots,
+            namespace.project_destination,
+            namespace.canonical_project,
+            namespace.bundle_roots,
         )?;
         let artifact_root = self
             .verified_artifacts
@@ -2654,7 +2631,7 @@ fn mount_fd_arg(handle: &Arc<std::fs::File>) -> String {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
-        return handle.as_raw_fd().to_string();
+        handle.as_raw_fd().to_string()
     }
     #[cfg(not(unix))]
     {
@@ -2775,14 +2752,8 @@ fn seal_bubblewrap_args(args: &[String]) -> Result<Arc<std::fs::File>, EngineErr
 
 fn resolve_writable_mount(
     configured: &str,
-    project_destination: &Path,
-    canonical_project: &Path,
-    cwd_destination: &Path,
-    canonical_cwd: &Path,
-    checkpoint_destination: Option<&Path>,
-    canonical_checkpoint_dir: Option<&Path>,
-    checkpoint_source_handle: Option<&Arc<std::fs::File>>,
-    project_source_handle: Option<&Arc<std::fs::File>>,
+    paths: &ResolvedSandboxPaths<'_>,
+    context: &SandboxLaunchContext<'_>,
 ) -> Result<Option<WritableMount>, EngineError> {
     let authority = if configured == "{checkpoint_dir}" {
         WritableMountAuthority::DaemonCheckpoint
@@ -2791,11 +2762,14 @@ fn resolve_writable_mount(
     };
     let (source, destination) = match configured {
         "{project}" => (
-            canonical_project.to_path_buf(),
-            project_destination.to_path_buf(),
+            paths.canonical_project.to_path_buf(),
+            paths.project_destination.to_path_buf(),
         ),
-        "{cwd}" => (canonical_cwd.to_path_buf(), cwd_destination.to_path_buf()),
-        "{checkpoint_dir}" => match (canonical_checkpoint_dir, checkpoint_destination) {
+        "{cwd}" => (
+            paths.canonical_cwd.to_path_buf(),
+            paths.cwd_destination.to_path_buf(),
+        ),
+        "{checkpoint_dir}" => match (paths.canonical_checkpoint_dir, context.checkpoint_dir) {
             (Some(source), Some(destination)) => (source.to_path_buf(), destination.to_path_buf()),
             (None, None) => return Ok(None),
             _ => {
@@ -2822,11 +2796,13 @@ fn resolve_writable_mount(
         )));
     }
     let source_handle = if authority == WritableMountAuthority::DaemonCheckpoint {
-        checkpoint_source_handle
+        paths
+            .checkpoint_source_handle
             .cloned()
             .ok_or_else(|| refused("daemon checkpoint mount has no pinned authority".to_string()))?
-    } else if configured == "{project}" && project_source_handle.is_some() {
-        project_source_handle
+    } else if configured == "{project}" && paths.project_source_handle.is_some() {
+        paths
+            .project_source_handle
             .cloned()
             .expect("checked project source handle")
     } else {
@@ -2841,22 +2817,16 @@ fn resolve_writable_mount(
 }
 
 fn resolve_readable_mounts(
+    runtime: &SandboxRuntime,
     configured: &str,
-    project_destination: &Path,
-    canonical_project: &Path,
-    cwd_destination: &Path,
-    canonical_cwd: &Path,
-    app_root: Option<&Path>,
-    app_root_authority: Option<&lillux::PinnedDirectory>,
-    app_root_destination: Option<&Path>,
-    daemon_socket: Option<&PinnedDaemonSocket>,
-    requested_daemon_socket: Option<&Path>,
-    bundle_roots: &[PathBuf],
-    node_trusted_keys_dir: Option<&Path>,
+    paths: &ResolvedSandboxPaths<'_>,
+    context: &SandboxLaunchContext<'_>,
     verified_code_mounts: &[ReadableMount],
 ) -> Result<Vec<ReadableMount>, EngineError> {
     if configured == "{node_public_identity}" {
-        let source_path = app_root
+        let source_path = runtime
+            .app_root
+            .as_deref()
             .ok_or_else(|| {
                 refused(
                     "sandbox runtime cannot resolve {node_public_identity} without an app root"
@@ -2865,13 +2835,15 @@ fn resolve_readable_mounts(
             })?
             .join(crate::AI_DIR)
             .join("node/identity/public-identity.json");
-        let authority = app_root_authority.ok_or_else(|| {
+        let authority = runtime.app_root_authority.as_deref().ok_or_else(|| {
             refused(
                 "sandbox runtime cannot resolve {node_public_identity} without pinned app-root authority"
                     .to_string(),
             )
         })?;
-        let destination = app_root_destination
+        let destination = runtime
+            .app_root_destination
+            .as_deref()
             .ok_or_else(|| {
                 refused(
                     "sandbox runtime cannot resolve {node_public_identity} destination without an app root"
@@ -2902,10 +2874,10 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{daemon_socket}" {
-        let Some(requested) = requested_daemon_socket else {
+        let Some(requested) = context.daemon_socket_path else {
             return Ok(Vec::new());
         };
-        let configured = daemon_socket.ok_or_else(|| {
+        let configured = runtime.daemon_socket.as_ref().ok_or_else(|| {
             refused(
                 "sandbox launch requested daemon IPC without a daemon-pinned socket path"
                     .to_string(),
@@ -2932,7 +2904,8 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{bundle_roots}" {
-        return bundle_roots
+        return context
+            .bundle_roots
             .iter()
             .map(|destination| {
                 let source = canonicalize_context_mount("bundle root", destination)?;
@@ -2947,7 +2920,7 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{node_trusted_keys}" {
-        let Some(destination) = node_trusted_keys_dir else {
+        let Some(destination) = context.node_trusted_keys_dir else {
             return Ok(Vec::new());
         };
         let source = canonicalize_context_mount("node trusted-keys directory", destination)?;
@@ -2965,10 +2938,13 @@ fn resolve_readable_mounts(
 
     let (source, destination) = match configured {
         "{project}" => (
-            canonical_project.to_path_buf(),
-            project_destination.to_path_buf(),
+            paths.canonical_project.to_path_buf(),
+            paths.project_destination.to_path_buf(),
         ),
-        "{cwd}" => (canonical_cwd.to_path_buf(), cwd_destination.to_path_buf()),
+        "{cwd}" => (
+            paths.canonical_cwd.to_path_buf(),
+            paths.cwd_destination.to_path_buf(),
+        ),
         other => {
             let destination = PathBuf::from(other);
             let source = std::fs::canonicalize(&destination).map_err(|error| {
@@ -3053,32 +3029,28 @@ fn validate_thread_path_component(thread_id: &str) -> Result<(), EngineError> {
 }
 
 fn validate_writable_mount(
-    path: &Path,
-    app_root: Option<&Path>,
-    backend: &Path,
-    daemon_socket: Option<&Path>,
-    canonical_project: &Path,
-    project_authority: SandboxProjectAuthority,
-    runtime_workspace_authorized: bool,
-    mount_authority: WritableMountAuthority,
-    canonical_checkpoint_dir: Option<&Path>,
+    runtime: &SandboxRuntime,
+    mount: &WritableMount,
+    paths: &ResolvedSandboxPaths<'_>,
+    context: &SandboxLaunchContext<'_>,
 ) -> Result<(), EngineError> {
+    let path = &mount.source;
     if path == Path::new("/") {
         return Err(refused(
             "sandbox writable path `/` would expose the entire host".to_string(),
         ));
     }
 
-    if let Some(app_root) = app_root {
+    if let Some(app_root) = runtime.app_root.as_deref() {
         let execution_root = app_root.join(crate::AI_DIR).join("state/cache/executions");
-        let is_exact_runtime_workspace = project_authority
+        let is_exact_runtime_workspace = context.project_authority
             == SandboxProjectAuthority::RuntimeWorkspace
-            && runtime_workspace_authorized
-            && canonical_project.parent() == Some(execution_root.as_path())
-            && path.starts_with(canonical_project);
-        let is_exact_daemon_checkpoint = mount_authority
+            && paths.runtime_workspace_authorized
+            && paths.canonical_project.parent() == Some(execution_root.as_path())
+            && path.starts_with(paths.canonical_project);
+        let is_exact_daemon_checkpoint = mount.authority
             == WritableMountAuthority::DaemonCheckpoint
-            && canonical_checkpoint_dir == Some(path);
+            && paths.canonical_checkpoint_dir == Some(path.as_path());
         if paths_overlap(path, app_root)
             && !is_exact_runtime_workspace
             && !is_exact_daemon_checkpoint
@@ -3090,6 +3062,11 @@ fn validate_writable_mount(
             )));
         }
     }
+    let backend = &runtime
+        .backend_capture
+        .as_ref()
+        .expect("enforced sandbox runtime has a captured backend")
+        .resolved_executable;
     if paths_overlap(path, backend) {
         return Err(refused(format!(
             "sandbox writable path {} overlaps sandbox backend {}",
@@ -3097,7 +3074,11 @@ fn validate_writable_mount(
             backend.display()
         )));
     }
-    if let Some(socket) = daemon_socket {
+    if let Some(socket) = runtime
+        .daemon_socket
+        .as_ref()
+        .map(|socket| socket.source.as_path())
+    {
         if paths_overlap(path, socket) {
             return Err(refused(format!(
                 "sandbox writable path {} overlaps protected daemon socket {}",
