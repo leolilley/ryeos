@@ -2020,7 +2020,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            db.reconcile_cursors_for_specs(&[spec.clone()], 2_000)
+            db.reconcile_cursors_for_specs(std::slice::from_ref(&spec), 2_000)
                 .unwrap(),
             0
         );
