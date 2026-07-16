@@ -3,6 +3,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
 use crate::status::LifecycleStatus;
 use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
@@ -76,37 +79,33 @@ pub async fn stop_with_progress(
     // control must never be routed over that socket. Signal the positively
     // identified local daemon instead; SIGTERM enters the same graceful
     // shutdown coordinator as Ctrl-C.
-    signal_live_daemon(env, libc::SIGTERM).await?;
+    let target = pin_live_daemon(env).await?;
+    target.signal(libc::SIGTERM)?;
 
     let mut deadline = Instant::now() + opts.timeout;
     let mut forced = false;
     loop {
         let status = crate::status::status(env).await?;
         observe(&mut observer, &status);
-        match status {
-            status @ LifecycleStatus::Stopped { .. } | status @ LifecycleStatus::Stale { .. } => {
-                return Ok(StopReport {
-                    status,
-                    already_stopped: false,
-                })
-            }
-            LifecycleStatus::NotInitialized { .. } => {
-                return Ok(StopReport {
-                    status,
-                    already_stopped: false,
-                })
-            }
-            LifecycleStatus::Running { .. }
-            | LifecycleStatus::Unresponsive { .. }
-            | LifecycleStatus::Starting { .. }
-            | LifecycleStatus::Failed { .. } => {}
+
+        // Socket and metadata cleanup happen before Tokio's blocking worker
+        // pool has necessarily stopped. Lifecycle status is therefore useful
+        // progress, but only the pidfd can prove the daemon process is gone.
+        if target.has_exited()? {
+            let status = crate::status::status(env).await?;
+            observe(&mut observer, &status);
+            return Ok(StopReport {
+                status,
+                already_stopped: false,
+            });
         }
 
         if Instant::now() >= deadline {
             if opts.force && !forced {
-                // Reconnect to the live socket and pin its kernel-authenticated
-                // peer before escalation. Never signal a daemon.json PID.
-                signal_live_daemon(env, libc::SIGKILL).await?;
+                // The daemon normally removes its socket early in graceful
+                // shutdown. Escalate through the pidfd captured before SIGTERM
+                // so this can neither miss the old process nor hit a replacement.
+                target.signal(libc::SIGKILL)?;
                 forced = true;
                 deadline = Instant::now() + Duration::from_secs(2);
                 continue;
@@ -129,7 +128,63 @@ fn observe(observer: &mut Option<&mut dyn LifecycleProgressObserver>, status: &L
 /// Connect to the configured live control/callback socket, take the kernel's
 /// peer PID (rather than trusting daemon.json or an RPC field), pin that exact
 /// incarnation with a pidfd, verify it is ryeosd, and signal through the pidfd.
-async fn signal_live_daemon(env: &LocalLifecycleEnv, signal: libc::c_int) -> Result<()> {
+struct LiveDaemonTarget {
+    pid: u32,
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl LiveDaemonTarget {
+    fn signal(&self, signal: libc::c_int) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.pidfd.as_raw_fd(),
+                    signal,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0u32,
+                )
+            };
+            if rc != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error).with_context(|| {
+                        format!("signal pinned ryeosd pid {}", self.pid)
+                    });
+                }
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        bail!("pidfd lifecycle stop is not supported on this platform")
+    }
+
+    fn has_exited(&self) -> Result<bool> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut pollfd = libc::pollfd {
+                fd: self.pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!("poll pinned ryeosd pid {}", self.pid)
+                });
+            }
+            return Ok(result > 0);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        bail!("pidfd lifecycle stop is not supported on this platform")
+    }
+}
+
+async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemonTarget> {
     let timeout = env.rpc_timeout();
     for candidate in env.uds_candidates() {
         let stream = match tokio::time::timeout(
@@ -148,8 +203,8 @@ async fn signal_live_daemon(env: &LocalLifecycleEnv, signal: libc::c_int) -> Res
         else {
             continue;
         };
-        if signal_verified_ryeosd_peer(&stream, pid as u32, signal).is_ok() {
-            return Ok(());
+        if let Ok(target) = pin_verified_ryeosd_peer(&stream, pid as u32) {
+            return Ok(target);
         }
     }
     Err(anyhow::anyhow!(
@@ -157,15 +212,12 @@ async fn signal_live_daemon(env: &LocalLifecycleEnv, signal: libc::c_int) -> Res
     ))
 }
 
-fn signal_verified_ryeosd_peer(
+fn pin_verified_ryeosd_peer(
     stream: &tokio::net::UnixStream,
     pid: u32,
-    signal: libc::c_int,
-) -> Result<()> {
+) -> Result<LiveDaemonTarget> {
     #[cfg(target_os = "linux")]
     {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
         let mut raw_pidfd: libc::c_int = -1;
         let mut value_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         let result = unsafe {
@@ -187,28 +239,12 @@ fn signal_verified_ryeosd_peer(
         // SAFETY: successful SO_PEERPIDFD installed a new owned descriptor.
         let pidfd = unsafe { OwnedFd::from_raw_fd(raw_pidfd) };
         verify_expected_ryeosd_pid(pid)?;
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                pidfd.as_raw_fd(),
-                signal,
-                std::ptr::null::<libc::siginfo_t>(),
-                0u32,
-            )
-        };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(());
-            }
-            return Err(err.into());
-        }
-        Ok(())
+        Ok(LiveDaemonTarget { pid, pidfd })
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (stream, pid, signal);
+        let _ = (stream, pid);
         bail!("pidfd lifecycle stop is not supported on this platform")
     }
 }
