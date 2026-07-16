@@ -385,11 +385,12 @@ fn progress_ticker(
         if state.stopped {
             return;
         }
-        if timeout.timed_out() && state.current.is_some() {
-            if render_progress_state(&mut state, started, color, unicode, width).is_err() {
-                state.stopped = true;
-                return;
-            }
+        if timeout.timed_out()
+            && state.current.is_some()
+            && render_progress_state(&mut state, started, color, unicode, width).is_err()
+        {
+            state.stopped = true;
+            return;
         }
     }
 }
@@ -460,8 +461,7 @@ fn non_redundant_detail<'a>(label: &str, detail: &'a str) -> Option<&'a str> {
             .get(..label.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(label))
     {
-        let remainder = detail[label.len()..]
-            .trim_start_matches(|ch: char| matches!(ch, ' ' | '·' | ':' | '-' | '—'));
+        let remainder = detail[label.len()..].trim_start_matches([' ', '·', ':', '-', '—']);
         return (!remainder.is_empty()).then_some(remainder);
     }
     Some(detail)

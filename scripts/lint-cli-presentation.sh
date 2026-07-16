@@ -6,10 +6,11 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 violations="$(
-    rg -n 'println!|eprintln!|writeln!|write!|print!' crates/bin/cli/src \
-        --glob '*.rs' \
-        --glob '!crates/bin/cli/src/tty/**' \
-        --glob '!crates/bin/cli/src/help.rs' \
+    grep -R -nE \
+        --include='*.rs' \
+        --exclude='help.rs' \
+        --exclude-dir='tty' \
+        'println!|eprintln!|writeln!|write!|print!' crates/bin/cli/src \
         || true
 )"
 
@@ -21,7 +22,7 @@ fi
 # Help builds semantic documents for the shared renderer. It must never regain
 # its former direct stdout/stderr side effects.
 help_violations="$(
-    rg -n 'println!|eprintln!|std::io::stdout|std::io::stderr' \
+    grep -nE 'println!|eprintln!|std::io::stdout|std::io::stderr' \
         crates/bin/cli/src/help.rs || true
 )"
 if [[ -n "$help_violations" ]]; then
@@ -32,7 +33,7 @@ fi
 # The terminal client is launched by `ryeos tui`, so its startup output is
 # part of the CLI presentation contract and must reuse ryeos_cli::tty.
 tui_violations="$(
-    rg -n 'println!|eprintln!|std::io::stdout|std::io::stderr' \
+    grep -nE 'println!|eprintln!|std::io::stdout|std::io::stderr' \
         crates/clients/terminal/src/main.rs || true
 )"
 if [[ -n "$tui_violations" ]]; then
@@ -43,7 +44,7 @@ fi
 # `web --print-url` intentionally owns one exact stdout serializer. Human
 # launcher diagnostics on stderr must still use the shared console.
 web_violations="$(
-    rg -n 'eprintln!|std::io::stderr' crates/clients/web/src/bin/web.rs || true
+    grep -nE 'eprintln!|std::io::stderr' crates/clients/web/src/bin/web.rs || true
 )"
 if [[ -n "$web_violations" ]]; then
     printf 'web launcher contains a direct terminal diagnostic:\n%s\n' "$web_violations" >&2
