@@ -433,7 +433,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_last_event_id() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -477,7 +477,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -502,7 +502,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -527,7 +527,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -690,7 +690,7 @@ fn new_thread_id_format_and_uniqueness() {
 ///
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR))
         .expect("initialize project root");
@@ -736,7 +736,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 /// validation happens before the SSE handshake completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_relative_project_path() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
