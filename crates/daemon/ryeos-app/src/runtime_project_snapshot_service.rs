@@ -237,12 +237,15 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
     };
     let head_state = manifest_state_map(&ctx.cas, &head_items)?;
     let mut worktree = BTreeMap::new();
+    // Status compares only snapshot-representable files. Symlinks are omitted
+    // here, while snapshot creation below continues to reject them strictly.
     let complete = walk_worktree(
         &ctx.project_path,
         &ctx.project_path,
         Path::new(""),
         ctx.ignore_matcher,
         deadline,
+        false,
         &mut worktree,
     )?;
     let mut paths = BTreeSet::new();
@@ -506,6 +509,7 @@ fn build_manifest(ctx: &SnapshotContext<'_>) -> Result<SourceManifest> {
         Path::new(""),
         ctx.ignore_matcher,
         None,
+        true,
         &mut files,
     )?;
     let mut items = HashMap::new();
@@ -532,6 +536,7 @@ fn walk_worktree(
     relative_dir: &Path,
     ignore: &crate::ignore::IgnoreMatcher,
     deadline: Option<Instant>,
+    reject_symlinks: bool,
     files: &mut BTreeMap<String, CapturedFile>,
 ) -> Result<bool> {
     let directory = open_directory_no_follow(root, dir)?;
@@ -544,10 +549,13 @@ fn walk_worktree(
         }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            bail!(
-                "project snapshots do not support symlinks: {}",
-                entry.path().display()
-            );
+            if reject_symlinks {
+                bail!(
+                    "project snapshots do not support symlinks: {}",
+                    entry.path().display()
+                );
+            }
+            continue;
         }
         let path = entry.path();
         let name = entry
@@ -563,7 +571,15 @@ fn walk_worktree(
             continue;
         }
         if file_type.is_dir() {
-            if !walk_worktree(root, &path, &relative_path, ignore, deadline, files)? {
+            if !walk_worktree(
+                root,
+                &path,
+                &relative_path,
+                ignore,
+                deadline,
+                reject_symlinks,
+                files,
+            )? {
                 return Ok(false);
             }
         } else if file_type.is_file() {
@@ -588,6 +604,7 @@ fn walk_worktree(
     _relative_dir: &Path,
     _ignore: &crate::ignore::IgnoreMatcher,
     _deadline: Option<Instant>,
+    _reject_symlinks: bool,
     _files: &mut BTreeMap<String, CapturedFile>,
 ) -> Result<bool> {
     bail!(

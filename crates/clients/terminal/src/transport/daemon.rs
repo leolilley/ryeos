@@ -137,6 +137,9 @@ impl DaemonClient {
         project_path: Option<&str>,
         read_only: bool,
     ) -> Result<(), ClientError> {
+        if self.ui_session_id.is_some() {
+            return Ok(());
+        }
         let body = serde_json::json!({
             "surface_ref": surface_ref,
             "project_path": project_path,

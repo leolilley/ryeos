@@ -155,8 +155,15 @@ fn main() {
         // --surface always means daemon resolution, not local preview.
         let loaded: ryeos_client_base::surface::LoadedSurface = if surface_name.is_some() {
             match transport::daemon::DaemonClient::try_connect().await {
-                Ok(client) => {
+                Ok(mut client) => {
                     let ref_str = surface_name.as_deref().unwrap();
+                    if let Err(e) = client
+                        .mint_ui_session(ref_str, Some(&project_path), read_only)
+                        .await
+                    {
+                        eprintln!("error: failed to initialize UI session: {e}");
+                        std::process::exit(1);
+                    }
                     eprintln!("info: resolving {} via daemon...", ref_str);
                     let resolved = client
                         .resolve_effective_surface(ref_str, Some(&project_path))
@@ -240,21 +247,36 @@ fn main() {
                 });
             }
             match transport::daemon::DaemonClient::try_connect().await {
-                Ok(client) => {
-                    for view_ref in view_refs {
-                        match client
-                            .resolve_effective_item(&view_ref, "view", Some(&project_path))
-                            .await
-                        {
-                            Ok(binding) => {
-                                let composed =
-                                    binding.get("composed_value").cloned().unwrap_or(binding);
-                                views.insert(view_ref, composed);
+                Ok(mut client) => {
+                    let session_surface_ref = loaded
+                        .requested_ref()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| loaded.spec().name.clone());
+                    match client
+                        .mint_ui_session(&session_surface_ref, Some(&project_path), read_only)
+                        .await
+                    {
+                        Ok(()) => {
+                            for view_ref in view_refs {
+                                match client
+                                    .resolve_effective_item(&view_ref, "view", Some(&project_path))
+                                    .await
+                                {
+                                    Ok(binding) => {
+                                        let composed = binding
+                                            .get("composed_value")
+                                            .cloned()
+                                            .unwrap_or(binding);
+                                        views.insert(view_ref, composed);
+                                    }
+                                    Err(e) => diagnostics
+                                        .push(format!("view {view_ref} unavailable: {e}")),
+                                }
                             }
-                            Err(e) => diagnostics.push(format!("view {view_ref} unavailable: {e}")),
+                            daemon_client = Some(client);
                         }
+                        Err(e) => diagnostics.push(format!("UI session unavailable: {e}")),
                     }
-                    daemon_client = Some(client);
                 }
                 Err(_) => {
                     eprintln!(
