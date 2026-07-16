@@ -16,6 +16,7 @@ const TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
+    Fetch,
     Install,
     Run,
 }
@@ -23,6 +24,7 @@ pub enum OperationKind {
 impl OperationKind {
     fn verb(self) -> &'static str {
         match self {
+            Self::Fetch => "FETCH",
             Self::Install => "INSTALL",
             Self::Run => "RUN",
         }
@@ -639,6 +641,7 @@ mod tests {
         assert_eq!(progress_bar_width(79), 8);
         assert_eq!(progress_bar_width(80), 12);
         assert_eq!(progress_bar_width(120), MAX_BAR_WIDTH);
+        assert_eq!(OperationKind::Fetch.verb(), "FETCH");
     }
 
     #[test]

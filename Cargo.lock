@@ -2533,6 +2533,7 @@ dependencies = [
  "rand 0.8.6",
  "reqwest",
  "ryeos-client-base",
+ "ryeos-cli",
  "ryeos-engine",
  "serde",
  "serde-wasm-bindgen",

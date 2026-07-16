@@ -108,6 +108,10 @@ impl Console {
         self.diagnostic(diagnostic)
     }
 
+    pub fn info(&self, diagnostic: &Diagnostic) -> io::Result<()> {
+        self.diagnostic(diagnostic)
+    }
+
     pub fn error(&self, diagnostic: &Diagnostic) -> io::Result<()> {
         self.diagnostic(diagnostic)
     }
@@ -133,6 +137,7 @@ impl Console {
                 .heading
                 .as_deref()
                 .unwrap_or(match diagnostic.level {
+                    DiagnosticLevel::Info => "INFO",
                     DiagnosticLevel::Warning => "WARNING",
                     DiagnosticLevel::Error => "COMMAND FAILED",
                 });
@@ -182,6 +187,7 @@ impl Console {
             }
         } else {
             let prefix = match diagnostic.level {
+                DiagnosticLevel::Info => "ryeos: info: ",
                 DiagnosticLevel::Warning => "ryeos: warning: ",
                 DiagnosticLevel::Error => "ryeos: ",
             };

@@ -27,6 +27,7 @@ lillux = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 ryeos-engine = { workspace = true }
+ryeos-cli = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

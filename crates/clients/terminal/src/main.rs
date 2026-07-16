@@ -9,6 +9,58 @@ mod render_text;
 mod terminal;
 mod transport;
 
+use ryeos_cli::tty::{
+    Console, Diagnostic, Document, Hint, OperationKind, OperationProgress, Row, Section,
+};
+
+fn exit_with_error(console: &Console, message: impl Into<String>, hint: Option<&str>) -> ! {
+    let mut diagnostic = Diagnostic::error(message);
+    diagnostic.hint = hint.map(Hint::new);
+    let _ = console.error(&diagnostic);
+    std::process::exit(1);
+}
+
+fn emit_info(console: &Console, message: impl Into<String>) {
+    let _ = console.info(&Diagnostic::info(message));
+}
+
+fn emit_warning(console: &Console, message: impl Into<String>) {
+    let _ = console.warning(&Diagnostic::warning(message));
+}
+
+fn finish_progress(progress: &mut Option<OperationProgress>) {
+    if let Some(progress) = progress.take() {
+        let _ = progress.finish();
+    }
+}
+
+fn print_help(console: &Console) {
+    let mut document = Document::titled("ryeos-tui");
+    document.sections.push(
+        Section::named("usage").row("ryeos-tui", "[OPTIONS] [PROJECT_PATH]"),
+    );
+    let mut options = Section::named("options");
+    options.rows = vec![
+        Row::key_value("--surface <REF>", "Open a surface by canonical ref"),
+        Row::key_value(
+            "--surface-file <PATH>",
+            "Load a surface spec from a local file (untrusted preview)",
+        ),
+        Row::key_value(
+            "--views-root <DIR>",
+            "Resolve view refs from local YAML under DIR first (with --surface-file)",
+        ),
+        Row::key_value(
+            "--project <PATH>",
+            "Project root for daemon-backed resolution",
+        ),
+        Row::key_value("--read-only", "Open a read-only seat"),
+        Row::key_value("--help", "Show this help"),
+    ];
+    document.sections.push(options);
+    let _ = console.document(&document);
+}
+
 /// Collect every `view:`-prefixed ref anywhere in a surface value so each
 /// can be embedded. Skips the `views` map itself (it holds already-resolved
 /// bindings keyed by ref, not refs to resolve).
@@ -47,6 +99,7 @@ fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnost
 }
 
 fn main() {
+    let console = Console::detect(false);
     let args: Vec<String> = std::env::args().collect();
     let mut project_path = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -65,8 +118,7 @@ fn main() {
                 if i < args.len() {
                     project_path = args[i].clone();
                 } else {
-                    eprintln!("--project requires a path argument");
-                    std::process::exit(1);
+                    exit_with_error(&console, "--project requires a path argument", None);
                 }
             }
             "--surface-file" => {
@@ -74,8 +126,7 @@ fn main() {
                 if i < args.len() {
                     surface_file = Some(args[i].clone());
                 } else {
-                    eprintln!("--surface-file requires a path argument");
-                    std::process::exit(1);
+                    exit_with_error(&console, "--surface-file requires a path argument", None);
                 }
             }
             "--surface" => {
@@ -83,8 +134,7 @@ fn main() {
                 if i < args.len() {
                     surface_name = Some(args[i].clone());
                 } else {
-                    eprintln!("--surface requires a name argument");
-                    std::process::exit(1);
+                    exit_with_error(&console, "--surface requires a name argument", None);
                 }
             }
             "--views-root" => {
@@ -92,32 +142,18 @@ fn main() {
                 if i < args.len() {
                     views_root = Some(args[i].clone());
                 } else {
-                    eprintln!("--views-root requires a directory argument");
-                    std::process::exit(1);
+                    exit_with_error(&console, "--views-root requires a directory argument", None);
                 }
             }
             "--help" | "-h" => {
-                eprintln!("Usage: ryeos-tui [OPTIONS] [PROJECT_PATH]");
-                eprintln!();
-                eprintln!("Options:");
-                eprintln!("  --surface <REF>         Open a surface by canonical ref");
-                eprintln!(
-                    "  --surface-file <PATH>   Load surface spec from a local file (untrusted preview)"
-                );
-                eprintln!(
-                    "  --views-root <DIR>      Resolve view: refs from local YAML under DIR first (with --surface-file)"
-                );
-                eprintln!("  --project <PATH>        Project root for daemon-backed resolution");
-                eprintln!("  --read-only             Read-only seat");
-                eprintln!("  --help                  Show this help");
+                print_help(&console);
                 std::process::exit(0);
             }
             p if !p.starts_with('-') => {
                 project_path = p.to_string();
             }
             _ => {
-                eprintln!("Unknown option: {}", args[i]);
-                std::process::exit(1);
+                exit_with_error(&console, format!("unknown option: {}", args[i]), None);
             }
         }
         i += 1;
@@ -127,12 +163,19 @@ fn main() {
     // (`--surface` / `--surface-file`) or by the launching client's config.
     // With neither, show an empty surface — never fabricate one or crash.
     if surface_name.is_none() && surface_file.is_none() {
-        eprintln!(
-            "info: no surface specified (--surface / --surface-file, or client config); showing an empty surface"
+        emit_info(
+            &console,
+            "no surface specified (--surface / --surface-file, or client config); showing an empty surface",
         );
     }
 
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+        exit_with_error(
+            &console,
+            format!("failed to create terminal runtime: {error}"),
+            None,
+        )
+    });
 
     rt.block_on(async {
         // Load surface
@@ -157,17 +200,31 @@ fn main() {
             match transport::daemon::DaemonClient::try_connect().await {
                 Ok(mut client) => {
                     let ref_str = surface_name.as_deref().unwrap();
+                    let mut progress = console
+                        .progress(OperationKind::Fetch, "opening UI session")
+                        .ok()
+                        .flatten();
+                    if let Some(progress) = progress.as_mut() {
+                        let _ = progress.update("opening UI session", Some(ref_str));
+                    }
                     if let Err(e) = client
                         .mint_ui_session(ref_str, Some(&project_path), read_only)
                         .await
                     {
-                        eprintln!("error: failed to initialize UI session: {e}");
-                        std::process::exit(1);
+                        finish_progress(&mut progress);
+                        exit_with_error(
+                            &console,
+                            format!("failed to initialize UI session: {e}"),
+                            None,
+                        );
                     }
-                    eprintln!("info: resolving {} via daemon...", ref_str);
+                    if let Some(progress) = progress.as_mut() {
+                        let _ = progress.update("resolving surface via daemon", Some(ref_str));
+                    }
                     let resolved = client
                         .resolve_effective_surface(ref_str, Some(&project_path))
                         .await;
+                    finish_progress(&mut progress);
                     daemon_client = Some(client);
                     match resolved {
                         Ok(value) => {
@@ -185,31 +242,38 @@ fn main() {
                             ) {
                                 Ok(surface) => surface,
                                 Err(diag) => {
-                                    eprintln!(
-                                        "error: invalid effective surface '{}': {}",
-                                        ref_str,
-                                        surface_diagnostic_message(&diag)
+                                    exit_with_error(
+                                        &console,
+                                        format!(
+                                            "invalid effective surface '{}': {}",
+                                            ref_str,
+                                            surface_diagnostic_message(&diag)
+                                        ),
+                                        None,
                                     );
-                                    std::process::exit(1);
                                 }
                             }
                         }
                         Err(e) => {
                             // Explicit surface request that fails — fail closed.
-                            eprintln!("error: failed to resolve surface '{}': {}", ref_str, e);
-                            eprintln!("hint: use --surface-file <path> for local preview");
-                            std::process::exit(1);
+                            exit_with_error(
+                                &console,
+                                format!("failed to resolve surface '{}': {}", ref_str, e),
+                                Some("use --surface-file <path> for local preview"),
+                            );
                         }
                     }
                 }
                 Err(_) => {
                     let ref_str = surface_name.as_deref().unwrap();
-                    eprintln!(
-                        "error: failed to resolve surface '{}': daemon not available",
-                        ref_str
+                    exit_with_error(
+                        &console,
+                        format!(
+                            "failed to resolve surface '{}': daemon not available",
+                            ref_str
+                        ),
+                        Some("start ryeosd, or use --surface-file <path> for local preview"),
                     );
-                    eprintln!("hint: start ryeosd, or use --surface-file <path> for local preview");
-                    std::process::exit(1);
                 }
             }
         } else {
@@ -248,16 +312,35 @@ fn main() {
             }
             match transport::daemon::DaemonClient::try_connect().await {
                 Ok(mut client) => {
+                    let total_views = view_refs.len();
+                    let mut progress = console
+                        .progress(OperationKind::Fetch, "opening preview UI session")
+                        .ok()
+                        .flatten();
                     let session_surface_ref = loaded
                         .requested_ref()
                         .map(str::to_owned)
                         .unwrap_or_else(|| loaded.spec().name.clone());
+                    if let Some(progress) = progress.as_mut() {
+                        let _ = progress.update(
+                            "opening preview UI session",
+                            Some(&session_surface_ref),
+                        );
+                    }
                     match client
                         .mint_ui_session(&session_surface_ref, Some(&project_path), read_only)
                         .await
                     {
                         Ok(()) => {
-                            for view_ref in view_refs {
+                            for (index, view_ref) in view_refs.into_iter().enumerate() {
+                                if let Some(progress) = progress.as_mut() {
+                                    let _ = progress.update_determinate(
+                                        "resolving preview views",
+                                        index,
+                                        total_views,
+                                        Some(&view_ref),
+                                    );
+                                }
                                 match client
                                     .resolve_effective_item(&view_ref, "view", Some(&project_path))
                                     .await
@@ -273,14 +356,24 @@ fn main() {
                                         .push(format!("view {view_ref} unavailable: {e}")),
                                 }
                             }
+                            if let Some(progress) = progress.as_mut() {
+                                let _ = progress.update_determinate(
+                                    "resolving preview views",
+                                    total_views,
+                                    total_views,
+                                    None,
+                                );
+                            }
                             daemon_client = Some(client);
                         }
                         Err(e) => diagnostics.push(format!("UI session unavailable: {e}")),
                     }
+                    finish_progress(&mut progress);
                 }
                 Err(_) => {
-                    eprintln!(
-                        "warn: no daemon — local preview renders only views the views-root carries"
+                    emit_warning(
+                        &console,
+                        "no daemon — local preview renders only views the views-root carries",
                     );
                 }
             }
@@ -302,7 +395,7 @@ fn main() {
                     diagnostics.push(format!("unsupported field '{field}': {message}"));
                 }
                 ryeos_client_base::surface::SurfaceDiagnostic::Info { message } => {
-                    eprintln!("info: {}", message);
+                    emit_info(&console, message);
                 }
             }
         }
@@ -310,8 +403,7 @@ fn main() {
         let result = app::run(&project_path, read_only, loaded, diagnostics, daemon_client).await;
 
         if let Err(e) = result {
-            eprintln!("ryeos-tui error: {}", e);
-            std::process::exit(1);
+            exit_with_error(&console, format!("terminal workspace failed: {e}"), None);
         }
     });
 }
