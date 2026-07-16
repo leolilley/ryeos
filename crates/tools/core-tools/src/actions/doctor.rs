@@ -252,8 +252,25 @@ fn check_verify(
             )
         }
     };
-    match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
+    let manifest_source = source
+        .join(ryeos_engine::AI_DIR)
+        .join("manifest.source.yaml");
+    let declared_name = std::fs::read_to_string(&manifest_source)
+        .ok()
+        .and_then(|raw| {
+            serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(&raw).ok()
+        })
+        .map(|manifest| manifest.name);
+    let Some(declared_name) = declared_name else {
+        return CheckResult::new(
+            "verify",
+            FAIL,
+            json!({ "error": "cannot determine declared bundle name from manifest.source.yaml" }),
+        );
+    };
+    match ryeos_bundle::preflight::preflight_verify_named_bundle_report_in_context(
         source,
+        &declared_name,
         dependency_roots,
         operator_config_root,
         sandbox,
