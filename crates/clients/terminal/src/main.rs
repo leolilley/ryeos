@@ -36,9 +36,9 @@ fn finish_progress(progress: &mut Option<OperationProgress>) {
 
 fn print_help(console: &Console) {
     let mut document = Document::titled("ryeos-tui");
-    document.sections.push(
-        Section::named("usage").row("ryeos-tui", "[OPTIONS] [PROJECT_PATH]"),
-    );
+    document
+        .sections
+        .push(Section::named("usage").row("ryeos-tui", "[OPTIONS] [PROJECT_PATH]"));
     let mut options = Section::named("options");
     options.rows = vec![
         Row::key_value("--surface <REF>", "Open a surface by canonical ref"),
@@ -322,10 +322,8 @@ fn main() {
                         .map(str::to_owned)
                         .unwrap_or_else(|| loaded.spec().name.clone());
                     if let Some(progress) = progress.as_mut() {
-                        let _ = progress.update(
-                            "opening preview UI session",
-                            Some(&session_surface_ref),
-                        );
+                        let _ = progress
+                            .update("opening preview UI session", Some(&session_surface_ref));
                     }
                     match client
                         .mint_ui_session(&session_surface_ref, Some(&project_path), read_only)

@@ -605,16 +605,16 @@ fn exec_tool(
         })?;
 
     if inherit_stdio {
-        return exec_inherited(
-            tool_ref_str,
-            Path::new(&request.cmd),
-            &request.args,
-            request.cwd.as_deref(),
-            &request.envs,
-            request.limits.as_ref(),
-            &request.inherited_fds,
-            false,
-        );
+        return exec_inherited(InheritedExecRequest {
+            tool_ref: tool_ref_str,
+            cmd: Path::new(&request.cmd),
+            args: &request.args,
+            cwd: request.cwd.as_deref(),
+            envs: &request.envs,
+            limits: request.limits.as_ref(),
+            inherited_fds: &request.inherited_fds,
+            inherit_env: false,
+        });
     }
 
     let result = lillux::run(request);
@@ -855,16 +855,28 @@ fn resolve_offline_cwd(
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-fn exec_inherited(
-    tool_ref: &str,
-    cmd: &Path,
-    args: &[String],
-    cwd: Option<&str>,
-    envs: &[(String, String)],
-    limits: Option<&lillux::SubprocessLimits>,
-    inherited_fds: &[std::sync::Arc<std::fs::File>],
+struct InheritedExecRequest<'a> {
+    tool_ref: &'a str,
+    cmd: &'a Path,
+    args: &'a [String],
+    cwd: Option<&'a str>,
+    envs: &'a [(String, String)],
+    limits: Option<&'a lillux::SubprocessLimits>,
+    inherited_fds: &'a [std::sync::Arc<std::fs::File>],
     inherit_env: bool,
-) -> Result<Option<Value>, CliError> {
+}
+
+fn exec_inherited(request: InheritedExecRequest<'_>) -> Result<Option<Value>, CliError> {
+    let InheritedExecRequest {
+        tool_ref,
+        cmd,
+        args,
+        cwd,
+        envs,
+        limits,
+        inherited_fds,
+        inherit_env,
+    } = request;
     let mut command = std::process::Command::new(cmd);
     command.args(args);
     if !inherit_env {
@@ -926,16 +938,16 @@ mod tests {
             ..lillux::SubprocessLimits::default()
         };
 
-        let error = exec_inherited(
-            "tool:test/inherited",
-            Path::new("unused"),
-            &[],
-            None,
-            &[],
-            Some(&limits),
-            &[],
-            false,
-        )
+        let error = exec_inherited(InheritedExecRequest {
+            tool_ref: "tool:test/inherited",
+            cmd: Path::new("unused"),
+            args: &[],
+            cwd: None,
+            envs: &[],
+            limits: Some(&limits),
+            inherited_fds: &[],
+            inherit_env: false,
+        })
         .unwrap_err();
 
         assert!(error.to_string().contains("resource limits"));
