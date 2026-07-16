@@ -352,29 +352,48 @@ verified_local_ryeosd_pid() {
 }
 
 stop_daemon_for_install() {
-    local status_out pid final_status
+    local status_out pid final_status stop_succeeded=1
 
     status_out="$(ryeos_status_quick)"
     if ! status_has_live_daemon <<<"$status_out"; then
         return 1
     fi
 
+    pid="$(pid_from_status <<<"$status_out")"
+    verified_local_ryeosd_pid "$pid" || \
+        die "refusing stop because lifecycle PID '${pid:-missing}' is not a verified ryeosd owned by $invoking_user"
+
     ryeos_term_info "stopping live daemon before replacing binaries"
+    ryeos_term_suspend
     if ! ryeos_user 30 stop --force; then
+        stop_succeeded=0
         ryeos_term_warn "ryeos stop timed out or failed; falling back to direct process kill"
-        pid="$(pid_from_status <<<"$status_out")"
-        if verified_local_ryeosd_pid "$pid"; then
-            kill "$pid" 2>/dev/null || true
-            for _ in {1..30}; do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.2
-            done
-            if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        else
-            die "refusing direct stop because lifecycle PID '${pid:-missing}' is not a verified ryeosd owned by $invoking_user"
+    fi
+
+    # Older installed clients can report success as soon as daemon metadata and
+    # sockets disappear even though the process is still draining uncancellable
+    # blocking work. The installer must gate replacement on the original PID,
+    # not lifecycle presentation state.
+    if kill -0 "$pid" 2>/dev/null; then
+        if [[ $stop_succeeded -eq 1 ]]; then
+            ryeos_term_warn "stop returned before daemon pid $pid exited; forcing stale process"
         fi
+        verified_local_ryeosd_pid "$pid" || \
+            die "refusing direct stop because pid $pid changed identity before exit"
+        kill "$pid" 2>/dev/null || true
+        for _ in {1..30}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        for _ in {1..10}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        kill -0 "$pid" 2>/dev/null && \
+            die "daemon pid $pid remained live after forced stop"
     fi
 
     final_status="$(ryeos_status_quick)"

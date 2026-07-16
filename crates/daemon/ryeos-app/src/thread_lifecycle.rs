@@ -315,7 +315,7 @@ impl FollowFact {
             child_chain_root_id: w.first_child_chain_root_id.clone(),
             child_terminal_status: w.first_child_terminal_status.clone(),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: w.fanout.then(|| FollowCohortProgress {
+            cohort: w.fanout.then_some(FollowCohortProgress {
                 done: w.terminal_child_count,
                 expected: w.expected_children,
             }),
@@ -338,7 +338,7 @@ impl FollowFact {
             child_chain_root_id: w.first_child_chain_root_id.clone(),
             child_terminal_status: w.first_child_terminal_status.clone(),
             parent_successor_thread_id: w.parent_successor_thread_id.clone(),
-            cohort: w.fanout.then(|| FollowCohortProgress {
+            cohort: w.fanout.then_some(FollowCohortProgress {
                 done: w.terminal_child_count,
                 expected: w.expected_children,
             }),
@@ -547,7 +547,7 @@ impl FinalizeCreatedUnattachedOutcome {
 /// Lifecycle-layer result of an atomic finalize-if-live transition.
 #[derive(Debug)]
 pub enum FinalizeIfNonterminalOutcome {
-    Finalized(ThreadDetail),
+    Finalized(Box<ThreadDetail>),
     AlreadyTerminal { status: String },
     PreservedForShutdown,
 }
@@ -579,6 +579,7 @@ pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
 /// `thread_continued` edge, not re-derived from runtime-emitted input. Not
 /// canonical JSON: identical requests serialize identically, which is all dedup
 /// needs; scopes are sorted so ordering is not significant.
+#[allow(clippy::too_many_arguments)] // Every launch-significant field is hashed explicitly.
 pub fn continuation_request_fingerprint(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
@@ -974,6 +975,8 @@ impl SealedResolvedItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+// This durable, internally-tagged representation must retain its exact shape.
+#[allow(clippy::large_enum_variant)]
 enum SealedPrincipal {
     Local {
         fingerprint: String,
@@ -2761,7 +2764,7 @@ impl ThreadLifecycleService {
                 persisted,
                 effective,
             } => self
-                .finish_generic_finalization(params, reported_status, persisted, effective)
+                .finish_generic_finalization(params, reported_status, persisted, *effective)
                 .map(FinalizeCreatedUnattachedOutcome::Finalized),
             StoreFinalizeCreatedUnattachedOutcome::AlreadyTerminal => self
                 .get_thread(&params.thread_id)?
@@ -2819,8 +2822,8 @@ impl ThreadLifecycleService {
                 persisted,
                 effective,
             } => self
-                .finish_generic_finalization(params, reported_status, persisted, effective)
-                .map(FinalizeIfNonterminalOutcome::Finalized),
+                .finish_generic_finalization(params, reported_status, persisted, *effective)
+                .map(|thread| FinalizeIfNonterminalOutcome::Finalized(Box::new(thread))),
             StoreFinalizeIfNonterminalOutcome::AlreadyTerminal { status } => {
                 Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal { status })
             }
@@ -4119,6 +4122,7 @@ pub fn resolve_thread_history_policy(
 /// composition pass is bound to the verified root digest by
 /// `resolve_launch_policy_from_resolution`; an in-place edit between verify
 /// and compose therefore fails instead of producing a mixed admission.
+#[allow(clippy::too_many_arguments)] // Root admission authority inputs stay explicit.
 pub fn admit_verified_root_execution(
     engine: &Engine,
     plan_context: &PlanContext,
@@ -4191,6 +4195,7 @@ pub fn admit_verified_root_execution(
 /// subject is still a verified item (for example a UI seat presenting a
 /// surface). This uses the same kind/composition/trust pipeline as execution;
 /// callers never synthesize Durable policy or branch on the subject kind.
+#[allow(clippy::too_many_arguments)] // Non-execution admission authority inputs stay explicit.
 pub fn admit_non_execution_root(
     engine: &Engine,
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
