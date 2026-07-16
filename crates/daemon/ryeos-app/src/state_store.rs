@@ -145,6 +145,13 @@ pub struct NewArtifactRecord {
     pub metadata: Option<Value>,
 }
 
+#[derive(Debug)]
+pub struct NewBundleEventAttachment {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub media_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FinalizeThreadRecord {
     pub status: String,
@@ -769,6 +776,7 @@ pub enum FinalizeIfNonterminalOutcome {
 pub enum StopIfAdmissionOpenOutcome {
     Requested(Box<RuntimeInfo>),
     AlreadyTerminal,
+    PreservedForFollow,
     PreservedForShutdown,
 }
 
@@ -1063,6 +1071,41 @@ fn has_indexed_collection_events(events: &[NewEventRecord]) -> bool {
                     | ryeos_state::event_types::THREAD_FACET_SET
             )
     })
+}
+
+const LAUNCH_ATTEMPT_AUDIT_TYPES: [ryeos_runtime::RuntimeEventType; 3] = [
+    ryeos_runtime::RuntimeEventType::AsLaunchedResolution,
+    ryeos_runtime::RuntimeEventType::AsLaunchedRefBindings,
+    ryeos_runtime::RuntimeEventType::RuntimeLaunchFacts,
+];
+
+fn validate_launch_attempt_audit(events: &[NewEventRecord]) -> Result<()> {
+    if events.len() != LAUNCH_ATTEMPT_AUDIT_TYPES.len() {
+        bail!(
+            "launch attempt audit must contain exactly {} events, received {}",
+            LAUNCH_ATTEMPT_AUDIT_TYPES.len(),
+            events.len()
+        );
+    }
+    for (index, (event, expected)) in events.iter().zip(LAUNCH_ATTEMPT_AUDIT_TYPES).enumerate() {
+        if event.event_type != expected.as_str() {
+            bail!(
+                "launch attempt audit event {index} must be '{}', received '{}'",
+                expected.as_str(),
+                event.event_type
+            );
+        }
+        let expected_storage = expected.storage_class().as_str();
+        if event.storage_class != expected_storage {
+            bail!(
+                "launch attempt audit event '{}' must use canonical storage class '{}', received '{}'",
+                event.event_type,
+                expected_storage,
+                event.storage_class
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_artifact_shape(artifact_type: &str, metadata: Option<&Value>) -> Result<usize> {
@@ -2278,6 +2321,18 @@ impl StateStore {
         thread_id: &str,
         base_project_snapshot_hash: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.mark_thread_running_with_events(thread_id, base_project_snapshot_hash, Vec::new())
+    }
+
+    /// Atomically append launch-attempt audit and cross a created thread into
+    /// `running`. Existing running recovery attempts append only their new
+    /// audit; they never emit a duplicate `thread_started` event.
+    pub fn mark_thread_running_with_events(
+        &self,
+        thread_id: &str,
+        base_project_snapshot_hash: Option<&str>,
+        mut initial_events: Vec<NewEventRecord>,
+    ) -> Result<Vec<PersistedEventRecord>> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let thread_row = g
@@ -2301,75 +2356,75 @@ impl StateStore {
             );
         }
 
-        match thread_row.status.as_str() {
+        let transition_created = match thread_row.status.as_str() {
             // Fresh launch: fall through to the created -> running transition
             // (appends `thread_started`, sets `started_at`).
-            "created" => {}
+            "created" => true,
             // Same-thread crash recovery re-spawns a row that is still `running`,
             // and the resumed runtime calls `mark_running` again. Idempotent
             // no-op: do NOT append a second `thread_started` or rewrite
             // `started_at` — an empty persisted-events list means "already
             // running". (`drain_running_threads` still sees `running`, so the
             // shutdown kill window stays intact — no transient non-running state.)
-            "running" => return Ok(Vec::new()),
+            "running" if initial_events.is_empty() => return Ok(Vec::new()),
+            "running" => false,
             other => {
                 bail!("invalid status transition: {other} -> running");
             }
-        }
+        };
 
-        let mut updated_snapshot = authoritative_snapshot_for_transition(
-            &g,
-            &thread_row.chain_root_id,
-            &thread_row.thread_id,
-        )?;
-        if let (Some(authoritative), Some(requested)) = (
-            updated_snapshot.base_project_snapshot_hash.as_deref(),
-            base_project_snapshot_hash,
-        ) {
-            if authoritative != requested {
-                bail!(
-                    "mark_running project snapshot mismatch for {thread_id}: authoritative {authoritative}, requested {requested}"
-                );
+        let snapshot_updates = if transition_created {
+            let mut updated_snapshot = authoritative_snapshot_for_transition(
+                &g,
+                &thread_row.chain_root_id,
+                &thread_row.thread_id,
+            )?;
+            if let (Some(authoritative), Some(requested)) = (
+                updated_snapshot.base_project_snapshot_hash.as_deref(),
+                base_project_snapshot_hash,
+            ) {
+                if authoritative != requested {
+                    bail!(
+                        "mark_running project snapshot mismatch for {thread_id}: authoritative {authoritative}, requested {requested}"
+                    );
+                }
             }
-        }
-        let base_project_snapshot_hash = base_project_snapshot_hash
-            .map(ToOwned::to_owned)
-            .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
+            let base_project_snapshot_hash = base_project_snapshot_hash
+                .map(ToOwned::to_owned)
+                .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
-        let now = lillux::time::iso8601_now();
-        updated_snapshot.status = ThreadStatus::Running;
-        updated_snapshot.updated_at.clone_from(&now);
-        updated_snapshot.started_at = Some(now.clone());
-        updated_snapshot.finished_at = None;
-        updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
+            let now = lillux::time::iso8601_now();
+            updated_snapshot.status = ThreadStatus::Running;
+            updated_snapshot.updated_at.clone_from(&now);
+            updated_snapshot.started_at = Some(now);
+            updated_snapshot.finished_at = None;
+            updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
 
-        let snapshot_update = SnapshotUpdate {
-            thread_id: thread_id.to_string(),
-            new_snapshot: updated_snapshot,
+            initial_events.push(NewEventRecord {
+                event_type: "thread_started".to_string(),
+                storage_class: "indexed".to_string(),
+                payload: json!({}),
+            });
+            vec![SnapshotUpdate {
+                thread_id: thread_id.to_string(),
+                new_snapshot: updated_snapshot,
+            }]
+        } else {
+            Vec::new()
         };
 
-        let event = NewEventRecord {
-            event_type: "thread_started".to_string(),
-            storage_class: "indexed".to_string(),
-            payload: json!({}),
-        };
-
-        let te = convert_events(
-            std::slice::from_ref(&event),
-            &thread_row.chain_root_id,
-            thread_id,
-        );
+        let te = convert_events(&initial_events, &thread_row.chain_root_id, thread_id);
         let result = committed_value(g.state_db.append_events_admitted(
             &thread_row.chain_root_id,
             thread_id,
             te,
-            vec![snapshot_update],
+            snapshot_updates,
             g.signer.as_ref(),
             &g.runtime_db,
             permit.cas_guard(),
         )?);
 
-        persisted_from_append(&result, &[event])
+        persisted_from_append(&result, &initial_events)
     }
 
     #[tracing::instrument(
@@ -2960,7 +3015,9 @@ impl StateStore {
         )
     }
 
-    #[allow(clippy::too_many_arguments)] // Atomic continuation handoff inputs stay explicit.
+    // Source lineage, resume proof, launch metadata, and initial durable events
+    // stay explicit because each is validated under the same write permit.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_machine_continuation_with_events(
         &self,
         successor: &NewThreadRecord,
@@ -2992,7 +3049,9 @@ impl StateStore {
     /// resume path launches it later, once the child's result is available) and
     /// NOT subject to the autonomous chain-depth cap (a follow is structural
     /// progress, not an autonomous run). Daemon-only: the trusted marker cannot be
-    /// reached through a runtime-supplied reason.
+    /// reached through a runtime-supplied reason. The running source must declare
+    /// native resume, and that exact policy is projected into the successor so a
+    /// resumed segment remains eligible to suspend at another follow node.
     pub fn create_follow_resume_successor(
         &self,
         successor: &NewThreadRecord,
@@ -3010,6 +3069,24 @@ impl StateStore {
         )
     }
 
+    pub fn create_follow_resume_successor_with_launch_metadata(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_running_continuation_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            RunningContinuationKind::GraphFollowResume,
+            successor_launch_metadata.resume_context.as_ref(),
+            Some(successor_launch_metadata),
+            Vec::new(),
+        )
+    }
+
     /// Shared core for both running-source continuations (machine handoff and
     /// follow-resume). One atomic op under the write permit + lock: re-verify the
     /// source is running, enforce the single-successor invariant, require the
@@ -3017,7 +3094,7 @@ impl StateStore {
     /// first), then settle the source `continued`. A race or seed failure aborts
     /// with the source still running — never `continued` behind an unlaunchable
     /// successor.
-    #[allow(clippy::too_many_arguments)] // Shared atomic continuation transaction boundary.
+    #[allow(clippy::too_many_arguments)]
     fn create_running_continuation_successor(
         &self,
         successor: &NewThreadRecord,
@@ -3046,7 +3123,7 @@ impl StateStore {
             .runtime_db
             .get_runtime_info(source_thread_id)?
             .ok_or_else(|| anyhow!("source runtime row missing: {source_thread_id}"))?;
-        if let Some(intent) = source_runtime.stop_intent {
+        if let Some(intent) = source_runtime.stop_intent.as_ref() {
             bail!(
                 "cannot continue stop-requested thread {source_thread_id} ({})",
                 intent.as_str()
@@ -3098,19 +3175,30 @@ impl StateStore {
             }
         }
 
-        // Require the source's captured launch identity: the successor must be
-        // able to fold the chain, or the handoff is pointless.
-        let source_resume_context = g
-            .runtime_db
-            .get_runtime_info(source_thread_id)?
-            .and_then(|info| info.launch_metadata)
-            .and_then(|m| m.resume_context)
+        // Require the source's complete captured launch identity: the successor
+        // must be able to fold the chain, and a follow successor must retain the
+        // replay declaration needed to suspend again after it resumes.
+        let source_launch_metadata = source_runtime.launch_metadata.ok_or_else(|| {
+            anyhow!(
+                "source thread {source_thread_id} has no captured ResumeContext; \
+                 cannot create a launchable continuation successor"
+            )
+        })?;
+        let source_resume_context = source_launch_metadata
+            .resume_context
+            .as_ref()
+            .cloned()
             .ok_or_else(|| {
                 anyhow!(
                     "source thread {source_thread_id} has no captured ResumeContext; \
                      cannot create a launchable continuation successor"
                 )
             })?;
+        if matches!(&kind, RunningContinuationKind::GraphFollowResume)
+            && source_launch_metadata.native_resume.is_none()
+        {
+            bail!("follow-resume source thread {source_thread_id} does not declare native_resume");
+        }
         if expected_resume_context.is_some_and(|expected| expected != &source_resume_context) {
             bail!(
                 "source thread {source_thread_id} ResumeContext changed during authoritative preparation"
@@ -3145,19 +3233,25 @@ impl StateStore {
         // settle. If the seed fails, only an orphan runtime row exists — no
         // state-db successor edge, source untouched and still running.
         {
+            if let Some(prepared) = successor_launch_metadata {
+                if prepared.resume_context.as_ref() != Some(&source_resume_context) {
+                    bail!(
+                        "prepared successor launch identity differs from its source ResumeContext"
+                    );
+                }
+                if prepared.native_resume != source_launch_metadata.native_resume
+                    || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
+                {
+                    bail!(
+                        "prepared successor execution policy differs from its source launch metadata"
+                    );
+                }
+            }
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            if successor_launch_metadata
-                .and_then(|metadata| metadata.resume_context.as_ref())
-                .is_some_and(|resume| resume != &source_resume_context)
-            {
-                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                bail!("prepared successor launch identity differs from its source ResumeContext");
-            }
             let mut successor_meta = successor_launch_metadata.cloned().unwrap_or_else(|| {
-                crate::launch_metadata::RuntimeLaunchMetadata::default()
-                    .with_resume_context(source_resume_context.clone())
+                source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
             });
             if successor_meta
                 .continuation_source_thread_id
@@ -3262,7 +3356,9 @@ impl StateStore {
     /// even if the daemon crashes before the runtime emits anything. A terminal
     /// (completed/failed) source keeps its status; a running source is settled
     /// `continued` (same as `create_continuation`).
-    #[allow(clippy::too_many_arguments)] // Idempotent continuation identity inputs stay explicit.
+    // Idempotency identity, source lineage, launch metadata, and initial events
+    // remain explicit at this atomic admission boundary.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_or_get_continuation_admitted(
         &self,
         successor: &NewThreadRecord,
@@ -4976,6 +5072,18 @@ impl StateStore {
         if is_terminal_status(&thread.status) {
             return Ok(StopIfAdmissionOpenOutcome::AlreadyTerminal);
         }
+        // A durable follow waiter transfers lifecycle ownership to the daemon.
+        // Keep this check under the same store lock as the stop tombstone so a
+        // request drop cannot race waiter reservation and kill the new chain.
+        if g.runtime_db
+            .get_follow_waiter_by_parent_thread(thread_id)?
+            .is_some()
+            || g.runtime_db
+                .get_follow_waiter_by_successor(thread_id)?
+                .is_some()
+        {
+            return Ok(StopIfAdmissionOpenOutcome::PreservedForFollow);
+        }
         if !self
             .process_attachment_admission_open
             .load(Ordering::Acquire)
@@ -5082,7 +5190,9 @@ impl StateStore {
         g.runtime_db.reserve_follow(seed)
     }
 
-    #[allow(clippy::too_many_arguments)] // Mirrors one atomic runtime-db follow-child record.
+    // Slot identity, item/spec identity, child lineage, and sealed authority
+    // stay explicit because each is independently verified under the store lock.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_follow_child(
         &self,
         follow_key: &str,
@@ -5391,6 +5501,87 @@ impl StateStore {
         .map(Some)
     }
 
+    /// Append the exact daemon-authored launch-attempt audit immediately before
+    /// a claimed managed-runtime spawn. Unlike the runtime callback event
+    /// boundary, this deliberately admits a still-`created` row: continuation
+    /// and follow successors must remain `created` until their process is
+    /// attached, but their recomputed attempt authority must be durable before
+    /// the spawn handoff becomes observable.
+    ///
+    /// Every lifecycle and operational guard is re-checked under the same state
+    /// lock as the append. This remains a daemon-only boundary; runtime-authored
+    /// events continue to require an already-`running` thread through
+    /// [`Self::append_events_if_thread_running`].
+    #[tracing::instrument(
+        name = "state:append_launch_attempt_audit",
+        skip(self, events),
+        fields(
+            thread_id = %thread_id,
+            chain_root_id = %chain_root_id,
+            event_count = events.len(),
+        )
+    )]
+    pub(crate) fn append_launch_attempt_audit(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+    ) -> Result<Vec<PersistedEventRecord>> {
+        validate_launch_attempt_audit(events)?;
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("launch attempt audit thread not found: {thread_id}"))?;
+        if thread.chain_root_id != chain_root_id {
+            bail!(
+                "launch attempt audit chain mismatch for {thread_id}: expected {}, received {chain_root_id}",
+                thread.chain_root_id
+            );
+        }
+        if !matches!(
+            ThreadStatus::from_str_lossy(&thread.status),
+            Some(ThreadStatus::Created | ThreadStatus::Running)
+        ) {
+            bail!(
+                "launch attempt audit requires a created or running thread; {thread_id} is '{}'",
+                thread.status
+            );
+        }
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("launch attempt audit refused: process attachment admission is closed");
+        }
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow!("runtime row missing while appending launch audit: {thread_id}")
+        })?;
+        if let Some(intent) = runtime.stop_intent {
+            bail!(
+                "launch attempt audit refused: thread {thread_id} has durable stop intent '{}'",
+                intent.as_str()
+            );
+        }
+        if runtime.pid.is_some() || runtime.pgid.is_some() || runtime.process_identity.is_some() {
+            bail!(
+                "launch attempt audit refused: thread {thread_id} already has a process attachment"
+            );
+        }
+        if g.runtime_db.get_launch_claim(thread_id)?.is_none() {
+            bail!("launch attempt audit refused: thread {thread_id} has no active launch claim");
+        }
+
+        append_events_locked(
+            &g,
+            Some(permit.cas_guard()),
+            chain_root_id,
+            thread_id,
+            events,
+        )
+    }
+
     /// The thread a live tail of `chain_root_id` should currently follow: the
     /// owner of the chain's highest-`chain_seq` event. `None` when the chain
     /// has no events yet.
@@ -5529,6 +5720,83 @@ impl StateStore {
         let g = self.lock()?;
         g.state_db
             .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
+    }
+
+    pub fn append_bundle_event_with_attachments(
+        &self,
+        mut request: ryeos_state::BundleEventAppendRequest,
+        attachments: Vec<NewBundleEventAttachment>,
+    ) -> Result<ryeos_state::BundleEventAppendResult> {
+        let permit = self.acquire_write_permit()?;
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let cas = self.state_authority.cas_store()?;
+        request.attachments = attachments
+            .into_iter()
+            .map(|attachment| {
+                let size_bytes = u64::try_from(attachment.bytes.len())
+                    .map_err(|_| anyhow!("bundle event attachment size does not fit u64"))?;
+                let stored = cas.put_blob(&attachment.bytes).with_context(|| {
+                    format!("store bundle event attachment '{}' in CAS", attachment.name)
+                })?;
+                Ok(ryeos_state::BundleEventAttachment {
+                    name: attachment.name,
+                    blob_hash: stored.hash,
+                    size_bytes,
+                    media_type: attachment.media_type,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let g = self.lock()?;
+        g.state_db
+            .append_bundle_event_admitted(request, g.signer.as_ref(), permit.cas_guard())
+    }
+
+    pub fn read_bundle_event_attachment(
+        &self,
+        event_hash: &str,
+        expected_bundle_id: &str,
+        expected_event_kind: &str,
+        attachment_name: &str,
+    ) -> Result<(
+        ryeos_state::BundleEventRecord,
+        ryeos_state::BundleEventAttachment,
+        Vec<u8>,
+    )> {
+        let record = {
+            let g = self.lock()?;
+            g.state_db.read_bundle_event_by_hash(event_hash)?
+        };
+        if record.event.bundle_id != expected_bundle_id
+            || record.event.event_kind != expected_event_kind
+        {
+            bail!(
+                "bundle event attachment identity mismatch: expected {expected_bundle_id}/{expected_event_kind}, event belongs to {}/{}",
+                record.event.bundle_id,
+                record.event.event_kind
+            );
+        }
+        let attachment = record
+            .event
+            .attachments
+            .iter()
+            .find(|attachment| attachment.name == attachment_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!("bundle event {event_hash} has no attachment named {attachment_name:?}")
+            })?;
+        let cas = self.state_authority.cas_store()?;
+        let bytes = cas
+            .get_blob(&attachment.blob_hash)?
+            .ok_or_else(|| anyhow!("bundle event attachment blob is missing"))?;
+        if bytes.len() as u64 != attachment.size_bytes {
+            bail!(
+                "bundle event attachment '{}' size mismatch: event says {}, CAS contains {}",
+                attachment.name,
+                attachment.size_bytes,
+                bytes.len()
+            );
+        }
+        Ok((record, attachment, bytes))
     }
 
     pub fn read_bundle_event_chain_page(
@@ -5750,9 +6018,10 @@ impl StateStore {
     }
 
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
-    /// lineage for cancel/kill cascade). Idempotent on the child. If the parent
-    /// was already stop-tombstoned, atomically inherit that monotonic intent on
-    /// the child before releasing the store lock, closing the late-link race.
+    /// lineage for cancel/kill cascade). An exact replay is idempotent;
+    /// conflicting parent or relation authority is rejected. If the parent was
+    /// already stop-tombstoned, atomically inherit that monotonic intent on the
+    /// child before releasing the store lock, closing the late-link race.
     pub fn record_child_link(
         &self,
         parent_thread_id: &str,
@@ -5801,24 +6070,45 @@ impl StateStore {
         for chain_root_id in chain_roots {
             _admissions.push(g.state_db.authorize_runtime_pin(&chain_root_id)?);
         }
-        let mut inherited_stop = g
+        let inherited_stop = g
             .runtime_db
             .get_runtime_info(parent_thread_id)?
             .ok_or_else(|| anyhow::anyhow!("parent runtime row missing: {parent_thread_id}"))?
             .stop_intent;
         // A dispatch admitted immediately before its parent finalized may reach
-        // this atomic linkage point afterward. Preserve the lineage, but stop
-        // the freshly-created child before it can attach. Continuations are
-        // different: their predecessor is intentionally terminal/continued.
-        if relation == "dispatch" && is_terminal_status(&parent.status) {
-            inherited_stop = Some(StopIntent::Cancel);
-        }
-        g.runtime_db
-            .record_child_link(parent_thread_id, child_thread_id, relation)?;
-        if let Some(intent) = inherited_stop {
-            g.runtime_db.request_thread_stop(child_thread_id, intent)?;
-        }
-        Ok(inherited_stop)
+        // this linkage point afterward. Preserve the lineage and tombstone the
+        // newly-created child in the same runtime-DB transaction. An exact
+        // replay is not a late child and must not synthesize a new stop merely
+        // because the parent has since continued. Follow children are linked
+        // before the generic launch path reaches this point, so its later
+        // `dispatch` registration must replay the authoritative `follow`
+        // relation rather than contradict it. Continuations are different:
+        // their predecessor is intentionally terminal/continued.
+        let existing_relation = g.runtime_db.child_link_relation(child_thread_id)?;
+        let replays_follow_relation =
+            relation == "dispatch" && existing_relation.as_deref() == Some("follow");
+        let effective_relation = if replays_follow_relation {
+            "follow"
+        } else {
+            relation
+        };
+        let stop_policy = if let Some(intent) = inherited_stop {
+            runtime_db::ChildLinkStopPolicy::Always(intent)
+        } else if relation == "dispatch"
+            && !replays_follow_relation
+            && is_terminal_status(&parent.status)
+        {
+            runtime_db::ChildLinkStopPolicy::IfInserted(StopIntent::Cancel)
+        } else {
+            runtime_db::ChildLinkStopPolicy::None
+        };
+        let (_, effective_stop) = g.runtime_db.record_child_link_with_stop_policy(
+            parent_thread_id,
+            child_thread_id,
+            effective_relation,
+            stop_policy,
+        )?;
+        Ok(effective_stop)
     }
 
     /// Every transitive descendant thread id of `root_thread_id`, breadth-first
@@ -6107,6 +6397,188 @@ mod tests {
         }
     }
 
+    fn launch_attempt_audit_events() -> Vec<NewEventRecord> {
+        LAUNCH_ATTEMPT_AUDIT_TYPES
+            .into_iter()
+            .enumerate()
+            .map(|(index, event_type)| NewEventRecord {
+                event_type: event_type.as_str().to_string(),
+                storage_class: event_type.storage_class().as_str().to_string(),
+                payload: json!({"fixture": index}),
+            })
+            .collect()
+    }
+
+    fn replayed_event_types(store: &StateStore, thread_id: &str) -> Vec<String> {
+        store
+            .replay_events(thread_id, Some(thread_id), None, 32, 1024 * 1024)
+            .expect("replay thread events")
+            .events
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect()
+    }
+
+    #[test]
+    fn claimed_created_thread_accepts_exact_launch_attempt_audit() {
+        let store = test_store();
+        let thread_id = "T-launch-audit";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let audit = launch_attempt_audit_events();
+
+        // The runtime-authored boundary remains running-only.
+        assert!(store
+            .append_events_if_thread_running(thread_id, thread_id, &audit)
+            .expect("runtime append guard")
+            .is_none());
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+
+        assert_eq!(
+            store
+                .claim_thread_launch(thread_id, "claim-audit", "daemon:test")
+                .expect("claim launch"),
+            runtime_db::LaunchClaimOutcome::Claimed
+        );
+        let persisted = store
+            .append_launch_attempt_audit(thread_id, thread_id, &audit)
+            .expect("append claimed launch audit");
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(
+            persisted
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            LAUNCH_ATTEMPT_AUDIT_TYPES
+                .iter()
+                .map(|event_type| event_type.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            replayed_event_types(&store, thread_id),
+            [
+                "thread_created",
+                ryeos_runtime::RuntimeEventType::AsLaunchedResolution.as_str(),
+                ryeos_runtime::RuntimeEventType::AsLaunchedRefBindings.as_str(),
+                ryeos_runtime::RuntimeEventType::RuntimeLaunchFacts.as_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_attempt_audit_rejections_do_not_mutate_the_chain() {
+        let store = test_store();
+        let thread_id = "T-launch-audit-reject";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create thread");
+        let audit = launch_attempt_audit_events();
+
+        let unclaimed = store
+            .append_launch_attempt_audit(thread_id, thread_id, &audit)
+            .expect_err("unclaimed launch audit must fail");
+        assert!(unclaimed.to_string().contains("no active launch claim"));
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+
+        assert_eq!(
+            store
+                .claim_thread_launch(thread_id, "claim-reject", "daemon:test")
+                .expect("claim launch"),
+            runtime_db::LaunchClaimOutcome::Claimed
+        );
+        let mut wrong_event = audit.clone();
+        wrong_event.swap(0, 1);
+        let wrong_event_error = store
+            .append_launch_attempt_audit(thread_id, thread_id, &wrong_event)
+            .expect_err("out-of-order audit must fail");
+        assert!(wrong_event_error.to_string().contains("event 0"));
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+
+        let mut wrong_storage = audit;
+        wrong_storage[0].storage_class = "journal".to_string();
+        let wrong_storage_error = store
+            .append_launch_attempt_audit(thread_id, thread_id, &wrong_storage)
+            .expect_err("non-canonical audit storage must fail");
+        assert!(wrong_storage_error
+            .to_string()
+            .contains("canonical storage class"));
+        assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
+    }
+
+    #[test]
+    fn launch_attempt_audit_rejects_terminal_and_process_attached_rows_without_mutation() {
+        let audit = launch_attempt_audit_events();
+
+        let terminal_store = test_store();
+        let terminal_id = "T-launch-audit-terminal";
+        terminal_store
+            .create_thread_for_test(&thread_record(terminal_id, terminal_id))
+            .expect("create terminal fixture");
+        terminal_store
+            .claim_thread_launch(terminal_id, "claim-terminal", "daemon:test")
+            .expect("claim terminal fixture");
+        terminal_store
+            .finalize_thread(
+                terminal_id,
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Completed.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                },
+            )
+            .expect("finalize fixture");
+        let terminal_before = replayed_event_types(&terminal_store, terminal_id);
+        let terminal_error = terminal_store
+            .append_launch_attempt_audit(terminal_id, terminal_id, &audit)
+            .expect_err("terminal launch audit must fail");
+        assert!(terminal_error
+            .to_string()
+            .contains("requires a created or running thread"));
+        assert_eq!(
+            replayed_event_types(&terminal_store, terminal_id),
+            terminal_before
+        );
+
+        let attached_store = test_store();
+        let attached_id = "T-launch-audit-attached";
+        attached_store
+            .create_thread_for_test(&thread_record(attached_id, attached_id))
+            .expect("create attached fixture");
+        attached_store
+            .claim_thread_launch(attached_id, "claim-attached", "daemon:test")
+            .expect("claim attached fixture");
+        attached_store
+            .attach_thread_process(
+                attached_id,
+                12345,
+                67890,
+                &crate::process::ExecutionProcessIdentity {
+                    schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 12345,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 67890,
+                    group_leader_start_time_ticks: 20,
+                },
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+            )
+            .expect("attach fixture process");
+        let attached_before = replayed_event_types(&attached_store, attached_id);
+        let attached_error = attached_store
+            .append_launch_attempt_audit(attached_id, attached_id, &audit)
+            .expect_err("process-attached launch audit must fail");
+        assert!(attached_error.to_string().contains("process attachment"));
+        assert_eq!(
+            replayed_event_types(&attached_store, attached_id),
+            attached_before
+        );
+    }
+
     fn continuation_resume_context(
         project_context: ProjectContext,
     ) -> crate::launch_metadata::ResumeContext {
@@ -6184,6 +6656,116 @@ mod tests {
         let persisted = authoritative_snapshot_for_transition(&inner, "T-root", "T-successor")
             .expect("read authoritative successor snapshot");
         assert_eq!(persisted.base_project_snapshot_hash, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn exact_child_link_replay_after_parent_continues_does_not_cancel_child() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-parent", "T-parent"))
+            .expect("parent thread");
+        store
+            .create_thread_for_test(&thread_record("T-child", "T-child"))
+            .expect("child thread");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("initial child link"),
+            None
+        );
+        store
+            .finalize_thread(
+                "T-parent",
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Continued.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Continued.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                },
+            )
+            .expect("continue parent");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("exact link replay"),
+            None
+        );
+        let child = store
+            .get_thread("T-child")
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.runtime.stop_intent, None);
+    }
+
+    #[test]
+    fn fresh_dispatch_link_after_parent_terminal_atomically_cancels_child() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-parent", "T-parent"))
+            .expect("parent thread");
+        store
+            .create_thread_for_test(&thread_record("T-child", "T-child"))
+            .expect("child thread");
+        store
+            .finalize_thread(
+                "T-parent",
+                &FinalizeThreadRecord {
+                    status: ThreadStatus::Completed.as_str().to_string(),
+                    outcome_code: Some(ThreadStatus::Completed.as_str().to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                },
+            )
+            .expect("complete parent");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("late child link"),
+            Some(StopIntent::Cancel)
+        );
+        let child = store
+            .get_thread("T-child")
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.runtime.stop_intent, Some(StopIntent::Cancel));
+    }
+
+    #[test]
+    fn exact_child_link_replay_propagates_durable_parent_kill() {
+        let store = test_store();
+        store
+            .create_thread_for_test(&thread_record("T-parent", "T-parent"))
+            .expect("parent thread");
+        store
+            .create_thread_for_test(&thread_record("T-child", "T-child"))
+            .expect("child thread");
+        store
+            .record_child_link("T-parent", "T-child", "dispatch")
+            .expect("initial child link");
+        store
+            .request_thread_stop("T-parent", StopIntent::Kill)
+            .expect("kill parent");
+
+        assert_eq!(
+            store
+                .record_child_link("T-parent", "T-child", "dispatch")
+                .expect("exact link replay"),
+            Some(StopIntent::Kill)
+        );
+        let child = store
+            .get_thread("T-child")
+            .expect("read child")
+            .expect("child row");
+        assert_eq!(child.runtime.stop_intent, Some(StopIntent::Kill));
     }
 
     #[test]

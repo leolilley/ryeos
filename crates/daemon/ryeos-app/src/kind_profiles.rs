@@ -62,10 +62,9 @@ impl KindProfileRegistry {
             }
         }
 
-        // Daemon-internal profile for child threads spawned by
-        // launch augmentations (e.g. compose_context_positions).
-        // These threads use the target kind's thread_profile when
-        // available, falling back to "system_task" otherwise.
+        // Add the small set of non-schema daemon bookkeeping profiles. Actual
+        // executable workers, including launch augmentations, cross root
+        // admission under their verified runtime kind's declared profile.
         Self::insert_internal_profiles(&mut profiles);
 
         tracing::info!(
@@ -77,10 +76,22 @@ impl KindProfileRegistry {
         Self { profiles }
     }
 
+    /// Add a synthetic profile to a test harness that deliberately does not
+    /// load signed kind schemas. Production registries remain schema-derived.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_test_profile(
+        mut self,
+        name: impl Into<String>,
+        profile: ThreadKindProfile,
+    ) -> Self {
+        self.profiles.insert(name.into(), profile);
+        self
+    }
+
     fn insert_internal_profiles(profiles: &mut HashMap<String, ThreadKindProfile>) {
-        // system_task: non-root, non-interruptible, non-continuable.
-        // Used for daemon-internal maintenance threads (e.g. launch
-        // augmentation child threads when no target kind profile exists).
+        // system_task: non-root, non-interruptible, non-continuable. Reserved
+        // for daemon-internal bookkeeping rows that do not execute an item.
         profiles.insert(
             "system_task".to_string(),
             ThreadKindProfile {
@@ -197,6 +208,24 @@ mod tests {
         assert!(profile.root_executable);
         assert!(profile.supports_interrupt);
         assert!(!profile.supports_continuation);
+        assert!(!profile.supports_operator_followup);
+    }
+
+    #[test]
+    fn test_profile_can_model_a_schema_kind_without_hardcoding_production_registry() {
+        let reg = KindProfileRegistry::build(None).with_test_profile(
+            "graph_run",
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: true,
+                supports_operator_followup: false,
+            },
+        );
+        let profile = reg.get("graph_run").expect("synthetic graph profile");
+        assert!(profile.root_executable);
+        assert!(!profile.supports_interrupt);
+        assert!(profile.supports_continuation);
         assert!(!profile.supports_operator_followup);
     }
 }

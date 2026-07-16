@@ -842,7 +842,7 @@ mod tests {
 
         let bundles = vec![("bare".to_string(), bare)];
         let error = validate_manifest_dependencies(&bundles).unwrap_err();
-        assert!(error.to_string().contains("required generated"));
+        assert!(format!("{error:#}").contains("required generated"));
     }
 
     #[test]

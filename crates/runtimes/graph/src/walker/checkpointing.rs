@@ -54,6 +54,7 @@ fn checkpoint_payload(cursor: CheckpointCursor<'_>) -> Value {
 /// deliberately contains no child identity: daemon handoff owns that mapping.
 fn follow_checkpoint_payload(
     cursor: CheckpointCursor<'_>,
+    item_refs: &[String],
     iteration_snapshot: Option<&[Value]>,
 ) -> Value {
     let graph_run_id = cursor.graph_run_id;
@@ -64,6 +65,7 @@ fn follow_checkpoint_payload(
     pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
     pending.insert("step_count".to_string(), json!(step));
     pending.insert("graph_run_id".to_string(), json!(graph_run_id));
+    pending.insert("item_refs".to_string(), json!(item_refs));
     if let Some(items) = iteration_snapshot {
         pending.insert("iteration_snapshot".to_string(), json!(items));
     }
@@ -79,6 +81,50 @@ fn validate_checkpoint_payload(payload: &Value) -> anyhow::Result<()> {
     validate_runtime_shape(payload, "graph checkpoint payload").map_err(|error| {
         anyhow::anyhow!("graph checkpoint payload exceeded rye-expr/1 bounds: {error}")
     })
+}
+
+fn validate_follow_item_refs(
+    item_refs: &[String],
+    iteration_snapshot: Option<&[Value]>,
+) -> anyhow::Result<()> {
+    let expected = iteration_snapshot.map_or(1, <[Value]>::len);
+    if item_refs.len() != expected || expected == 0 {
+        anyhow::bail!(
+            "pending follow item_refs cardinality {} does not match required {expected}",
+            item_refs.len()
+        );
+    }
+    for (index, item_ref) in item_refs.iter().enumerate() {
+        ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|error| {
+            anyhow::anyhow!("pending follow item_refs[{index}] is not canonical: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+/// Ordered child identity plus the optional fanout snapshot written into one
+/// pending-follow checkpoint. Keeping these coupled prevents call sites from
+/// supplying a cohort snapshot without the matching rendered refs (or vice
+/// versa), while keeping the checkpoint writer below Clippy's argument limit.
+pub(super) struct FollowCheckpointChildren<'a> {
+    item_refs: &'a [String],
+    iteration_snapshot: Option<&'a [Value]>,
+}
+
+impl<'a> FollowCheckpointChildren<'a> {
+    pub(super) fn single(item_refs: &'a [String]) -> Self {
+        Self {
+            item_refs,
+            iteration_snapshot: None,
+        }
+    }
+
+    pub(super) fn fanout(item_refs: &'a [String], iteration_snapshot: &'a [Value]) -> Self {
+        Self {
+            item_refs,
+            iteration_snapshot: Some(iteration_snapshot),
+        }
+    }
 }
 
 impl Walker {
@@ -140,9 +186,14 @@ impl Walker {
         step: u32,
         state: &Value,
         suppressed_errors: &[ErrorRecord],
-        iteration_snapshot: Option<&[Value]>,
+        children: FollowCheckpointChildren<'_>,
     ) -> anyhow::Result<()> {
+        let FollowCheckpointChildren {
+            item_refs,
+            iteration_snapshot,
+        } = children;
         self.ensure_run_history_bounded()?;
+        validate_follow_item_refs(item_refs, iteration_snapshot)?;
         let Some(writer) = &self.checkpoint else {
             return Ok(());
         };
@@ -164,6 +215,7 @@ impl Walker {
                 retry_attempt: 0,
                 written_at: &lillux::time::iso8601_now(),
             },
+            item_refs,
             iteration_snapshot,
         );
         validate_checkpoint_payload(&payload)?;
@@ -267,6 +319,7 @@ mod tests {
     #[test]
     fn follow_payload_repoints_cursor_without_child_identity() {
         let state = json!({});
+        let item_refs = vec!["directive:test/child".to_string()];
         let payload = follow_checkpoint_payload(
             CheckpointCursor {
                 definition_ref: "graph:test/example",
@@ -280,6 +333,7 @@ mod tests {
                 retry_attempt: 0,
                 written_at: "2026-01-02T03:04:05Z",
             },
+            &item_refs,
             None,
         );
 
@@ -291,6 +345,7 @@ mod tests {
                 "follow_node": "wait-for-child",
                 "step_count": 7,
                 "graph_run_id": "run-2",
+                "item_refs": ["directive:test/child"],
             })
         );
         assert!(payload[follow_keys::PENDING_FOLLOW]

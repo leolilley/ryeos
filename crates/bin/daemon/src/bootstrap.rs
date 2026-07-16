@@ -395,12 +395,21 @@ fn create_directory_layout(config: &Config) -> Result<()> {
         config.app_root.join(".ai").join("bundles"),
         // CAS state
         config.runtime_state_dir().join("objects"),
+        config.runtime_state_dir().join("locators"),
         config.runtime_state_dir().join("refs"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)
             .with_context(|| format!("failed to create directory {}", dir.display()))?;
     }
+    let runtime_state = lillux::PinnedDirectory::open_or_create(&config.runtime_state_dir())
+        .context("pin initialized runtime-state directory")?;
+    let recovery = runtime_state
+        .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
+        .context("create initialized recovery authority")?;
+    recovery
+        .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
+        .context("create initialized thread-projection recovery authority")?;
     Ok(())
 }
 

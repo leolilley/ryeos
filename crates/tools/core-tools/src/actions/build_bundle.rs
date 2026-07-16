@@ -67,6 +67,12 @@ pub(super) fn rebuild_bundle_manifest_in_place(
     validate_publish_control_tree(&ai_root, true)?;
 
     let bin_root = ai_root.join("bin");
+    if matches!(
+        fs::symlink_metadata(&bin_root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        bail!("no .ai/bin directory at {}", bin_root.display());
+    }
     require_real_directory(&bin_root, "bundle binary root")?;
 
     // Validate every existing output component before creating or writing any
@@ -205,8 +211,14 @@ pub(super) fn rebuild_bundle_manifest_in_place(
         "{}\n{manifest_hash}\n",
         ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
     );
-    let signed_ref = sign_content(&ref_body, signing_key, "#", None);
-    atomic_write_str(&refs_path, &signed_ref)?;
+    let existing_ref = fs::read_to_string(&refs_path).ok();
+    if !existing_ref
+        .as_deref()
+        .is_some_and(|existing| already_signed_manifest_ref(existing, &manifest_hash, signing_key))
+    {
+        let signed_ref = sign_content(&ref_body, signing_key, "#", None);
+        atomic_write_str(&refs_path, &signed_ref)?;
+    }
 
     Ok(RebuildReport {
         manifest_hash,
@@ -218,6 +230,24 @@ pub(super) fn rebuild_bundle_manifest_in_place(
 fn atomic_write_str(path: &Path, content: &str) -> Result<()> {
     lillux::atomic_write(path, content.as_bytes())
         .with_context(|| format!("atomically write {}", path.display()))
+}
+
+fn already_signed_manifest_ref(
+    existing: &str,
+    expected_manifest_hash: &str,
+    signing_key: &SigningKey,
+) -> bool {
+    let verifying_key = signing_key.verifying_key();
+    let fingerprint = compute_fingerprint(&verifying_key);
+    ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+        existing,
+        |candidate| (candidate == fingerprint).then_some(verifying_key),
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
+    )
+    .is_ok_and(|verified| {
+        verified.manifest_hash == expected_manifest_hash
+            && verified.signer_fingerprint == fingerprint
+    })
 }
 
 fn require_real_directory(path: &Path, label: &str) -> Result<()> {
@@ -385,7 +415,7 @@ mod tests {
 
             let error = rebuild_bundle_manifest(&bundle, &test_signing_key())
                 .expect_err("linked publisher input roots must be refused");
-            assert!(error.to_string().contains("symlink"));
+            assert!(format!("{error:#}").contains("symlink"));
             assert!(!bundle.join(".ai/objects").exists());
         }
     }
@@ -405,7 +435,7 @@ mod tests {
 
             let error = rebuild_bundle_manifest(&bundle, &test_signing_key())
                 .expect_err("linked publisher output roots must be refused");
-            assert!(error.to_string().contains("symlink"));
+            assert!(format!("{error:#}").contains("symlink"));
             assert!(fs::read_dir(&external).unwrap().next().is_none());
         }
     }

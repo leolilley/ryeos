@@ -101,6 +101,5 @@ test_threads_args=()
 [[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
 
 gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
-RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
-    "$CARGO" nextest run --workspace --no-fail-fast \
+"$CARGO" nextest run --workspace --no-fail-fast \
     "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"

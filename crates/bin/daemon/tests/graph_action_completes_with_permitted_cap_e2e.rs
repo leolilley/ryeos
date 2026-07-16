@@ -90,6 +90,7 @@ config:
     greet:
       action:
         item_id: "tool:echo/echo"
+        ref_bindings: {}
         params:
           msg: "hello"
       assign:
@@ -117,6 +118,7 @@ config:
     greet:
       action:
         item_id: "tool:echo/echo"
+        ref_bindings: {}
         params:
           msg: "hello"
       assign:
@@ -362,7 +364,10 @@ async fn graph_action_completes_with_permitted_cap() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e:#}\n--- daemon stderr ---\n{stderr}")
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!(

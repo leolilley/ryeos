@@ -124,13 +124,7 @@ pub(crate) fn capture_live_project_snapshot(
     let mut staged_roots = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, source)?;
-    let items = ingest::ingest_directory(
-        &authority,
-        &guard,
-        &mut staged_roots,
-        project_path,
-        &state.ignore_matcher,
-    )?;
+    let items = ingest::ingest_directory(&authority, &guard, project_path, &state.ignore_matcher)?;
     let manifest = SourceManifest {
         item_source_hashes: items,
     };
@@ -170,13 +164,7 @@ pub(crate) fn capture_live_project_manifest(
     let mut staged_roots = authority
         .require_recovery()?
         .begin_staged_cas_roots_admitted(&guard, source)?;
-    let items = ingest::ingest_directory(
-        &authority,
-        &guard,
-        &mut staged_roots,
-        project_path,
-        &state.ignore_matcher,
-    )?;
+    let items = ingest::ingest_directory(&authority, &guard, project_path, &state.ignore_matcher)?;
     let manifest = SourceManifest {
         item_source_hashes: items,
     };
@@ -424,6 +412,9 @@ pub fn fold_back_outputs(
 ///
 /// The `principal_key` is the raw fingerprint hex (from
 /// [`ryeos_state::refs::principal_storage_key`]).
+// Pinned authority, held CAS guard, signed head identity, and both snapshot
+// hashes remain explicit at the compare-and-swap fold-back boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn advance_after_foldback(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
@@ -475,6 +466,9 @@ pub fn advance_after_foldback(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+// The traversal's pinned authority, mutation guard, roots, integrity map, and
+// accumulators remain explicit because they share one guarded walk.
+#[allow(clippy::too_many_arguments)]
 fn walk_and_diff(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
@@ -537,13 +531,8 @@ fn walk_and_diff(
                 }
                 _ => {
                     // New or changed — ingest into items (canonical format).
-                    let result: self::ingest::IngestResult = self::ingest::ingest_item(
-                        authority,
-                        cas_mutation_guard,
-                        None,
-                        &rel,
-                        &path,
-                    )?;
+                    let result: self::ingest::IngestResult =
+                        self::ingest::ingest_item(authority, cas_mutation_guard, &rel, &path)?;
                     tracing::trace!(
                         rel_path = %rel,
                         blob_hash = %result.blob_hash,

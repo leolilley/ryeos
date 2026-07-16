@@ -354,7 +354,11 @@ fn matches_regex<'context>(
         .limits
         .max_allocation_bytes
         .saturating_sub(evaluator.budget.allocated_bytes());
-    let compiled_limit = pattern.len().saturating_mul(64).max(1024);
+    // The regex crate's Unicode tables alone can exceed a 1 KiB program for a
+    // simple bounded expression. Reserve a practical fixed floor while still
+    // scaling with authored pattern size and charging the full bound against
+    // the evaluator allocation budget before compilation.
+    let compiled_limit = pattern.len().saturating_mul(64).max(256 * 1024);
     let reservation = compiled_limit.saturating_mul(2);
     if reservation > remaining {
         return Err(evaluator.limit_error(span, "regex compilation allocation limit exceeded"));

@@ -41,6 +41,7 @@ pub struct Row {
     pub key: Option<String>,
     pub value: String,
     pub tone: Tone,
+    pub marker: Option<String>,
 }
 
 impl Row {
@@ -49,6 +50,7 @@ impl Row {
             key: Some(key.into()),
             value: value.into(),
             tone: Tone::Neutral,
+            marker: None,
         }
     }
 
@@ -57,11 +59,17 @@ impl Row {
             key: None,
             value: value.into(),
             tone: Tone::Neutral,
+            marker: None,
         }
     }
 
     pub fn with_tone(mut self, tone: Tone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    pub fn with_marker(mut self, marker: impl Into<String>) -> Self {
+        self.marker = Some(marker.into());
         self
     }
 }

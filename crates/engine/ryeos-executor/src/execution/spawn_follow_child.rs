@@ -637,53 +637,53 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 bail!("follow: child metadata changed during preparation at index {item_index}");
             }
         }
-        let inherited_stop = match state.state_store.record_child_link(
-            &parent_thread_id,
-            &child_thread_id,
-            "dispatch",
-        ) {
-            Ok(inherited_stop) => inherited_stop,
-            Err(error) => {
-                // The conditional transition proves Created + unattached +
-                // unclaimed under the same store lock as finalization. A
-                // same-slot re-drive can therefore never finalize a child that
-                // advanced after the row read above.
-                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
-                    state,
-                    &child_thread_id,
-                    json!({
-                        "code": "child_link_failed",
-                        "reason": error.to_string(),
-                    }),
-                );
-                match cleanup {
-                    Ok(outcome) if outcome.is_settled() => {
-                        crate::execution::launch::kick_follow_resume_if_ready(
-                            state,
-                            &child_thread_id,
-                        );
-                        crate::execution::launch::kick_launch_window_for_terminal(
-                            state,
-                            &child_thread_id,
-                        );
-                    }
-                    Ok(outcome) => tracing::warn!(
-                        child_thread_id,
-                        ?outcome,
-                        "preserved concurrently advanced follow child after lineage failure"
-                    ),
-                    Err(cleanup_error) => {
-                        return Err(anyhow::anyhow!(
-                            "follow: record child lineage under parent {parent_thread_id}: \
+        let inherited_stop =
+            match state
+                .state_store
+                .record_child_link(&parent_thread_id, &child_thread_id, "follow")
+            {
+                Ok(inherited_stop) => inherited_stop,
+                Err(error) => {
+                    // The conditional transition proves Created + unattached +
+                    // unclaimed under the same store lock as finalization. A
+                    // same-slot re-drive can therefore never finalize a child that
+                    // advanced after the row read above.
+                    let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                        state,
+                        &child_thread_id,
+                        json!({
+                            "code": "child_link_failed",
+                            "reason": error.to_string(),
+                        }),
+                    );
+                    match cleanup {
+                        Ok(outcome) if outcome.is_settled() => {
+                            crate::execution::launch::kick_follow_resume_if_ready(
+                                state,
+                                &child_thread_id,
+                            );
+                            crate::execution::launch::kick_launch_window_for_terminal(
+                                state,
+                                &child_thread_id,
+                            );
+                        }
+                        Ok(outcome) => tracing::warn!(
+                            child_thread_id,
+                            ?outcome,
+                            "preserved concurrently advanced follow child after lineage failure"
+                        ),
+                        Err(cleanup_error) => {
+                            return Err(anyhow::anyhow!(
+                                "follow: record child lineage under parent {parent_thread_id}: \
                              {error}; conditional child cleanup also failed: {cleanup_error}"
-                        ));
+                            ));
+                        }
                     }
+                    return Err(error).context(format!(
+                        "follow: record child lineage under parent {parent_thread_id}"
+                    ));
                 }
-                return Err(error).context(format!(
-                    "follow: record child lineage under parent {parent_thread_id}"
-                ));
-            }
-        };
+            };
         if inherited_stop.is_some() {
             crate::execution::process_attachment::finalize_requested_stop_if_present(
                 state,
@@ -796,6 +796,20 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     existing
                 } else {
                     let successor_id = new_thread_id();
+                    let successor_launch_metadata = parent_launch_metadata
+                        .as_ref()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "follow: parent {parent_thread_id} has no persisted launch metadata"
+                            )
+                        })?
+                        .for_continuation_successor(
+                            &parent_thread_id,
+                            ryeos_app::launch_metadata::daemon_checkpoint_dir(
+                                &state.config.app_root,
+                                &successor_id,
+                            ),
+                        );
                     // Via the lifecycle service so the parent-`continued` + successor-
                     // `created` events reach live subscribers, not just the event store.
                     state.threads.create_follow_resume_successor(
@@ -821,6 +835,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         &parent_thread_id,
                         &parent.chain_root_id,
                         &params.completion,
+                        &successor_launch_metadata,
                     )?;
                     if let Err(error) = state
                         .state_store

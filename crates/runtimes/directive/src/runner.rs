@@ -32,7 +32,6 @@ const CONTINUATION_LOG_REASON: &str = "context_window";
 
 #[derive(Debug)]
 pub enum State {
-    Init,
     CheckingLimits,
     CallingProvider,
     Streaming {
@@ -432,7 +431,9 @@ impl Runner {
 
     pub async fn run(&mut self) -> RuntimeResult {
         let mut guard = RunGuard { finalized: false };
-        let mut state = State::Init;
+        // The entrypoint has already attached the process and durably moved
+        // the thread to running before it constructs the runner.
+        let mut state = State::CheckingLimits;
         let mut turn = self.initial_turn;
         // Collected non-fatal callback failures. P2.2 — runtime no
         // longer silently drops `append_event` errors; everything that
@@ -450,20 +451,6 @@ impl Runner {
 
         loop {
             state = match state {
-                State::Init => {
-                    // pid/pgid is registered earlier, in `run_with_envelope`
-                    // right after the callback client is built — BEFORE any
-                    // durable callback — so the daemon can always tell a live
-                    // runtime from a crashed one.
-                    if let Err(e) = self.callback.mark_running().await {
-                        state = State::Errored {
-                            error: format!("resume-critical callback mark_running failed: {e}"),
-                        };
-                        continue;
-                    }
-                    State::CheckingLimits
-                }
-
                 State::CheckingLimits => {
                     if let Err(e) = self.harness.check_limits() {
                         if e == "cancelled" {

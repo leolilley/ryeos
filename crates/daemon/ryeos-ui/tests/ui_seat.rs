@@ -1,5 +1,5 @@
 mod test_state;
-use test_state::build_test_state;
+use test_state::build_test_state_with_live_bundles;
 
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_ui::browser_session::LaunchContext;
@@ -26,7 +26,7 @@ fn handler_context(session_id: &str) -> HandlerContext {
 
 #[tokio::test]
 async fn ui_seat_open_reattaches_running_session_seat() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -63,7 +63,7 @@ async fn ui_seat_open_reattaches_running_session_seat() {
 
 #[tokio::test]
 async fn ui_seat_append_replay_and_close_round_trip() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -121,7 +121,7 @@ async fn ui_seat_append_replay_and_close_round_trip() {
 
 #[tokio::test]
 async fn read_only_actions_allow_session_local_seat_services() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
@@ -140,5 +140,7 @@ async fn read_only_actions_allow_session_local_seat_services() {
     .expect("read-only session may open local UI seat");
 
     assert_eq!(result["status"], "executed");
-    assert!(result["result"]["thread_id"].is_string());
+    assert_eq!(result["result"]["thread"]["kind"], "service_run");
+    assert_eq!(result["result"]["thread"]["recorded"].as_bool(), Some(true));
+    assert!(result["result"]["result"]["thread_id"].is_string());
 }

@@ -305,8 +305,8 @@ fn resolve_pinned_snapshot_context_admitted(
     let materialization_cache =
         crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
     crate::execution::checkout_project(
-        &authority,
-        &cas_mutation_guard,
+        authority,
+        cas_mutation_guard,
         manifest_hash,
         &exec_dir,
         Some(&materialization_cache),

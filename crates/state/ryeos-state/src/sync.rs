@@ -663,6 +663,12 @@ mod tests {
         lillux::sha256_hex(canonical.as_bytes())
     }
 
+    fn initialize_standalone_runtime(runtime_state_dir: &Path) {
+        fs::create_dir_all(runtime_state_dir.join("objects")).unwrap();
+        fs::create_dir_all(runtime_state_dir.join("refs")).unwrap();
+        crate::CasMutationGuard::ensure_anchor(runtime_state_dir).unwrap();
+    }
+
     fn minimal_chain_payload(chain_root_id: &str) -> ExportPayload {
         let policy_hash = "a".repeat(64);
         let snapshot = ThreadSnapshotBuilder::new(
@@ -751,8 +757,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let refs_root = tmp.path().join("refs");
-        fs::create_dir_all(&cas_root).unwrap();
-        fs::create_dir_all(&refs_root).unwrap();
+        initialize_standalone_runtime(tmp.path());
 
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
@@ -849,7 +854,7 @@ mod tests {
     fn staged_chain_import_writes_and_verifies() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
-        fs::create_dir_all(&cas_root).unwrap();
+        initialize_standalone_runtime(tmp.path());
 
         let payload = minimal_chain_payload("T-test");
         let head_hash = payload.chain_head_hash.clone();
@@ -919,8 +924,7 @@ mod tests {
     #[test]
     fn staged_chain_import_rejects_corrupt_hash() {
         let tmp = tempfile::tempdir().unwrap();
-        let cas_root = tmp.path().join("objects");
-        fs::create_dir_all(&cas_root).unwrap();
+        initialize_standalone_runtime(tmp.path());
 
         let payload = ExportPayload {
             chain_root_id: "T-test".to_string(),
@@ -936,14 +940,14 @@ mod tests {
         let error = stage_chain_import(tmp.path(), &payload)
             .err()
             .expect("corrupt staged head must fail closure verification");
-        assert!(error.to_string().contains("incomplete CAS closure"));
+        assert!(format!("{error:#}").contains("incomplete CAS closure"));
     }
 
     #[test]
     fn staged_chain_import_handles_blobs() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
-        fs::create_dir_all(&cas_root).unwrap();
+        initialize_standalone_runtime(tmp.path());
 
         let data = b"binary blob content here";
         let hash = lillux::sha256_hex(data);
@@ -967,7 +971,7 @@ mod tests {
     fn staged_chain_import_leases_omitted_local_descendants() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
-        fs::create_dir_all(&cas_root).unwrap();
+        initialize_standalone_runtime(tmp.path());
 
         let mut payload = minimal_chain_payload("T-test");
         let snapshot = payload.entries.remove(0);
@@ -991,8 +995,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let refs_root = tmp.path().join("refs");
-        fs::create_dir_all(&cas_root).unwrap();
-        fs::create_dir_all(&refs_root).unwrap();
+        initialize_standalone_runtime(tmp.path());
 
         let snap = serde_json::json!({
             "kind": "thread_snapshot",
@@ -1202,6 +1205,6 @@ mod tests {
         );
         let thread = thread.unwrap();
         assert_eq!(thread.status, "created");
-        assert_eq!(thread.item_ref, "test/imported");
+        assert_eq!(thread.item_ref, "directive:test/imported");
     }
 }

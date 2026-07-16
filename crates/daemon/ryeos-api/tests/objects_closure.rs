@@ -119,7 +119,7 @@ async fn closure_get_enforces_blob_byte_budget() {
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("exceeds max_blob_bytes"));
+    assert!(format!("{err:#}").contains("max_blob_bytes=1"));
 }
 
 #[tokio::test]

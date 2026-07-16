@@ -19,7 +19,6 @@ use super::limits::{
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
-use ryeos_app::event_store_service::{EventAppendBatchParams, EventAppendItem};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
@@ -220,9 +219,15 @@ pub enum BuildAndLaunchError {
     #[error("{reason}")]
     CapabilityRejected { reason: String },
     #[error("{0}")]
-    LaunchPreparation(#[source] DispatchError),
+    LaunchPreparation(#[source] Box<DispatchError>),
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
+}
+
+impl From<DispatchError> for BuildAndLaunchError {
+    fn from(error: DispatchError) -> Self {
+        Self::LaunchPreparation(Box::new(error))
+    }
 }
 
 impl BuildAndLaunchError {
@@ -457,7 +462,7 @@ pub fn materialize_native_executor(
                 |fingerprint| {
                     trust_store
                         .get(fingerprint)
-                        .map(|signer| signer.verifying_key.clone())
+                        .map(|signer| signer.verifying_key)
                 },
                 root_trust_class,
             ) {
@@ -769,22 +774,32 @@ pub struct NativeLaunchResult {
 }
 
 /// Spawn-gate: refuse to spawn an effective item whose composed trust class
-/// is `Unsigned`. Pulled out of `build_and_launch` so the policy is
-/// independently unit-testable.
+/// is `Unsigned`. The rejection remains a typed dispatch-policy error all the
+/// way to the HTTP boundary; it must never collapse into an opaque 500.
 pub(crate) fn enforce_effective_trust(
     trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     kind: &str,
-) -> Result<()> {
+) -> std::result::Result<(), DispatchError> {
     if matches!(trust_class, ryeos_engine::resolution::TrustClass::Unsigned) {
-        anyhow::bail!(
-            "refusing to spawn `{}` ({}): effective_trust_class is Unsigned — \
-             root or one of its ancestors lacks a valid signature from a trusted signer",
-            item_ref,
-            kind
-        );
+        return Err(effective_trust_unsigned_error(item_ref, kind));
     }
     Ok(())
+}
+
+/// Construct the single typed policy rejection used when either the composed
+/// resolution pipeline or a direct verified-root gate proves unsigned launch
+/// authority. Keeping this shape centralized prevents method and envelope
+/// dispatch from drifting at the HTTP boundary.
+pub(crate) fn effective_trust_unsigned_error(item_ref: &str, kind: &str) -> DispatchError {
+    DispatchError::LaunchPolicyForbidden {
+        code: "effective_trust_unsigned".to_owned(),
+        message: format!(
+            "refusing to spawn `{item_ref}` ({kind}): effective_trust_class is Unsigned — \
+             root or one of its ancestors lacks a valid signature from a trusted signer"
+        ),
+        binding: None,
+    }
 }
 
 /// Conventional name of the launcher-facing capability list inside
@@ -1006,11 +1021,13 @@ pub struct BuildAndLaunchParams<'a> {
     pub launch_handoff: Option<&'a LaunchHandoff>,
 }
 
-/// One-shot readiness signal for an acknowledged managed launch.
+/// One-shot readiness signal for an acknowledged subprocess launch.
 ///
 /// Pre-handoff failures publish a structured error; cancellation/panic closes
-/// the receiver. The dispatch task's typed error remains authoritative. Only
-/// the managed-envelope launcher can publish success.
+/// the receiver. The dispatch task's typed error remains authoritative.
+/// Managed-envelope, method-runtime, and terminal-subprocess launchers publish
+/// success only after their exact execution authority is owned by a scheduled
+/// task.
 #[derive(Debug, Clone)]
 pub struct LaunchHandoff {
     sender: Arc<Mutex<Option<tokio::sync::oneshot::Sender<LaunchHandoffResult>>>>,
@@ -1048,7 +1065,7 @@ impl LaunchHandoff {
         }
     }
 
-    fn publish(&self, thread_id: String) {
+    pub(crate) fn publish(&self, thread_id: String) {
         self.publish_result(Ok(thread_id));
     }
 
@@ -1107,6 +1124,16 @@ struct PreparedManagedLaunchAuthority {
     is_resume: bool,
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     pending_project_snapshot: Option<super::PendingProjectSnapshot>,
+}
+
+/// Whether the exact authority audit for this launch is already part of the
+/// thread's signed birth commit or must be appended for this claimed attempt.
+/// Keeping this typed prevents an existing `created` successor from silently
+/// taking the fresh-birth path (or a fresh root from duplicating its audit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchAuditDisposition {
+    CommittedAtBirth,
+    AppendForAttempt,
 }
 
 fn launch_audit_records(
@@ -1222,12 +1249,12 @@ async fn prepare_managed_launch_authority(
         .runtimes
         .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
         .map_err(|error| {
-            BuildAndLaunchError::LaunchPreparation(DispatchError::LaunchPreparationFailed {
+            BuildAndLaunchError::from(DispatchError::LaunchPreparationFailed {
                 code: "runtime_launch_contract_unavailable".to_owned(),
                 message: error.to_string(),
                 classification: "configuration".to_owned(),
                 binding: None,
-                details: BTreeMap::new(),
+                details: Box::new(BTreeMap::new()),
             })
         })?
         .clone();
@@ -1242,7 +1269,7 @@ async fn prepare_managed_launch_authority(
             principal: &params.resolved.plan_context.requested_by,
         },
     )
-    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+    .map_err(BuildAndLaunchError::from)?;
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(params.project_path));
     let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
     merge_prepared_secret_requirements(
@@ -1538,7 +1565,13 @@ pub async fn build_and_launch(
             )?,
     };
     drop(authority.pending_project_snapshot.take());
-    run_claimed_thread_row_with_authority(params, thread, authority, true).await
+    run_claimed_thread_row_with_authority(
+        params,
+        thread,
+        authority,
+        LaunchAuditDisposition::CommittedAtBirth,
+    )
+    .await
 }
 
 /// Run an already-created `created` thread row to completion: resolve, spawn its
@@ -1565,7 +1598,8 @@ async fn run_claimed_thread_row(
         Err(error) => {
             let terminal_error = match &error {
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
-                    crate::structured_error::StructuredErrorPayload::from(dispatch_error).to_value()
+                    crate::structured_error::StructuredErrorPayload::from(dispatch_error.as_ref())
+                        .to_value()
                 }
                 other => json!({
                     "code": "launch_preparation_failed",
@@ -1586,14 +1620,20 @@ async fn run_claimed_thread_row(
             return Err(error);
         }
     };
-    run_claimed_thread_row_with_authority(params, thread, authority, false).await
+    run_claimed_thread_row_with_authority(
+        params,
+        thread,
+        authority,
+        LaunchAuditDisposition::AppendForAttempt,
+    )
+    .await
 }
 
 async fn run_claimed_thread_row_with_authority(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let state = params.state;
     let thread_id = thread.thread_id.clone();
@@ -1615,7 +1655,7 @@ async fn run_claimed_thread_row_with_authority(
         params,
         thread,
         authority,
-        launch_audit_already_persisted,
+        launch_audit,
         &mut lifecycle_owner,
     )
     .await;
@@ -1632,7 +1672,7 @@ async fn run_claimed_thread_row_inner(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
     lifecycle_owner: &mut super::process_attachment::LifecycleOwnerGuard,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
@@ -1980,26 +2020,19 @@ async fn run_claimed_thread_row_inner(
     // Fresh roots and continuations committed this audit with `thread_created`
     // in their birth transaction. Existing-row retry/recovery paths append the
     // recomputed trio atomically before handoff.
-    if !launch_audit_already_persisted {
-        let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?
-            .into_iter()
-            .map(|event| EventAppendItem {
-                event_type: event.event_type,
-                storage_class: event.storage_class,
-                payload: event.payload,
-            })
-            .collect();
-        state
-            .events
-            .append_batch(&EventAppendBatchParams {
-                thread_id: thread_id.clone(),
-                events: launch_audit,
-            })
-            .map_err(|error| {
-                BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "atomic durable launch audit append failed: {error}"
-                ))
-            })?;
+    match launch_audit {
+        LaunchAuditDisposition::CommittedAtBirth => {}
+        LaunchAuditDisposition::AppendForAttempt => {
+            let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?;
+            state
+                .threads
+                .append_launch_attempt_audit(&chain_root_id, &thread_id, &launch_audit)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "atomic durable launch audit append failed: {error}"
+                    ))
+                })?;
+        }
     }
 
     // 8. Build envelope
@@ -2455,7 +2488,7 @@ struct PreparedSuccessorLaunch {
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
 }
 
 pub struct PreparedOperatorSuccessorLaunch {
@@ -2478,10 +2511,10 @@ impl PreparedOperatorSuccessorLaunch {
     }
 
     /// Mark that the authoritative audit committed with a newly-created
-    /// successor. Existing-row retry preparations deliberately remain false so
-    /// their recomputed attempt audit is appended before handoff.
+    /// successor. Existing-row retry preparations deliberately retain
+    /// `AppendForAttempt` so their recomputed audit is appended before handoff.
     pub fn with_persisted_birth_audit(mut self) -> Self {
-        self.prepared.launch_audit_already_persisted = true;
+        self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
         self
     }
@@ -2493,7 +2526,7 @@ pub struct PreparedMachineSuccessorLaunch {
 
 impl PreparedMachineSuccessorLaunch {
     pub fn with_persisted_birth_audit(mut self) -> Self {
-        self.prepared.launch_audit_already_persisted = true;
+        self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
         self
     }
@@ -2511,7 +2544,7 @@ pub struct PreparedFollowChildLaunch {
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     authority: PreparedManagedLaunchAuthority,
-    launch_audit_already_persisted: bool,
+    launch_audit: LaunchAuditDisposition,
 }
 
 impl PreparedFollowChildLaunch {
@@ -2534,10 +2567,10 @@ impl PreparedFollowChildLaunch {
     }
 
     /// Mark that `initial_audit_events` committed atomically with this fresh
-    /// root. Re-driven pre-existing rows leave this false so the recomputed
-    /// attempt audit is appended before their spawn handoff.
+    /// root. Re-driven pre-existing rows retain `AppendForAttempt` so the
+    /// recomputed audit is appended before their spawn handoff.
     pub fn with_persisted_birth_audit(mut self) -> Self {
-        self.launch_audit_already_persisted = true;
+        self.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.authority.pending_project_snapshot.take());
         self
     }
@@ -2662,7 +2695,7 @@ async fn prepare_follow_child_launch_inner(
         validate_only: false,
     };
     let admission_primary = engine.resolve(&plan_context, &canonical).map_err(|error| {
-        BuildAndLaunchError::LaunchPreparation(map_follow_child_resolution_error(
+        BuildAndLaunchError::from(map_follow_child_resolution_error(
             "admission",
             &resume.item_ref,
             error,
@@ -2690,7 +2723,7 @@ async fn prepare_follow_child_launch_inner(
     };
     let applicability =
         crate::dispatch::launch_contract_applicability(&resume.item_ref, &admission_context)
-            .map_err(BuildAndLaunchError::LaunchPreparation)?;
+            .map_err(BuildAndLaunchError::from)?;
     crate::dispatch::admit_launch_contract(
         &applicability,
         &admission_primary,
@@ -2699,12 +2732,12 @@ async fn prepare_follow_child_launch_inner(
         &admission_context,
         state,
     )
-    .map_err(BuildAndLaunchError::LaunchPreparation)?;
+    .map_err(BuildAndLaunchError::from)?;
 
     // The authoritative pass begins from a fresh primary resolution against the
     // exact borrowed-provenance engine. No admission output crosses this seam.
     let resolved_item = engine.resolve(&plan_context, &canonical).map_err(|error| {
-        BuildAndLaunchError::LaunchPreparation(map_follow_child_resolution_error(
+        BuildAndLaunchError::from(map_follow_child_resolution_error(
             "authority",
             &resume.item_ref,
             error,
@@ -2802,7 +2835,7 @@ async fn prepare_follow_child_launch_inner(
         execution,
         launch_metadata,
         authority,
-        launch_audit_already_persisted: false,
+        launch_audit: LaunchAuditDisposition::AppendForAttempt,
     })
 }
 
@@ -2831,7 +2864,7 @@ fn map_follow_child_resolution_error(
             ),
             classification: "unavailable".to_owned(),
             binding: None,
-            details: BTreeMap::new(),
+            details: Box::new(BTreeMap::new()),
         },
         _ => {
             DispatchError::LaunchPreparationFailed {
@@ -2841,7 +2874,7 @@ fn map_follow_child_resolution_error(
                 ),
                 classification: "configuration".to_owned(),
                 binding: None,
-                details: BTreeMap::new(),
+                details: Box::new(BTreeMap::new()),
             }
         }
     }
@@ -2932,7 +2965,7 @@ async fn prepare_successor_launch(
         execution,
         launch_metadata,
         authority,
-        launch_audit_already_persisted: false,
+        launch_audit: LaunchAuditDisposition::AppendForAttempt,
     })
 }
 
@@ -2986,18 +3019,28 @@ pub async fn prepare_machine_successor_launch(
     resume: &ryeos_app::launch_metadata::ResumeContext,
     source_thread_id: &str,
 ) -> Result<PreparedMachineSuccessorLaunch, BuildAndLaunchError> {
-    Ok(PreparedMachineSuccessorLaunch {
-        prepared: prepare_successor_launch(
-            state,
-            successor_thread_id,
-            resume,
-            SuccessorMode::Machine,
-            Some(source_thread_id),
-            None,
-            true,
-        )
-        .await?,
-    })
+    let mut prepared = prepare_successor_launch(
+        state,
+        successor_thread_id,
+        resume,
+        SuccessorMode::Machine,
+        Some(source_thread_id),
+        None,
+        false,
+    )
+    .await?;
+
+    // A machine continuation is another segment of the same admitted launch,
+    // not a fresh launch identity. Preparing it may materialize a pinned
+    // project snapshot into a request-owned checkout, but that ephemeral path
+    // must never replace the source's durable ResumeContext. The state boundary
+    // verifies exact equality before committing the continuation edge.
+    prepared.resume_context = resume.clone();
+    prepared.launch_metadata =
+        std::mem::take(&mut prepared.launch_metadata).with_resume_context(resume.clone());
+    prepared.authority.launch_metadata = Some(prepared.launch_metadata.clone());
+
+    Ok(PreparedMachineSuccessorLaunch { prepared })
 }
 
 /// Launch a newly persisted operator successor with the exact authoritative
@@ -3018,7 +3061,7 @@ pub async fn launch_prepared_operator_successor(
     .await;
     match &result {
         Err(BuildAndLaunchError::LaunchPreparation(error)) => {
-            launch_handoff.publish_dispatch_failure(error)
+            launch_handoff.publish_dispatch_failure(error.as_ref())
         }
         Err(error) => launch_handoff.publish_failure(
             "operator_successor_launch_failed",
@@ -3093,7 +3136,7 @@ fn prepare_and_spawn_successor_recovery_inner(
     mode: SuccessorMode,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
     let claim = match ThreadLaunchClaim::acquire(&state, successor_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -3153,7 +3196,7 @@ async fn launch_successor_inner_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, successor_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             // Another launcher (live dispatch or a concurrent reconcile) owns the
             // window. Benign no-op — must NOT burn the attempt budget or finalize.
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
@@ -3338,7 +3381,7 @@ async fn launch_claimed_successor(
             }
             (
                 prepared.execution,
-                Some((prepared.authority, prepared.launch_audit_already_persisted)),
+                Some((prepared.authority, prepared.launch_audit)),
             )
         }
         None => (
@@ -3393,14 +3436,9 @@ async fn launch_claimed_successor(
         launch_handoff,
     };
     match prepared_authority {
-        Some((authority, launch_audit_already_persisted)) => {
-            run_claimed_thread_row_with_authority(
-                launch_params,
-                successor,
-                authority,
-                launch_audit_already_persisted,
-            )
-            .await
+        Some((authority, launch_audit)) => {
+            run_claimed_thread_row_with_authority(launch_params, successor, authority, launch_audit)
+                .await
         }
         None => run_claimed_thread_row(launch_params, successor).await,
     }
@@ -3519,7 +3557,7 @@ pub fn prepare_and_spawn_existing_native_resume_recovery(
     thread_id: &str,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
     let claim = match ThreadLaunchClaim::acquire(&state, thread_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -3554,7 +3592,7 @@ async fn launch_existing_native_resume_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, thread_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
                 return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
             }
@@ -3666,45 +3704,48 @@ async fn launch_claimed_follow_child(
     let identity = metadata.resume_context.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
     })?;
-    let (params, parent_context, prepared_authority, launch_audit_already_persisted) =
-        match prepared_child {
-            Some(prepared) => {
-                if prepared.thread_id != thread_id {
-                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "precomputed child authority names {}, not persisted child {thread_id}",
-                        prepared.thread_id
-                    )));
-                }
-                if prepared.resume_context != identity {
-                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "precomputed child authority does not match persisted launch identity"
-                    )));
-                }
-                let audit_persisted = prepared.launch_audit_already_persisted;
-                (
-                    prepared.execution,
-                    prepared.parent_context,
-                    Some(prepared.authority),
-                    audit_persisted,
-                )
+    let (params, parent_context, prepared_authority, launch_audit) = match prepared_child {
+        Some(prepared) => {
+            if prepared.thread_id != thread_id {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed child authority names {}, not persisted child {thread_id}",
+                    prepared.thread_id
+                )));
             }
-            None => {
-                let parent_context =
-                    parent_context.or(persisted_parent_context).ok_or_else(|| {
-                        anyhow::anyhow!("follow child: {thread_id} has no persisted parent context")
-                    })?;
-                // Recovery reconstructs the exact admitted root identity from
-                // the sealed request. A live caller may still override only the
-                // borrowed workspace provenance.
-                let params = crate::execution::runner::execution_params_from_sealed_root_request(
-                    state,
-                    &identity,
-                    &sealed_root_request,
-                    provenance_override,
-                )?;
-                (params, parent_context, None, false)
+            if prepared.resume_context != identity {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "precomputed child authority does not match persisted launch identity"
+                )));
             }
-        };
+            let launch_audit = prepared.launch_audit;
+            (
+                prepared.execution,
+                prepared.parent_context,
+                Some(prepared.authority),
+                launch_audit,
+            )
+        }
+        None => {
+            let parent_context = parent_context.or(persisted_parent_context).ok_or_else(|| {
+                anyhow::anyhow!("follow child: {thread_id} has no persisted parent context")
+            })?;
+            // Recovery reconstructs the exact admitted root identity from
+            // the sealed request. A live caller may still override only the
+            // borrowed workspace provenance.
+            let params = crate::execution::runner::execution_params_from_sealed_root_request(
+                state,
+                &identity,
+                &sealed_root_request,
+                provenance_override,
+            )?;
+            (
+                params,
+                parent_context,
+                None,
+                LaunchAuditDisposition::AppendForAttempt,
+            )
+        }
+    };
     // Working dir + runtime registry follow the FINAL provenance (post-
     // override), so the hot path runs in the parent's workspace with the
     // parent's request engine.
@@ -3745,13 +3786,8 @@ async fn launch_claimed_follow_child(
     };
     match prepared_authority {
         Some(authority) => {
-            run_claimed_thread_row_with_authority(
-                launch_params,
-                thread,
-                authority,
-                launch_audit_already_persisted,
-            )
-            .await
+            run_claimed_thread_row_with_authority(launch_params, thread, authority, launch_audit)
+                .await
         }
         None => run_claimed_thread_row(launch_params, thread).await,
     }
@@ -3809,7 +3845,7 @@ pub async fn launch_prepared_follow_child(
     .await;
     match &result {
         Err(BuildAndLaunchError::LaunchPreparation(error)) => {
-            launch_handoff.publish_dispatch_failure(error)
+            launch_handoff.publish_dispatch_failure(error.as_ref())
         }
         Err(error) => {
             launch_handoff.publish_failure("child_launch_failed", error.to_string(), 500, false)
@@ -3846,7 +3882,7 @@ pub fn prepare_and_spawn_follow_child(
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
 ) -> Result<RecoveryLaunchOutcome, BuildAndLaunchError> {
     let claim = match ThreadLaunchClaim::acquire(&state, child_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -3895,7 +3931,7 @@ async fn launch_follow_child_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, child_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
                 return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
             }
@@ -4359,7 +4395,7 @@ pub fn prepare_and_spawn_follow_resume_recovery(
         ))
     })?;
     let claim = match ThreadLaunchClaim::acquire(&state, &successor_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             // Preserve the live launcher's waiter-cleanup semantics: if this is
             // provably the right successor and it already advanced, the owning
@@ -4430,7 +4466,7 @@ async fn launch_follow_resume_successor_with_claim(
     let _claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, &successor_id)? {
-            ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+            ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
             ThreadLaunchClaimOutcome::AlreadyClaimed => {
                 // Another launcher holds the claim. Retire the waiter ONLY if the
                 // successor is a VALID follow-resume successor of THIS parent (upstream +
@@ -4794,7 +4830,9 @@ mod tests {
 
     #[test]
     fn non_fanout_waiter_requires_exactly_one_child_before_collection() {
-        for expected_children in [0, 2, u32::MAX] {
+        let error = validate_follow_waiter_cardinality(false, 0).unwrap_err();
+        assert!(error.to_string().contains("at least one child"));
+        for expected_children in [2, u32::MAX] {
             let error = validate_follow_waiter_cardinality(false, expected_children).unwrap_err();
             assert!(error.to_string().contains("exactly one child"));
         }
@@ -4981,6 +5019,7 @@ mod tests {
             "content_blob_hash": blob_hash,
             "integrity": format!("sha256:{blob_hash}"),
             "mode": 0o755,
+            "signature_info": null,
         });
         let item_source_hash = cas.store_object(&item_source).unwrap();
         let manifest = serde_json::json!({
@@ -5111,6 +5150,12 @@ mod tests {
     fn enforce_trust_blocks_unsigned() {
         let err = enforce_effective_trust(TrustClass::Unsigned, "directive:my/agent", "directive")
             .unwrap_err();
+        assert_eq!(err.code(), "effective_trust_unsigned");
+        assert_eq!(err.http_status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(matches!(
+            &err,
+            DispatchError::LaunchPolicyForbidden { binding: None, .. }
+        ));
         let msg = format!("{err}");
         assert!(msg.contains("refusing to spawn"));
         assert!(msg.contains("Unsigned"));

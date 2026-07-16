@@ -66,7 +66,7 @@ fn installable_refs(
             let Some(extension) = extensions
                 .iter()
                 .copied()
-                .find_map(|extension| relative.ends_with(extension).then_some(extension))
+                .find(|extension| relative.ends_with(*extension))
             else {
                 continue;
             };

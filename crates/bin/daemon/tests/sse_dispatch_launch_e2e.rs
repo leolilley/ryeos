@@ -28,7 +28,10 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
+use common::fast_fixture::{
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
+    FastFixture,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
@@ -264,11 +267,10 @@ async fn assert_pre_admission_rejection(resp: reqwest::Response, expected_messag
     );
 }
 
-/// Returns `(harness, user_sk, publisher_sk, node_fp, mock_url)`. Provider,
-/// routing, and the directive are NOT planted here — dispatch resolves items
-/// from the project root, so a directive-running test plants them into the
-/// project it passes as `project_path` (see `plant_launch_project`).
-async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, String) {
+/// Returns `(harness, user_sk, publisher_sk, node_fp)`. The provider is
+/// bundle-owned; a directive-running test plants only its routing overlay and
+/// directive into the project it passes as `project_path`.
+async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
     let mock = MockProvider::start(vec![
         MockResponse::Text("Hello ".into()),
         MockResponse::Text("from dispatch_launch".into()),
@@ -279,6 +281,12 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, String
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-dispatch-launch-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             plant_execute_stream_route(state_path, &fixture.publisher)?;
             // Authorize the user key (HTTP caller principal). The file must
             // be signed by the node identity (daemon requirement).
@@ -291,20 +299,18 @@ async fn boot_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, String
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + execute-stream route");
 
     std::mem::forget(mock);
     let node_fp = fixture.node_fp();
-    (h, fixture.user, fixture.publisher, node_fp, mock_url)
+    (h, fixture.user, fixture.publisher, node_fp)
 }
 
-/// Plant provider + routing + directive into a project root for the
-/// happy-path launch test.
-fn plant_launch_project(project: &Path, mock_url: &str, publisher: &SigningKey) {
-    plant_mock_provider(project, mock_url, publisher).expect("plant provider");
+/// Plant the routing overlay and directive into a project root for the
+/// happy-path launch test. Provider authority lives in the fixture bundle.
+fn plant_launch_project(project: &Path, publisher: &SigningKey) {
     plant_model_routing(project, publisher).expect("plant routing");
     plant_directive(project, "test/launch_e2e", "Say hello.", publisher).expect("plant directive");
 }
@@ -320,14 +326,14 @@ fn plant_launch_project(project: &Path, mock_url: &str, publisher: &SigningKey) 
 /// lifecycle event from `thread_started` onward.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_e2e_round_trip() {
-    let (h, node_sk, publisher_sk, node_fp, mock_url) = boot_daemon().await;
+    let (h, node_sk, publisher_sk, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_launch_project(project.path(), &mock_url, &publisher_sk);
+    plant_launch_project(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -427,13 +433,13 @@ async fn sse_dispatch_launch_e2e_round_trip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_last_event_id() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -471,7 +477,7 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -481,7 +487,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
-            "ref_bindings": {},
+            "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
             "launch_mode": "detached"
@@ -496,7 +502,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -506,7 +512,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
-            "ref_bindings": {},
+            "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
             "validate_only": true
@@ -521,7 +527,7 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
@@ -531,7 +537,7 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
         &node_fp,
         serde_json::json!({
             "item_ref": "directive:test/launch_e2e",
-            "ref_bindings": {},
+            "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
             "target_site_id": "site:not-local"
@@ -577,7 +583,7 @@ fn sse_dispatch_launch_collision() {
     let mut head_trust = ryeos_state::refs::TrustStore::new();
     head_trust.insert(
         identity.fingerprint().to_string(),
-        identity.verifying_key().clone(),
+        *identity.verifying_key(),
     );
     let write_barrier = WriteBarrier::new();
     let state_store = StateStore::new_with_head_trust(
@@ -684,8 +690,10 @@ fn new_thread_id_format_and_uniqueness() {
 ///
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR))
+        .expect("initialize project root");
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
@@ -728,11 +736,11 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
 /// validation happens before the SSE handshake completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn sse_dispatch_launch_rejects_relative_project_path() {
-    let (h, user_sk, _publisher, node_fp, _mock_url) = boot_daemon().await;
+    let (h, user_sk, _publisher, node_fp) = boot_daemon().await;
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/launch_e2e",
-        "ref_bindings": {},
+        "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": "relative/path",
         "parameters": {},
     });

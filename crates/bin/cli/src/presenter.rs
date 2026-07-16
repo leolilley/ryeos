@@ -7,7 +7,7 @@ use crate::transport::http::SseEvent;
 
 pub enum Presenter {
     Plain(crate::tty::Console),
-    Tty(TtyPresenter),
+    Tty(Box<TtyPresenter>),
 }
 
 pub enum StructuredPresentation {
@@ -19,7 +19,7 @@ pub enum StructuredPresentation {
 impl Presenter {
     pub fn for_console(console: &crate::tty::Console) -> Self {
         if console.capabilities().tty() {
-            Self::Tty(TtyPresenter::new(console.clone()))
+            Self::Tty(Box::new(TtyPresenter::new(console.clone())))
         } else {
             Self::Plain(console.clone())
         }

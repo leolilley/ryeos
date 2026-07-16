@@ -430,6 +430,19 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    pub async fn bundle_events_materialize_attachment(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback bundle_events_materialize_attachment called without an inner UDS client \
+                 (socket missing); cannot materialize durable bundle event attachment"
+            )
+        })?;
+        client
+            .bundle_events_materialize_attachment(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     pub async fn vault_put(&self, request: Value) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(

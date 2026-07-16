@@ -25,6 +25,31 @@ use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
+const DEFAULT_DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn daemon_startup_deadline() -> anyhow::Result<Instant> {
+    let timeout = match std::env::var("RYEOSD_TEST_STARTUP_TIMEOUT_SECS") {
+        Ok(raw) => {
+            let seconds = raw.parse::<u64>().with_context(|| {
+                format!("parse RYEOSD_TEST_STARTUP_TIMEOUT_SECS value `{raw}` as seconds")
+            })?;
+            anyhow::ensure!(
+                seconds > 0,
+                "RYEOSD_TEST_STARTUP_TIMEOUT_SECS must be greater than zero"
+            );
+            Duration::from_secs(seconds)
+        }
+        Err(std::env::VarError::NotPresent) => DEFAULT_DAEMON_STARTUP_TIMEOUT,
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "read RYEOSD_TEST_STARTUP_TIMEOUT_SECS: {error}"
+            ));
+        }
+    };
+    Ok(Instant::now() + timeout)
+}
+
 /// Path to the built `ryeosd` binary (set by Cargo for integration tests
 /// in this crate).
 pub fn ryeosd_binary() -> PathBuf {
@@ -59,6 +84,127 @@ pub fn read_actual_bind(daemon_json_path: &Path) -> anyhow::Result<SocketAddr> {
     })?;
     s.parse()
         .with_context(|| format!("parse 'bind' value '{s}' from daemon.json"))
+}
+
+fn daemon_stderr_log_path(fallback_dir: &Path, harness_id: u64) -> PathBuf {
+    let directory = std::env::var_os("RYEOSD_TEST_STDERR_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback_dir.to_path_buf());
+    directory.join(format!(
+        "daemon-{}-{harness_id}.stderr.log",
+        std::process::id()
+    ))
+}
+
+fn daemon_stderr_stdio(path: &Path) -> anyhow::Result<Stdio> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create daemon stderr directory {}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("create daemon stderr log {}", path.display()))?;
+    Ok(Stdio::from(file))
+}
+
+async fn stop_and_collect_daemon_stderr(child: &mut Child, stderr_path: &Path) -> String {
+    child.start_kill().ok();
+
+    let mut stderr = String::new();
+    if tokio::time::timeout(Duration::from_secs(2), child.wait())
+        .await
+        .is_err()
+    {
+        stderr.push_str("<daemon did not exit within 2s after kill>\n");
+    }
+    match std::fs::read_to_string(stderr_path) {
+        Ok(log) => {
+            if !stderr.is_empty() && !log.is_empty() {
+                stderr.push_str("<daemon stderr log>\n");
+            }
+            stderr.push_str(&log);
+        }
+        Err(error) => stderr.push_str(&format!(
+            "<failed to read daemon stderr log {}: {error}>\n",
+            stderr_path.display()
+        )),
+    }
+    stderr
+}
+
+async fn wait_for_daemon_ready(
+    child: &mut Child,
+    bind: SocketAddr,
+    stderr_path: &Path,
+    context: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("http://{bind}/_ryeos/ready");
+
+    loop {
+        let detail = match client
+            .get(&url)
+            .timeout(Duration::from_millis(200))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                let status = response.status();
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+                if body.contains("node_startup_failed") {
+                    let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
+                    anyhow::bail!(
+                        "{context} reported a terminal startup failure at {url}: HTTP {status}: \
+                         {body}\ndaemon stderr:\n{stderr}"
+                    );
+                }
+                format!("HTTP {status}: {body}")
+            }
+            Err(error) => error.to_string(),
+        };
+
+        if Instant::now() > deadline {
+            let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
+            anyhow::bail!(
+                "{context} never became ready at {url}; last probe: {detail}\n\
+                 daemon stderr:\n{stderr}"
+            );
+        }
+        tokio::time::sleep(DAEMON_STARTUP_POLL_INTERVAL).await;
+    }
+}
+
+async fn wait_for_daemon_discovery(
+    child: &mut Child,
+    daemon_json: &Path,
+    stderr_path: &Path,
+    context: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    loop {
+        if daemon_json.exists() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
+            anyhow::bail!(
+                "{context} exited with {status} before publishing {} — daemon stderr:\n{stderr}",
+                daemon_json.display()
+            );
+        }
+        if Instant::now() > deadline {
+            let stderr = stop_and_collect_daemon_stderr(child, stderr_path).await;
+            anyhow::bail!(
+                "{context} never published {} — daemon stderr:\n{stderr}",
+                daemon_json.display()
+            );
+        }
+        tokio::time::sleep(DAEMON_STARTUP_POLL_INTERVAL).await;
+    }
 }
 
 /// Resolve the projection instance selected by the current recovery
@@ -137,7 +283,7 @@ pub fn copy_core_to_temp() -> (TempDir, PathBuf) {
 
 /// Ensure published bundle artifacts under `bundles/{core,standard}/`
 /// reflect the current source tree. If any tracked source file is newer
-/// than the standard bundle's published manifest, re-run
+/// than the standard bundle's published manifest ref, re-run
 /// `scripts/populate-bundles.sh` to rebuild release binaries, restage
 /// them, and re-sign + republish both bundles.
 ///
@@ -178,10 +324,16 @@ pub fn ensure_bundles_fresh() {
 
         // Re-check staleness inside the lock — another process may have
         // already refreshed while we waited.
-        let representative = root.join(
-            "bundles/standard/.ai/runtimes/directive-runtime.yaml",
-        );
-        let publish_time = read_signature_timestamp(&representative);
+        // Publication rewrites this ref only after the standard bundle's
+        // manifest closure has been committed. Do not use a source item's
+        // embedded signature timestamp here: unchanged signed YAML remains
+        // byte-for-byte stable across publication, which made every later test
+        // incorrectly treat a freshly published bundle as stale.
+        let representative = root.join("bundles/standard/.ai/refs/bundles/manifest");
+        let publish_time = representative
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
         let needs_refresh = match publish_time {
             None => true,
             Some(m) => bundle_inputs_newer_than(&root, m),
@@ -207,66 +359,21 @@ pub fn ensure_bundles_fresh() {
     });
 }
 
-/// Parse the `# ryeos:signed:<RFC3339>:...` envelope from a signed
-/// bundle file and return the embedded publish timestamp. Returns
-/// `None` if the file is missing, unsigned, or the timestamp is
-/// unparseable.
-fn read_signature_timestamp(path: &Path) -> Option<std::time::SystemTime> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let line = content.lines().find(|l| l.starts_with("# ryeos:signed:"))?;
-    // Format: `# ryeos:signed:<RFC3339>:<digest>:<sig>:<fp>` where the
-    // timestamp itself contains 2 colons (`2026-05-07T08:09:10Z`).
-    // Strip the prefix, then take the first 3 colon-separated segments
-    // of the remainder and reconstruct the RFC3339 string.
-    let body = line.strip_prefix("# ryeos:signed:")?;
-    let mut parts = body.splitn(4, ':');
-    let date_h = parts.next()?; // "2026-05-07T08"
-    let mi = parts.next()?; // "09"
-    let se_z = parts.next()?; // "10Z"
-    let ts = format!("{date_h}:{mi}:{se_z}");
-    rfc3339_to_systemtime(&ts)
-}
-
-/// Tiny RFC3339 → SystemTime parser (UTC `Z` only — that's all the
-/// signing format emits). Returns `None` on any malformed input.
-fn rfc3339_to_systemtime(s: &str) -> Option<std::time::SystemTime> {
-    // Expect: `YYYY-MM-DDTHH:MM:SSZ`
-    let s = s.strip_suffix('Z')?;
-    let (date, time) = s.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let y: i64 = date_parts.next()?.parse().ok()?;
-    let mo: u32 = date_parts.next()?.parse().ok()?;
-    let d: u32 = date_parts.next()?.parse().ok()?;
-    let mut time_parts = time.split(':');
-    let h: u32 = time_parts.next()?.parse().ok()?;
-    let mi: u32 = time_parts.next()?.parse().ok()?;
-    let se: u32 = time_parts.next()?.parse().ok()?;
-
-    // Days since 1970-01-01 using Howard Hinnant's algorithm
-    // (handles Gregorian leap years correctly through 9999).
-    let y_adj = y - if mo <= 2 { 1 } else { 0 };
-    let era = y_adj.div_euclid(400);
-    let yoe = y_adj - era * 400;
-    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 } as i64) + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days_since_epoch = era * 146097 + doe - 719468;
-    let total_secs = days_since_epoch * 86400 + (h as i64) * 3600 + (mi as i64) * 60 + se as i64;
-    if total_secs < 0 {
-        return None;
-    }
-    Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(total_secs as u64))
-}
-
 /// Walk the source roots that affect bundle binary contents and return
-/// `true` if any `.rs` / `Cargo.toml` file under them has an mtime
-/// newer than `published`. We only check source crates (not bundle
-/// item YAMLs): YAMLs are always rewritten by the publish step, so
-/// comparing them against the publish timestamp would be circular.
+/// `true` if a workspace manifest or production crate source has an mtime
+/// newer than `published`. Integration tests, benches, and examples cannot
+/// affect release binaries and must not force a full bundle rebuild.
+///
+/// We do not check bundle item YAMLs: publishing intentionally preserves
+/// unchanged signed source items, while rebuilding their manifest closure.
 /// A user editing a bundle YAML directly without republishing is a
 /// known-acceptable hole — that path is rare and republishing is one
 /// command.
 fn bundle_inputs_newer_than(root: &Path, published: std::time::SystemTime) -> bool {
-    dir_has_newer(&root.join("crates"), published)
+    [root.join("Cargo.toml"), root.join("Cargo.lock")]
+        .iter()
+        .any(|path| file_is_newer(path, published))
+        || dir_has_newer(&root.join("crates"), published)
 }
 
 fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
@@ -276,22 +383,31 @@ fn dir_has_newer(path: &Path, published: std::time::SystemTime) -> bool {
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| matches!(name, "tests" | "benches" | "examples"))
+            {
+                continue;
+            }
             if dir_has_newer(&p, published) {
                 return true;
             }
-        } else if p.file_name().is_some_and(|name| name == "Cargo.toml")
-            || p.extension().is_some_and(|ext| ext == "rs")
+        } else if (p.file_name().is_some_and(|name| name == "Cargo.toml")
+            || p.file_name().is_some_and(|name| name == "build.rs")
+            || p.extension().is_some_and(|ext| ext == "rs"))
+            && file_is_newer(&p, published)
         {
-            if let Ok(m) = entry.metadata() {
-                if let Ok(modified) = m.modified() {
-                    if modified > published {
-                        return true;
-                    }
-                }
-            }
+            return true;
         }
     }
     false
+}
+
+fn file_is_newer(path: &Path, published: std::time::SystemTime) -> bool {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified > published)
 }
 
 /// Recursive directory copy (Unix, no special handling).
@@ -345,8 +461,10 @@ pub struct DaemonHarness {
     pub bind: SocketAddr,
     pub uds_path: PathBuf,
     pub child: Child,
-    /// Captured stderr (joined async) — populated on drop for diagnostics.
-    pub stderr_buf: Option<String>,
+    /// Regular file continuously receiving daemon stderr. A file is used rather
+    /// than an unread pipe so verbose test logging can never backpressure and
+    /// stall the daemon under test.
+    stderr_log_path: PathBuf,
     /// Operator signing key from the fast fixture. Used by `post_execute` to
     /// sign requests. `None` when the daemon was started via `start()`
     /// instead of `start_fast()`.
@@ -410,6 +528,7 @@ impl DaemonHarness {
         let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
+        let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let mut cmd = Command::new(ryeosd_binary());
         cmd.arg("--app-root")
@@ -421,78 +540,36 @@ impl DaemonHarness {
             .env("HOSTNAME", "testhost")
             .env("RYEOS_APP_ROOT", &app_root)
             .env("HOME", user_space.path())
-            // When RYEOSD_TEST_STDERR_DIR is set, mirror daemon stderr
-            // to a stable on-disk file (named per-harness-id) so test
-            // failures can dump diagnostics post-mortem. Otherwise
-            // pipe so drain_stderr_nonblocking can read it directly.
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
 
-        let child = cmd.spawn()?;
+        let startup_deadline = daemon_startup_deadline()?;
+        let mut child = cmd.spawn()?;
 
         let daemon_json = app_root.join("daemon.json");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                // Drain stderr so the failure message includes the
-                // daemon's own diagnostics. Stderr may be either a
-                // piped handle or the on-disk log file.
-                let mut child = child;
-                child.start_kill().ok();
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{harness_id}.stderr.log"));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    stderr.read_to_string(&mut buf).await.ok();
-                }
-                anyhow::bail!(
-                    "daemon.json never appeared at {} — daemon stderr:\n{}",
-                    daemon_json.display(),
-                    buf
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut child,
+            &daemon_json,
+            &stderr_log_path,
+            "daemon",
+            startup_deadline,
+        )
+        .await?;
 
         // Read the actual bound address — required when we passed :0.
         let actual_bind = read_actual_bind(&daemon_json)?;
 
-        // Best-effort: also wait for the HTTP listener to actually accept.
-        let client = reqwest::Client::new();
-        let url = format!("http://{actual_bind}/health");
-        let connect_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                anyhow::bail!("daemon /health never became reachable at {url}");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut child,
+            actual_bind,
+            &stderr_log_path,
+            "daemon",
+            startup_deadline,
+        )
+        .await?;
 
         Ok(Self {
             _state_dir_outer: state_dir_outer,
@@ -502,7 +579,7 @@ impl DaemonHarness {
             bind: actual_bind,
             uds_path,
             child,
-            stderr_buf: None,
+            stderr_log_path,
             user_key: None,
             node_key: None,
         })
@@ -586,6 +663,7 @@ impl DaemonHarness {
         let harness_id = next_harness_id();
         // UDS socket in a temp dir (avoids writing socket into workspace tree)
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
+        let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
         let mut cmd = Command::new(ryeosd_binary());
         // NOTE: NO . The fast fixture is the init.
@@ -599,68 +677,34 @@ impl DaemonHarness {
             .env("RYEOS_APP_ROOT", &state_path)
             .env("HOME", user_space.path())
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
 
-        let child = cmd.spawn()?;
+        let startup_deadline = daemon_startup_deadline()?;
+        let mut child = cmd.spawn()?;
 
         let daemon_json = state_path.join("daemon.json");
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                let mut child = child;
-                child.start_kill().ok();
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{harness_id}.stderr.log"));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    stderr.read_to_string(&mut buf).await.ok();
-                }
-                anyhow::bail!(
-                    "daemon.json never appeared at {} (fast fixture path) — daemon stderr:\n{}",
-                    daemon_json.display(),
-                    buf
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut child,
+            &daemon_json,
+            &stderr_log_path,
+            "daemon (fast fixture path)",
+            startup_deadline,
+        )
+        .await?;
 
         let actual_bind = read_actual_bind(&daemon_json)?;
 
-        let client = reqwest::Client::new();
-        let url = format!("http://{actual_bind}/health");
-        let connect_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                anyhow::bail!("daemon /health never became reachable at {url} (fast fixture path)");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut child,
+            actual_bind,
+            &stderr_log_path,
+            "daemon (fast fixture path)",
+            startup_deadline,
+        )
+        .await?;
 
         let harness = Self {
             _state_dir_outer: state_dir_outer,
@@ -670,7 +714,7 @@ impl DaemonHarness {
             bind: actual_bind,
             uds_path,
             child,
-            stderr_buf: None,
+            stderr_log_path,
             user_key: Some(fixture.user.clone()),
             node_key: Some(fixture.node.clone()),
         };
@@ -688,9 +732,25 @@ impl DaemonHarness {
         project_path: &str,
         params: serde_json::Value,
     ) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+        // The live HTTP contract does not accept relative project paths.
+        // Historical tests used `.` merely to mean "no project overlay";
+        // represent that intent with the current omitted-project shape so the
+        // daemon creates its isolated execution workspace. Tests exercising a
+        // real project pass its absolute tempdir path instead.
+        let project_path = (project_path != ".").then_some(project_path);
+
+        // The directive runtime's signed launch contract requires an explicit
+        // model identity. These fixtures keep model configuration on the
+        // directive itself, so the correct binding is the independently
+        // authorized directive ref repeated in the `model` slot.
+        let ref_bindings = if item_ref.starts_with("directive:") {
+            serde_json::json!({ "model": item_ref })
+        } else {
+            serde_json::json!({})
+        };
         let body = serde_json::json!({
             "item_ref": item_ref,
-            "ref_bindings": {},
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": params,
         });
@@ -784,6 +844,7 @@ impl DaemonHarness {
         // Bind `:0` and read the new actual address back from daemon.json.
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
 
         // Remove the old daemon.json so we can detect when the new
         // daemon writes its own (with the new bind address).
@@ -801,62 +862,33 @@ impl DaemonHarness {
             .env("RYEOS_APP_ROOT", &self.state_path)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
 
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                anyhow::bail!(
-                    "respawned daemon.json never appeared at {}",
-                    daemon_json.display()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut self.child,
+            &daemon_json,
+            &stderr_log_path,
+            "respawned daemon",
+            startup_deadline,
+        )
+        .await?;
         self.bind = read_actual_bind(&daemon_json)?;
 
-        let client = reqwest::Client::new();
-        let url = format!("http://{}/health", self.bind);
-        let connect_deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{harness_id}.stderr.log"));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                anyhow::bail!(
-                    "restarted daemon /health never became reachable at {url} — stderr:\n{buf}"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            &stderr_log_path,
+            "respawned daemon",
+            startup_deadline,
+        )
+        .await?;
+        self.stderr_log_path = stderr_log_path;
 
         Ok(())
     }
@@ -912,6 +944,7 @@ impl DaemonHarness {
         // 4. Re-spawn with `:0`; read actual bind from daemon.json.
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let harness_id = next_harness_id();
+        let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
         let mut cmd = Command::new(ryeosd_binary());
@@ -925,67 +958,35 @@ impl DaemonHarness {
             .env("RYEOS_APP_ROOT", &self.state_path)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
-            .stderr(
-                std::env::var_os("RYEOSD_TEST_STDERR_DIR")
-                    .and_then(|d| {
-                        let path = std::path::PathBuf::from(d)
-                            .join(format!("daemon-{harness_id}.stderr.log"));
-                        std::fs::File::create(&path).ok().map(Stdio::from)
-                    })
-                    .unwrap_or_else(Stdio::piped),
-            )
+            .stderr(daemon_stderr_stdio(&stderr_log_path)?)
             .kill_on_drop(true);
 
         tweak(&mut cmd);
 
+        let startup_deadline = daemon_startup_deadline()?;
         self.child = cmd.spawn()?;
 
         // Wait for the restarted daemon to publish daemon.json with
         // its newly-bound address.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if daemon_json.exists() {
-                break;
-            }
-            if Instant::now() > deadline {
-                anyhow::bail!(
-                    "restarted daemon.json never appeared at {}",
-                    daemon_json.display()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_discovery(
+            &mut self.child,
+            &daemon_json,
+            &stderr_log_path,
+            "restarted daemon",
+            startup_deadline,
+        )
+        .await?;
         self.bind = read_actual_bind(&daemon_json)?;
 
-        // 5. Wait for the daemon to be responsive (deadline is generous
-        //    because the reconciler runs before the HTTP listener binds).
-        let client = reqwest::Client::new();
-        let url = format!("http://{}/health", self.bind);
-        let connect_deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if client
-                .get(&url)
-                .timeout(Duration::from_millis(200))
-                .send()
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            if Instant::now() > connect_deadline {
-                // Drain stderr for diagnostics.
-                let mut buf = String::new();
-                if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-                    let path = std::path::PathBuf::from(dir)
-                        .join(format!("daemon-{}.stderr.log", self.bind.port()));
-                    buf = std::fs::read_to_string(&path).unwrap_or_default();
-                }
-                anyhow::bail!(
-                    "restarted daemon /health never became reachable at {url} — stderr:\n{buf}"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        wait_for_daemon_ready(
+            &mut self.child,
+            self.bind,
+            &stderr_log_path,
+            "restarted daemon",
+            startup_deadline,
+        )
+        .await?;
+        self.stderr_log_path = stderr_log_path;
 
         Ok(())
     }
@@ -996,52 +997,24 @@ impl DaemonHarness {
         self.restart_with(|_| {}).await
     }
 
-    /// Drain whatever has accumulated on the child's stderr handle
-    /// **without blocking** on EOF. Used by tests that need to print
-    /// diagnostics on assertion failure without waiting for the
-    /// daemon to exit. After the call the stderr handle is gone, so
-    /// only call once per harness.
+    /// Read whatever has accumulated in the daemon's stderr log without
+    /// waiting for the daemon to exit. The daemon writes directly to this
+    /// regular file, so diagnostics never create pipe backpressure.
     pub async fn drain_stderr_nonblocking(&mut self) -> String {
-        // When RYEOSD_TEST_STDERR_DIR is set, the harness redirects
-        // stderr to a per-port file there; read that. Otherwise, fall
-        // through and drain the piped handle.
-        if let Some(dir) = std::env::var_os("RYEOSD_TEST_STDERR_DIR") {
-            let path = std::path::PathBuf::from(dir)
-                .join(format!("daemon-{}.stderr.log", self.bind.port()));
-            if let Ok(s) = std::fs::read_to_string(&path) {
-                return s;
-            }
+        match std::fs::read_to_string(&self.stderr_log_path) {
+            Ok(stderr) => stderr,
+            Err(error) => format!(
+                "<failed to read daemon stderr log {}: {error}>\n",
+                self.stderr_log_path.display()
+            ),
         }
-        use tokio::time::{timeout, Duration};
-        let Some(mut stderr) = self.child.stderr.take() else {
-            return String::new();
-        };
-        let mut buf = Vec::new();
-        let _ = timeout(Duration::from_millis(500), async {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match stderr.read(&mut chunk).await {
-                    Ok(0) => break,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    Err(_) => break,
-                }
-            }
-        })
-        .await;
-        String::from_utf8_lossy(&buf).into_owned()
     }
 }
 
 impl Drop for DaemonHarness {
     fn drop(&mut self) {
-        // Best-effort: kill the child synchronously. tokio::process::Child
-        // sets KILLONDROP via kill_on_drop(true), but we also want to drain
-        // stderr for diagnostics if a test fails.
-        if let Some(stderr) = self.child.stderr.take() {
-            // Drain on a tokio runtime if one is around; otherwise discard.
-            // We can't await here, so just give up on stderr capture in Drop.
-            drop(stderr);
-        }
+        // Best-effort: kill the child synchronously. tokio::process::Child also
+        // has kill_on_drop enabled; stderr is already captured in a regular file.
         let _ = self.child.start_kill();
     }
 }
@@ -1162,6 +1135,17 @@ pub async fn run_service_standalone(
     let fixture = fast_fixture::populate_initialized_state(&state_path, user_space.path())?;
     fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
     fast_fixture::register_standard_bundle(&state_path, &fixture)?;
+    drop(ryeos_app::runtime_db::RuntimeDb::open(
+        &state_path.join(".ai/state/runtime.sqlite3"),
+    )?);
+    let runtime_state_dir = state_path.join(".ai/state");
+    let scheduler_db =
+        ryeos_scheduler::db::SchedulerDb::open(&runtime_state_dir.join("scheduler.sqlite3"))?;
+    ryeos_scheduler::projection::rebuild_fires_from_dir(
+        &runtime_state_dir.join("schedules"),
+        &scheduler_db,
+    )?;
+    drop(scheduler_db);
 
     let mut cmd = Command::new(ryeosd_binary());
     cmd.arg("--app-root")

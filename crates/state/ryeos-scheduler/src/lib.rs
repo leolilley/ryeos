@@ -51,7 +51,7 @@ pub trait SchedulerContext: Send + Sync + 'static {
     fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>>;
 
     /// The trust store for schedule signature verification.
-    fn trust_store(&self) -> &TrustStore;
+    fn schedule_trust_store(&self) -> &TrustStore;
 
     /// Check a thread's status. Returns `None` if thread doesn't exist.
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>>;
@@ -109,8 +109,8 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
         (**self).scheduler_runtime_gate()
     }
 
-    fn trust_store(&self) -> &TrustStore {
-        (**self).trust_store()
+    fn schedule_trust_store(&self) -> &TrustStore {
+        (**self).schedule_trust_store()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {

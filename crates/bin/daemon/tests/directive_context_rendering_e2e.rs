@@ -14,7 +14,7 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -160,7 +160,12 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
     let plant =
         |state_path: &Path, _user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(&project_path, &mock_url, &fixture.publisher)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-context-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             plant_model_routing(&project_path, &fixture.publisher)?;
 
             // Plant a knowledge item with a distinctive body.
@@ -187,7 +192,6 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon should start");
@@ -227,7 +231,12 @@ async fn e2e_directive_without_context_still_works() {
     let plant =
         |state_path: &Path, _user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(&project_path, &mock_url, &fixture.publisher)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-context-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             plant_model_routing(&project_path, &fixture.publisher)?;
 
             // Directive with NO context block.
@@ -244,7 +253,6 @@ async fn e2e_directive_without_context_still_works() {
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon should start");

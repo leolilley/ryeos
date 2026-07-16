@@ -55,17 +55,42 @@ async fn standalone_bundle_install_then_list_then_remove() {
     // so preflight's discover_installed_bundle_roots finds it.
     let harness = StandaloneHarness::new_initialized().expect("standalone harness init");
 
-    // Build a minimal candidate bundle. It needs a .ai/ directory with
-    // at least one kind schema so preflight doesn't bail at "no kind
-    // schemas". Copy a real signed one from core.
+    // Build a minimal published candidate with its own kind namespace. Reusing
+    // a core kind would create two providers in the prospective graph, while an
+    // unsigned or manifest-less source is intentionally not installable.
     let src = tempfile::tempdir().expect("src tempdir");
-    let src_kinds = src.path().join(".ai/node/engine/kinds/service");
+    let src_kinds = src.path().join(".ai/node/engine/kinds/testkind");
     std::fs::create_dir_all(&src_kinds).unwrap();
     let core_kind = harness
         .app_root
-        .join(".ai/node/engine/kinds/service/service.kind-schema.yaml");
-    std::fs::copy(&core_kind, src_kinds.join("service.kind-schema.yaml"))
-        .expect("copy real kind schema from core");
+        .join(".ai/node/engine/kinds/config/config.kind-schema.yaml");
+    let config_schema = std::fs::read_to_string(&core_kind).expect("read core config kind schema");
+    let test_schema = lillux::signature::strip_signature_lines(&config_schema)
+        .replace(
+            "category: \"engine/kinds/config\"",
+            "category: \"engine/kinds/testkind\"",
+        )
+        .replace("  directory: config", "  directory: testkind");
+    let signed_schema = lillux::signature::sign_content_at(
+        &test_schema,
+        &harness.fixture.publisher,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(src_kinds.join("testkind.kind-schema.yaml"), signed_schema)
+        .expect("write signed test kind schema");
+
+    let manifest = "name: testbundle\nversion: '1.0'\nprovides_kinds:\n  - testkind\nrequires_kinds:\n  - config\nuses_kinds: []\n";
+    let signed_manifest = lillux::signature::sign_content_at(
+        manifest,
+        &harness.fixture.publisher,
+        "#",
+        None,
+        common::fast_fixture::FAST_FIXTURE_TIME,
+    );
+    std::fs::write(src.path().join(".ai/manifest.yaml"), signed_manifest)
+        .expect("write signed bundle manifest");
     let src_path = src.path().to_str().unwrap().to_string();
 
     // 1. Install testbundle.
@@ -88,7 +113,7 @@ async fn standalone_bundle_install_then_list_then_remove() {
     // 2. Verify the bundle was copied to disk.
     let installed = harness
         .app_root
-        .join(".ai/bundles/testbundle/.ai/node/engine/kinds/service/service.kind-schema.yaml");
+        .join(".ai/bundles/testbundle/.ai/node/engine/kinds/testkind/testkind.kind-schema.yaml");
     assert!(
         installed.exists(),
         "expected installed kind schema at {} (install handler didn't copy)",

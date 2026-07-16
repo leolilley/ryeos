@@ -134,7 +134,7 @@ description: Default directive runtime
 const MINIMAL_RUNTIME_YAML: &str = "\
 kind: runtime
 serves: directive
-binary_ref: bin/runner
+binary_ref: bin/test-triple/runner
 abi_version: v1
 launch_contract:
   primary_allowed_kinds: [directive]
@@ -207,7 +207,7 @@ fn parse_runtime_yaml_missing_serves_rejected() {
     let body = with_empty_launch_contract(
         "\
 kind: runtime
-binary_ref: bin/x
+binary_ref: bin/test-triple/x
 abi_version: v1
 ",
         "directive",
@@ -242,7 +242,7 @@ fn parse_runtime_yaml_missing_abi_version_rejected() {
         "\
 kind: runtime
 serves: directive
-binary_ref: bin/x
+binary_ref: bin/test-triple/x
 ",
         "directive",
     );
@@ -259,7 +259,7 @@ fn parse_runtime_yaml_wrong_kind_rejected() {
         "\
 kind: tool
 serves: directive
-binary_ref: bin/x
+binary_ref: bin/test-triple/x
 abi_version: v1
 ",
         "directive",
@@ -319,7 +319,7 @@ fn registry_two_runtimes_one_default_returns_default() {
 kind: runtime
 serves: directive
 default: true
-binary_ref: bin/fast
+binary_ref: bin/test-triple/fast
 abi_version: v1
 ",
             "directive",
@@ -332,7 +332,7 @@ abi_version: v1
             "\
 kind: runtime
 serves: directive
-binary_ref: bin/slow
+binary_ref: bin/test-triple/slow
 abi_version: v1
 ",
             "directive",
@@ -361,7 +361,7 @@ fn registry_two_runtimes_both_default_fails_build() {
 kind: runtime
 serves: directive
 default: true
-binary_ref: bin/a
+binary_ref: bin/test-triple/a
 abi_version: v1
 ",
             "directive",
@@ -375,7 +375,7 @@ abi_version: v1
 kind: runtime
 serves: directive
 default: true
-binary_ref: bin/b
+binary_ref: bin/test-triple/b
 abi_version: v1
 ",
             "directive",
@@ -407,7 +407,7 @@ fn registry_two_runtimes_neither_default_lookup_fails() {
             "\
 kind: runtime
 serves: directive
-binary_ref: bin/a
+binary_ref: bin/test-triple/a
 abi_version: v1
 ",
             "directive",
@@ -420,7 +420,7 @@ abi_version: v1
             "\
 kind: runtime
 serves: directive
-binary_ref: bin/b
+binary_ref: bin/test-triple/b
 abi_version: v1
 ",
             "directive",
@@ -456,7 +456,7 @@ fn registry_lookup_by_ref_returns_runtime() {
 
     let canonical = CanonicalRef::parse("runtime:default").unwrap();
     let rt = registry.lookup_by_ref(&canonical).expect("lookup hit");
-    assert_eq!(rt.yaml.binary_ref, "bin/runner");
+    assert_eq!(rt.yaml.binary_ref, "bin/test-triple/runner");
 
     let missing = CanonicalRef::parse("runtime:nope").unwrap();
     assert!(registry.lookup_by_ref(&missing).is_none());

@@ -1118,6 +1118,55 @@ mod tests {
         assert!(path.exists());
     }
 
+    /// Wait until the shell has installed its signal trap. A fixed sleep is
+    /// not a readiness boundary under a saturated CI runner. The child is the
+    /// unreaped leader of a process group created by this test, so the timeout
+    /// path may safely kill that still-reserved group ID before failing.
+    fn wait_for_signal_target_ready(child: &mut std::process::Child, ready: &std::path::Path) {
+        let overall_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let cleanup_at = overall_deadline
+            .checked_sub(Duration::from_millis(500))
+            .expect("cleanup reserve fits inside readiness deadline");
+        while std::time::Instant::now() < cleanup_at {
+            if ready.exists() {
+                return;
+            }
+            if let Some(status) = child.try_wait().expect("poll signal target readiness") {
+                panic!("signal target exited before installing its trap: {status:?}");
+            }
+            let remaining = cleanup_at.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+
+        let signal_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let signal_detail = if signal_result == 0 {
+            "SIGKILL delivered to owned process group".to_string()
+        } else {
+            format!(
+                "owned process-group SIGKILL failed: {}",
+                std::io::Error::last_os_error()
+            )
+        };
+        let mut status = None;
+        while std::time::Instant::now() < overall_deadline {
+            status = child
+                .try_wait()
+                .expect("poll signal target readiness cleanup");
+            if status.is_some() {
+                break;
+            }
+            let remaining = overall_deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+        let child_detail = status
+            .map(|status| format!("reaped with {status:?}"))
+            .unwrap_or_else(|| "not reaped before deadline".to_string());
+        panic!(
+            "signal target did not install its trap within the three-second deadline; \
+             cleanup: {signal_detail}; child: {child_detail}"
+        );
+    }
+
     /// Spawn a shell that:
     ///   1. Installs a SIGTERM trap which writes a marker file then exits 0.
     ///   2. Sleeps long enough that, absent any signal, the test would time out.
@@ -1130,18 +1179,25 @@ mod tests {
         std::path::PathBuf,
     ) {
         let marker = tmp.path().join("got_term");
+        let ready = tmp.path().join("term_ready");
         let marker_str = marker.display().to_string();
+        let ready_str = ready.display().to_string();
+        // Keep the signalable shell itself blocked in a builtin. A shell waiting
+        // on a foreground `sleep` defers its trap until that child exits, while a
+        // busy loop wastes a runner core. `Child` retains the piped stdin writer,
+        // so `read` blocks without a subprocess and the exact target handles TERM.
         let script = format!(
-            r#"trap 'echo term > "{m}"; exit 0' TERM; (while true; do sleep 0.05; done)"#,
-            m = marker_str
+            r#"trap 'echo term > "{m}"; exit 0' TERM; : > "{r}"; while read -r _; do :; done"#,
+            m = marker_str,
+            r = ready_str,
         );
-        let child = unsafe {
+        let mut child = unsafe {
             // process_group(0) starts the child in its own new process group
             // whose PGID equals its PID — exactly what the daemon kills.
             Command::new("sh")
                 .arg("-c")
                 .arg(&script)
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .pre_exec(|| {
@@ -1155,8 +1211,7 @@ mod tests {
                 .expect("spawn signal target")
         };
         let pgid = child.id() as i64;
-        // Give the shell a moment to install the trap before signalling.
-        std::thread::sleep(Duration::from_millis(150));
+        wait_for_signal_target_ready(&mut child, &ready);
         let identity =
             capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
         (child, identity, marker)
@@ -1199,14 +1254,76 @@ mod tests {
     /// becomes a zombie that a group-existence probe still reports as alive,
     /// confusing the daemon's bounded group-exit poll. (In production the
     /// reaper is the engine's spawn handle.)
+    ///
+    /// The test owns both the `Child` and its dedicated process group. While
+    /// `try_wait` reports it live, the unreaped leader still reserves its PID,
+    /// so a final `kill(-pgid, SIGKILL)` cannot hit a recycled group. Reserve
+    /// the final second of the same ten-second budget for that cleanup and
+    /// never call a blocking `wait` or `join` on the timeout path.
     fn run_kill_with_reaper<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(
         kill: F,
         child: &mut std::process::Child,
     ) -> (R, std::process::ExitStatus) {
         let kill_handle = std::thread::spawn(kill);
-        let status = child.wait().expect("wait child");
-        let result = kill_handle.join().expect("kill thread join");
-        (result, status)
+        let overall_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let cleanup_at = overall_deadline
+            .checked_sub(Duration::from_secs(1))
+            .expect("cleanup reserve fits inside signal-test deadline");
+        let mut status = None;
+
+        while std::time::Instant::now() < cleanup_at {
+            if status.is_none() {
+                status = child.try_wait().expect("poll child");
+            }
+            if let Some(status) = status.take_if(|_| kill_handle.is_finished()) {
+                let result = kill_handle.join().expect("kill thread join");
+                return (result, status);
+            }
+            let remaining = cleanup_at.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+
+        let cleanup_signal = if status.is_none() {
+            let result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            if result == 0 {
+                "SIGKILL delivered to owned process group".to_string()
+            } else {
+                format!(
+                    "owned process-group SIGKILL failed: {}",
+                    std::io::Error::last_os_error()
+                )
+            }
+        } else {
+            "child already reaped; no numeric signal attempted".to_string()
+        };
+
+        while std::time::Instant::now() < overall_deadline {
+            if status.is_none() {
+                status = child.try_wait().expect("poll child during bounded cleanup");
+            }
+            if status.is_some() && kill_handle.is_finished() {
+                break;
+            }
+            let remaining = overall_deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+
+        let child_detail = status
+            .map(|status| format!("reaped with {status:?}"))
+            .unwrap_or_else(|| "not reaped before deadline".to_string());
+        let worker_detail = if kill_handle.is_finished() {
+            match kill_handle.join() {
+                Ok(_) => "kill worker completed".to_string(),
+                Err(_) => "kill worker panicked".to_string(),
+            }
+        } else {
+            drop(kill_handle);
+            "kill worker still running and was detached".to_string()
+        };
+        panic!(
+            "signal target exceeded the ten-second test deadline; \
+             cleanup: {cleanup_signal}; child: {child_detail}; worker: {worker_detail}"
+        );
     }
 
     #[test]
@@ -1273,15 +1390,18 @@ mod tests {
         // Trap SIGTERM but do NOT exit — forces grace expiry → SIGKILL path.
         let tmp = TempDir::new().unwrap();
         let marker = tmp.path().join("got_term");
+        let ready = tmp.path().join("stubborn_ready");
         let marker_str = marker.display().to_string();
+        let ready_str = ready.display().to_string();
         // No subshell — the parent sh installs the trap and loops
         // directly so SIGTERM is fully absorbed by the trap (which
         // intentionally does not exit). The kernel's SIGKILL is then
         // the only thing that can terminate the process group, which
         // is exactly the path under test.
         let script = format!(
-            r#"trap 'echo term > "{m}"' TERM; while true; do sleep 0.05; done"#,
-            m = marker_str
+            r#"trap 'echo term > "{m}"' TERM; : > "{r}"; while true; do sleep 0.05; done"#,
+            m = marker_str,
+            r = ready_str,
         );
         let mut child = unsafe {
             Command::new("sh")
@@ -1301,7 +1421,7 @@ mod tests {
                 .expect("spawn stubborn target")
         };
         let pgid = child.id() as i64;
-        std::thread::sleep(Duration::from_millis(150));
+        wait_for_signal_target_ready(&mut child, &ready);
         let identity =
             capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
 
@@ -1357,16 +1477,22 @@ mod tests {
         std::path::PathBuf,
     ) {
         let marker = tmp.path().join("got_usr1");
+        let ready = tmp.path().join("usr1_ready");
         let marker_str = marker.display().to_string();
+        let ready_str = ready.display().to_string();
+        // As above, the exact target blocks in its own builtin over the retained
+        // stdin pipe, so there is no foreground child to defer SIGUSR1 and no
+        // polling loop consuming a runner core.
         let script = format!(
-            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; (while true; do sleep 0.05; done)"#,
-            m = marker_str
+            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; : > "{r}"; while read -r _; do :; done"#,
+            m = marker_str,
+            r = ready_str,
         );
-        let child = unsafe {
+        let mut child = unsafe {
             Command::new("sh")
                 .arg("-c")
                 .arg(&script)
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .pre_exec(|| {
@@ -1380,7 +1506,7 @@ mod tests {
                 .expect("spawn usr1 target")
         };
         let pgid = child.id() as i64;
-        std::thread::sleep(Duration::from_millis(150));
+        wait_for_signal_target_ready(&mut child, &ready);
         let identity =
             capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
         (child, identity, marker)

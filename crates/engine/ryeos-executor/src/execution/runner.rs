@@ -497,6 +497,13 @@ fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerD
         StopIfAdmissionOpenOutcome::AlreadyTerminal => {
             return Ok(OwnerDropThreadOutcome::AlreadyTerminal)
         }
+        StopIfAdmissionOpenOutcome::PreservedForFollow => {
+            tracing::debug!(
+                thread_id,
+                "execution owner transferred to durable follow waiter"
+            );
+            return Ok(OwnerDropThreadOutcome::AlreadyTerminal);
+        }
         StopIfAdmissionOpenOutcome::PreservedForShutdown => {
             return Ok(OwnerDropThreadOutcome::PreservedForShutdown)
         }
@@ -1224,13 +1231,17 @@ fn verify_fresh_root_admission(params: &ExecutionParams) -> Result<()> {
 /// for an already-active shutdown coordinator.
 #[tracing::instrument(
     name = "thread:execute",
-    skip(state, params),
+    skip(state, params, launch_handoff),
     fields(
         thread_id = tracing::field::Empty,
         item_ref = %params.resolved.item_ref,
     )
 )]
-pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<InlineResult> {
+pub async fn run_inline(
+    state: AppState,
+    mut params: ExecutionParams,
+    launch_handoff: Option<&super::launch::LaunchHandoff>,
+) -> Result<InlineResult> {
     let mut guard = ExecutionGuard::new(state.clone());
 
     // Create and track thread.
@@ -1417,7 +1428,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     let inline_isolation = state.isolation.clone();
     let inline_isolation_daemon_socket_path = isolation_daemon_socket_path;
     let spawn_workspace_lifeline = guard.temp_dir.clone();
-    let mut spawned = match task::spawn_blocking(move || {
+    let spawn_handle = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
             engine: &engine,
@@ -1437,9 +1448,16 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
             original_pushed_head_ref: inline_pushed_head_ref.as_ref(),
             state_root: inline_state_root.as_deref(),
         })
-    })
-    .await
-    {
+    });
+
+    // The durable row and complete execution request are now owned by the
+    // scheduled spawn task. Accepted launch may expose its pre-minted id at
+    // this point; spawn/attach/runtime failures remain inspectable on that row.
+    if let Some(handoff) = launch_handoff {
+        handoff.publish(running.thread_id.clone());
+    }
+
+    let mut spawned = match spawn_handle.await {
         Ok(Ok(s)) => s,
         Ok(Err(err)) => {
             tracing::error!(error = %err, "engine error during inline spawn");
@@ -1629,13 +1647,17 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
 /// on success, error, and panic.
 #[tracing::instrument(
     name = "thread:execute",
-    skip(state, params),
+    skip(state, params, launch_handoff),
     fields(
         thread_id = tracing::field::Empty,
         item_ref = %params.resolved.item_ref,
     )
 )]
-pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Result<DetachedResult> {
+pub async fn run_detached(
+    state: AppState,
+    mut params: ExecutionParams,
+    launch_handoff: Option<&super::launch::LaunchHandoff>,
+) -> Result<DetachedResult> {
     let mut guard = ExecutionGuard::new(state.clone());
 
     // Create and track thread.
@@ -1854,6 +1876,12 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_tat_token,
         None,
     ));
+
+    // Every execution input and cleanup guard is now owned by the scheduled
+    // detached task. This is the terminal-subprocess acknowledgement boundary.
+    if let Some(handoff) = launch_handoff {
+        handoff.publish(running_thread_id.clone());
+    }
 
     // Re-fetch the thread detail (the original was consumed by the background task setup)
     let running_detail = state
@@ -2710,7 +2738,7 @@ pub async fn run_existing_detached(
     // detached background task below, making a successful return a durable
     // claimed-and-enqueued boundary rather than an in-memory scheduling hint.
     let resume_claim = match ThreadLaunchClaim::acquire(&state, &thread_id)? {
-        ThreadLaunchClaimOutcome::Claimed(claim) => claim,
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }

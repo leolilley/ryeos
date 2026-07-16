@@ -122,6 +122,12 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Correction runs should reuse compiled RyeOS crates, not only third-party
+          # dependencies, and a failing gate must still publish its valid artifacts.
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -171,6 +177,11 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Keep the expensive bundle/test compilation warm across CI repair runs.
+          key: workspace-crates-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Show tool versions
         run: |

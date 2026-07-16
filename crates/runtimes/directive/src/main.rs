@@ -222,12 +222,21 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         &thread_auth_token,
     );
 
-    // Register this process's pgid BEFORE any durable callback — the resume
-    // replay read, `append_event(thread_continued)`, and the opening
-    // `emit_stimulus` below all happen after this. Without it the daemon
-    // cannot tell a live runtime from a crashed one on restart and would
-    // resume a duplicate. Resume-critical: must precede all work.
+    // Establish runtime lifecycle BEFORE any other durable callback. The
+    // process attachment lets restart reconciliation distinguish this live
+    // runtime from a crashed one; the running transition then opens the
+    // mutation surface used by thread_continued and the opening stimulus.
+    // Both lifecycle calls precede resume replay and are resume-critical.
     callback.attach_current_process().await?;
+    // The directive bootstrap emits the opening cognition before Runner enters
+    // its state machine. Cross the lifecycle boundary immediately after process
+    // attachment so every subsequent durable callback is authored by a running
+    // thread. Runner's Init mark remains an idempotent defense for alternate
+    // harnesses and resume entry points.
+    callback
+        .mark_running()
+        .await
+        .context("failed to mark directive runtime running after attach")?;
 
     let mut runtime_data = std::mem::take(&mut envelope.runtime_data);
     let provider_snapshot: ResolvedProviderSnapshot =

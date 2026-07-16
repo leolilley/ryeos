@@ -25,8 +25,9 @@ pub mod thread_snapshot;
 
 pub use attestation::Attestation;
 pub use bundle_event::{
-    hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
-    BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+    hash_bundle_event, validate_bundle_identifier, BundleEventAttachment, BundleEventAttribution,
+    BundleEventObject, BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_ATTACHMENTS,
+    MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use item_source::ItemSource;

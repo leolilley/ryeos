@@ -26,6 +26,20 @@ if [[ -s "$tmp/width-errors" ]]; then
     exit 1
 fi
 
+assert_terminal_frames_fit() {
+    local file="$1" limit="$2" description="$3" frame frame_width
+    while IFS= read -r -d $'\r' frame || [[ -n "$frame" ]]; do
+        frame="${frame//$'\033[2K'/}"
+        [[ -z "$frame" ]] && continue
+        frame_width="$(printf '%s\n' "$frame" | wc -L)"
+        if (( frame_width > limit )); then
+            printf '%s terminal output exceeded COLUMNS: %s cells\n' \
+                "$description" "$frame_width" >&2
+            return 1
+        fi
+    done <"$file"
+}
+
 RYEOS_TTY=never ryeos_term_init
 RYEOS_TTY=never ryeos_term_begin VERIFY "plain phase" 2>"$tmp/plain"
 RYEOS_TTY=never ryeos_term_update "plain update" "detail" 2>>"$tmp/plain"
@@ -55,7 +69,7 @@ if grep -q $'\033\[[0-9;]*m' "$tmp/no-color"; then
     exit 1
 fi
 
-NO_COLOR= TERM=xterm RYEOS_TTY=always bash -c \
+NO_COLOR='' TERM=xterm RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_begin RUN empty-no-color; ryeos_term_cleanup' \
     _ "$helper" 2>"$tmp/empty-no-color"
 if grep -q $'\033\[[0-9;]*m' "$tmp/empty-no-color"; then
@@ -132,18 +146,12 @@ fi
 NO_COLOR=1 TERM=xterm COLUMNS=20 RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_begin RUN "a deliberately long narrow-terminal label"; ryeos_term_cleanup' \
     _ "$helper" 2>"$tmp/narrow"
-awk 'length($0) > 20 { exit 1 }' "$tmp/narrow" || {
-    printf 'narrow terminal output exceeded COLUMNS\n' >&2
-    exit 1
-}
+assert_terminal_frames_fit "$tmp/narrow" 20 narrow
 
 NO_COLOR=1 TERM=xterm COLUMNS=40 RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_begin VERIFY "界界界界界界界界界界界界界界界界"; ryeos_term_update "界界界界界界界界界界界界界界界界" detail; ryeos_term_cleanup' \
     _ "$helper" 2>"$tmp/wide-cells"
-if (( $(wc -L < "$tmp/wide-cells") > 40 )); then
-    printf 'wide terminal output exceeded COLUMNS\n' >&2
-    exit 1
-fi
+assert_terminal_frames_fit "$tmp/wide-cells" 40 wide
 
 if command -v script >/dev/null 2>&1; then
     TERM=xterm RYEOS_TTY=auto script -qec \

@@ -2277,7 +2277,7 @@ mod tests {
             "expected_previous_hash": null,
             "admitted_target_hash": null,
             "admitted_at": null,
-            "created_at": "2026-07-14T12:00:00+00:00",
+            "created_at": "2026-07-14T12:00:00Z",
             "object_hashes": [],
             "blob_hashes": [],
         })
@@ -2609,7 +2609,9 @@ mod tests {
         lease
             .protect_blob_hash_admitted(&guard, &hash("b"))
             .unwrap();
-        let staged_dir = temp.path().join("recovery/staged-cas-roots");
+        let staged_dir = temp
+            .path()
+            .join("recovery/thread-projection/staged-cas-roots");
         let before = fs::read_dir(&staged_dir).unwrap().count();
 
         let roots = store.inspect_staged_cas_root_hashes_read_only().unwrap();
@@ -2666,12 +2668,14 @@ mod tests {
     fn nested_cas_mutation_guard_rejects_a_different_runtime_root() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
-        let _shared = CasMutationGuard::acquire_shared(first.path()).unwrap();
-        let error = match CasMutationGuard::acquire_shared(second.path()) {
+        CasMutationGuard::ensure_anchor(first.path()).unwrap();
+        CasMutationGuard::ensure_anchor(second.path()).unwrap();
+        let _shared = CasMutationGuard::acquire_existing_shared(first.path()).unwrap();
+        let error = match CasMutationGuard::acquire_existing_shared(second.path()) {
             Ok(_) => panic!("cross-root nested guard unexpectedly succeeded"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("different runtime state root"));
+        assert!(format!("{error:#}").contains("different runtime state root"));
     }
 
     #[test]

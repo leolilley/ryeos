@@ -53,10 +53,10 @@ pub use locators::ThreadLocator;
 pub use objects::{
     parse_canonical_timestamp, thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot,
     thread_snapshot::ThreadUsage, thread_snapshot::UsageSubject, Attestation,
-    BundleEventAttribution, BundleEventObject, CapturedEffectiveTrustClass, CapturedItemSpace,
-    CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
-    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState,
-    ThreadHistoryRetention, MAX_TERMINAL_DURATION_SECONDS,
+    BundleEventAttachment, BundleEventAttribution, BundleEventObject, CapturedEffectiveTrustClass,
+    CapturedItemSpace, CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance,
+    CapturedPolicyProvenance, CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy,
+    ChainState, ThreadHistoryRetention, MAX_TERMINAL_DURATION_SECONDS,
 };
 pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,

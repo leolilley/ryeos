@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_excludes_current_due_boundary() {
-        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let db = SchedulerDb::new_in_memory().unwrap();
         let spec = make_cron_spec(1780455600000); // 2026-06-03T03:00:00Z
         db.upsert_fire(&make_fire(&spec.schedule_id, 1780457400000))
             .unwrap(); // 03:30
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_includes_older_missing_boundary_before_current() {
-        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let db = SchedulerDb::new_in_memory().unwrap();
         let spec = make_cron_spec(1780455600000); // 2026-06-03T03:00:00Z
         db.upsert_fire(&make_fire(&spec.schedule_id, 1780456500000))
             .unwrap(); // 03:15
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_startup_after_missed_first_fire() {
-        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let db = SchedulerDb::new_in_memory().unwrap();
         let spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
 
         let missed = detect_misfires_before(
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn detect_misfires_startup_before_first_fire_is_empty() {
-        let db = SchedulerDb::open(&std::path::PathBuf::from(":memory:")).unwrap();
+        let db = SchedulerDb::new_in_memory().unwrap();
         let spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
 
         let missed = detect_misfires_before(

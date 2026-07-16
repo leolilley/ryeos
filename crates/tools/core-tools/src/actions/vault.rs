@@ -259,7 +259,7 @@ fn run_rewrap_locked(
                 MAX_VAULT_ENVELOPE_BYTES,
                 "staged sealed envelope",
             )
-            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+            .map_err(lillux::AtomicMutationError::BeforeCommit)?;
             lillux::atomic_write_private(&store_path, &bytes)?;
         }
         let public_bytes = read_bounded_file(
@@ -267,7 +267,7 @@ fn run_rewrap_locked(
             MAX_VAULT_KEY_FILE_BYTES,
             "staged vault public key",
         )
-        .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
         lillux::atomic_write(&pub_path, &public_bytes)?;
         // Secret key last: once this changes, the current generation is complete.
         let secret_bytes = read_bounded_file(
@@ -275,7 +275,7 @@ fn run_rewrap_locked(
             MAX_VAULT_KEY_FILE_BYTES,
             "staged vault secret key",
         )
-        .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
         lillux::atomic_write_private(&key_path, &secret_bytes)?;
         Ok(())
     })();

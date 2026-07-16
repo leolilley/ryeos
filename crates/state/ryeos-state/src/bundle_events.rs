@@ -8,8 +8,8 @@ use lillux::crypto::Verifier as _;
 use serde::{Deserialize, Serialize};
 
 use crate::objects::{
-    hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
-    BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES, SCHEMA_VERSION,
+    hash_bundle_event, validate_bundle_identifier, BundleEventAttachment, BundleEventAttribution,
+    BundleEventObject, BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES, SCHEMA_VERSION,
 };
 use crate::refs;
 use crate::signer::Signer;
@@ -67,6 +67,7 @@ pub struct BundleEventAppendRequest {
     pub correlation_id: Option<String>,
     pub causation_id: Option<String>,
     pub attribution: BundleEventAttribution,
+    pub attachments: Vec<BundleEventAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +334,7 @@ pub(crate) fn append_bundle_event_pinned(
         request_fingerprint: Some(request_fingerprint),
         correlation_id: request.correlation_id,
         causation_id: request.causation_id,
+        attachments: request.attachments,
         payload: request.payload,
     };
     event.validate()?;
@@ -936,7 +938,7 @@ pub fn read_bundle_event_by_hash(
     read_bundle_event_by_hash_with_cas(&cas, event_hash)
 }
 
-fn read_bundle_event_by_hash_with_cas(
+pub(crate) fn read_bundle_event_by_hash_with_cas(
     cas: &lillux::CasStore,
     event_hash: &str,
 ) -> anyhow::Result<BundleEventRecord> {
@@ -1185,6 +1187,7 @@ fn compute_request_fingerprint(
         "idempotency_key": request.idempotency_key,
         "correlation_id": request.correlation_id,
         "causation_id": request.causation_id,
+        "attachments": request.attachments,
     });
     let canonical = lillux::canonical_json(&value)
         .context("failed to canonicalize bundle event request fingerprint")?;
@@ -1240,6 +1243,7 @@ mod tests {
             correlation_id: None,
             causation_id: None,
             attribution: BundleEventAttribution::default(),
+            attachments: vec![],
         }
     }
 
@@ -1285,6 +1289,34 @@ mod tests {
             Some(chain[0].event_hash.as_str())
         );
         assert_eq!(chain[1].event.chain_seq, 2);
+    }
+
+    #[test]
+    fn event_attachment_is_part_of_the_retained_object_closure() {
+        let (_tmp, cas_root, refs_root) = roots();
+        let signer = TestSigner::default();
+        let trust = trust_store(&signer);
+        let checkpoint = b"durable learner checkpoint";
+        let blob_hash = lillux::CasStore::new(cas_root.clone())
+            .put_blob(checkpoint)
+            .unwrap()
+            .hash;
+        let mut request = append_request("actor", "weights_updated");
+        request.attachments.push(BundleEventAttachment {
+            name: "checkpoint".to_string(),
+            blob_hash: blob_hash.clone(),
+            size_bytes: checkpoint.len() as u64,
+            media_type: Some("application/octet-stream".to_string()),
+        });
+
+        let appended =
+            append_bundle_event(&cas_root, &refs_root, request, &signer, &trust).unwrap();
+        let closure =
+            crate::object_closure::collect_object_closure(&cas_root, [appended.event_hash])
+                .unwrap();
+
+        assert!(closure.is_complete());
+        assert!(closure.blob_hashes.contains(&blob_hash));
     }
 
     #[test]

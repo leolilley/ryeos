@@ -2298,8 +2298,9 @@ mod tests {
 
         let error = replay_full_and_advance_cursor(&projection, &cas_root, "T-root", &head_hash)
             .unwrap_err();
+        let diagnostic = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("failed to read ChainState"),
+            diagnostic.contains("load ChainState history link") && diagnostic.contains("is absent"),
             "unexpected error: {error:#}"
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
@@ -2346,8 +2347,10 @@ mod tests {
 
         let error = replay_full_and_advance_cursor(&projection, &cas_root, "T-root", &head_hash)
             .unwrap_err();
+        let diagnostic = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("failed to parse ChainState"),
+            diagnostic.contains("load ChainState history link")
+                && diagnostic.contains("decode CAS object"),
             "unexpected error: {error:#}"
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();
@@ -2385,8 +2388,9 @@ mod tests {
 
         let error = replay_full_and_advance_cursor(&projection, &cas_root, "T-root", &head_hash)
             .unwrap_err();
+        let diagnostic = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("failed to parse thread_snapshot"),
+            diagnostic.contains("load snapshot") && diagnostic.contains("decode CAS object"),
             "unexpected error: {error:#}"
         );
         let cursor = projection.get_projection_meta("T-root").unwrap().unwrap();

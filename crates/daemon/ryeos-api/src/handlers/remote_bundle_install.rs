@@ -573,10 +573,12 @@ impl RemoteStagingCleanup {
             return;
         }
         match std::fs::symlink_metadata(&self.path) {
-            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
-                if std::fs::remove_dir_all(&self.path).is_ok() {
-                    self.armed = false;
-                }
+            Ok(metadata)
+                if metadata.file_type().is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && std::fs::remove_dir_all(&self.path).is_ok() =>
+            {
+                self.armed = false;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.armed = false;
@@ -673,9 +675,9 @@ async fn fetch_and_materialize_files(
     Ok((files_installed, total_bytes))
 }
 
-fn build_blob_fetch_batches(
-    entries: &[BundleExportEntry],
-) -> Result<(HashMap<String, Vec<usize>>, Vec<Vec<String>>)> {
+type BlobFetchBatches = (HashMap<String, Vec<usize>>, Vec<Vec<String>>);
+
+fn build_blob_fetch_batches(entries: &[BundleExportEntry]) -> Result<BlobFetchBatches> {
     let mut uses_by_hash: HashMap<String, Vec<usize>> = HashMap::new();
     let mut ordered_hashes: Vec<(String, u64)> = Vec::new();
     for (index, entry) in entries.iter().enumerate() {

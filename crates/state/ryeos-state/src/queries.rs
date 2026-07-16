@@ -990,6 +990,8 @@ pub fn execution_tree(
             t.item_ref, t.executor_ref, t.launch_mode,
             t.current_site_id, t.origin_site_id, t.upstream_thread_id,
             t.requested_by, t.project_root,
+            t.base_project_snapshot_hash, t.result_project_snapshot_hash,
+            t.captured_history_policy_json,
             t.created_at, t.updated_at, t.started_at, t.finished_at,
             walk.parent_thread_id AS tree_parent_thread_id,
             walk.relation AS tree_relation,
@@ -2226,7 +2228,7 @@ mod tests {
             thread_id,
             chain_root_id,
             "directive",
-            "system/test",
+            "directive:system/test",
             "directive-runtime",
         )
         .status(status)
@@ -2246,7 +2248,7 @@ mod tests {
         if thread_id == chain_root_id {
             builder = builder.captured_history_policy(Some(CapturedThreadHistoryPolicy {
                 retention: ThreadHistoryRetention::Durable,
-                canonical_item_ref: "system/test".to_string(),
+                canonical_item_ref: "directive:system/test".to_string(),
                 item_content_hash: "11".repeat(32),
                 item_signer_fingerprint: Some("22".repeat(32)),
                 item_trust_class: CapturedItemTrustClass::Trusted,
@@ -2868,7 +2870,7 @@ mod tests {
             Some("T-source"),
         );
         project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
-        project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
+        project_usage_event(&db, "chain-A", "T-successor", 3, 150, 15);
 
         let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
         assert_eq!(totals.thread_count, 1);
@@ -2895,7 +2897,7 @@ mod tests {
             Some("T-source"),
         );
         project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
-        project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
+        project_usage_event(&db, "chain-A", "T-successor", 3, 150, 15);
 
         let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
         assert_eq!(

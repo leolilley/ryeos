@@ -742,7 +742,7 @@ fn handler_preparation_error(
         message: error.message,
         classification: classification.to_owned(),
         binding: error.binding,
-        details: error.details,
+        details: Box::new(error.details),
     }
 }
 
@@ -831,7 +831,7 @@ fn preparation_error_with_binding(
         message: message.into(),
         classification: classification.to_owned(),
         binding,
-        details: BTreeMap::new(),
+        details: Box::new(BTreeMap::new()),
     }
 }
 
@@ -854,7 +854,7 @@ fn host_preparation_error_with_binding(
         message: message.into(),
         classification: classification.to_owned(),
         binding,
-        details: BTreeMap::new(),
+        details: Box::new(BTreeMap::new()),
     }
 }
 

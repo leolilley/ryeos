@@ -666,8 +666,11 @@ mod tests {
 
     impl MockContext {
         fn new() -> Self {
+            let app_root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("state"))
+                .unwrap();
             Self {
-                app_root: tempfile::tempdir().unwrap(),
+                app_root,
                 db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
                 gate: Arc::new(RwLock::new(())),
                 trust: TrustStore::empty(),
@@ -693,7 +696,7 @@ mod tests {
             self.gate.clone()
         }
 
-        fn trust_store(&self) -> &TrustStore {
+        fn schedule_trust_store(&self) -> &TrustStore {
             &self.trust
         }
 

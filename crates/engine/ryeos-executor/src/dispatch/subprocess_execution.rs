@@ -198,7 +198,12 @@ pub(crate) async fn dispatch_subprocess(
     use ryeos_engine::protocol_vocabulary::LifecycleMode;
     match protocol.descriptor.lifecycle.mode {
         LifecycleMode::Managed => {
-            dispatch_managed_subprocess(
+            // Keep the managed and ordinary subprocess futures behind an
+            // allocation boundary. Both leaves carry substantial launch
+            // state; embedding both branch futures in this routing future can
+            // exhaust an unoptimized Tokio worker stack before the selected
+            // leaf reaches its first suspension point.
+            Box::pin(dispatch_managed_subprocess(
                 SubprocessDispatchContext {
                     current_ref,
                     thread_profile,
@@ -212,19 +217,20 @@ pub(crate) async fn dispatch_subprocess(
                     launch_handoff,
                 },
                 protocol,
-            )
+            ))
             .await
         }
         LifecycleMode::DetachedOk => {
             validate_ordinary_protocol_contract(protocol, &current_ref.kind)?;
-            dispatch_tool_subprocess(
+            Box::pin(dispatch_tool_subprocess(
                 current_ref,
                 thread_profile,
                 hop_verified,
                 request,
                 ctx,
                 state,
-            )
+                launch_handoff,
+            ))
             .await
         }
     }
@@ -343,7 +349,7 @@ async fn dispatch_managed_subprocess(
     })
     .await
     .map_err(|e| match e {
-        launch::BuildAndLaunchError::LaunchPreparation(error) => error,
+        launch::BuildAndLaunchError::LaunchPreparation(error) => *error,
         launch::BuildAndLaunchError::MissingSecrets { item_ref, secrets } => {
             let first = secrets.first().expect("missing secret error has a secret");
             let source = first.primary_source();
@@ -383,6 +389,9 @@ async fn dispatch_managed_subprocess(
     }))
 }
 
+// Verified hop identity, root authority, request context, daemon state, and
+// protocol contract remain explicit at the subprocess dispatch boundary.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_streaming_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
@@ -527,7 +536,7 @@ async fn dispatch_streaming_subprocess(
         &engine_roots,
         &state.config.app_root,
     )
-    .map_err(|error| DispatchError::Internal(error.into()))?;
+    .map_err(DispatchError::Internal)?;
     let env_request = ryeos_engine::subprocess_spec::SubprocessBuildRequest {
         cmd: executor_path,
         args: Vec::new(),
@@ -948,6 +957,7 @@ async fn dispatch_tool_subprocess(
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_handoff: Option<&crate::execution::launch::LaunchHandoff>,
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
 
@@ -992,7 +1002,14 @@ async fn dispatch_tool_subprocess(
             detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
         })?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
-        return dispatch_via_method_executor(&resolved, request, ctx, state).await;
+        return Box::pin(dispatch_via_method_executor(
+            &resolved,
+            request,
+            ctx,
+            state,
+            launch_handoff,
+        ))
+        .await;
     }
 
     // A method-dispatch wrapper carries the target's admission through the
@@ -1101,23 +1118,34 @@ async fn dispatch_tool_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        let result = crate::execution::runner::run_detached(state.clone(), params)
-            .await
-            .map_err(|e| DispatchError::SubprocessRunFailed {
-                item_ref: item_ref_for_error.clone(),
-                detail: e.to_string(),
-            })?;
+        // `run_detached` and `run_inline` are independent, large lifecycle
+        // futures. Boxing the selected leaf prevents this tool router from
+        // carrying both state machines inline on every poll.
+        let result = Box::pin(crate::execution::runner::run_detached(
+            state.clone(),
+            params,
+            launch_handoff,
+        ))
+        .await
+        .map_err(|e| DispatchError::SubprocessRunFailed {
+            item_ref: item_ref_for_error.clone(),
+            detail: e.to_string(),
+        })?;
         Ok(json!({
             "thread": result.running_thread,
             "detached": true,
         }))
     } else {
-        let result = crate::execution::runner::run_inline(state.clone(), params)
-            .await
-            .map_err(|e| DispatchError::SubprocessRunFailed {
-                item_ref: item_ref_for_error,
-                detail: e.to_string(),
-            })?;
+        let result = Box::pin(crate::execution::runner::run_inline(
+            state.clone(),
+            params,
+            launch_handoff,
+        ))
+        .await
+        .map_err(|e| DispatchError::SubprocessRunFailed {
+            item_ref: item_ref_for_error,
+            detail: e.to_string(),
+        })?;
         let mut envelope = json!({
             "thread": result.finalized_thread,
             "result": result.result,

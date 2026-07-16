@@ -154,7 +154,7 @@ impl LiveDaemonTarget {
                         .with_context(|| format!("signal pinned ryeosd pid {}", self.pid));
                 }
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -174,7 +174,7 @@ impl LiveDaemonTarget {
                 return Err(std::io::Error::last_os_error())
                     .with_context(|| format!("poll pinned ryeosd pid {}", self.pid));
             }
-            return Ok(result > 0);
+            Ok(result > 0)
         }
 
         #[cfg(not(target_os = "linux"))]

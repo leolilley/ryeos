@@ -299,6 +299,8 @@ pub(crate) fn verify_planned_candidate(
 
 /// Re-plan the completed staging generation, verify it with the exact closure,
 /// then run the same node-owned registry/executable admission used at boot.
+// This admission boundary deliberately keeps every verified authority explicit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn admit_completed_staging(
     app_root: &Path,
     bundle_name: &str,

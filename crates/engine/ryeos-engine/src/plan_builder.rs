@@ -839,6 +839,8 @@ metadata:
             executor_id: executor_id.map(String::from),
             ..Default::default()
         };
+        let content = fs::read_to_string(&source_path).unwrap();
+        let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
@@ -848,8 +850,8 @@ metadata:
             resolved_from: "test".to_string(),
             shadowed: vec![],
             materialized_project_root: project_dir,
-            raw_content_digest: "test_raw_hash".to_string(),
-            content_hash: "test_hash".to_string(),
+            raw_content_digest: content_hash.clone(),
+            content_hash,
             signature_header: None,
             source_format: ResolvedSourceFormat {
                 extension: ".py".to_string(),

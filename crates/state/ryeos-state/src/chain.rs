@@ -966,15 +966,67 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
             anyhow::bail!("initial root event identity must equal chain_root_id");
         }
     }
+    let genesis_entry = ChainThreadEntry {
+        snapshot_hash: String::new(),
+        last_event_hash: None,
+        last_thread_seq: 0,
+        status: initial_snapshot.status,
+    };
+    validation::stamp_snapshot_position(&mut initial_snapshot, &genesis_entry, 0);
+    let initial_floor = initial_snapshot.created_at.clone();
+    validation::normalize_and_validate_new_thread(
+        &mut initial_snapshot,
+        chain_root_id,
+        &initial_floor,
+        None,
+    )?;
     lock.ensure_protects(refs_root, chain_root_id)?;
     verify_expected_current_head(lock, chain_root_id, None, trust_store)?;
 
-    let initial_floor = initial_snapshot.created_at.clone();
-    let append_timestamp = validation::normalize_event_timestamps(&mut events, &initial_floor)?;
+    // A valid authoritative history always begins with a zero-event genesis.
+    // Initial events are committed in its direct successor, while both states
+    // and the snapshot are written in one CAS batch and only the successor is
+    // published as the signed head. The Created snapshot need not be rewritten
+    // merely to record journal position; unchanged snapshots are allowed to lag
+    // an entry's event cursor until a real lifecycle transition publishes the
+    // next snapshot.
+    let snapshot_json = lillux::canonical_json(&initial_snapshot.to_value())
+        .context("failed to canonicalize initial root snapshot")?;
+    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
+    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
+
+    let genesis_state = ChainState {
+        schema: 1,
+        kind: "chain_state".to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        prev_chain_state_hash: None,
+        last_event_hash: None,
+        last_chain_seq: 0,
+        updated_at: validation::monotonic_now([initial_snapshot.updated_at.as_str()])?,
+        threads: BTreeMap::from([(
+            chain_root_id.to_string(),
+            ChainThreadEntry {
+                snapshot_hash: snapshot_hash.clone(),
+                ..genesis_entry
+            },
+        )]),
+    };
+    genesis_state.validate()?;
+    validation::validate_chain_positions(&genesis_state)?;
+    let genesis_json = lillux::canonical_json(&genesis_state.to_value())
+        .context("failed to canonicalize initial root genesis state")?;
+    let genesis_hash = lillux::sha256_hex(genesis_json.as_bytes());
+    let genesis_path = lillux::shard_path(cas_root, "objects", &genesis_hash, ".json");
+
+    let append_timestamp =
+        validation::normalize_event_timestamps(&mut events, &genesis_state.updated_at)?;
     let event_count_u64 = u64::try_from(events.len()).context("event batch is too large")?;
     let mut last_event_hash = None;
     let mut stored_events = Vec::with_capacity(events.len());
-    let mut pending_writes = Vec::new();
+    let mut pending_writes = vec![
+        (snapshot_path, snapshot_json.into_bytes()),
+        (genesis_path, genesis_json.into_bytes()),
+    ];
     for (offset, mut event) in events.into_iter().enumerate() {
         let sequence = u64::try_from(offset)
             .context("event batch is too large")?
@@ -995,36 +1047,12 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
         stored_events.push(event);
     }
 
-    let mut root_entry = ChainThreadEntry {
-        snapshot_hash: String::new(),
+    let root_entry = ChainThreadEntry {
+        snapshot_hash: snapshot_hash.clone(),
         last_event_hash: last_event_hash.clone(),
         last_thread_seq: event_count_u64,
         status: initial_snapshot.status,
     };
-    validation::stamp_snapshot_position(&mut initial_snapshot, &root_entry, event_count_u64);
-    validation::normalize_and_validate_new_thread(
-        &mut initial_snapshot,
-        chain_root_id,
-        &append_timestamp,
-        None,
-    )?;
-    validation::validate_snapshot_last_event(
-        &initial_snapshot,
-        initial_snapshot
-            .last_event_hash
-            .as_deref()
-            .ok_or_else(|| anyhow!("root snapshot is missing its final event hash"))?,
-        stored_events
-            .last()
-            .expect("root creation rejects an empty event list"),
-    )?;
-
-    let snapshot_json = lillux::canonical_json(&initial_snapshot.to_value())
-        .context("failed to canonicalize initial root snapshot")?;
-    let snapshot_hash = lillux::sha256_hex(snapshot_json.as_bytes());
-    let snapshot_path = lillux::shard_path(cas_root, "objects", &snapshot_hash, ".json");
-    pending_writes.push((snapshot_path, snapshot_json.into_bytes()));
-    root_entry.snapshot_hash.clone_from(&snapshot_hash);
 
     let mut threads = BTreeMap::new();
     threads.insert(chain_root_id.to_string(), root_entry);
@@ -1032,12 +1060,12 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
         schema: 1,
         kind: "chain_state".to_string(),
         chain_root_id: chain_root_id.to_string(),
-        prev_chain_state_hash: None,
+        prev_chain_state_hash: Some(genesis_hash.clone()),
         last_event_hash,
         last_chain_seq: event_count_u64,
         updated_at: validation::monotonic_now([
             append_timestamp.as_str(),
-            initial_snapshot.updated_at.as_str(),
+            genesis_state.updated_at.as_str(),
         ])?,
         threads,
     };
@@ -1051,6 +1079,14 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
 
     write_cas_batch(cas_root, lock, &pending_writes)
         .context("failed to store initial root chain closure in CAS")?;
+    let cas = cas_store_for_lock(cas_root, Some(lock))?;
+    validation::validate_authoritative_history_with_cas(
+        &cas,
+        chain_root_id,
+        &chain_state_hash,
+        Some(&genesis_hash),
+    )
+    .context("failed to validate initial root chain history before publication")?;
     publish_chain_head(
         cas_root,
         refs_root,
@@ -1591,6 +1627,9 @@ pub(crate) fn add_thread_to_chain_with_trust_under_lock(
 }
 
 #[cfg(test)]
+// The test adapter mirrors the authority-bearing production boundary, keeping
+// CAS, refs, signer, trust, and cache inputs independently visible.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events(
     cas_root: &Path,
     refs_root: &Path,
@@ -1614,6 +1653,9 @@ pub(crate) fn add_thread_to_chain_with_events(
 }
 
 #[cfg(test)]
+// Preserve the explicit authority/trust seam in tests rather than hiding
+// security-relevant inputs inside a convenience fixture.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn add_thread_to_chain_with_events_and_trust(
     cas_root: &Path,
     refs_root: &Path,
@@ -2289,6 +2331,16 @@ mod tests {
         trust_store
     }
 
+    fn initialize_test_recovery(refs_root: &Path) {
+        let runtime_state_dir = refs_root
+            .parent()
+            .expect("test refs root must have a runtime-state parent");
+        drop(
+            crate::recovery::RecoveryStore::from_runtime_state_dir(runtime_state_dir)
+                .expect("initialize test thread-projection recovery authority"),
+        );
+    }
+
     fn acknowledge_test_projection(refs_root: &Path, chain_root_id: &str) {
         let recovery = crate::recovery::RecoveryStore::from_refs_root(refs_root).unwrap();
         let lock = ChainLock::acquire(refs_root, chain_root_id).unwrap();
@@ -2317,6 +2369,7 @@ mod tests {
         signer: &dyn Signer,
         head_cache: &mut HeadCache,
     ) -> anyhow::Result<CreateResult> {
+        initialize_test_recovery(refs_root);
         let trust_store = test_trust_store();
         let result = super::create_chain(
             cas_root,
@@ -2333,12 +2386,45 @@ mod tests {
         result
     }
 
+    fn create_chain_with_events(
+        cas_root: &Path,
+        refs_root: &Path,
+        chain_root_id: &str,
+        initial_snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        head_cache: &mut HeadCache,
+    ) -> anyhow::Result<AddThreadWithEventsResult> {
+        initialize_test_recovery(refs_root);
+        let _cas_mutation_guard =
+            crate::recovery::CasMutationGuard::shared_from_cas_root(cas_root)?;
+        let lock = ChainLock::acquire(refs_root, chain_root_id)?;
+        let trust_store = test_trust_store();
+        let result = super::create_chain_with_events_and_trust_under_lock(
+            cas_root,
+            refs_root,
+            chain_root_id,
+            initial_snapshot,
+            events,
+            signer,
+            &trust_store,
+            head_cache,
+            &lock,
+        );
+        drop(lock);
+        if result.is_ok() {
+            acknowledge_test_projection(refs_root, chain_root_id);
+        }
+        result
+    }
+
     fn append_events(
         input: AppendEventsInput<'_>,
         head_cache: &mut HeadCache,
     ) -> anyhow::Result<AppendResult> {
         let refs_root = input.refs_root.to_path_buf();
         let chain_root_id = input.chain_root_id.to_string();
+        initialize_test_recovery(&refs_root);
         let trust_store = test_trust_store();
         let result = super::append_events(input, &trust_store, head_cache);
         if result.is_ok() {
@@ -2355,6 +2441,7 @@ mod tests {
         signer: &dyn Signer,
         head_cache: &mut HeadCache,
     ) -> anyhow::Result<CreateResult> {
+        initialize_test_recovery(refs_root);
         let trust_store = test_trust_store();
         let result = super::add_thread_to_chain(
             cas_root,
@@ -2380,6 +2467,7 @@ mod tests {
         signer: &dyn Signer,
         head_cache: &mut HeadCache,
     ) -> anyhow::Result<AddThreadWithEventsResult> {
+        initialize_test_recovery(refs_root);
         let trust_store = test_trust_store();
         let result = super::add_thread_to_chain_with_events(
             cas_root,
@@ -2441,12 +2529,12 @@ mod tests {
             thread_id,
             thread_id,
             "directive",
-            "system/test",
+            "directive:system/test",
             "directive-runtime",
         )
         .captured_history_policy(Some(CapturedThreadHistoryPolicy {
             retention: ThreadHistoryRetention::Durable,
-            canonical_item_ref: "system/test".into(),
+            canonical_item_ref: "directive:system/test".into(),
             item_content_hash: hash.clone(),
             item_signer_fingerprint: Some(hash.clone()),
             item_trust_class: CapturedItemTrustClass::Trusted,
@@ -2488,6 +2576,58 @@ mod tests {
         let result = result.unwrap();
         assert!(!result.chain_state_hash.is_empty());
         assert!(!result.snapshot_hash.is_empty());
+    }
+
+    #[test]
+    fn create_chain_with_events_writes_zero_event_genesis_then_event_successor() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let cas_root = tempdir.path().join("state");
+        let refs_root = tempdir.path().join("refs");
+        let signer = TestSigner::default();
+        let mut head_cache = HeadCache::new();
+
+        let result = create_chain_with_events(
+            &cas_root,
+            &refs_root,
+            "T-root",
+            make_test_snapshot("T-root"),
+            vec![make_test_event("T-root", "T-root")],
+            &signer,
+            &mut head_cache,
+        )
+        .unwrap();
+        let head = read_chain_head(&cas_root, &refs_root, "T-root", &mut head_cache).unwrap();
+        assert_eq!(head.last_chain_seq, 1);
+        assert!(head.last_event_hash.is_some());
+
+        let genesis_hash = head
+            .prev_chain_state_hash
+            .as_deref()
+            .expect("event-bearing head must directly name its genesis");
+        let cas = lillux::CasStore::new(cas_root.clone());
+        let genesis: ChainState = serde_json::from_value(
+            cas.get_object(genesis_hash)
+                .unwrap()
+                .expect("genesis object must exist"),
+        )
+        .unwrap();
+        assert!(genesis.prev_chain_state_hash.is_none());
+        assert_eq!(genesis.last_chain_seq, 0);
+        assert!(genesis.last_event_hash.is_none());
+        assert_eq!(
+            genesis.threads["T-root"].snapshot_hash, head.threads["T-root"].snapshot_hash,
+            "initial events must not invent a same-status snapshot transition"
+        );
+        assert_eq!(result.snapshot.last_chain_seq, 0);
+        assert_eq!(result.snapshot.last_thread_seq, 0);
+        assert!(result.snapshot.last_event_hash.is_none());
+        validate_authoritative_history_with_cas(
+            &cas,
+            "T-root",
+            &result.chain_state_hash,
+            Some(genesis_hash),
+        )
+        .unwrap();
     }
 
     #[test]

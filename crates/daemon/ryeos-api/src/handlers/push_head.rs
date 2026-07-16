@@ -128,18 +128,19 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
                 "initial push-head snapshot must not carry parent history"
             ));
         }
-        Some(expected) => {
+        Some(expected)
             if !crate::handlers::project_apply_snapshot::snapshot_history_contains(
                 &cas,
                 &req.snapshot_hash,
                 expected,
-            )? {
-                return Err(anyhow!(
-                    "push-head snapshot {} does not descend from expected HEAD {expected}",
-                    req.snapshot_hash
-                ));
-            }
+            )? =>
+        {
+            return Err(anyhow!(
+                "push-head snapshot {} does not descend from expected HEAD {expected}",
+                req.snapshot_hash
+            ));
         }
+        Some(_) => {}
         None => {}
     }
     let manifest_obj = cas
