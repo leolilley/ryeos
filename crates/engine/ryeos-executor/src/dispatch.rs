@@ -2520,12 +2520,13 @@ pub(crate) fn mint_runtime_capability_caps(
                 &engine.bundle_roots,
                 &engine.node_trust_store,
             )?;
-            ryeos_bundle::manifest::load_verified_manifest_yaml(
+            ryeos_bundle::manifest::load_verified_manifest(
                 &ai_dir,
                 &effective_bundle_id,
                 &engine.node_trust_store,
             )
             .map_err(|err| err.to_string())?
+            .manifest
         }
         ryeos_engine::contracts::ItemSpace::Project => {
             if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedProject {
@@ -2546,12 +2547,13 @@ pub(crate) fn mint_runtime_capability_caps(
                 .trust_store
                 .with_project_keys(project_root)
                 .map_err(|err| err.to_string())?;
-            ryeos_bundle::manifest::load_verified_manifest_yaml(
+            ryeos_bundle::manifest::load_verified_manifest(
                 &ai_dir,
                 &effective_bundle_id,
                 project_trust.as_ref(),
             )
             .map_err(|err| err.to_string())?
+            .manifest
         }
     };
     manifest.runtime_authority.validate()?;

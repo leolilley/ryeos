@@ -404,7 +404,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE"
   --owner "$OWNER" >/dev/null
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
-  echo "[populate-bundles] publishing sandbox-linux-bubblewrap bundle…"
+  ryeos_term_update "publishing sandbox-linux-bubblewrap bundle" "signed manifests"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$ISOLATION_BWRAP" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
