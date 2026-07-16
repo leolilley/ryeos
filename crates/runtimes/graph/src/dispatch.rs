@@ -7,7 +7,7 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 
 use crate::context::ExecutionContext;
-use crate::model::FanoutItemStatus;
+use crate::model::{FanoutItemStatus, GraphResult, GraphRunStatus};
 
 /// Outcome of dispatching a single graph action leaf, classified from
 /// the daemon execute envelope BEFORE the bare result is unwrapped.
@@ -85,8 +85,10 @@ pub struct ActionSuccess {
     /// directive's structured outputs as `${result.outputs.X}`. The inner
     /// `result` of a directive return is the synthetic sentinel
     /// `"directive_return"` — not meaningful graph data — so the outputs
-    /// are the payload. For every other leaf (subprocess, bare value,
-    /// native return with no outputs) this is the bare inner result and
+    /// are the payload. A `graph:*` child keeps its complete typed
+    /// [`GraphResult`] in the durable runtime envelope while exposing that
+    /// DTO's authored `result` here. For every other leaf (subprocess, bare
+    /// value, native return with no outputs) this is the bare inner result and
     /// the shape is unchanged.
     pub result: Value,
     /// Token/spend cost reported by a native child runtime (directive or
@@ -220,7 +222,7 @@ pub async fn dispatch_action(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    match classify_envelope(response.result) {
+    match classify_envelope_for_item(response.result, item_id) {
         ActionOutcome::Failure(mut failure) => {
             failure.child_thread_id = child_thread_id;
             Ok(ActionOutcome::Failure(failure))
@@ -280,14 +282,52 @@ pub async fn dispatch_action(
 /// callback contract, so classification MUST happen before the inline-
 /// continuation guard reads it.
 pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
+    classify_envelope_with_projection(value, NativeResultProjection::KindDefined)
+}
+
+/// Classify a live dispatch result using the exact kind selected by the
+/// authored canonical item reference.
+///
+/// Graph runtimes retain their complete [`GraphResult`] in the durable native
+/// envelope. At the graph-expression boundary, however, a graph action exposes
+/// the child graph's authored return value. Kind-directed projection keeps that
+/// contract explicit and prevents arbitrary non-graph payloads that happen to
+/// resemble a `GraphResult` from being unwrapped.
+fn classify_envelope_for_item(value: Value, item_ref: &str) -> ActionOutcome {
+    let projection = match native_result_projection(item_ref) {
+        Ok(projection) => projection,
+        Err(diagnostic) => return malformed_native_runtime_failure(diagnostic, None),
+    };
+    classify_envelope_with_projection(value, projection)
+}
+
+fn classify_envelope_with_projection(
+    value: Value,
+    projection: NativeResultProjection,
+) -> ActionOutcome {
     let Some(obj) = value.as_object() else {
+        if projection == NativeResultProjection::GraphReturn {
+            return malformed_native_runtime_failure(
+                "graph action returned a non-native result instead of the required runtime envelope"
+                    .to_string(),
+                None,
+            );
+        }
         return ActionOutcome::Success(ActionSuccess::bare(value));
     };
 
     // Any native marker is authoritative. A partial native envelope must fail
     // closed instead of falling through as successful arbitrary tool data.
     if obj.contains_key("success") || obj.contains_key("status") {
-        return classify_native_runtime_envelope(value);
+        return classify_native_runtime_envelope(value, projection);
+    }
+
+    if projection == NativeResultProjection::GraphReturn {
+        return malformed_native_runtime_failure(
+            "graph action returned a non-native result instead of the required runtime envelope"
+                .to_string(),
+            None,
+        );
     }
 
     // Subprocess envelope: discriminated by `outcome_code`.
@@ -400,6 +440,24 @@ struct FollowFanoutResumeEnvelope {
 /// continuation chain and is never a terminal follow result. For every other
 /// closed status, `success` must agree exactly with the status outcome.
 pub(crate) fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowEnvelope, String> {
+    classify_follow_envelope_with_projection(value, NativeResultProjection::KindDefined)
+}
+
+/// Classify a single followed child using the canonical item ref captured in
+/// the checkpointed action. A graph child exposes its authored return to the
+/// resumed parent; every other kind retains its kind-defined native result.
+pub(crate) fn classify_follow_envelope_for_item(
+    value: Value,
+    item_ref: &str,
+) -> Result<ClassifiedFollowEnvelope, String> {
+    let projection = native_result_projection(item_ref)?;
+    classify_follow_envelope_with_projection(value, projection)
+}
+
+fn classify_follow_envelope_with_projection(
+    value: Value,
+    projection: NativeResultProjection,
+) -> Result<ClassifiedFollowEnvelope, String> {
     let envelope: FollowResultEnvelope = serde_json::from_value(value)
         .map_err(|error| format!("malformed follow result envelope: {error}"))?;
     let FollowResultEnvelope {
@@ -434,11 +492,8 @@ pub(crate) fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowE
     };
 
     let outcome = if status.is_success() {
-        let result = if has_meaningful_outputs(&outputs) {
-            json!({ "result": result, "outputs": outputs })
-        } else {
-            result
-        };
+        let result = native_success_value(result, outputs, projection)
+            .map_err(|error| format!("malformed follow result envelope: {error}"))?;
         ActionOutcome::Success(ActionSuccess {
             result,
             cost,
@@ -466,7 +521,7 @@ pub(crate) fn classify_follow_envelope(value: Value) -> Result<ClassifiedFollowE
 /// child failure, so callers must reject an error before applying `on_error`.
 pub(crate) fn classify_follow_fanout_envelope(
     value: Value,
-    iteration_count: usize,
+    item_refs: &[String],
 ) -> Result<ClassifiedFollowFanoutEnvelope, String> {
     let envelope: FollowFanoutResumeEnvelope = serde_json::from_value(value)
         .map_err(|error| format!("malformed follow fanout wrapper: {error}"))?;
@@ -481,13 +536,13 @@ pub(crate) fn classify_follow_fanout_envelope(
     if !fanout {
         return Err("malformed follow fanout wrapper: `fanout` must be true".to_string());
     }
-    if iteration_count == 0 {
+    if item_refs.is_empty() {
         return Err(
             "malformed follow fanout wrapper: checkpointed cohort must contain at least one item"
                 .to_string(),
         );
     }
-    if expected != items.len() || items.len() != iteration_count || statuses.len() != items.len() {
+    if expected != items.len() || items.len() != item_refs.len() || statuses.len() != items.len() {
         return Err(
             "malformed follow fanout wrapper: inconsistent expected/items/statuses/snapshot cardinality"
                 .to_string(),
@@ -510,8 +565,13 @@ pub(crate) fn classify_follow_fanout_envelope(
         basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
     };
     let mut classified = Vec::with_capacity(items.len());
-    for (index, (item, declared_status)) in items.into_iter().zip(statuses.iter()).enumerate() {
-        let item = classify_follow_envelope(item)
+    for (index, ((item, declared_status), item_ref)) in items
+        .into_iter()
+        .zip(statuses.iter())
+        .zip(item_refs.iter())
+        .enumerate()
+    {
+        let item = classify_follow_envelope_for_item(item, item_ref)
             .map_err(|error| format!("follow fanout item {index}: {error}"))?;
         if item.fanout_status() != *declared_status {
             return Err(format!(
@@ -536,7 +596,10 @@ pub(crate) fn classify_follow_fanout_envelope(
     })
 }
 
-fn classify_native_runtime_envelope(value: Value) -> ActionOutcome {
+fn classify_native_runtime_envelope(
+    value: Value,
+    projection: NativeResultProjection,
+) -> ActionOutcome {
     let envelope: NativeResultEnvelope = match serde_json::from_value(value) {
         Ok(envelope) => envelope,
         Err(error) => {
@@ -576,11 +639,14 @@ fn classify_native_runtime_envelope(value: Value) -> ActionOutcome {
         );
     }
     if status.is_success() {
-        ActionOutcome::Success(ActionSuccess {
-            result: native_success_value(result, outputs),
-            cost,
-            child_thread_id: None,
-        })
+        match native_success_value(result, outputs, projection) {
+            Ok(result) => ActionOutcome::Success(ActionSuccess {
+                result,
+                cost,
+                child_thread_id: None,
+            }),
+            Err(diagnostic) => malformed_native_runtime_failure(diagnostic, cost),
+        }
     } else {
         // A failed native child (e.g. a directive that burned tokens then
         // errored) still reports `cost` — preserve it.
@@ -641,18 +707,79 @@ fn classify_subprocess_envelope(value: Value) -> ActionOutcome {
 
 /// Graph-visible success value for a native-runtime envelope.
 ///
-/// When the child declared structured `outputs` (a directive return), wrap
-/// as `{result: <inner>, outputs: <outputs>}` so the graph can read
-/// `${result.outputs.X}`. When there are no meaningful outputs (a native
-/// return, a sub-graph result, or a directive with no declared outputs —
-/// which emits `outputs: {}`), return the bare inner result so existing
-/// `${result.state}` / `${result.foo}` call sites keep working unchanged.
-fn native_success_value(result: Value, outputs: Value) -> Value {
-    if has_meaningful_outputs(&outputs) {
-        json!({ "result": result, "outputs": outputs })
-    } else {
-        result
+/// A graph runtime's durable result is the complete typed [`GraphResult`], but
+/// an authored graph action observes only that DTO's `result` field. Other
+/// native kinds retain their kind-defined result projection: directives with
+/// declared outputs expose `{result, outputs}`, while a native return with no
+/// outputs exposes its bare result.
+fn native_success_value(
+    result: Value,
+    outputs: Value,
+    projection: NativeResultProjection,
+) -> Result<Value, String> {
+    match projection {
+        NativeResultProjection::GraphReturn => project_graph_return(result, outputs),
+        NativeResultProjection::KindDefined => {
+            if has_meaningful_outputs(&outputs) {
+                Ok(json!({ "result": result, "outputs": outputs }))
+            } else {
+                Ok(result)
+            }
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeResultProjection {
+    KindDefined,
+    GraphReturn,
+}
+
+fn native_result_projection(item_ref: &str) -> Result<NativeResultProjection, String> {
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref)
+        .map_err(|error| format!("invalid dispatched item reference `{item_ref}`: {error}"))?;
+    Ok(if canonical.kind == "graph" {
+        NativeResultProjection::GraphReturn
+    } else {
+        NativeResultProjection::KindDefined
+    })
+}
+
+fn project_graph_return(result: Value, outputs: Value) -> Result<Value, String> {
+    if !outputs.is_null() {
+        return Err("graph runtime envelope must carry null `outputs`".to_string());
+    }
+
+    let graph_result: GraphResult = serde_json::from_value(result)
+        .map_err(|error| format!("graph runtime returned malformed GraphResult: {error}"))?;
+    let definition_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(
+        &graph_result.definition_ref,
+    )
+    .map_err(|error| {
+        format!(
+            "graph runtime returned GraphResult with invalid definition_ref `{}`: {error}",
+            graph_result.definition_ref
+        )
+    })?;
+    if definition_ref.kind != "graph" {
+        return Err(format!(
+            "graph runtime returned GraphResult with non-graph definition_ref `{}`",
+            graph_result.definition_ref
+        ));
+    }
+    let successful_status = matches!(
+        graph_result.status,
+        GraphRunStatus::Valid | GraphRunStatus::Completed | GraphRunStatus::CompletedWithErrors
+    );
+    if !graph_result.success || !successful_status {
+        return Err(format!(
+            "graph runtime returned success envelope with contradictory GraphResult success={} status=`{}`",
+            graph_result.success,
+            graph_result.status.as_str()
+        ));
+    }
+
+    Ok(graph_result.result.unwrap_or(Value::Null))
 }
 
 /// Whether a native envelope's `outputs` carries declared data. A
@@ -1234,6 +1361,138 @@ mod tests {
             "warnings": [],
             "cost": null,
         })
+    }
+
+    fn completed_graph_result(result: Value) -> Value {
+        json!({
+            "success": true,
+            "graph_id": "test/child",
+            "definition_ref": "graph:test/child",
+            "definition_hash": "sha256:test-child",
+            "graph_run_id": "gr-child",
+            "status": GraphRunStatus::Completed,
+            "steps": 1,
+            "state": {"private_child_state": true},
+            "result": result,
+            "node_costs": [],
+            "hook_costs": [],
+        })
+    }
+
+    #[test]
+    fn graph_item_projects_authored_return_without_sniffing_non_graph_payloads() {
+        let authored = json!({"child_ran": "sentinel"});
+        let graph_result = completed_graph_result(authored.clone());
+        let envelope =
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, graph_result.clone());
+
+        assert_eq!(
+            expect_success(classify_envelope_for_item(
+                envelope.clone(),
+                "graph:test/child",
+            )),
+            authored
+        );
+        assert_eq!(
+            expect_success(classify_envelope_for_item(envelope, "directive:test/child",)),
+            graph_result,
+            "a non-graph payload is never projected based on its content"
+        );
+    }
+
+    #[test]
+    fn single_graph_follow_projects_authored_return() {
+        let authored = json!({"child_ran": "sentinel"});
+        let classified = classify_follow_envelope_for_item(
+            canonical_follow_envelope(
+                true,
+                RuntimeResultStatus::Completed,
+                completed_graph_result(authored.clone()),
+            ),
+            "graph:test/child",
+        )
+        .expect("canonical graph follow envelope");
+
+        assert_eq!(expect_success(classified.outcome), authored);
+    }
+
+    #[test]
+    fn graph_follow_fanout_projects_each_item_by_its_checkpointed_kind() {
+        let graph_authored = json!({"child_ran": "graph"});
+        let graph_result = completed_graph_result(graph_authored.clone());
+        let graph_shaped_directive_result =
+            completed_graph_result(json!({"child_ran": "directive"}));
+        let wrapper = json!({
+            "fanout": true,
+            "expected": 2,
+            "failed": 0,
+            "statuses": [FanoutItemStatus::Completed, FanoutItemStatus::Completed],
+            "items": [
+                canonical_follow_envelope(
+                    true,
+                    RuntimeResultStatus::Completed,
+                    graph_result,
+                ),
+                canonical_follow_envelope(
+                    true,
+                    RuntimeResultStatus::Completed,
+                    graph_shaped_directive_result.clone(),
+                ),
+            ],
+        });
+        let item_refs = vec![
+            "graph:test/child".to_string(),
+            "directive:test/child".to_string(),
+        ];
+        let classified = classify_follow_fanout_envelope(wrapper, &item_refs)
+            .expect("canonical mixed-kind fanout envelope");
+        let mut items = classified.items.into_iter();
+
+        assert_eq!(
+            expect_success(items.next().expect("graph item").outcome),
+            graph_authored
+        );
+        assert_eq!(
+            expect_success(items.next().expect("directive item").outcome),
+            graph_shaped_directive_result
+        );
+    }
+
+    #[test]
+    fn graph_projection_rejects_malformed_graph_result_as_integrity_failure() {
+        let envelope = canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            json!({"child_ran": "missing graph result contract"}),
+        );
+        let failure = expect_action_failure(classify_envelope_for_item(
+            envelope.clone(),
+            "graph:test/child",
+        ));
+        assert!(failure.integrity);
+        assert!(failure.diagnostic.contains("malformed GraphResult"));
+
+        let error = classify_follow_envelope_for_item(envelope, "graph:test/child").unwrap_err();
+        assert!(error.contains("malformed GraphResult"), "{error}");
+    }
+
+    #[test]
+    fn graph_item_requires_native_envelope_and_graph_definition_ref() {
+        for bare in [json!("bare"), json!({"child_ran": true})] {
+            let failure =
+                expect_action_failure(classify_envelope_for_item(bare, "graph:test/child"));
+            assert!(failure.integrity);
+            assert!(failure.diagnostic.contains("required runtime envelope"));
+        }
+
+        let mut wrong_kind = completed_graph_result(json!({"child_ran": true}));
+        wrong_kind["definition_ref"] = json!("directive:test/child");
+        let failure = expect_action_failure(classify_envelope_for_item(
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, wrong_kind),
+            "graph:test/child",
+        ));
+        assert!(failure.integrity);
+        assert!(failure.diagnostic.contains("non-graph definition_ref"));
     }
 
     #[test]

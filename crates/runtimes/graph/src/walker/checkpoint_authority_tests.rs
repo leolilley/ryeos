@@ -395,6 +395,7 @@ config:
                         "follow_node": "await_child",
                         "step_count": 4,
                         "graph_run_id": run_id,
+                        "item_refs": ["directive:test/child"],
                     })),
                     Some(json!({
                         "success": true,
@@ -450,6 +451,7 @@ config:
                         "follow_node": "await_cohort",
                         "step_count": 6,
                         "graph_run_id": run_id,
+                        "item_refs": ["directive:test/child", "directive:test/child"],
                         "iteration_snapshot": ["a", "b"],
                     })),
                     Some(json!({

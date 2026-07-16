@@ -56,11 +56,11 @@ use history::{GRAPH_WARNINGS_TRUNCATED, MAX_GRAPH_WARNING_SCALAR_BYTES};
 use outcome::*;
 use transitions::resolve_next_on_error;
 
-/// Schema version of the graph checkpoint payload. Bump on any incompatible
-/// change to the written fields; the resume parser rejects an unknown version.
-///
-/// The current schema pins the signed graph definition and expression
-/// language. Other shapes are rejected; there are no legacy migrations.
+/// Marker for the one exact current graph checkpoint contract. Reader and
+/// writer evolve together under this marker; missing fields, unknown fields,
+/// and structural drift are rejected rather than migrated. The contract pins
+/// the signed graph definition and expression language, and no alternate or
+/// legacy checkpoint versions are accepted.
 pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub(crate) const EXPRESSION_LANGUAGE: &str = "rye-expr/1";
 
@@ -269,11 +269,6 @@ impl Walker {
             return slot.take();
         }
         None
-    }
-
-    fn take_follow_result(&self, node: &str) -> Option<Value> {
-        self.take_follow_state(node)
-            .and_then(|state| state.follow_result)
     }
 
     /// Drain the accumulated callback-drift warnings. Called by the
@@ -705,6 +700,7 @@ impl Walker {
                 *self.follow_resume.lock().unwrap() = Some(FollowResumeState {
                     follow_node: pending.follow_node,
                     follow_result: resume.follow_result,
+                    item_refs: pending.item_refs,
                     iteration_snapshot: pending.iteration_snapshot,
                 });
             }

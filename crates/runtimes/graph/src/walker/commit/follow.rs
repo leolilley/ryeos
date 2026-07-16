@@ -23,7 +23,8 @@ impl Walker {
             ref_bindings,
             params,
         } = outcome;
-        let item_id = item_id.as_str();
+        let item_ref = item_id;
+        let item_id = item_ref.as_str();
         let params = &params;
         // Suspend lifecycle: started + a DISTINCT suspended event + the
         // pending-follow checkpoint, THEN the handoff. Deliberately NO node
@@ -38,7 +39,15 @@ impl Walker {
         // idempotently (by follow_key). A checkpoint failure is a hard error
         // like any other resume-correctness failure.
         if let Err(e) = self
-            .write_follow_checkpoint(graph_run_id, current, step, state, suppressed_errors, None)
+            .write_follow_checkpoint(
+                graph_run_id,
+                current,
+                step,
+                state,
+                suppressed_errors,
+                std::slice::from_ref(&item_ref),
+                None,
+            )
             .await
         {
             let msg = format!("follow checkpoint write failed: {e}");
@@ -154,6 +163,10 @@ impl Walker {
             width,
             iteration_snapshot,
         } = *outcome;
+        let item_refs = children
+            .iter()
+            .map(|child| child.item_ref.clone())
+            .collect::<Vec<_>>();
         self.emit_graph_step_started(graph_run_id, step, current)
             .await;
         self.emit_graph_follow_suspended(
@@ -171,6 +184,7 @@ impl Walker {
                 step,
                 state,
                 suppressed_errors,
+                &item_refs,
                 Some(&iteration_snapshot),
             )
             .await

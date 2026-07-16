@@ -3029,7 +3029,9 @@ impl StateStore {
     /// resume path launches it later, once the child's result is available) and
     /// NOT subject to the autonomous chain-depth cap (a follow is structural
     /// progress, not an autonomous run). Daemon-only: the trusted marker cannot be
-    /// reached through a runtime-supplied reason.
+    /// reached through a runtime-supplied reason. The running source must declare
+    /// native resume, and that exact policy is projected into the successor so a
+    /// resumed segment remains eligible to suspend at another follow node.
     pub fn create_follow_resume_successor(
         &self,
         successor: &NewThreadRecord,
@@ -3083,7 +3085,7 @@ impl StateStore {
             .runtime_db
             .get_runtime_info(source_thread_id)?
             .ok_or_else(|| anyhow!("source runtime row missing: {source_thread_id}"))?;
-        if let Some(intent) = source_runtime.stop_intent {
+        if let Some(intent) = source_runtime.stop_intent.as_ref() {
             bail!(
                 "cannot continue stop-requested thread {source_thread_id} ({})",
                 intent.as_str()
@@ -3135,19 +3137,30 @@ impl StateStore {
             }
         }
 
-        // Require the source's captured launch identity: the successor must be
-        // able to fold the chain, or the handoff is pointless.
-        let source_resume_context = g
-            .runtime_db
-            .get_runtime_info(source_thread_id)?
-            .and_then(|info| info.launch_metadata)
-            .and_then(|m| m.resume_context)
+        // Require the source's complete captured launch identity: the successor
+        // must be able to fold the chain, and a follow successor must retain the
+        // replay declaration needed to suspend again after it resumes.
+        let source_launch_metadata = source_runtime.launch_metadata.ok_or_else(|| {
+            anyhow!(
+                "source thread {source_thread_id} has no captured ResumeContext; \
+                 cannot create a launchable continuation successor"
+            )
+        })?;
+        let source_resume_context = source_launch_metadata
+            .resume_context
+            .as_ref()
+            .cloned()
             .ok_or_else(|| {
                 anyhow!(
                     "source thread {source_thread_id} has no captured ResumeContext; \
                      cannot create a launchable continuation successor"
                 )
             })?;
+        if matches!(&kind, RunningContinuationKind::GraphFollowResume)
+            && source_launch_metadata.native_resume.is_none()
+        {
+            bail!("follow-resume source thread {source_thread_id} does not declare native_resume");
+        }
         if expected_resume_context.is_some_and(|expected| expected != &source_resume_context) {
             bail!(
                 "source thread {source_thread_id} ResumeContext changed during authoritative preparation"
@@ -3182,19 +3195,25 @@ impl StateStore {
         // settle. If the seed fails, only an orphan runtime row exists — no
         // state-db successor edge, source untouched and still running.
         {
+            if let Some(prepared) = successor_launch_metadata {
+                if prepared.resume_context.as_ref() != Some(&source_resume_context) {
+                    bail!(
+                        "prepared successor launch identity differs from its source ResumeContext"
+                    );
+                }
+                if prepared.native_resume != source_launch_metadata.native_resume
+                    || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
+                {
+                    bail!(
+                        "prepared successor execution policy differs from its source launch metadata"
+                    );
+                }
+            }
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            if successor_launch_metadata
-                .and_then(|metadata| metadata.resume_context.as_ref())
-                .is_some_and(|resume| resume != &source_resume_context)
-            {
-                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                bail!("prepared successor launch identity differs from its source ResumeContext");
-            }
             let mut successor_meta = successor_launch_metadata.cloned().unwrap_or_else(|| {
-                crate::launch_metadata::RuntimeLaunchMetadata::default()
-                    .with_resume_context(source_resume_context.clone())
+                source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
             });
             if successor_meta
                 .continuation_source_thread_id

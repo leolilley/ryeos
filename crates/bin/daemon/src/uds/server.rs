@@ -2132,29 +2132,31 @@ mod tests {
             .state_store
             .seed_launch_metadata(
                 "P",
-                &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-                    kind: "graph".into(),
-                    item_ref: "graph:test/graph".into(),
-                    ref_bindings: std::collections::BTreeMap::new(),
-                    launch_mode: "detached".into(),
-                    parameters: json!({}),
-                    project_context: ProjectContext::LocalPath {
-                        path: std::path::PathBuf::from("/tmp/p"),
-                    },
-                    original_snapshot_hash: None,
-                    original_pushed_head_ref: None,
-                    state_root: None,
-                    current_site_id: "site:test".into(),
-                    origin_site_id: "site:test".into(),
-                    requested_by: EffectivePrincipal::Local(Principal {
-                        fingerprint: "fp".into(),
-                        scopes: vec![],
+                &RuntimeLaunchMetadata::default()
+                    .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_resume_context(ResumeContext {
+                        kind: "graph".into(),
+                        item_ref: "graph:test/graph".into(),
+                        ref_bindings: std::collections::BTreeMap::new(),
+                        launch_mode: "detached".into(),
+                        parameters: json!({}),
+                        project_context: ProjectContext::LocalPath {
+                            path: std::path::PathBuf::from("/tmp/p"),
+                        },
+                        original_snapshot_hash: None,
+                        original_pushed_head_ref: None,
+                        state_root: None,
+                        current_site_id: "site:test".into(),
+                        origin_site_id: "site:test".into(),
+                        requested_by: EffectivePrincipal::Local(Principal {
+                            fingerprint: "fp".into(),
+                            scopes: vec![],
+                        }),
+                        execution_hints: ExecutionHints::default(),
+                        effective_caps: vec![],
+                        executor_ref: None,
+                        runtime_ref: None,
                     }),
-                    execution_hints: ExecutionHints::default(),
-                    effective_caps: vec![],
-                    executor_ref: None,
-                    runtime_ref: None,
-                }),
             )
             .unwrap();
         state
