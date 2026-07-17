@@ -861,76 +861,6 @@ pub fn validate_installed_bundle_plan(
     .context("validate installed bundle dependency/provider graph")
 }
 
-#[cfg(test)]
-mod isolation_generation_tests {
-    use super::*;
-
-    #[test]
-    fn verified_generation_refuses_atomic_bundle_root_replacement() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("bundle");
-        let displaced = temporary.path().join("bundle-old");
-        std::fs::create_dir(&root).unwrap();
-        let authority = lillux::PinnedDirectory::open(&root).unwrap().unwrap();
-        let record = VerifiedBundleGenerationRecord {
-            name: "demo".to_string(),
-            canonical_root: root.clone(),
-            root_authority: Arc::new(authority),
-            manifest_body_digest: "a".repeat(64),
-            manifest_signer_fingerprint: "b".repeat(64),
-            executor_manifest: None,
-        };
-
-        std::fs::rename(&root, displaced).unwrap();
-        std::fs::create_dir(&root).unwrap();
-
-        let error = ensure_generation_root_binding(&record).unwrap_err();
-        assert!(error.to_string().contains("root identity changed"));
-    }
-
-    fn write_policy(app_root: &std::path::Path, mode: ryeos_engine::isolation::IsolationMode) {
-        let mut policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
-        policy.mode = mode;
-        let path = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_yaml::to_string(&policy).unwrap()).unwrap();
-    }
-
-    #[test]
-    fn disabled_prospective_generation_does_not_require_selected_bundle() {
-        let app_root = tempfile::tempdir().unwrap();
-        write_policy(
-            app_root.path(),
-            ryeos_engine::isolation::IsolationMode::Disabled,
-        );
-
-        let runtime = load_prospective_isolation(app_root.path(), &[], &TrustStore::empty())
-            .expect("disabled prospective generation");
-        assert!(!runtime.is_enforced());
-        assert_eq!(
-            runtime.inspection().backend.status,
-            ryeos_engine::isolation::IsolationBackendStatus::Disabled
-        );
-    }
-
-    #[test]
-    fn enforced_prospective_generation_refuses_selected_bundle_removal() {
-        let app_root = tempfile::tempdir().unwrap();
-        write_policy(
-            app_root.path(),
-            ryeos_engine::isolation::IsolationMode::Enforce,
-        );
-
-        let error = match load_prospective_isolation(app_root.path(), &[], &TrustStore::empty()) {
-            Ok(_) => panic!("enforced prospective generation accepted a missing backend"),
-            Err(error) => error.to_string(),
-        };
-        assert!(error.contains("removes selected isolation bundle"));
-    }
-}
-
 struct NodeBundleAdmission {
     kinds: KindRegistry,
     parser_dispatcher: ParserDispatcher,
@@ -1111,4 +1041,74 @@ fn validate_terminator_refs(kinds: &KindRegistry, protocols: &ProtocolRegistry) 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod isolation_generation_tests {
+    use super::*;
+
+    #[test]
+    fn verified_generation_refuses_atomic_bundle_root_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("bundle");
+        let displaced = temporary.path().join("bundle-old");
+        std::fs::create_dir(&root).unwrap();
+        let authority = lillux::PinnedDirectory::open(&root).unwrap().unwrap();
+        let record = VerifiedBundleGenerationRecord {
+            name: "demo".to_string(),
+            canonical_root: root.clone(),
+            root_authority: Arc::new(authority),
+            manifest_body_digest: "a".repeat(64),
+            manifest_signer_fingerprint: "b".repeat(64),
+            executor_manifest: None,
+        };
+
+        std::fs::rename(&root, displaced).unwrap();
+        std::fs::create_dir(&root).unwrap();
+
+        let error = ensure_generation_root_binding(&record).unwrap_err();
+        assert!(error.to_string().contains("root identity changed"));
+    }
+
+    fn write_policy(app_root: &std::path::Path, mode: ryeos_engine::isolation::IsolationMode) {
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
+        policy.mode = mode;
+        let path = app_root
+            .join(ryeos_engine::AI_DIR)
+            .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_yaml::to_string(&policy).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn disabled_prospective_generation_does_not_require_selected_bundle() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            ryeos_engine::isolation::IsolationMode::Disabled,
+        );
+
+        let runtime = load_prospective_isolation(app_root.path(), &[], &TrustStore::empty())
+            .expect("disabled prospective generation");
+        assert!(!runtime.is_enforced());
+        assert_eq!(
+            runtime.inspection().backend.status,
+            ryeos_engine::isolation::IsolationBackendStatus::Disabled
+        );
+    }
+
+    #[test]
+    fn enforced_prospective_generation_refuses_selected_bundle_removal() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(
+            app_root.path(),
+            ryeos_engine::isolation::IsolationMode::Enforce,
+        );
+
+        let error = match load_prospective_isolation(app_root.path(), &[], &TrustStore::empty()) {
+            Ok(_) => panic!("enforced prospective generation accepted a missing backend"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("removes selected isolation bundle"));
+    }
 }
