@@ -876,7 +876,7 @@ mod tests {
     #[test]
     fn declaration_requires_distinct_launcher() {
         let declaration = IsolationBackendDeclaration {
-            id: "linux-bubblewrap".to_string(),
+            id: "example".to_string(),
             protocol: IsolationAdapterProtocolVersion::V1,
             targets: vec![IsolationTargetTriple::X86_64UnknownLinuxGnu],
             adapter: "adapter".to_string(),
@@ -889,7 +889,7 @@ mod tests {
     #[test]
     fn declaration_rejects_duplicate_targets_and_unsafe_executable_names() {
         let mut declaration = IsolationBackendDeclaration {
-            id: "linux-bubblewrap".to_string(),
+            id: "example".to_string(),
             protocol: IsolationAdapterProtocolVersion::V1,
             targets: vec![
                 IsolationTargetTriple::X86_64UnknownLinuxGnu,
@@ -949,8 +949,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v1","protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v1","protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -959,13 +959,13 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(from_json_str_strict::<AdapterInspectionRequest>(unknown)
             .unwrap_err()
             .to_string()
             .contains("unknown field"));
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -1149,7 +1149,7 @@ mod tests {
         let request = AdapterInspectionRequest {
             protocol: IsolationAdapterProtocolVersion::V1,
             target: IsolationTargetTriple::X86_64UnknownLinuxGnu,
-            backend_id: "linux/bubblewrap".to_string(),
+            backend_id: "invalid/example".to_string(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 3)]),
         };
         assert!(request.validate().is_err());
@@ -1161,7 +1161,7 @@ mod tests {
             artifacts: BTreeMap::from([(
                 IsolationArtifactRole::Launcher,
                 InspectedArtifact {
-                    version: "bubblewrap 0.11.0".to_string(),
+                    version: "example 1.0.0".to_string(),
                     digest: "A".repeat(64),
                 },
             )]),

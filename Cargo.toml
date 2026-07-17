@@ -19,7 +19,6 @@ members = [
     "crates/tools/handler-bins",
     "crates/engine/ryeos-handler-protocol",
     "crates/engine/ryeos-isolation-protocol",
-    "crates/isolation/bubblewrap-adapter",
     "crates/runtimes/knowledge",
     "crates/engine/ryeos-runtime",
     "crates/state/ryeos-scheduler",
@@ -30,6 +29,7 @@ members = [
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
 ]
+exclude = ["bundles/*/adapter"]
 resolver = "2"
 
 [workspace.package]

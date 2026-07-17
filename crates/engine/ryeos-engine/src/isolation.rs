@@ -1690,14 +1690,17 @@ impl IsolationRuntime {
                     "enforced isolation runtime requires an app root".to_string(),
                 ));
             }
+            let selection = policy.backend.as_ref().ok_or_else(|| {
+                refused("enforced isolation requires an explicit backend selection".to_string())
+            })?;
             let resolved = backend.as_ref().ok_or_else(|| {
                 refused(format!(
                     "enforced isolation requires signed bundle `{}` implementation `{}`",
-                    policy.backend.bundle, policy.backend.implementation
+                    selection.bundle, selection.implementation
                 ))
             })?;
             resolved.validate()?;
-            if resolved.selection != policy.backend {
+            if &resolved.selection != selection {
                 return Err(refused(
                     "resolved isolation backend does not match node policy selection".to_string(),
                 ));
@@ -1952,10 +1955,16 @@ impl Default for IsolationRuntime {
 }
 
 fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError> {
-    policy
-        .backend
-        .validate()
-        .map_err(|error| refused(error.to_string()))?;
+    if policy.mode == IsolationMode::Enforce && policy.backend.is_none() {
+        return Err(refused(
+            "enforced isolation requires an explicit backend selection".to_string(),
+        ));
+    }
+    if let Some(backend) = &policy.backend {
+        backend
+            .validate()
+            .map_err(|error| refused(error.to_string()))?;
+    }
     for configured in &policy.filesystem.readable {
         let is_placeholder = matches!(
             configured.as_str(),
@@ -2935,11 +2944,11 @@ mod tests {
         let launcher = Arc::new(std::fs::File::open("/dev/null").unwrap());
         ResolvedIsolationBackend {
             selection: IsolationBackendSelection {
-                bundle: "sandbox-linux-bubblewrap".to_string(),
-                implementation: "linux-bubblewrap".to_string(),
+                bundle: "example-isolation-backend".to_string(),
+                implementation: "example".to_string(),
             },
             declaration: IsolationBackendDeclaration {
-                id: "linux-bubblewrap".to_string(),
+                id: "example".to_string(),
                 protocol: IsolationAdapterProtocolVersion::V1,
                 targets: vec![
                     ryeos_isolation_protocol::IsolationTargetTriple::X86_64UnknownLinuxGnu,
@@ -2961,7 +2970,7 @@ mod tests {
             inspected_artifacts: BTreeMap::from([(
                 IsolationArtifactRole::Launcher,
                 InspectedArtifact {
-                    version: "bubblewrap 0.11.0".to_string(),
+                    version: "example 1.0.0".to_string(),
                     digest: "c".repeat(64),
                 },
             )]),
@@ -3085,12 +3094,13 @@ mod tests {
         let app_root = tempfile::tempdir().unwrap();
         let mut policy = IsolationPolicy::default_disabled();
         policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection);
         write_policy(app_root.path(), &policy);
 
         let error = IsolationRuntime::load(app_root.path()).unwrap_err();
         assert!(error
             .to_string()
-            .contains("requires signed bundle `sandbox-linux-bubblewrap`"));
+            .contains("requires signed bundle `example-isolation-backend`"));
     }
 
     #[test]

@@ -17,11 +17,11 @@ does not regenerate CAS data, re-sign bundle content, or import packaged trust
 documents as authority. `ryeos init` verifies the installed artifact against
 the official publisher key compiled into the release binary.
 
-Initialization writes the strict isolation policy with `mode: disabled`.
-The packaged `sandbox-linux-bubblewrap` bundle carries the signed adapter and
-launcher artifacts, so there is no host Bubblewrap dependency. Operators can change
-`<app-root>/.ai/node/isolation.yaml` to `mode: enforce`; execution fails closed
-when the selected signed backend is missing or unusable. Validate the edit with
+Initialization writes the strict isolation policy with `mode: disabled` and no
+backend selected. The package does not ship an isolation backend. Operators may
+install a separately authored backend bundle, select it in
+`<app-root>/.ai/node/isolation.yaml`, and change the mode to `enforce`; execution
+fails closed when the selected signed backend is missing or unusable. Validate the edit with
 `ryeos node doctor` and restart the node to load it. The
 [isolation contract](../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) documents the strict
 schema and operating contract.

@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-07-16T05:11:07Z:ddd5208b11ba8b73cc6d16972fdbe601de8bc546c2a9d0faed47147d5662f8b0:kWJIyYwqKLon7VSfqmaisoGVD9EkCP4MasbC7hr8mjAeNxBHPzAh1MAubyiKRdhreCirc9oEpQqMMhT2aC+lDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:21:57Z:d088bd75310b6445d87dc432a4a0dc1b8ea3f9826cef1058a6b324c1cf6679e6:MFxvk7tV90FvuMdt4SdiWgjG5up1LVP56iIleHeAIrFlMX0QtgkDJopVy/EJjG3uR1yfmdCThpbjRTZwfe/DBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
-tags: [node, isolation, bubblewrap, security, subprocess, node-policy]
+tags: [node, isolation, security, subprocess, node-policy]
 version: "1.5.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
@@ -19,8 +19,7 @@ cannot activate the isolation or weaken its controls.
 The engine resolves typed isolation requirements against signed backend
 declarations and live inspected capabilities. It emits a strict backend-neutral
 plan; the selected adapter owns backend-specific inspection and launch
-compilation. The current signed Linux bundle supplies a Bubblewrap adapter and
-launcher, while the engine has no Bubblewrap dependency or host-path lookup.
+compilation. RyeOS does not ship or select an isolation backend by default.
 
 The engine also keeps node trust separate from project/request trust. The
 `node_trust_store` is loaded only from persistent node configuration and is the
@@ -43,9 +42,7 @@ The policy has two modes:
 ```yaml
 version: 1
 mode: disabled
-backend:
-  bundle: sandbox-linux-bubblewrap
-  implementation: linux-bubblewrap
+backend: null
 filesystem:
   readable:
     - "{node_public_identity}"
@@ -70,8 +67,9 @@ limits:
   verified_artifact_files: 4096
 ```
 
-The default is deliberately inert. To opt in, install the signed backend bundle,
-change the node-owned mode to `enforce`, run
+The default is deliberately inert. To opt in, install a signed backend bundle,
+select its bundle and implementation in the policy, change the node-owned mode
+to `enforce`, run
 `ryeos node doctor`, and restart the node.
 The daemon loads one immutable policy generation at startup; editing the file
 does not change a running daemon. The daemon-backed `ryeos daemon status`
@@ -87,6 +85,8 @@ Doctor derives the same facts from the shared immutable runtime snapshot.
 
 - `version` must be `1`, the first published strict-policy schema. Other
   versions and unknown fields are rejected without aliases or translation.
+- `backend` is null when no backend is selected and must be present in enforce
+  mode.
 - `backend.bundle` names one registered signed bundle.
 - `backend.implementation` names one backend declaration in that bundle's
   signed manifest. Enforce mode captures the exact signed adapter and artifact

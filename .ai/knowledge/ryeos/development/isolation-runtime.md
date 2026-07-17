@@ -8,7 +8,7 @@ version: "1.2.0"
 description: Deep implementation map for the immutable RyeOS strict isolation, exact-byte execution boundary, launch coverage, path authority, and state durability.
 tags:
   - isolation
-  - bubblewrap
+  - backend-bundles
   - execution
   - node-policy
   - security
@@ -32,8 +32,8 @@ The supplied spelling is retained only as the namespace destination; a changed
 canonical association refuses startup. Daemon startup uses `load_for_daemon`
 to pin the configured callback UDS path into the same snapshot. Standalone and
 offline callers use the shared registered-isolation composition path. Disabled
-snapshots validate the strict schema and mandatory output/artifact limits but
-do not require the selected bundle. Enforced snapshots resolve the selected
+snapshots validate the strict schema and mandatory output/artifact limits and
+may have no selected backend. Enforced snapshots resolve the selected
 declaration from a registered signed bundle, capture the exact adapter and
 launcher descriptors through the normal executor-manifest trust chain, require
 signer continuity with the bundle manifest, and perform strict live protocol,
@@ -326,7 +326,7 @@ of CAS reachability. Other rebuildable cache children may still be removed.
 ## Diagnostics and operational proof
 
 `ryeos node doctor` calls the production loader. Disabled mode is a healthy
-inactive opt-out and does not require Bubblewrap. Enforce mode validates the
+inactive opt-out and does not require a backend. Enforce mode validates the
 backend and reports filesystem, network, environment, open-file, and bounded
 output posture.
 Release smoke keeps separate default-disabled and explicit-enforcement profiles;

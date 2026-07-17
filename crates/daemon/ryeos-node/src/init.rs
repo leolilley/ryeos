@@ -622,9 +622,13 @@ fn validate_selected_backend_staging(
     prospective_isolation: &ryeos_engine::isolation::IsolationRuntime,
     node_trust_store: &TrustStore,
 ) -> Result<()> {
-    if !prospective_isolation.is_enforced()
-        || prospective_isolation.inspection().backend.selection.bundle != bundle_name
-    {
+    let selected_bundle = prospective_isolation
+        .inspection()
+        .backend
+        .selection
+        .as_ref()
+        .map(|selection| selection.bundle.as_str());
+    if !prospective_isolation.is_enforced() || selected_bundle != Some(bundle_name) {
         return Ok(());
     }
     let roots = plan

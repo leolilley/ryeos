@@ -117,8 +117,7 @@ mod tests {
             policy.mode,
             ryeos_engine::isolation::IsolationMode::Disabled
         );
-        assert_eq!(policy.backend.bundle, "sandbox-linux-bubblewrap");
-        assert_eq!(policy.backend.implementation, "linux-bubblewrap");
+        assert_eq!(policy.backend, None);
         assert_eq!(
             policy.filesystem.readable,
             vec![

@@ -82,7 +82,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -438,23 +438,9 @@ jobs:
           if not re.fullmatch(r"sha256:[0-9a-f]{64}", isolation.get("policy_digest") or ""):
               raise SystemExit(f"running daemon did not report a policy digest: {isolation!r}")
           backend = isolation.get("backend") or {}
-          selection = backend.get("selection") or {}
-          if selection != {
-              "bundle": "sandbox-linux-bubblewrap",
-              "implementation": "linux-bubblewrap",
-          }:
-              raise SystemExit(f"running daemon reported the wrong backend selection: {backend!r}")
-          if expected == "enforce":
-              if not re.fullmatch(r"[0-9a-f]{64}", backend.get("bundle_manifest_digest") or ""):
-                  raise SystemExit(f"running daemon omitted the signed bundle generation: {backend!r}")
-              if not re.fullmatch(r"[0-9a-f]{64}", backend.get("signer_fingerprint") or ""):
-                  raise SystemExit(f"running daemon omitted the backend signer: {backend!r}")
-              if not backend.get("adapter_build") or not backend.get("effective_capabilities"):
-                  raise SystemExit(f"running daemon omitted adapter inspection facts: {backend!r}")
-              launcher = (backend.get("artifacts") or {}).get("launcher") or {}
-              if not launcher.get("version") or not re.fullmatch(r"[0-9a-f]{64}", launcher.get("digest") or ""):
-                  raise SystemExit(f"running daemon omitted the inspected launcher: {backend!r}")
-          elif any(backend.get(field) for field in (
+          if backend.get("selection") is not None:
+              raise SystemExit(f"disabled daemon unexpectedly selected an isolation backend: {backend!r}")
+          if any(backend.get(field) for field in (
               "bundle_manifest_digest", "signer_fingerprint", "adapter_build",
               "effective_capabilities", "artifacts",
           )):
@@ -475,7 +461,7 @@ jobs:
               raise SystemExit(
                   f"isolation doctor mismatch: expected version=1 mode={expected!r}, detail={detail!r}"
               )
-          expected_backend = "signed_bundle_inspected" if expected == "enforce" else "not_loaded"
+          expected_backend = "disabled"
           if detail.get("backend_status") != expected_backend:
               raise SystemExit(
                   f"isolation backend status mismatch: expected {expected_backend!r}, detail={detail!r}"
@@ -497,147 +483,6 @@ jobs:
           docker restart "$CONTAINER"
           wait_ready
           assert_isolation_mode disabled
-
-      - name: Smoke standard image explicitly-enforced isolation profile
-        env:
-          IMG: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
-        run: |
-          VOLUME="ryeos-release-enforced-${{ github.run_id }}"
-          CONTAINER="ryeos-release-enforced-${{ github.run_id }}"
-          cleanup() {
-            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-            docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-          }
-          reports_running() {
-            LIFECYCLE_STATUS_JSON="$1" python3 - <<'PY'
-          import json
-          import os
-
-          report = json.loads(os.environ["LIFECYCLE_STATUS_JSON"])
-          running = report.get("Running")
-          if not isinstance(running, dict) or not isinstance(running.get("metadata"), dict):
-              raise SystemExit(f"node is not Running: {report!r}")
-          PY
-          }
-          wait_ready() {
-            local report
-            for attempt in $(seq 1 60); do
-              if report="$(docker exec "$CONTAINER" ryeos node status --json 2>/dev/null)" && \
-                 reports_running "$report" && \
-                 docker exec "$CONTAINER" ryeos daemon status >/dev/null 2>&1; then
-                return 0
-              fi
-              if [ "$attempt" -eq 60 ]; then
-                docker logs "$CONTAINER"
-                return 1
-              fi
-              sleep 1
-            done
-          }
-          assert_isolation_mode() {
-            local expected="$1"
-            local daemon_report doctor_report
-            daemon_report="$(docker exec "$CONTAINER" ryeos daemon status)"
-            DAEMON_STATUS_JSON="$daemon_report" EXPECTED_ISOLATION_MODE="$expected" python3 - <<'PY'
-          import json
-          import os
-          import re
-
-          report = json.loads(os.environ["DAEMON_STATUS_JSON"])
-          isolation = report.get("isolation") or {}
-          expected = os.environ["EXPECTED_ISOLATION_MODE"]
-          if isolation.get("version") != 1 or isolation.get("mode") != expected:
-              raise SystemExit(
-                  f"running daemon isolation mismatch: expected version=1 mode={expected!r}, isolation={isolation!r}"
-              )
-          if isolation.get("source") != "/data/app/.ai/node/isolation.yaml":
-              raise SystemExit(f"running daemon reported the wrong isolation source: {isolation!r}")
-          if not re.fullmatch(r"sha256:[0-9a-f]{64}", isolation.get("policy_digest") or ""):
-              raise SystemExit(f"running daemon did not report a policy digest: {isolation!r}")
-          backend = isolation.get("backend") or {}
-          selection = backend.get("selection") or {}
-          if selection != {
-              "bundle": "sandbox-linux-bubblewrap",
-              "implementation": "linux-bubblewrap",
-          }:
-              raise SystemExit(f"running daemon reported the wrong backend selection: {backend!r}")
-          if expected == "enforce":
-              if not re.fullmatch(r"[0-9a-f]{64}", backend.get("bundle_manifest_digest") or ""):
-                  raise SystemExit(f"running daemon omitted the signed bundle generation: {backend!r}")
-              if not re.fullmatch(r"[0-9a-f]{64}", backend.get("signer_fingerprint") or ""):
-                  raise SystemExit(f"running daemon omitted the backend signer: {backend!r}")
-              if not backend.get("adapter_build") or not backend.get("effective_capabilities"):
-                  raise SystemExit(f"running daemon omitted adapter inspection facts: {backend!r}")
-              launcher = (backend.get("artifacts") or {}).get("launcher") or {}
-              if not launcher.get("version") or not re.fullmatch(r"[0-9a-f]{64}", launcher.get("digest") or ""):
-                  raise SystemExit(f"running daemon omitted the inspected launcher: {backend!r}")
-          elif any(backend.get(field) for field in (
-              "bundle_manifest_digest", "signer_fingerprint", "adapter_build",
-              "effective_capabilities", "artifacts",
-          )):
-              raise SystemExit(f"disabled daemon unexpectedly loaded an isolation backend: {backend!r}")
-          PY
-            doctor_report="$(docker exec "$CONTAINER" ryeos node doctor --json --no-bundles)"
-            ISOLATION_DOCTOR_JSON="$doctor_report" EXPECTED_ISOLATION_MODE="$expected" python3 - <<'PY'
-          import json
-          import os
-
-          report = json.loads(os.environ["ISOLATION_DOCTOR_JSON"])
-          matches = [row for row in report.get("checks", []) if row.get("name") == "isolation"]
-          if len(matches) != 1:
-              raise SystemExit(f"expected one isolation doctor row, got {matches!r}")
-          detail = matches[0].get("detail") or {}
-          expected = os.environ["EXPECTED_ISOLATION_MODE"]
-          if detail.get("version") != 1 or detail.get("mode") != expected:
-              raise SystemExit(
-                  f"isolation doctor mismatch: expected version=1 mode={expected!r}, detail={detail!r}"
-              )
-          expected_backend = "signed_bundle_inspected" if expected == "enforce" else "not_loaded"
-          if detail.get("backend_status") != expected_backend:
-              raise SystemExit(
-                  f"isolation backend status mismatch: expected {expected_backend!r}, detail={detail!r}"
-              )
-          readable = (detail.get("filesystem") or {}).get("readable") or []
-          if "{node_public_identity}" not in readable:
-              raise SystemExit(f"node public identity binding missing: detail={detail!r}")
-          PY
-          }
-          trap cleanup EXIT
-          docker volume create "$VOLUME"
-          docker run -d --name "$CONTAINER" \
-            --cap-add SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            --security-opt apparmor=unconfined \
-            -v "$VOLUME:/data" \
-            "$IMG"
-          wait_ready
-          assert_isolation_mode disabled
-          docker exec "$CONTAINER" sh -eu -c '
-            policy=/data/app/.ai/node/isolation.yaml
-            grep -qx "mode: disabled" "$policy"
-            sed -i "s/^mode: disabled$/mode: enforce/" "$policy"
-            grep -qx "mode: enforce" "$policy"
-          '
-          docker restart "$CONTAINER"
-          wait_ready
-          assert_isolation_mode enforce
-          docker exec --workdir /tmp "$CONTAINER" \
-            ryeos execute tool:ryeos/core/identity/public_key
-          docker exec "$CONTAINER" sh -eu -c '
-            bwrap=/data/app/.ai/bundles/sandbox-linux-bubblewrap/.ai/bin/x86_64-unknown-linux-gnu/bwrap
-            test -x "$bwrap"
-            printf authority > /tmp/ryeos-isolation-fd-authority
-            exec 7< /tmp/ryeos-isolation-fd-authority
-            exec 8> /tmp/ryeos-isolation-fd-status
-            exec "$bwrap" \
-              --json-status-fd 8 \
-              --unshare-user \
-              --ro-bind / / \
-              --ro-bind-fd 7 /run/ryeos-isolation-fd-authority \
-              --proc /proc \
-              --dev /dev \
-              -- /usr/bin/python3 -c "import os; leaks=[fd for fd in range(3,256) if os.path.exists(\"/proc/self/fd/\"+str(fd))]; assert not leaks, leaks"
-          '
 
       - name: Scan standard image for known vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

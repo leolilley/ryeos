@@ -277,23 +277,21 @@ pub fn resolve_isolation_backend(
     if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
         return Ok(None);
     }
+    let selection = policy.backend.context(
+        "enforced isolation policy requires an explicit signed bundle backend selection",
+    )?;
     let record = generation
         .records()
         .iter()
-        .find(|record| record.name == policy.backend.bundle)
-        .with_context(|| {
-            format!(
-                "isolation bundle `{}` is not registered",
-                policy.backend.bundle
-            )
-        })?;
+        .find(|record| record.name == selection.bundle)
+        .with_context(|| format!("isolation bundle `{}` is not registered", selection.bundle))?;
     let verified = ryeos_bundle::manifest::load_verified_manifest(
         &record.path.join(ryeos_engine::AI_DIR),
         &record.name,
         node_trust_store,
     )
     .context("verify selected isolation bundle manifest")?;
-    resolve_verified_isolation_backend(policy.backend, &record.path, verified, node_trust_store, "")
+    resolve_verified_isolation_backend(selection, &record.path, verified, node_trust_store, "")
         .map(Some)
 }
 
@@ -326,11 +324,14 @@ pub fn load_prospective_isolation(
     let backend = if policy.mode == ryeos_engine::isolation::IsolationMode::Disabled {
         None
     } else {
+        let selection = policy.backend.context(
+            "enforced isolation policy requires an explicit signed bundle backend selection",
+        )?;
         let mut selected = None;
         for root in bundle_roots {
             let Ok(manifest) = ryeos_bundle::manifest::load_verified_manifest(
                 &root.join(ryeos_engine::AI_DIR),
-                &policy.backend.bundle,
+                &selection.bundle,
                 node_trust_store,
             ) else {
                 continue;
@@ -338,18 +339,18 @@ pub fn load_prospective_isolation(
             if selected.replace((root, manifest)).is_some() {
                 anyhow::bail!(
                     "prospective bundle set contains more than one selected isolation bundle `{}`",
-                    policy.backend.bundle
+                    selection.bundle
                 );
             }
         }
         let (root, manifest) = selected.with_context(|| {
             format!(
                 "prospective bundle set removes selected isolation bundle `{}`",
-                policy.backend.bundle
+                selection.bundle
             )
         })?;
         Some(resolve_verified_isolation_backend(
-            policy.backend.clone(),
+            selection,
             root,
             manifest,
             node_trust_store,

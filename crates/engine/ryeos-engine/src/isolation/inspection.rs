@@ -32,7 +32,8 @@ pub struct IsolationInspection {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct IsolationBackendInspection {
-    pub selection: IsolationBackendSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<IsolationBackendSelection>,
     pub status: IsolationBackendStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_manifest_digest: Option<String>,

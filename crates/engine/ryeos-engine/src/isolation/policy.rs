@@ -9,7 +9,7 @@ pub const ISOLATION_POLICY_RELATIVE_PATH: &str = "node/isolation.yaml";
 pub struct IsolationPolicy {
     pub version: u32,
     pub mode: IsolationMode,
-    pub backend: IsolationBackendSelection,
+    pub backend: Option<IsolationBackendSelection>,
     pub filesystem: IsolationFilesystemPolicy,
     pub network: IsolationNetworkPolicy,
     pub environment: IsolationEnvironmentPolicy,
@@ -21,10 +21,7 @@ impl IsolationPolicy {
         Self {
             version: ISOLATION_POLICY_VERSION,
             mode: IsolationMode::Disabled,
-            backend: IsolationBackendSelection {
-                bundle: "sandbox-linux-bubblewrap".to_string(),
-                implementation: "linux-bubblewrap".to_string(),
-            },
+            backend: None,
             filesystem: IsolationFilesystemPolicy {
                 readable: vec![
                     "{node_public_identity}".to_string(),

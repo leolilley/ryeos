@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:823ae6283470e5c600b1cc2559b6ba3be49b22a8303aae63d579e5c5a285b01d:ngg9HH5D1t4t2zWM86mw99XNGL07xm5bqQ0xvghkh5mvPQxA6HY/yqP1XwUsBkDIYyfs6psqW8bRq3oV+nT3CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:21:56Z:a087af8227248162fbf136cd2e015c2f7f4835a895c1b7cf7ed7f8f69b910e6c:9AJu/E7LLBl7R+KgGVCtr+j9odhT8l/seBVpPtwh4mKW+XgkJQ6N8yDx6Es+Fbs5m7RMLc+QbI6IgSjoOWYjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -93,10 +93,9 @@ initialization before writing runtime state, acquires the state lock
 before unlinking sockets, repairs only daemon-local artifacts, then loads
 registered bundles and starts listeners.
 
-The signed `sandbox-linux-bubblewrap` bundle carries both the isolation adapter
-and its Bubblewrap launcher; RyeOS does not resolve Bubblewrap from the host.
-Select that installed bundle in `isolation.yaml` before choosing
-`mode: enforce`, validate with `ryeos node doctor`, and restart. See [Execution
+No isolation backend is installed by default. Install an independently authored
+backend bundle and select it in `isolation.yaml` before choosing `mode: enforce`,
+validate with `ryeos node doctor`, and restart. See [Execution
 Isolation](node/execution-isolation.md).
 
 For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator

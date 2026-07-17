@@ -986,7 +986,7 @@ mod tests {
             std::fs::create_dir_all(&node_identity_dir).unwrap();
             std::fs::write(
                 node_identity_dir.parent().unwrap().join("isolation.yaml"),
-                "version: 1\nmode: disabled\nbackend:\n  bundle: sandbox-linux-bubblewrap\n  implementation: linux-bubblewrap\n\
+                "version: 1\nmode: disabled\nbackend: null\n\
                  filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n\
                  network:\n  mode: isolated\nenvironment:\n  allow:\n    - \"*\"\n\
                  limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",

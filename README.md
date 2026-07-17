@@ -170,10 +170,10 @@ ryeos node status
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
 into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. The signed
-`sandbox-linux-bubblewrap` bundle contains its adapter and launcher; RyeOS has
-no host Bubblewrap package dependency. The isolation policy defaults to
-`mode: disabled`. `ryeos start`
+vault material, and writes node configuration. The isolation policy defaults
+to `mode: disabled` with no backend selected. Isolation backends are ordinary,
+separately installed bundles; RyeOS distributions do not include one by
+default. `ryeos start`
 launches `ryeosd`. See the
 [execution isolation contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
 enabling or tightening the node-owned policy.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T04:18:05Z:1e5929e2b9facb63797d24a1f0020b7175ad30b3a43dff930fb366bfbff0700c:uiUN8Td0JmAMh4GHmdLe63t7kWSALI7YCvFT1Tma+Zn4s3GocqOJdZYz68RaEDxFi6WCIDBZ7qkZMui0IOENAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:21:56Z:cd0dac091108dfe72cb8ec0593707fb677508a9235617c2e8bb0965923be5814:RtcRChqrys7/pxWIwbR49ryHwpM/ySZgq+auCFJXTuy1ispox64wRhS/QrYqKe9cQ/4DleGyq/jmS4TXVDWgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -27,9 +27,9 @@ infrastructure and retain the hermetic handler boundary below.
 
 The engine emits a typed backend-neutral launch plan. The selected signed bundle
 declares an adapter, launcher artifacts, target triples, and a capability upper
-bound; live inspection may narrow but never broaden that authority. The current
-`sandbox-linux-bubblewrap` bundle implements the Linux backend. Items may narrow
-node policy but may not select a backend, enable isolation, or request fallback.
+bound; live inspection may narrow but never broaden that authority. Backends
+are independently authored and installed bundles. Items may narrow node policy
+but may not select a backend, enable isolation, or request fallback.
 
 At bootstrap and prospective bundle admission, the selected adapter and
 payloads are signature-verified and copied into immutable sealed executable

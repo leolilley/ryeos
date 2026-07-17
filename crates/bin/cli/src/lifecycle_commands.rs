@@ -1447,8 +1447,13 @@ mod tests {
         let open_files = open_files
             .map(|limit| format!("  open_files: {limit}\n"))
             .unwrap_or_else(|| "  open_files: null\n".to_string());
+        let backend = if mode == "enforce" {
+            "backend:\n  bundle: example-isolation-backend\n  implementation: example"
+        } else {
+            "backend: null"
+        };
         format!(
-            "version: 1\nmode: {mode}\nbackend:\n  bundle: sandbox-linux-bubblewrap\n  implementation: linux-bubblewrap\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
+            "version: 1\nmode: {mode}\n{backend}\nfilesystem:\n  writable:\n    - \"{{project}}\"\n  readable:\n    - \"{{node_public_identity}}\"\nnetwork:\n  mode: isolated\nenvironment:\n  allow:\n    - PATH\nlimits:\n{open_files}  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
         )
     }
 

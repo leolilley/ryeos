@@ -17,7 +17,7 @@ use crate::error::EngineError;
 pub struct IsolationLaunchProvenance {
     pub policy_digest: Option<String>,
     pub mode: IsolationMode,
-    pub backend: IsolationBackendSelection,
+    pub backend: Option<IsolationBackendSelection>,
     pub backend_status: IsolationBackendStatus,
     pub bundle_manifest_digest: Option<String>,
     pub signer_fingerprint: Option<String>,

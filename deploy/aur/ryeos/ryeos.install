@@ -20,8 +20,8 @@ post_install() {
     echo "no packaged trust-file override is used."
     echo
     echo "The node isolation policy defaults to mode: disabled."
-    echo "The signed sandbox-linux-bubblewrap bundle supplies the optional enforcement backend."
-    echo "Change <app-root>/.ai/node/isolation.yaml to mode: enforce and restart the node."
+    echo "No isolation backend is installed by default."
+    echo "Install and select a backend bundle before changing the policy to mode: enforce."
 }
 
 post_upgrade() {

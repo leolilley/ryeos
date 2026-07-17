@@ -2435,18 +2435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-bubblewrap-adapter"
-version = "0.1.0"
-dependencies = [
- "libc",
- "ryeos-isolation-protocol",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
 name = "ryeos-bundle"
 version = "0.1.0"
 dependencies = [

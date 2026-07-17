@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the exact Bubblewrap payload staged into the signed isolation bundle.
-# The resulting executable exists only as payload for the signed bundle.
-BWRAP_OUTPUT="${BWRAP_OUTPUT:?BWRAP_OUTPUT must name the bundle payload path}"
+# Optional example-bundle authoring helper. RyeOS never invokes this script;
+# use it only when deliberately building the Bubblewrap demonstration bundle.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
+TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+OUTPUT_DIR="$ROOT/bundles/sandbox-linux-bubblewrap/.ai/bin/$TRIPLE"
+BWRAP_OUTPUT="$OUTPUT_DIR/bwrap"
+ADAPTER_MANIFEST="$ROOT/bundles/sandbox-linux-bubblewrap/adapter/Cargo.toml"
+
 bwrap_compatible() {
     local executable="$1"
     local output major minor help dynamic
@@ -18,14 +24,13 @@ bwrap_compatible() {
     for option in --bind-fd --ro-bind-fd --argv0; do
         grep -Eq "(^|[[:space:]])${option}([[:space:]]|$)" <<<"$help" || return 1
     done
-    # libcap is part of the signed payload, not an ambient host dependency.
-    # glibc remains the declared base ABI for the supported target triple.
     dynamic="$(readelf -d "$executable" 2>/dev/null)" || return 1
-    if grep -Eq 'Shared library: \[libcap\.so' <<<"$dynamic"; then
-        return 1
-    fi
-    return 0
+    ! grep -Eq 'Shared library: \[libcap\.so' <<<"$dynamic"
 }
+
+mkdir -p "$OUTPUT_DIR"
+cargo build --release --manifest-path "$ADAPTER_MANIFEST" --target-dir "$TARGET"
+install -m 0755 "$TARGET/release/ryeos-bubblewrap-adapter" "$OUTPUT_DIR/"
 
 if [[ -x "$BWRAP_OUTPUT" ]] && bwrap_compatible "$BWRAP_OUTPUT"; then
     exit 0
@@ -54,7 +59,6 @@ meson setup "$build_dir" "$source_dir" \
     -Dsupport_setuid=false \
     -Dtests=false
 meson compile -C "$build_dir"
-mkdir -p "$(dirname "$BWRAP_OUTPUT")"
 install -m 0755 "$build_dir/bwrap" "$BWRAP_OUTPUT"
 
 bwrap_compatible "$BWRAP_OUTPUT"
