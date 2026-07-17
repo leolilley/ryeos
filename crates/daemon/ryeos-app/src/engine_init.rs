@@ -179,17 +179,17 @@ fn ensure_generation_root_binding(bundle: &VerifiedBundleGenerationRecord) -> Re
 
 struct RetainedRegisteredGeneration {
     app_root: PathBuf,
-    _mutation_lock: Option<Arc<crate::bundle_transaction::BundleRegistryMutationLock>>,
+    _read_lock: Option<Arc<crate::bundle_transaction::BundleRegistryReadLock>>,
     verified_generation: Arc<VerifiedBundleGeneration>,
     node_trust_store: TrustStore,
 }
 
 impl ryeos_engine::isolation::IsolationGenerationLifeline for RetainedRegisteredGeneration {
     fn begin_operation(&self) -> std::result::Result<Box<dyn Send + Sync>, String> {
-        if self._mutation_lock.is_some() {
+        if self._read_lock.is_some() {
             return Ok(Box::new(()));
         }
-        crate::bundle_transaction::BundleRegistryMutationLock::acquire(&self.app_root)
+        crate::bundle_transaction::BundleRegistryReadLock::acquire(&self.app_root)
             .map(|guard| Box::new(guard) as Box<dyn Send + Sync>)
             .map_err(|error| format!("{error:#}"))
     }
@@ -209,20 +209,26 @@ pub fn load_registered_isolation(
     load_registered_generation_under_lock(app_root).map(|generation| generation.0)
 }
 
-/// Standalone composition retains the node-wide generation lock for as long
-/// as the returned runtime (and any engine holding it) remains alive.
+/// Standalone composition retains a shared node-wide generation lock for as
+/// long as the returned runtime (and any engine holding it) remains alive.
+///
+/// A retained reader prevents bundle install/replace/remove from changing the
+/// verified generation, while remaining compatible with nested read-only
+/// engines launched by parser, composer, and inspection handlers. Retaining
+/// the exclusive mutation lock here would deadlock such a child against its
+/// parent before it could resolve anything.
 pub fn load_locked_registered_isolation(
     app_root: &std::path::Path,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
     let generation_lock = Arc::new(
-        crate::bundle_transaction::BundleRegistryMutationLock::acquire(app_root)
-            .context("acquire retained bundle-generation lock for isolation composition")?,
+        crate::bundle_transaction::BundleRegistryReadLock::acquire(app_root)
+            .context("acquire retained bundle-generation read lock for isolation composition")?,
     );
     let (runtime, node_trust, generation) = load_registered_generation_under_lock(app_root)?;
     let bundle_roots = generation.roots();
     let lifeline = Arc::new(RetainedRegisteredGeneration {
         app_root: app_root.to_path_buf(),
-        _mutation_lock: Some(generation_lock),
+        _read_lock: Some(generation_lock),
         verified_generation: generation,
         node_trust_store: node_trust.clone(),
     });
@@ -679,7 +685,7 @@ pub fn retain_daemon_generation(
     runtime.retain_registered_generation(
         Arc::new(RetainedRegisteredGeneration {
             app_root,
-            _mutation_lock: None,
+            _read_lock: None,
             verified_generation: generation,
             node_trust_store: node_trust_store.clone(),
         }),
@@ -864,6 +870,46 @@ pub fn validate_installed_bundle_plan(
 #[cfg(test)]
 mod isolation_generation_tests {
     use super::*;
+
+    #[test]
+    fn retained_generation_allows_nested_read_only_engine() {
+        let app_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(app_root.path().join(".ai/bundles")).unwrap();
+        // Initialize the lock anchor the same way node setup does.
+        drop(
+            crate::bundle_transaction::BundleRegistryMutationLock::acquire(app_root.path())
+                .unwrap(),
+        );
+
+        let retained_lock = Arc::new(
+            crate::bundle_transaction::BundleRegistryReadLock::acquire(app_root.path()).unwrap(),
+        );
+        let lifeline = RetainedRegisteredGeneration {
+            app_root: app_root.path().to_path_buf(),
+            _read_lock: Some(retained_lock),
+            verified_generation: Arc::new(VerifiedBundleGeneration {
+                records: Vec::new(),
+                bundles: Vec::new(),
+            }),
+            node_trust_store: TrustStore::empty(),
+        };
+        let operation =
+            ryeos_engine::isolation::IsolationGenerationLifeline::begin_operation(&lifeline)
+                .unwrap();
+
+        let path = app_root.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let nested = std::thread::spawn(move || {
+            let result = crate::bundle_transaction::BundleRegistryReadLock::acquire(&path);
+            tx.send(result.is_ok()).unwrap();
+        });
+        let acquired = rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(operation);
+        drop(lifeline);
+        nested.join().unwrap();
+
+        assert!(acquired.unwrap());
+    }
 
     #[test]
     fn verified_generation_refuses_atomic_bundle_root_replacement() {

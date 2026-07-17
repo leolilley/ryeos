@@ -1201,7 +1201,7 @@ fn normalize_migrated_launch_metadata(raw: &str) -> Result<String> {
         .get("schema_version")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
-    if !matches!(schema_version, 1 | 2 | 3) {
+    if !matches!(schema_version, 1..=3) {
         bail!("unsupported stored launch metadata schema_version `{schema_version}`");
     }
     object.insert(
@@ -5773,9 +5773,11 @@ mod tests {
 
         let migrated = RuntimeDb::open(&path).unwrap();
         let metadata = migrated
-            .get_launch_metadata("T-pre-isolation")
+            .get_runtime_info("T-pre-isolation")
             .unwrap()
-            .expect("launch metadata row must survive migration");
+            .expect("runtime row must survive migration")
+            .launch_metadata
+            .expect("launch metadata must survive migration");
         assert_eq!(metadata.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
         assert!(metadata.isolation.is_none());
     }

@@ -97,34 +97,34 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
 
     let project_root = req.project_path.map(std::path::PathBuf::from);
 
-    let mut effective = state
+    let effective = state
         .engine
-        .effective_item(EffectiveItemRequest {
-            item_ref,
-            expected_kind: req.expected_kind,
-            project_root: project_root.clone(),
+        .with_checked_bundle_generation(|generation| {
+            let mut effective = generation.effective_item(EffectiveItemRequest {
+                item_ref,
+                expected_kind: req.expected_kind,
+                project_root: project_root.clone(),
+            })?;
+
+            // A surface and every view it binds are one coherent read. Keep
+            // the verified generation guard around the complete batch instead
+            // of reacquiring and re-verifying it for each embedded view.
+            if effective.kind == "surface" {
+                let failures = crate::surface_views::embed_surface_views_in_generation(
+                    generation,
+                    project_root.as_deref(),
+                    &mut effective.composed_value,
+                );
+                for (view_ref, reason) in failures {
+                    effective.diagnostics.push(EffectiveItemDiagnostic {
+                        level: "warn".to_string(),
+                        message: format!("view {view_ref} unavailable: {reason}"),
+                    });
+                }
+            }
+            Ok(effective)
         })
         .map_err(map_engine_error)?;
-
-    // A surface binds views by ref and never defines them. Embed each
-    // bound view's composed value server-side so renderers receive one
-    // complete payload — no per-view follow-up round-trips. A view that
-    // fails to resolve embeds a degraded entry (the pane renders the
-    // reason) and additionally surfaces as a warn diagnostic; per-view
-    // failures never fail the whole surface.
-    if effective.kind == "surface" {
-        let failures = crate::surface_views::embed_surface_views(
-            &state.engine,
-            project_root.as_deref(),
-            &mut effective.composed_value,
-        );
-        for (view_ref, reason) in failures {
-            effective.diagnostics.push(EffectiveItemDiagnostic {
-                level: "warn".to_string(),
-                message: format!("view {view_ref} unavailable: {reason}"),
-            });
-        }
-    }
 
     // Thread-scoped mode: attach the launch-time digest (truth) alongside the
     // fresh resolution (now), with per-ancestor drift flags.

@@ -122,6 +122,85 @@ pub struct Engine {
     isolation_generation: std::sync::Arc<crate::isolation::IsolationRuntime>,
 }
 
+/// Read-only engine view bound to one verified installed-bundle generation.
+///
+/// A caller resolving a coherent batch (for example a surface and all of its
+/// views) uses this view so the generation is locked and verified once around
+/// the whole batch instead of once per item.
+pub struct CheckedEngineGeneration<'a> {
+    engine: &'a Engine,
+}
+
+fn parallel_map_ordered<T, U>(items: &[T], operation: impl Fn(&T) -> U + Sync) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+{
+    if items.len() <= 1 {
+        return items.iter().map(operation).collect();
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(items.len());
+    let chunk_size = items.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let operation = &operation;
+        items
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(operation).collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+impl CheckedEngineGeneration<'_> {
+    pub fn resolve(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+    ) -> Result<ResolvedItem, EngineError> {
+        self.engine.resolve_current(ctx, item_ref)
+    }
+
+    pub fn effective_item(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<EffectiveItem, EngineError> {
+        self.engine.effective_item_current(request)
+    }
+
+    /// Resolve independent canonical items concurrently while retaining this
+    /// generation and preserving input order.
+    pub fn resolve_many(
+        &self,
+        ctx: &PlanContext,
+        item_refs: &[CanonicalRef],
+    ) -> Vec<Result<ResolvedItem, EngineError>> {
+        parallel_map_ordered(item_refs, |item_ref| {
+            self.engine.resolve_current(ctx, item_ref)
+        })
+    }
+
+    /// Compose independent effective items concurrently while retaining this
+    /// generation and preserving input order.
+    pub fn effective_items(
+        &self,
+        requests: &[EffectiveItemRequest],
+    ) -> Vec<Result<EffectiveItem, EngineError>> {
+        parallel_map_ordered(requests, |request| {
+            self.engine.effective_item_current(request.clone())
+        })
+    }
+}
+
 impl Engine {
     pub fn new(
         kinds: KindRegistry,
@@ -155,14 +234,31 @@ impl Engine {
         &self,
         operation: impl FnOnce() -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
+        self.with_checked_bundle_generation(|_| operation())
+    }
+
+    /// Run a coherent read batch against one verified installed-bundle
+    /// generation. Supported bundle mutations are excluded for the duration;
+    /// concurrent read batches remain independent.
+    pub fn with_checked_bundle_generation<T, E>(
+        &self,
+        operation: impl FnOnce(&CheckedEngineGeneration<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<EngineError>,
+    {
         let _operation_guard = self
             .isolation_generation
-            .begin_registered_generation_operation()?;
+            .begin_registered_generation_operation()
+            .map_err(E::from)?;
         self.isolation_generation
-            .ensure_registered_generation_current()?;
-        let value = operation()?;
+            .ensure_registered_generation_current()
+            .map_err(E::from)?;
+        let generation = CheckedEngineGeneration { engine: self };
+        let value = operation(&generation)?;
         self.isolation_generation
-            .ensure_registered_generation_current()?;
+            .ensure_registered_generation_current()
+            .map_err(E::from)?;
         Ok(value)
     }
 
@@ -772,6 +868,25 @@ mod tests {
     use lillux::crypto::SigningKey;
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingGenerationLifeline {
+        begins: AtomicUsize,
+        checks: AtomicUsize,
+    }
+
+    impl crate::isolation::IsolationGenerationLifeline for CountingGenerationLifeline {
+        fn begin_operation(&self) -> Result<Box<dyn Send + Sync>, String> {
+            self.begins.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(()))
+        }
+
+        fn ensure_current(&self) -> Result<(), String> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])
@@ -889,6 +1004,31 @@ formats:
         let fp = engine.registry_fingerprint();
         assert!(!fp.is_empty());
         assert_eq!(fp, test_engine().registry_fingerprint());
+    }
+
+    #[test]
+    fn checked_generation_batches_multiple_resolutions_under_one_guard() {
+        let lifeline = std::sync::Arc::new(CountingGenerationLifeline::default());
+        let isolation = crate::isolation::IsolationRuntime::default().retain_registered_generation(
+            lifeline.clone(),
+            TrustStore::empty(),
+            vec![],
+        );
+        let engine = test_engine().with_isolation_generation(std::sync::Arc::new(isolation));
+        let ctx = test_plan_context();
+        let item_ref = CanonicalRef::parse("tool:missing").unwrap();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                let results = generation.resolve_many(&ctx, &[item_ref.clone(), item_ref]);
+                assert_eq!(results.len(), 2);
+                assert!(results.into_iter().all(|result| result.is_err()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(lifeline.begins.load(Ordering::SeqCst), 1);
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
     }
 
     #[test]

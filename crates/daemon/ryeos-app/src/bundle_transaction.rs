@@ -64,6 +64,15 @@ pub struct BundleRegistryMutationLock {
     _lock: lillux::ExclusiveFileLock,
 }
 
+/// A stable read view of the installed bundle registry.
+///
+/// Read-side engine operations share this lock with one another. Bundle
+/// install/replace/remove paths take [`BundleRegistryMutationLock`], so a
+/// verified generation cannot change while any reader is using it.
+pub struct BundleRegistryReadLock {
+    _lock: lillux::SharedFileLock,
+}
+
 /// A per-name bundle transaction tied to a held node-wide registry lock.
 ///
 /// The borrow makes it impossible for normal callers to drop the registry lock
@@ -89,6 +98,14 @@ impl BundleRegistryMutationLock {
             transaction: BundleTransaction::acquire(&self.app_root, name)?,
             _registry_lock: self,
         })
+    }
+}
+
+impl BundleRegistryReadLock {
+    pub fn acquire(app_root: &Path) -> Result<Self> {
+        let target = app_root.join(".ai/bundles");
+        let lock = lillux::SharedFileLock::acquire_existing(&target)?;
+        Ok(Self { _lock: lock })
     }
 }
 

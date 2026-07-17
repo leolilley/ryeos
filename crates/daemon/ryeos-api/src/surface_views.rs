@@ -16,7 +16,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::engine::{EffectiveItemRequest, Engine};
+use ryeos_engine::engine::{CheckedEngineGeneration, EffectiveItemRequest, Engine};
 
 /// Collect every `view:`-prefixed ref anywhere in the composed surface
 /// value — center `tiles`, edge `slots`, `backdrop`, `library` — skipping
@@ -27,6 +27,14 @@ use ryeos_engine::engine::{EffectiveItemRequest, Engine};
 /// declared view.
 fn collect_view_refs(value: &Value, out: &mut Vec<String>) {
     collect_view_refs_at(value, out, true);
+}
+
+fn unique_view_refs(value: &Value) -> Vec<String> {
+    let mut view_refs = Vec::new();
+    collect_view_refs(value, &mut view_refs);
+    view_refs.sort();
+    view_refs.dedup();
+    view_refs
 }
 
 fn collect_view_refs_at(value: &Value, out: &mut Vec<String>, at_root: bool) {
@@ -61,14 +69,25 @@ pub fn embed_views_with(
     if !composed_value.is_object() {
         return Vec::new();
     }
-    let mut view_refs: Vec<String> = Vec::new();
-    collect_view_refs(composed_value, &mut view_refs);
-    view_refs.sort();
-    view_refs.dedup();
+    let view_refs = unique_view_refs(composed_value);
     if view_refs.is_empty() {
         return Vec::new();
     }
 
+    let resolved = view_refs
+        .into_iter()
+        .map(|view_ref| {
+            let result = resolve(&view_ref);
+            (view_ref, result)
+        })
+        .collect();
+    embed_view_results(composed_value, resolved)
+}
+
+fn embed_view_results(
+    composed_value: &mut Value,
+    resolved: Vec<(String, Result<Value, String>)>,
+) -> Vec<(String, String)> {
     // `views` is never authored inline; anything non-object there is
     // malformed. Reset it so per-ref insertion below cannot panic.
     if composed_value.get("views").is_some_and(|v| !v.is_object()) {
@@ -76,8 +95,8 @@ pub fn embed_views_with(
     }
 
     let mut failures: Vec<(String, String)> = Vec::new();
-    for view_ref in view_refs {
-        match resolve(&view_ref) {
+    for (view_ref, result) in resolved {
+        match result {
             Ok(view_value) => {
                 composed_value["views"][&view_ref] = view_value;
             }
@@ -110,6 +129,50 @@ pub fn embed_surface_views(
             .map(|effective| effective.composed_value)
             .map_err(|e| e.to_string())
     })
+}
+
+/// Resolve a surface's bound views inside a caller-owned checked generation
+/// batch. This avoids reacquiring and re-verifying the installed bundle
+/// generation for every view while preserving the same resolution semantics.
+pub fn embed_surface_views_in_generation(
+    generation: &CheckedEngineGeneration<'_>,
+    project_root: Option<&Path>,
+    composed_value: &mut Value,
+) -> Vec<(String, String)> {
+    if !composed_value.is_object() {
+        return Vec::new();
+    }
+    let mut resolved = Vec::new();
+    let mut requests = Vec::new();
+    let mut valid_refs = Vec::new();
+    for view_ref in unique_view_refs(composed_value) {
+        match CanonicalRef::parse(&view_ref) {
+            Ok(item_ref) => {
+                valid_refs.push(view_ref);
+                requests.push(EffectiveItemRequest {
+                    item_ref,
+                    expected_kind: Some("view".to_string()),
+                    project_root: project_root.map(Path::to_path_buf),
+                });
+            }
+            Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),
+        }
+    }
+    resolved.extend(
+        valid_refs
+            .into_iter()
+            .zip(generation.effective_items(&requests))
+            .map(|(view_ref, result)| {
+                (
+                    view_ref,
+                    result
+                        .map(|effective| effective.composed_value)
+                        .map_err(|error| error.to_string()),
+                )
+            }),
+    );
+    resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
+    embed_view_results(composed_value, resolved)
 }
 
 #[cfg(test)]

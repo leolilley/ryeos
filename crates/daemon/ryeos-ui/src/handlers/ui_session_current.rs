@@ -21,6 +21,7 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItemRequest;
+use ryeos_engine::error::EngineError;
 use ryeos_executor::executor::ServiceAvailability;
 
 use crate::state::get_ui_state;
@@ -65,38 +66,30 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
     let surface_ref = session.surface_ref.clone();
     let project_path = session.project_root.clone();
-    let effective_surface = CanonicalRef::parse(&surface_ref)
-        .ok()
-        .and_then(|item_ref| {
-            state
-                .engine
-                .effective_item(EffectiveItemRequest {
-                    item_ref,
-                    expected_kind: Some("surface".to_string()),
-                    project_root: project_path.clone().map(Into::into),
-                })
-                .ok()
-        })
-        .map(|effective| {
-            // Embed each bound view server-side (views-as-content): the
-            // browser receives the surface with `views` already resolved,
-            // keyed by ref. A view that fails to resolve arrives as a
-            // degraded entry the tile renders as a placeholder carrying
-            // the reason — never a missing binding.
-            let mut composed = effective.composed_value;
-            let failures = ryeos_api::surface_views::embed_surface_views(
-                &state.engine,
-                project_path.as_deref().map(std::path::Path::new),
-                &mut composed,
-            );
-            // The session response has no diagnostics channel (the degraded
-            // pane carries the reason on-screen); keep the daemon log honest
-            // about what failed to embed.
-            for (view_ref, reason) in &failures {
-                tracing::warn!(view_ref = %view_ref, reason = %reason, "view embed failed");
-            }
-            composed
-        });
+    let effective_surface = CanonicalRef::parse(&surface_ref).ok().and_then(|item_ref| {
+        state
+            .engine
+            .with_checked_bundle_generation(
+                |generation| -> std::result::Result<Value, EngineError> {
+                    let effective = generation.effective_item(EffectiveItemRequest {
+                        item_ref,
+                        expected_kind: Some("surface".to_string()),
+                        project_root: project_path.clone().map(Into::into),
+                    })?;
+                    let mut composed = effective.composed_value;
+                    let failures = ryeos_api::surface_views::embed_surface_views_in_generation(
+                        generation,
+                        project_path.as_deref().map(std::path::Path::new),
+                        &mut composed,
+                    );
+                    for (view_ref, reason) in &failures {
+                        tracing::warn!(view_ref = %view_ref, reason = %reason, "view embed failed");
+                    }
+                    Ok(composed)
+                },
+            )
+            .ok()
+    });
 
     let response = Response {
         session_id: session.session_id.clone(),
